@@ -2,7 +2,7 @@
 name = "dotore"
 version = "0.1.0"
 edition = "2024"
-description = "Pure-Rust React doctor starting with Effect & State dataflow diagnostics, surgical auto-fixes, and visual cascade reports."
+description = "Pure-Rust React and TypeScript static analyzer, deterministic auto-fixer, and remediation engine."
 license = "MIT"
 
 [lib]
@@ -38,9 +38,9 @@ wildcard_enum_match_arm = "warn"
 dbg_macro = "deny"
 todo = "warn"
 
-# Size & complexity gates
-too_many_lines = "warn"
-cognitive_complexity = "warn"
+# Pragmatic size gates (favor readable, idiomatic Rust over artificial splitting)
+too_many_lines = "allow"
+cognitive_complexity = "allow"
 excessive_nesting = "warn"
 too_many_arguments = "warn"
 
