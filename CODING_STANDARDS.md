@@ -2,20 +2,25 @@
 
 Read at review. Mechanical rules live in the checks (`cargo clippy --all-targets --all-features -- -D warnings && cargo fmt --all -- --check`), not here. Folder layout and import rules: `docs/architecture/layout.md`. For CSS, HTML and JS platform choices, call the Skill tool with `platform-first`; reviewers and implementers both use it.
 
-## Architecture and IR
+## Architecture and Precision
 
-### Build the component IR once; rules only query the IR
+### Parse once per file; combine shared IR with direct semantic precision
 
-**Rule.** Parse and walk the `oxc` AST and semantic table only inside `src/ir.rs` (and cross-file indexing in `src/graph.rs`). Diagnostic rules in `src/rules.rs` and auto-fixes in `src/fixer.rs` operate strictly on `SubjectIr` and `ProjectGraph` data structures, never walking raw AST nodes.
-**Why.** Per-rule AST visitors duplicate traversal logic and grow into brittle 100 KB heuristics (the exact failure mode of ESLint/oxlint JS plugins).
-**Applies when.** A diff adds or modifies a diagnostic rule, cascade detector, or auto-fix.
+**Rule.** Parse each source file once via `oxc_parser` and `oxc_semantic` inside `src/ir/` and link cross-file relationships in `src/graph.rs` (`ProjectGraph`). Rules in `src/rules/` query `FileIr` and `ProjectGraph` for shared facts (`SubjectIr`, **Caller Sites**, **Render Cascades**, module reachability, **Capability Gates**) and may inspect `oxc_semantic` AST/scope nodes directly whenever fine-grained syntax or control-flow checks are required to preserve 100% edge-case accuracy.
+**Why.** A single parse eliminates redundant file I/O and AST construction, while allowing direct semantic inspection prevents lossy abstractions and preserves every adversarial regression case.
+**Applies when.** A diff adds or modifies a diagnostic rule, graph pass, or auto-fix.
 
 ### Parse into domain types at the boundary
 
-**Rule.** Convert raw AST strings, CLI arguments, and file paths into validated enums and structs (`RuleId`, `PrescriptionTier`, `DepsSpec`, `SubjectKind`) at the parser/CLI boundary rather than passing raw strings or booleans inward.
-**Why.** Typed domain values let the compiler enforce exhaustive handling when a new rule or tier is added.
-**Applies when.** A function outside `src/main.rs` or `src/ir.rs` accepts raw string identifiers for rules, tiers, or hook kinds.
+**Rule.** Convert CLI arguments, configuration (`dotore.config.*` / `package.json#dotore`), and rule identifiers into typed Rust enums and structs (`RuleId`, `PrescriptionTier`, `CapabilityGate`, `SubjectKind`) at the boundary rather than passing raw strings inward.
+**Why.** Typed domain values let the compiler enforce exhaustive handling across rules, fixers, and reporters.
+**Applies when.** A function outside boundary parsers accepts raw string identifiers for rules, tiers, or scopes.
 
+### Favor readable, idiomatic Rust over bureaucratic splitting
+
+**Rule.** Write straightforward, self-contained functions that a junior developer can follow top-to-bottom and a senior engineer can audit for zero-copy performance. Do not fragment cohesive rule or graph logic into tiny helpers just to hit an arbitrary line count.
+**Why.** Premature splitting scatters control flow and obscures invariants.
+**Applies when.** Reviewing or refactoring any Rust module.
 ## Modules and Ownership
 
 ### Keep module surfaces small and `pub(crate)` by default
