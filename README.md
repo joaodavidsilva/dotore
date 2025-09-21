@@ -1,6 +1,6 @@
 # dotore
 
-Pure-Rust React doctor starting with Effect and State dataflow diagnostics, deterministic surgical auto-fixes, and visual **Render Cascade** reports.
+Pure-Rust React and TypeScript static analyzer, deterministic auto-fixer, and remediation engine.
 
 ## Commands
 
