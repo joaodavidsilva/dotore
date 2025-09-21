@@ -12,7 +12,7 @@ use dotore::{
 #[command(
     name = "dotore",
     version,
-    about = "Pure-Rust React doctor for Effect & State dataflow diagnostics, surgical auto-fixes, and cascade reports."
+    about = "Pure-Rust React and TypeScript static analyzer, deterministic auto-fixer, and remediation engine."
 )]
 struct Cli {
     #[command(subcommand)]
