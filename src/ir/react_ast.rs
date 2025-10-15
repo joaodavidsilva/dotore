@@ -1,11 +1,16 @@
-//! React-specific AST and semantic predicates (`useState`, `useEffect`, `useRef`, props, HOCs).
+//! React-specific AST and semantic predicates (`useState`, `useEffect`, `useRef`, props, HOCs, and JSX classification).
 
 use oxc_ast::{
     AstKind,
-    ast::{ArrowFunctionBody, BindingPattern, CallExpression, Expression, Statement},
+    ast::{
+        ArrowFunctionBody, BindingPattern, CallExpression, Expression, JSXAttributeItem,
+        JSXAttributeValue, JSXChild, JSXElementName, JSXExpression, Statement,
+    },
 };
 use oxc_semantic::{NodeId, ReferenceId, Semantic, SymbolFlags, SymbolId};
 use oxc_span::{GetSpan, Span};
+
+use super::types::{ByteSpan, CallerSite, JsxElementIr, loc_from_line_starts};
 
 const PURE_HOCS: &[&str] = &["memo", "forwardRef"];
 
@@ -343,4 +348,337 @@ pub(crate) fn find_node_by_span(
         }
     }
     None
+}
+
+/// Extracts all JSX `<Component ... />` caller sites in the file.
+pub(crate) fn extract_caller_sites(
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+) -> Vec<CallerSite> {
+    let mut sites = Vec::new();
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        let AstKind::JSXOpeningElement(opening) = node.kind() else {
+            continue;
+        };
+        let JSXElementName::IdentifierReference(ident) = &opening.name else {
+            continue;
+        };
+        if !is_component_name(&ident.name) {
+            continue;
+        }
+
+        let import_source = ident
+            .reference_id
+            .get()
+            .and_then(|ref_id| semantic.scoping().get_reference(ref_id).symbol_id())
+            .and_then(|sym_id| resolve_import_source(semantic, sym_id));
+
+        let (has_key, passed_props) = extract_jsx_props(&opening.attributes);
+
+        let parent_subject_name = find_enclosing_react_node(semantic, node_id)
+            .and_then(|subj_id| get_subject_name(semantic, subj_id));
+
+        sites.push(CallerSite {
+            component_name: ident.name.to_string(),
+            import_source,
+            parent_subject_name,
+            span: ByteSpan {
+                start: opening.span.start,
+                end: opening.span.end,
+            },
+            loc: loc_from_line_starts(line_starts, opening.span.start),
+            has_key,
+            passed_props,
+        });
+    }
+    sites
+}
+
+fn extract_jsx_props(attributes: &[JSXAttributeItem<'_>]) -> (bool, Vec<String>) {
+    let mut has_key = false;
+    let mut passed_props = Vec::new();
+    for attr_item in attributes {
+        let Some(attr) = attr_item.as_attribute() else {
+            continue;
+        };
+        let Some(ident_name) = attr.name.as_identifier() else {
+            continue;
+        };
+        if ident_name.name == "key" {
+            has_key = true;
+        } else {
+            passed_props.push(ident_name.name.to_string());
+        }
+    }
+    (has_key, passed_props)
+}
+
+fn resolve_import_source(semantic: &Semantic<'_>, sym_id: SymbolId) -> Option<String> {
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    for anc_id in std::iter::once(decl_id).chain(semantic.nodes().ancestor_ids(decl_id)) {
+        if let AstKind::ImportDeclaration(import_decl) = semantic.nodes().kind(anc_id) {
+            return import_decl.source.value.as_str().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Extracts all [`JsxElementIr`] nodes from the file.
+pub(crate) fn extract_jsx_elements(
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+) -> Vec<JsxElementIr> {
+    let mut elements = Vec::new();
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        let AstKind::JSXElement(jsx_el) = node.kind() else {
+            continue;
+        };
+        let opening = &jsx_el.opening_element;
+        let (name, root_identifier, is_component, is_unresolved_component) =
+            classify_jsx_element_name(semantic, &opening.name);
+
+        let enclosing_subject = find_enclosing_react_node(semantic, node_id)
+            .and_then(|subj_id| get_subject_name(semantic, subj_id));
+
+        let mut ancestor_elements = Vec::new();
+        for anc_id in semantic.nodes().ancestor_ids(node_id) {
+            if let AstKind::JSXElement(parent_jsx) = semantic.nodes().kind(anc_id) {
+                let (parent_name, _, _, _) =
+                    classify_jsx_element_name(semantic, &parent_jsx.opening_element.name);
+                ancestor_elements.push(parent_name);
+            }
+        }
+        ancestor_elements.reverse();
+
+        let (in_array_map, map_index_param) = check_enclosing_array_map(semantic, node_id);
+        let (attributes, has_key, key_is_array_index, object_literal_props) =
+            extract_jsx_element_attributes(&opening.attributes, map_index_param.as_deref());
+        let (has_raw_text_child, raw_text_preview, has_element_children, has_render_prop_children) =
+            inspect_jsx_children(&jsx_el.children);
+
+        let opener_start_loc = loc_from_line_starts(line_starts, opening.span.start);
+        let opener_end_loc = loc_from_line_starts(line_starts, opening.span.end.saturating_sub(1));
+
+        elements.push(JsxElementIr {
+            name,
+            root_identifier,
+            is_component,
+            enclosing_subject,
+            ancestor_elements,
+            attributes,
+            has_key,
+            key_is_array_index,
+            object_literal_props,
+            in_array_map,
+            has_raw_text_child,
+            raw_text_preview,
+            has_element_children,
+            has_render_prop_children,
+            is_unresolved_component,
+            opener_start_line: opener_start_loc.line,
+            opener_end_line: opener_end_loc.line,
+            span: ByteSpan {
+                start: opening.span.start,
+                end: opening.span.end,
+            },
+            loc: opener_start_loc,
+        });
+    }
+    elements
+}
+
+fn extract_jsx_element_attributes(
+    attr_items: &[JSXAttributeItem<'_>],
+    map_index_param: Option<&str>,
+) -> (Vec<String>, bool, bool, Vec<String>) {
+    let mut attributes = Vec::new();
+    let mut has_key = false;
+    let mut key_is_array_index = false;
+    let mut object_literal_props = Vec::new();
+
+    for attr_item in attr_items {
+        let Some(attr) = attr_item.as_attribute() else {
+            continue;
+        };
+        let Some(ident_name) = attr.name.as_identifier() else {
+            continue;
+        };
+        let attr_name = ident_name.name.to_string();
+        if attr_name == "key" {
+            has_key = true;
+            if let Some(idx_param) = map_index_param
+                && let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
+                && let Some(expr) = container.expression.as_expression()
+                && let Expression::Identifier(id) = expr.without_parentheses()
+                && id.name.as_str() == idx_param
+            {
+                key_is_array_index = true;
+            }
+        } else {
+            if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
+                && let Some(expr) = container.expression.as_expression()
+                && matches!(expr.without_parentheses(), Expression::ObjectExpression(_))
+            {
+                object_literal_props.push(attr_name.clone());
+            }
+            attributes.push(attr_name);
+        }
+    }
+    (
+        attributes,
+        has_key,
+        key_is_array_index,
+        object_literal_props,
+    )
+}
+
+fn inspect_jsx_children(children: &[JSXChild<'_>]) -> (bool, Option<String>, bool, bool) {
+    let mut has_raw_text_child = false;
+    let mut raw_text_preview = None;
+    let mut has_element_children = false;
+    let mut has_render_prop_children = false;
+
+    for child in children {
+        match child {
+            JSXChild::Text(t) => {
+                record_raw_text_snippet(
+                    t.value.as_str(),
+                    &mut has_raw_text_child,
+                    &mut raw_text_preview,
+                );
+            }
+            JSXChild::Element(_) | JSXChild::Fragment(_) => {
+                has_element_children = true;
+            }
+            JSXChild::ExpressionContainer(container) => match &container.expression {
+                JSXExpression::ArrowFunctionExpression(_)
+                | JSXExpression::FunctionExpression(_) => {
+                    has_render_prop_children = true;
+                }
+                JSXExpression::StringLiteral(s) => {
+                    if let Some(val) = s.value.as_str() {
+                        record_raw_text_snippet(
+                            val,
+                            &mut has_raw_text_child,
+                            &mut raw_text_preview,
+                        );
+                    }
+                }
+                _ => {}
+            },
+            JSXChild::Spread(_) => {}
+        }
+    }
+    (
+        has_raw_text_child,
+        raw_text_preview,
+        has_element_children,
+        has_render_prop_children,
+    )
+}
+
+fn record_raw_text_snippet(
+    raw: &str,
+    has_raw_text_child: &mut bool,
+    raw_text_preview: &mut Option<String>,
+) {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+        *has_raw_text_child = true;
+        if raw_text_preview.is_none() {
+            *raw_text_preview = Some(trimmed.to_string());
+        }
+    }
+}
+
+pub(crate) fn classify_jsx_element_name(
+    semantic: &Semantic<'_>,
+    name: &JSXElementName<'_>,
+) -> (String, String, bool, bool) {
+    match name {
+        JSXElementName::Identifier(ident) => {
+            let s = ident.name.to_string();
+            let comp = is_component_name(&s);
+            (s.clone(), s, comp, false)
+        }
+        JSXElementName::IdentifierReference(ident) => {
+            let s = ident.name.to_string();
+            let comp = is_component_name(&s);
+            let unresolved = comp
+                && s != "React"
+                && s != "Fragment"
+                && ident.reference_id.get().is_some_and(|ref_id| {
+                    semantic
+                        .scoping()
+                        .get_reference(ref_id)
+                        .symbol_id()
+                        .is_none()
+                });
+            (s.clone(), s, comp, unresolved)
+        }
+        JSXElementName::MemberExpression(mem) => {
+            let full = mem
+                .span()
+                .source_text(semantic.source_text())
+                .trim()
+                .to_string();
+            let root = full.split('.').next().unwrap_or(full.as_str()).to_string();
+            (full, root, true, false)
+        }
+        JSXElementName::NamespacedName(ns) => {
+            let full = format!("{}:{}", ns.namespace.name, ns.name.name);
+            (full, ns.namespace.name.to_string(), false, false)
+        }
+        JSXElementName::ThisExpression(_) => ("this".to_string(), "this".to_string(), true, false),
+    }
+}
+
+pub(crate) fn check_enclosing_array_map(
+    semantic: &Semantic<'_>,
+    jsx_node_id: NodeId,
+) -> (bool, Option<String>) {
+    for anc_id in semantic.nodes().ancestor_ids(jsx_node_id) {
+        match semantic.nodes().kind(anc_id) {
+            AstKind::JSXElement(_) => return (false, None),
+            AstKind::ArrowFunctionExpression(arrow) => {
+                let parent_id = semantic.nodes().parent_id(anc_id);
+                if let AstKind::CallExpression(call) = semantic.nodes().kind(parent_id)
+                    && is_map_callee(&call.callee)
+                {
+                    let index_param = arrow
+                        .params
+                        .items
+                        .get(1)
+                        .and_then(|p| p.pattern.get_binding_identifier())
+                        .map(|id| id.name.to_string());
+                    return (true, index_param);
+                }
+                return (false, None);
+            }
+            AstKind::Function(func) => {
+                let parent_id = semantic.nodes().parent_id(anc_id);
+                if let AstKind::CallExpression(call) = semantic.nodes().kind(parent_id)
+                    && is_map_callee(&call.callee)
+                {
+                    let index_param = func
+                        .params
+                        .items
+                        .get(1)
+                        .and_then(|p| p.pattern.get_binding_identifier())
+                        .map(|id| id.name.to_string());
+                    return (true, index_param);
+                }
+                return (false, None);
+            }
+            _ => {}
+        }
+    }
+    (false, None)
+}
+
+fn is_map_callee(callee: &Expression<'_>) -> bool {
+    matches!(
+        callee.without_parentheses(),
+        Expression::StaticMemberExpression(mem) if mem.property.name == "map"
+    )
 }
