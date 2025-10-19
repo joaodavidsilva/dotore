@@ -9,8 +9,8 @@ pub(crate) mod extract;
 pub(crate) mod react_ast;
 pub(crate) mod types;
 
-pub(crate) use extract::parse_file_ir;
-pub use types::{ByteSpan, SourceLoc, SubjectKind};
-pub(crate) use types::{
-    CallerSite, DepRef, DepsSpec, EffectNode, FileIr, SetterCallSite, SubjectIr,
+pub use extract::{inspect_file_semantic, parse_file_ir};
+pub use types::{
+    ByteSpan, CallerSite, DepRef, DepsSpec, EffectNode, FileContext, FileIr, JsxElementIr,
+    SecuritySinkKind, SetterCallSite, SourceLoc, SubjectIr, SubjectKind, SymbolKind, SymbolOutline,
 };
