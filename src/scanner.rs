@@ -85,6 +85,7 @@ fn is_supported_file(path: &Path, include_tests: bool) -> bool {
     if file_name.ends_with(".d.ts")
         || file_name.ends_with(".d.mts")
         || file_name.ends_with(".d.cts")
+        || file_name.starts_with("dotore.config.")
     {
         return false;
     }
