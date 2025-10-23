@@ -4,8 +4,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use dotore::{
-    PrescriptionTier, RuleId, ScanOptions, apply_autofixes, format_fix_report,
-    format_terminal_report, scan_workspace, write_and_open_html_report,
+    CliOverrides, PrescriptionTier, RuleId, ScanOptions, apply_autofixes, format_fix_report,
+    format_terminal_report, scan_workspace_with_overrides, write_and_open_html_report,
 };
 
 #[derive(Debug, Parser)]
@@ -50,7 +50,23 @@ struct CheckArgs {
     #[arg(long)]
     include_tests: bool,
 
-    /// Filter by rule ID (repeatable, e.g. `--rule no-derived-state`).
+    /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
+    #[arg(long)]
+    no_inline_disables: bool,
+
+    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
+    #[arg(long)]
+    custom_rules_only: bool,
+
+    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
+    #[arg(long = "ignore-tag", value_name = "TAG")]
+    ignore_tags: Vec<String>,
+
+    /// Explicit path to a `dotore.config.*` file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Filter by rule ID or legacy alias (repeatable, e.g. `--rule no-derived-state`).
     #[arg(long = "rule", value_name = "RULE_ID")]
     rules: Vec<String>,
 
@@ -72,6 +88,22 @@ struct FixArgs {
     /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
     #[arg(long)]
     include_tests: bool,
+
+    /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
+    #[arg(long)]
+    no_inline_disables: bool,
+
+    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
+    #[arg(long)]
+    custom_rules_only: bool,
+
+    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
+    #[arg(long = "ignore-tag", value_name = "TAG")]
+    ignore_tags: Vec<String>,
+
+    /// Explicit path to a `dotore.config.*` file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -91,6 +123,22 @@ struct ReportArgs {
     /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
     #[arg(long)]
     include_tests: bool,
+
+    /// Bypass inline disable comments.
+    #[arg(long)]
+    no_inline_disables: bool,
+
+    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
+    #[arg(long)]
+    custom_rules_only: bool,
+
+    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
+    #[arg(long = "ignore-tag", value_name = "TAG")]
+    ignore_tags: Vec<String>,
+
+    /// Explicit path to a `dotore.config.*` file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -145,7 +193,14 @@ fn run_check(args: &CheckArgs) -> ExitCode {
             }
         };
 
-    let (report, _) = match scan_workspace(&options) {
+    let overrides = CliOverrides {
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: args.ignore_tags.clone(),
+        config_path: args.config.clone(),
+    };
+
+    let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
         Ok(res) => res,
         Err(err) => {
             eprintln!("error scanning workspace: {err}");
@@ -179,8 +234,14 @@ fn run_fix(args: &FixArgs) -> ExitCode {
         rules: None,
         tiers: Some(vec![PrescriptionTier::Autofix]),
     };
+    let overrides = CliOverrides {
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: args.ignore_tags.clone(),
+        config_path: args.config.clone(),
+    };
 
-    let (report, sources) = match scan_workspace(&options) {
+    let (report, sources) = match scan_workspace_with_overrides(&options, &overrides) {
         Ok(res) => res,
         Err(err) => {
             eprintln!("error scanning workspace: {err}");
@@ -207,8 +268,14 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         rules: None,
         tiers: None,
     };
+    let overrides = CliOverrides {
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: args.ignore_tags.clone(),
+        config_path: args.config.clone(),
+    };
 
-    let (report, _) = match scan_workspace(&options) {
+    let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
         Ok(res) => res,
         Err(err) => {
             eprintln!("error scanning workspace: {err}");
