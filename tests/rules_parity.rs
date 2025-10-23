@@ -1812,11 +1812,7 @@ fn scanner_respects_gitignore_and_ignore_without_git_directory() {
         "export function Types() {}",
     )
     .unwrap();
-    fs::write(
-        root.join("scratch/Draft.tsx"),
-        "export function Draft() {}",
-    )
-    .unwrap();
+    fs::write(root.join("scratch/Draft.tsx"), "export function Draft() {}").unwrap();
 
     let (_, sources) = scan_workspace(&ScanOptions {
         paths: vec![root.clone()],
@@ -1847,11 +1843,7 @@ fn scanner_respects_parent_gitignore_when_scanning_subdirectory() {
         "*.generated.tsx\npackages/web/src/generated/\n",
     )
     .unwrap();
-    fs::write(
-        root.join("packages/.ignore"),
-        "IgnoredByParentIgnore.tsx\n",
-    )
-    .unwrap();
+    fs::write(root.join("packages/.ignore"), "IgnoredByParentIgnore.tsx\n").unwrap();
     fs::write(
         sub.join("components/Button.tsx"),
         "export function Button() {}",
@@ -1867,11 +1859,7 @@ fn scanner_respects_parent_gitignore_when_scanning_subdirectory() {
         "export function Ignored() {}",
     )
     .unwrap();
-    fs::write(
-        sub.join("generated/Api.tsx"),
-        "export function Api() {}",
-    )
-    .unwrap();
+    fs::write(sub.join("generated/Api.tsx"), "export function Api() {}").unwrap();
 
     let (_, sources) = scan_workspace(&ScanOptions {
         paths: vec![sub.clone()],
