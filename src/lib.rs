@@ -21,6 +21,8 @@ pub(crate) mod ir;
 pub(crate) mod report;
 /// Diagnostic rules engine over `SubjectIr` and `ProjectGraph`.
 pub(crate) mod rules;
+/// Native Chrome DevTools Protocol (CDP) runtime profiler (`dotore scan`).
+pub(crate) mod runtime_scan;
 /// Parallel gitignore-aware file discovery.
 pub(crate) mod scanner;
 
@@ -42,6 +44,29 @@ pub use report::{
 pub use rules::{
     AutofixPatch, ByteEdit, ContextualOwnerPolicy, Diagnostic, PrescriptionTier, RuleCategory,
     RuleId, RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, rule_registry,
+};
+pub use runtime_scan::{
+    BuildRuntimeScanReportInput, ComponentEventSource, LocalUrlSuggestion,
+    RUNTIME_SCAN_INTERACTION_DURATION_THRESHOLD_MS, RUNTIME_SCAN_LAYOUT_THRASH_RATIO,
+    RUNTIME_SCAN_LOCAL_DEV_PORTS, RUNTIME_SCAN_MAX_COMPONENT_EVENTS,
+    RUNTIME_SCAN_MAX_COMPONENTS_PER_COMMIT, RUNTIME_SCAN_MAX_DOCUMENT_SNAPSHOTS,
+    RUNTIME_SCAN_MAX_HOTSPOTS, RUNTIME_SCAN_MAX_INTERACTIONS, RUNTIME_SCAN_MAX_LOAF_ENTRIES,
+    RUNTIME_SCAN_MAX_RECORDING_DURATION_MS, RUNTIME_SCAN_MAX_SCRIPTS_PER_LOAF,
+    RUNTIME_SCAN_MAX_SNAPSHOT_BYTES, RUNTIME_SCAN_MAX_SNAPSHOT_PAYLOAD_BYTES,
+    RUNTIME_SCAN_MAX_STRING_LENGTH, RUNTIME_SCAN_MAX_TRACE_BYTES,
+    RUNTIME_SCAN_MIN_COMPONENT_DURATION_MS, RUNTIME_SCAN_SAFE_CDP_PAGE_URLS,
+    RUNTIME_SCAN_SCHEMA_VERSION, RUNTIME_SCAN_SNAPSHOT_ENVELOPE_RESERVE_BYTES,
+    RUNTIME_SCAN_TRACE_CATEGORIES, RUNTIME_SCAN_TRACE_FILE_MODE,
+    RUNTIME_SCAN_TRACING_COMPLETE_TIMEOUT_MS, RUNTIME_SCAN_UNKNOWN_SOURCE_CHAR_POSITION,
+    ReactBuildType, RecordRuntimeTraceInput, RecordRuntimeTraceResult, RuntimeScanComponentEvent,
+    RuntimeScanComponentHotspot, RuntimeScanConnection, RuntimeScanFormat, RuntimeScanInteraction,
+    RuntimeScanLongAnimationFrame, RuntimeScanProbeSnapshot, RuntimeScanProbeSupport,
+    RuntimeScanReport, RuntimeScanScriptHotspot, RuntimeScanScriptTiming, RuntimeScanSummary,
+    assert_cdp_profile_uncontaminated, build_runtime_scan_report, detect_local_runtime_urls,
+    format_runtime_scan_error_report, format_runtime_scan_report, is_runtime_scan_probe_snapshot,
+    merge_probe_snapshots, parse_runtime_scan_snapshot_payload, prompt_runtime_scan_url_with_io,
+    record_runtime_trace, resolve_runtime_scan_format, resolve_runtime_trace_path,
+    sanitize_runtime_text, sanitize_runtime_url,
 };
 
 use config::content_enables_react_compiler;
