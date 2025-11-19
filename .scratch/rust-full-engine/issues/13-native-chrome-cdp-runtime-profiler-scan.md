@@ -4,10 +4,10 @@
 
 **Blocked by:** 01: Prefactor Rule Registry, Capability Gate, Config Loader, and Single-Pass OXC Pipeline
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `dotore scan [url]` launches an isolated system Chrome/Chromium profile with remote debugging enabled (or connects to an existing debug-enabled browser via `--cdp <url>`, rejecting `--cdp` profiles that have other non-blank tabs open so browser-wide tracing stays uncontaminated).
-- [ ] When `url` is omitted in an interactive terminal, `dotore scan` detects running localhost development/production servers and prompts the user to select or enter a target URL.
-- [ ] The embedded runtime probe and visual purple component-render overlay are injected via CDP `Page.addScriptToEvaluateOnNewDocument`, and browser tracing (`Tracing.start` / `Tracing.end`) records until the user presses Enter or the 5-minute timeout elapses.
-- [ ] Trace and probe snapshots across documents are merged in Rust to compute worst interaction timing (INP/Event Timing), total blocking duration, LCP, CLS, Long Animation Frame script hotspots (including forced style/layout thrash ratios), and React component render counts and self/max durations.
-- [ ] The raw trace is streamed to a local `.json.gz` file (honoring `--trace-out <path>` and restrictive file permissions) and the structured summary is rendered in `text`, `json`, or `jsonl` (`--format`).
+- [x] `dotore scan [url]` launches an isolated system Chrome/Chromium profile with remote debugging enabled (or connects to an existing debug-enabled browser via `--cdp <url>`, rejecting `--cdp` profiles that have other non-blank tabs open so browser-wide tracing stays uncontaminated).
+- [x] When `url` is omitted in an interactive terminal, `dotore scan` detects running localhost development/production servers and prompts the user to select or enter a target URL.
+- [x] The embedded runtime probe and visual purple component-render overlay are injected via CDP `Page.addScriptToEvaluateOnNewDocument`, and browser tracing (`Tracing.start` / `Tracing.end`) records until the user presses Enter or the 5-minute timeout elapses.
+- [x] Trace and probe snapshots across documents are merged in Rust to compute worst interaction timing (INP/Event Timing), total blocking duration, LCP, CLS, Long Animation Frame script hotspots (including forced style/layout thrash ratios), and React component render counts and self/max durations.
+- [x] The raw trace is streamed to a local `.json.gz` file (honoring `--trace-out <path>` and restrictive file permissions) and the structured summary is rendered in `text`, `json`, or `jsonl` (`--format`).
