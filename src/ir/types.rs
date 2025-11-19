@@ -450,6 +450,74 @@ pub enum SymbolKind {
     Import,
 }
 
+impl SymbolKind {
+    /// All 12 supported symbol kinds in canonical alphabetical order.
+    pub const ALL: &'static [Self] = &[
+        Self::Class,
+        Self::Constant,
+        Self::Enum,
+        Self::EnumMember,
+        Self::Export,
+        Self::Function,
+        Self::Import,
+        Self::Interface,
+        Self::Method,
+        Self::Property,
+        Self::Type,
+        Self::Variable,
+    ];
+
+    /// Default symbol kinds queried by `dotore search` when `--kind` is omitted.
+    pub const DEFAULT_SEARCH_KINDS: &'static [Self] = &[
+        Self::Class,
+        Self::Enum,
+        Self::Function,
+        Self::Interface,
+        Self::Method,
+        Self::Property,
+        Self::Type,
+    ];
+
+    /// Parses a kebab-case symbol kind identifier.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "class" => Some(Self::Class),
+            "constant" => Some(Self::Constant),
+            "enum" => Some(Self::Enum),
+            "enum-member" => Some(Self::EnumMember),
+            "export" => Some(Self::Export),
+            "function" => Some(Self::Function),
+            "import" => Some(Self::Import),
+            "interface" => Some(Self::Interface),
+            "method" => Some(Self::Method),
+            "property" => Some(Self::Property),
+            "type" => Some(Self::Type),
+            "variable" => Some(Self::Variable),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical kebab-case string for this symbol kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Constant => "constant",
+            Self::Enum => "enum",
+            Self::EnumMember => "enum-member",
+            Self::Export => "export",
+            Self::Function => "function",
+            Self::Import => "import",
+            Self::Interface => "interface",
+            Self::Method => "method",
+            Self::Property => "property",
+            Self::Type => "type",
+            Self::Variable => "variable",
+        }
+    }
+}
+
 /// A declared symbol extracted with its signature and adjacent doc comment (see `GLOSSARY.md`: **Symbol Outline**).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SymbolOutline {
@@ -461,15 +529,19 @@ pub struct SymbolOutline {
     pub signature: String,
     /// Adjacent leading comment text, if any.
     pub doc_comment: Option<String>,
-    /// Enclosing class, interface, or enum name for members/methods/properties.
+    /// 1-based start line of the adjacent leading comment block, if any.
+    pub comment_start_line: Option<u32>,
+    /// Enclosing class, interface, enum, function, or object container name for members/nested symbols.
     pub parent_name: Option<String>,
     /// Whether the symbol is exported from the module.
     pub exported: bool,
     /// Byte span of the declaration.
     pub span: ByteSpan,
-    /// 1-based start line and column.
+    /// 1-based line where the declaration signature header ends.
+    pub signature_end_line: u32,
+    /// 1-based start line and column of the symbol identifier.
     pub loc: SourceLoc,
-    /// 1-based inclusive end line.
+    /// 1-based inclusive end line of the declaration.
     pub end_line: u32,
 }
 
