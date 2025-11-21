@@ -9,9 +9,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstKind,
     ast::{
-        ArrowFunctionBody, BindingPattern, CallExpression, Class, Declaration,
+        ArrowFunctionBody, BindingPattern, CallExpression, Declaration,
         ExportDefaultDeclarationKind, Expression, ImportDeclaration, ImportDeclarationSpecifier,
-        Program, Statement, TSInterfaceDeclaration, VariableDeclarationKind,
+        Program, PropertyKey, TSEnumMemberName, VariableDeclarationKind,
     },
 };
 use oxc_parser::Parser;
@@ -73,7 +73,7 @@ where
     let caller_sites = extract_caller_sites(&semantic, &line_starts);
     let jsx_elements = extract_jsx_elements(&semantic, &line_starts);
     let module = extract_module_ir(&parsed.program, &semantic, &line_starts);
-    let symbol_outlines = extract_symbol_outlines(&parsed.program, source, &line_starts);
+    let symbol_outlines = extract_symbol_outlines(&semantic, source, &line_starts);
     let mutations = extract_mutations(&semantic, &ref_entries, &line_starts);
     let async_flows = extract_async_flows(&semantic, &line_starts);
     let security_sinks = extract_security_sinks(&parsed.program, &semantic, &module, &line_starts);
@@ -1172,443 +1172,723 @@ fn collect_declaration_exports(
     }
 }
 
+struct OutlineTarget<'a> {
+    name: String,
+    kind: SymbolKind,
+    id_span: Span,
+    decl_span: Span,
+    body_start: Option<u32>,
+    parent_name: Option<String>,
+    exported: bool,
+    source: &'a str,
+    lines: &'a [&'a str],
+    line_starts: &'a [u32],
+}
+
 fn extract_symbol_outlines(
-    program: &Program<'_>,
+    semantic: &Semantic<'_>,
     source: &str,
     line_starts: &[u32],
 ) -> Vec<SymbolOutline> {
     let lines: Vec<&str> = source.lines().collect();
     let mut outlines = Vec::new();
 
-    for stmt in &program.body {
-        match stmt {
-            Statement::ExportDeclaration(exp) => {
-                extract_decl_outlines(
-                    &exp.declaration,
-                    true,
-                    exp.span.start,
-                    source,
-                    &lines,
-                    line_starts,
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        let parent_id = semantic.nodes().parent_id(node_id);
+        let parent_kind = semantic.nodes().kind(parent_id);
+        let container = find_enclosing_container_name(semantic, node_id);
+
+        match node.kind() {
+            AstKind::Function(func) => {
+                if matches!(
+                    parent_kind,
+                    AstKind::MethodDefinition(_)
+                        | AstKind::ObjectProperty(_)
+                        | AstKind::PropertyDefinition(_)
+                ) {
+                    continue;
+                }
+                if func.is_expression() && matches!(parent_kind, AstKind::VariableDeclarator(_)) {
+                    continue;
+                }
+                if let Some(id) = &func.id {
+                    let (decl_span, exported) =
+                        resolve_decl_span_and_export(semantic, node_id, func.span);
+                    push_symbol_outline(
+                        &mut outlines,
+                        OutlineTarget {
+                            name: id.name.to_string(),
+                            kind: SymbolKind::Function,
+                            id_span: id.span,
+                            decl_span,
+                            body_start: func.body.as_ref().map(|b| b.span.start),
+                            parent_name: container,
+                            exported,
+                            source,
+                            lines: &lines,
+                            line_starts,
+                        },
+                    );
+                }
+            }
+            AstKind::Class(class) => {
+                if class.is_expression() && matches!(parent_kind, AstKind::VariableDeclarator(_)) {
+                    continue;
+                }
+                if let Some(id) = &class.id {
+                    let (decl_span, exported) =
+                        resolve_decl_span_and_export(semantic, node_id, class.span);
+                    push_symbol_outline(
+                        &mut outlines,
+                        OutlineTarget {
+                            name: id.name.to_string(),
+                            kind: SymbolKind::Class,
+                            id_span: id.span,
+                            decl_span,
+                            body_start: Some(class.body.span.start),
+                            parent_name: container,
+                            exported,
+                            source,
+                            lines: &lines,
+                            line_starts,
+                        },
+                    );
+                }
+            }
+            AstKind::TSInterfaceDeclaration(iface) => {
+                let (decl_span, exported) =
+                    resolve_decl_span_and_export(semantic, node_id, iface.span);
+                push_symbol_outline(
                     &mut outlines,
+                    OutlineTarget {
+                        name: iface.id.name.to_string(),
+                        kind: SymbolKind::Interface,
+                        id_span: iface.id.span,
+                        decl_span,
+                        body_start: Some(iface.body.span.start),
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
                 );
             }
-            Statement::ExportDefaultDeclaration(exp) => match &exp.declaration {
-                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                    let name =
-                        f.id.as_ref()
-                            .map_or_else(|| "default".to_string(), |id| id.name.to_string());
+            AstKind::TSTypeAliasDeclaration(t) => {
+                let (decl_span, exported) = resolve_decl_span_and_export(semantic, node_id, t.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: t.id.name.to_string(),
+                        kind: SymbolKind::Type,
+                        id_span: t.id.span,
+                        decl_span,
+                        body_start: None,
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::TSEnumDeclaration(e) => {
+                let (decl_span, exported) = resolve_decl_span_and_export(semantic, node_id, e.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: e.id.name.to_string(),
+                        kind: SymbolKind::Enum,
+                        id_span: e.id.span,
+                        decl_span,
+                        body_start: Some(e.body.span.start),
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::TSEnumMember(member) => {
+                let Some(member_name) = extract_enum_member_name(&member.id) else {
+                    continue;
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, member.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: member_name,
+                        kind: SymbolKind::EnumMember,
+                        id_span: member.id.span(),
+                        decl_span: member.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::VariableDeclarator(decl) => {
+                let AstKind::VariableDeclaration(var_decl) = parent_kind else {
+                    continue;
+                };
+                let init_expr = decl.init.as_ref().map(Expression::without_parentheses);
+                let is_fn_init = matches!(
+                    init_expr,
+                    Some(
+                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                    )
+                );
+                let kind = if is_fn_init {
+                    SymbolKind::Function
+                } else if var_decl.kind == VariableDeclarationKind::Const {
+                    SymbolKind::Constant
+                } else {
+                    SymbolKind::Variable
+                };
+                let body_start = expr_body_start(init_expr);
+                let (var_span, exported) =
+                    resolve_decl_span_and_export(semantic, parent_id, var_decl.span);
+                let decl_span = if var_decl.declarations.len() == 1 {
+                    var_span
+                } else {
+                    decl.span
+                };
+                let mut bindings = Vec::new();
+                collect_binding_identifiers(&decl.id, &mut bindings);
+                for (name, id_span) in bindings {
                     push_symbol_outline(
                         &mut outlines,
-                        name,
-                        SymbolKind::Function,
-                        exp.span,
-                        exp.span.start,
-                        None,
-                        true,
-                        source,
-                        &lines,
-                        line_starts,
-                    );
-                }
-                ExportDefaultDeclarationKind::ClassDeclaration(c) => {
-                    let name =
-                        c.id.as_ref()
-                            .map_or_else(|| "default".to_string(), |id| id.name.to_string());
-                    push_symbol_outline(
-                        &mut outlines,
-                        name,
-                        SymbolKind::Class,
-                        exp.span,
-                        exp.span.start,
-                        None,
-                        true,
-                        source,
-                        &lines,
-                        line_starts,
-                    );
-                }
-                _ => {}
-            },
-            _ => {
-                if let Some(decl) = stmt.as_declaration() {
-                    extract_decl_outlines(
-                        decl,
-                        false,
-                        stmt.span().start,
-                        source,
-                        &lines,
-                        line_starts,
-                        &mut outlines,
+                        OutlineTarget {
+                            name,
+                            kind,
+                            id_span,
+                            decl_span,
+                            body_start,
+                            parent_name: container.clone(),
+                            exported,
+                            source,
+                            lines: &lines,
+                            line_starts,
+                        },
                     );
                 }
             }
+            AstKind::MethodDefinition(m) => {
+                let Some(name) = extract_property_key_name(&m.key) else {
+                    continue;
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, m.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind: SymbolKind::Method,
+                        id_span: m.key.span(),
+                        decl_span: m.span,
+                        body_start: m.value.body.as_ref().map(|b| b.span.start),
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::PropertyDefinition(p) => {
+                let Some(name) = extract_property_key_name(&p.key) else {
+                    continue;
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, p.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind: SymbolKind::Property,
+                        id_span: p.key.span(),
+                        decl_span: p.span,
+                        body_start: expr_body_start(
+                            p.value.as_ref().map(Expression::without_parentheses),
+                        ),
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::AccessorProperty(a) => {
+                let Some(name) = extract_property_key_name(&a.key) else {
+                    continue;
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, a.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind: SymbolKind::Property,
+                        id_span: a.key.span(),
+                        decl_span: a.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::TSMethodSignature(m) => {
+                let Some(name) = extract_property_key_name(&m.key) else {
+                    continue;
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, m.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind: SymbolKind::Method,
+                        id_span: m.key.span(),
+                        decl_span: m.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::TSPropertySignature(p) => {
+                let Some(name) = extract_property_key_name(&p.key) else {
+                    continue;
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, p.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind: SymbolKind::Property,
+                        id_span: p.key.span(),
+                        decl_span: p.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ObjectProperty(prop) => {
+                if !matches!(parent_kind, AstKind::ObjectExpression(_)) {
+                    continue;
+                }
+                let Some(name) = extract_property_key_name(&prop.key) else {
+                    continue;
+                };
+                let kind = if prop.method {
+                    SymbolKind::Method
+                } else {
+                    SymbolKind::Property
+                };
+                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, prop.span);
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind,
+                        id_span: prop.key.span(),
+                        decl_span: prop.span,
+                        body_start: expr_body_start(Some(prop.value.without_parentheses())),
+                        parent_name: container,
+                        exported,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ImportSpecifier(spec) => {
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: spec.local.name.to_string(),
+                        kind: SymbolKind::Import,
+                        id_span: spec.local.span,
+                        decl_span: spec.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported: false,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ImportDefaultSpecifier(spec) => {
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: spec.local.name.to_string(),
+                        kind: SymbolKind::Import,
+                        id_span: spec.local.span,
+                        decl_span: spec.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported: false,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ImportNamespaceSpecifier(spec) => {
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: spec.local.name.to_string(),
+                        kind: SymbolKind::Import,
+                        id_span: spec.local.span,
+                        decl_span: spec.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported: false,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ExportSpecifier(spec) => {
+                let name = spec.exported.name().as_str().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name,
+                        kind: SymbolKind::Export,
+                        id_span: spec.exported.span(),
+                        decl_span: spec.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported: true,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ExportDefaultDeclaration(exp) => {
+                push_symbol_outline(
+                    &mut outlines,
+                    OutlineTarget {
+                        name: "default".to_string(),
+                        kind: SymbolKind::Export,
+                        id_span: exp.span,
+                        decl_span: exp.span,
+                        body_start: None,
+                        parent_name: container,
+                        exported: true,
+                        source,
+                        lines: &lines,
+                        line_starts,
+                    },
+                );
+            }
+            AstKind::ExportAllDeclaration(exp) => {
+                if let Some(exported_name) = &exp.exported {
+                    let name = exported_name.name().as_str().to_string();
+                    if !name.is_empty() {
+                        push_symbol_outline(
+                            &mut outlines,
+                            OutlineTarget {
+                                name,
+                                kind: SymbolKind::Export,
+                                id_span: exported_name.span(),
+                                decl_span: exp.span,
+                                body_start: None,
+                                parent_name: container,
+                                exported: true,
+                                source,
+                                lines: &lines,
+                                line_starts,
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
     outlines
 }
 
-fn extract_decl_outlines(
-    decl: &Declaration<'_>,
-    exported: bool,
-    comment_anchor_start: u32,
-    source: &str,
-    lines: &[&str],
-    line_starts: &[u32],
-    out: &mut Vec<SymbolOutline>,
-) {
-    match decl {
-        Declaration::FunctionDeclaration(f) => {
-            if let Some(id) = &f.id {
-                push_symbol_outline(
-                    out,
-                    id.name.to_string(),
-                    SymbolKind::Function,
-                    f.span,
-                    comment_anchor_start,
-                    None,
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
+fn find_enclosing_container_name(semantic: &Semantic<'_>, node_id: NodeId) -> Option<String> {
+    for anc_id in semantic.nodes().ancestor_ids(node_id).skip(1) {
+        match semantic.nodes().kind(anc_id) {
+            AstKind::Class(c) => {
+                if let Some(id) = &c.id {
+                    return Some(id.name.to_string());
+                }
             }
-        }
-        Declaration::ClassDeclaration(c) => {
-            if let Some(id) = &c.id {
-                let class_name = id.name.to_string();
-                push_symbol_outline(
-                    out,
-                    class_name.clone(),
-                    SymbolKind::Class,
-                    c.span,
-                    comment_anchor_start,
-                    None,
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
-                extract_class_member_outlines(
-                    c,
-                    &class_name,
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                    out,
-                );
+            AstKind::TSInterfaceDeclaration(i) => return Some(i.id.name.to_string()),
+            AstKind::TSEnumDeclaration(e) => return Some(e.id.name.to_string()),
+            AstKind::TSTypeAliasDeclaration(t) => return Some(t.id.name.to_string()),
+            AstKind::Function(f) => {
+                if let Some(id) = &f.id {
+                    return Some(id.name.to_string());
+                }
             }
-        }
-        Declaration::TSInterfaceDeclaration(iface) => {
-            let iface_name = iface.id.name.to_string();
-            push_symbol_outline(
-                out,
-                iface_name.clone(),
-                SymbolKind::Interface,
-                iface.span,
-                comment_anchor_start,
-                None,
-                exported,
-                source,
-                lines,
-                line_starts,
-            );
-            extract_interface_member_outlines(
-                iface,
-                &iface_name,
-                exported,
-                source,
-                lines,
-                line_starts,
-                out,
-            );
-        }
-        Declaration::TSTypeAliasDeclaration(t) => {
-            push_symbol_outline(
-                out,
-                t.id.name.to_string(),
-                SymbolKind::Type,
-                t.span,
-                comment_anchor_start,
-                None,
-                exported,
-                source,
-                lines,
-                line_starts,
-            );
-        }
-        Declaration::TSEnumDeclaration(e) => {
-            let enum_name = e.id.name.to_string();
-            push_symbol_outline(
-                out,
-                enum_name.clone(),
-                SymbolKind::Enum,
-                e.span,
-                comment_anchor_start,
-                None,
-                exported,
-                source,
-                lines,
-                line_starts,
-            );
-            for member in &e.body.members {
-                let member_name = member
-                    .id
-                    .static_name()
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                push_symbol_outline(
-                    out,
-                    member_name,
-                    SymbolKind::EnumMember,
-                    member.span,
-                    member.span.start,
-                    Some(enum_name.clone()),
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
+            AstKind::MethodDefinition(m) => {
+                if let Some(name) = extract_property_key_name(&m.key) {
+                    return Some(name);
+                }
             }
-        }
-        Declaration::VariableDeclaration(v) => {
-            for declarator in &v.declarations {
-                let Some(id) = declarator.id.get_binding_identifier() else {
-                    continue;
-                };
-                let is_fn_init = declarator.init.as_ref().is_some_and(|init| {
-                    matches!(
-                        init.without_parentheses(),
-                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-                    )
-                });
-                let kind = if is_fn_init {
-                    SymbolKind::Function
-                } else if v.kind == VariableDeclarationKind::Const {
-                    SymbolKind::Constant
-                } else {
-                    SymbolKind::Variable
-                };
-                push_symbol_outline(
-                    out,
-                    id.name.to_string(),
-                    kind,
-                    v.span,
-                    comment_anchor_start,
-                    None,
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extract_class_member_outlines(
-    class_decl: &Class<'_>,
-    class_name: &str,
-    exported: bool,
-    source: &str,
-    lines: &[&str],
-    line_starts: &[u32],
-    out: &mut Vec<SymbolOutline>,
-) {
-    for element in &class_decl.body.body {
-        match element {
-            oxc_ast::ast::ClassElement::MethodDefinition(m) => {
-                let Some(m_name) = m
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                push_symbol_outline(
-                    out,
-                    m_name,
-                    SymbolKind::Method,
-                    m.span,
-                    m.span.start,
-                    Some(class_name.to_string()),
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
-            }
-            oxc_ast::ast::ClassElement::PropertyDefinition(p) => {
-                let Some(p_name) = p
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                push_symbol_outline(
-                    out,
-                    p_name,
-                    SymbolKind::Property,
-                    p.span,
-                    p.span.start,
-                    Some(class_name.to_string()),
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
+            AstKind::VariableDeclarator(v) => {
+                if let Some(id) = v.id.get_binding_identifier() {
+                    return Some(id.name.to_string());
+                }
             }
             _ => {}
         }
     }
+    None
 }
 
-fn extract_interface_member_outlines(
-    iface: &TSInterfaceDeclaration<'_>,
-    iface_name: &str,
-    exported: bool,
-    source: &str,
-    lines: &[&str],
-    line_starts: &[u32],
-    out: &mut Vec<SymbolOutline>,
-) {
-    for sig in &iface.body.body {
-        match sig {
-            oxc_ast::ast::TSSignature::TSPropertySignature(prop) => {
-                let Some(p_name) = prop
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                push_symbol_outline(
-                    out,
-                    p_name,
-                    SymbolKind::Property,
-                    prop.span,
-                    prop.span.start,
-                    Some(iface_name.to_string()),
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
+fn resolve_decl_span_and_export(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    own_span: Span,
+) -> (Span, bool) {
+    let parent_id = semantic.nodes().parent_id(node_id);
+    let decl_span = match semantic.nodes().kind(parent_id) {
+        AstKind::ExportDeclaration(exp) => exp.span,
+        AstKind::ExportNamedDeclaration(exp) => exp.span,
+        AstKind::ExportDefaultDeclaration(exp) => exp.span,
+        _ => own_span,
+    };
+    let exported = semantic.nodes().ancestor_ids(node_id).any(|anc_id| {
+        matches!(
+            semantic.nodes().kind(anc_id),
+            AstKind::ExportDeclaration(_)
+                | AstKind::ExportNamedDeclaration(_)
+                | AstKind::ExportDefaultDeclaration(_)
+        )
+    });
+    (decl_span, exported)
+}
+
+fn expr_body_start(expr: Option<&Expression<'_>>) -> Option<u32> {
+    match expr {
+        Some(Expression::ArrowFunctionExpression(arrow)) => Some(arrow.body.span().start),
+        Some(Expression::FunctionExpression(func)) => func.body.as_ref().map(|b| b.span.start),
+        _ => None,
+    }
+}
+
+fn collect_binding_identifiers(pattern: &BindingPattern<'_>, out: &mut Vec<(String, Span)>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            if !id.name.is_empty() {
+                out.push((id.name.to_string(), id.span));
             }
-            oxc_ast::ast::TSSignature::TSMethodSignature(m) => {
-                let Some(m_name) = m
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                push_symbol_outline(
-                    out,
-                    m_name,
-                    SymbolKind::Method,
-                    m.span,
-                    m.span.start,
-                    Some(iface_name.to_string()),
-                    exported,
-                    source,
-                    lines,
-                    line_starts,
-                );
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            collect_binding_identifiers(&assign.left, out);
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_binding_identifiers(elem, out);
             }
-            _ => {}
+            if let Some(rest) = &arr.rest {
+                collect_binding_identifiers(&rest.argument, out);
+            }
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_identifiers(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_identifiers(&rest.argument, out);
+            }
         }
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Constructs a SymbolOutline directly from AST span and precomputed line tables"
-)]
-fn push_symbol_outline(
-    out: &mut Vec<SymbolOutline>,
-    name: String,
-    kind: SymbolKind,
-    span: Span,
-    comment_anchor_start: u32,
-    parent_name: Option<String>,
-    exported: bool,
-    source: &str,
-    lines: &[&str],
-    line_starts: &[u32],
-) {
-    let loc = loc_from_line_starts(line_starts, span.start);
-    let end_loc = loc_from_line_starts(line_starts, span.end.saturating_sub(1));
-    let comment_loc = loc_from_line_starts(line_starts, comment_anchor_start);
-    let doc_comment = extract_leading_doc_comment(lines, comment_loc.line);
-    let first_line = span
-        .source_text(source)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
+fn extract_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::PrivateIdentifier(priv_id) => {
+            (!priv_id.name.is_empty()).then(|| format!("#{}", priv_id.name))
+        }
+        _ => key
+            .static_name()
+            .and_then(|n| n.as_str().map(str::to_string))
+            .filter(|s| !s.is_empty()),
+    }
+}
+
+fn extract_enum_member_name(id: &TSEnumMemberName<'_>) -> Option<String> {
+    let s = id.static_name().as_str().unwrap_or_default();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn push_symbol_outline(out: &mut Vec<SymbolOutline>, target: OutlineTarget<'_>) {
+    let id_loc = loc_from_line_starts(target.line_starts, target.id_span.start);
+    let decl_start_loc = loc_from_line_starts(target.line_starts, target.decl_span.start);
+    let end_loc = loc_from_line_starts(
+        target.line_starts,
+        target
+            .decl_span
+            .end
+            .saturating_sub(1)
+            .max(target.decl_span.start),
+    );
+    let (doc_comment, comment_start_line) = extract_adjacent_comment(
+        target.source,
+        target.lines,
+        target.line_starts,
+        target.decl_span.start,
+        decl_start_loc.line,
+    );
+    let sig_end_offset = compute_signature_end(
+        target.source,
+        target.decl_span.start,
+        target.decl_span.end,
+        target.body_start,
+    );
+    let sig_end_loc = loc_from_line_starts(
+        target.line_starts,
+        sig_end_offset.saturating_sub(1).max(target.decl_span.start),
+    );
+    let raw_sig = target
+        .source
+        .get(target.decl_span.start as usize..sig_end_offset as usize)
+        .unwrap_or("");
+    let signature = normalize_whitespace(raw_sig)
         .trim_end_matches('{')
         .trim()
         .to_string();
 
     out.push(SymbolOutline {
-        name,
-        kind,
-        signature: first_line,
+        name: target.name,
+        kind: target.kind,
+        signature,
         doc_comment,
-        parent_name,
-        exported,
+        comment_start_line,
+        parent_name: target.parent_name,
+        exported: target.exported,
         span: ByteSpan {
-            start: span.start,
-            end: span.end,
+            start: target.decl_span.start,
+            end: target.decl_span.end,
         },
-        loc,
-        end_line: end_loc.line,
+        signature_end_line: sig_end_loc.line,
+        loc: id_loc,
+        end_line: end_loc.line.max(decl_start_loc.line),
     });
 }
 
-fn extract_leading_doc_comment(lines: &[&str], start_line_1based: u32) -> Option<String> {
-    if start_line_1based <= 1 {
-        return None;
+fn compute_signature_end(
+    source: &str,
+    decl_start: u32,
+    decl_end: u32,
+    body_start: Option<u32>,
+) -> u32 {
+    if let Some(bs) = body_start
+        && bs > decl_start
+    {
+        return bs.min(decl_end);
     }
-    let mut idx = (start_line_1based as usize).saturating_sub(2);
-    let mut collected = Vec::new();
-    let mut in_block = false;
+    let start_usize = (decl_start as usize).min(source.len());
+    let fallback_end = source[start_usize..]
+        .find('\n')
+        .map_or(decl_end, |rel| decl_start + rel as u32);
+    decl_end.min(fallback_end)
+}
 
-    loop {
-        let line = lines.get(idx)?.trim();
-        if in_block {
-            collected.push(line);
-            if line.starts_with("/*") {
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_adjacent_comment(
+    source: &str,
+    lines: &[&str],
+    line_starts: &[u32],
+    decl_start: u32,
+    decl_line_1based: u32,
+) -> (Option<String>, Option<u32>) {
+    let mut collected: Vec<(u32, String)> = Vec::new();
+
+    if decl_line_1based > 1 {
+        let mut idx = (decl_line_1based as usize).saturating_sub(2);
+        let mut in_block = false;
+        while let Some(raw_line) = lines.get(idx) {
+            let line = raw_line.trim();
+            let line_num = (idx + 1) as u32;
+            if in_block {
+                collected.push((line_num, line.to_string()));
+                if line.starts_with("/*") {
+                    in_block = false;
+                }
+            } else if line.starts_with("//") {
+                collected.push((line_num, line.to_string()));
+            } else if line.ends_with("*/") {
+                collected.push((line_num, line.to_string()));
+                if !line.starts_with("/*") {
+                    in_block = true;
+                }
+            } else {
                 break;
             }
-        } else if line.starts_with("//") {
-            collected.push(line);
-        } else if line.ends_with("*/") {
-            collected.push(line);
-            if line.starts_with("/*") {
+            if idx == 0 {
                 break;
             }
-            in_block = true;
-        } else {
-            break;
+            idx -= 1;
         }
-        if idx == 0 {
-            break;
-        }
-        idx -= 1;
+        collected.reverse();
+    }
+
+    if let Some(inline_comment) =
+        extract_inline_leading_block_comment(source, line_starts, decl_start, decl_line_1based)
+    {
+        collected.push((decl_line_1based, inline_comment));
     }
 
     if collected.is_empty() {
+        return (None, None);
+    }
+    let first_line = collected.first().map(|(l, _)| *l);
+    let joined = collected
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (Some(joined), first_line)
+}
+
+fn extract_inline_leading_block_comment(
+    source: &str,
+    line_starts: &[u32],
+    decl_start: u32,
+    decl_line_1based: u32,
+) -> Option<String> {
+    let line_start = *line_starts.get((decl_line_1based as usize).saturating_sub(1))?;
+    if decl_start <= line_start {
         return None;
     }
-    collected.reverse();
-    Some(collected.join("\n"))
+    let prefix = source.get(line_start as usize..decl_start as usize)?;
+    let comment_start = prefix.find("/*")?;
+    let after_open = &prefix[comment_start..];
+    let comment_end = after_open.find("*/")?;
+    let comment = after_open[..comment_end + 2].trim();
+    (!comment.is_empty()).then(|| comment.to_string())
 }
 
 /// Parses inline disable directives (`dotore-disable*`, `eslint-disable*`, `oxlint-disable*`) from `source`.
