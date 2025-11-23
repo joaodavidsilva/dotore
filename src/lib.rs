@@ -25,6 +25,8 @@ pub(crate) mod rules;
 pub(crate) mod runtime_scan;
 /// Parallel gitignore-aware file discovery.
 pub(crate) mod scanner;
+/// Native fuzzy AST **Symbol Outline** search (`dotore search`).
+pub(crate) mod search;
 
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, DotoreConfig, IgnoreConfig, IgnoreOverride,
@@ -67,6 +69,11 @@ pub use runtime_scan::{
     merge_probe_snapshots, parse_runtime_scan_snapshot_payload, prompt_runtime_scan_url_with_io,
     record_runtime_trace, resolve_runtime_scan_format, resolve_runtime_trace_path,
     sanitize_runtime_text, sanitize_runtime_url,
+};
+pub use search::{
+    SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
+    format_search_json, format_search_text, score_fuzzy, search_project_sources, search_symbols,
+    should_highlight_search, should_highlight_stdout,
 };
 
 use config::content_enables_react_compiler;
