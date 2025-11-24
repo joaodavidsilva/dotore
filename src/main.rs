@@ -5,11 +5,12 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::{Args, Parser, Subcommand};
 use dotore::{
     BuildRuntimeScanReportInput, CliOverrides, PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS,
-    RecordRuntimeTraceInput, RuleId, RuntimeScanFormat, ScanOptions, apply_autofixes,
-    build_runtime_scan_report, detect_local_runtime_urls, format_fix_report,
-    format_runtime_scan_error_report, format_runtime_scan_report, format_terminal_report,
-    prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
-    scan_workspace_with_overrides, write_and_open_html_report,
+    RecordRuntimeTraceInput, RuleId, RuntimeScanFormat, ScanOptions, SearchOptions, SymbolKind,
+    apply_autofixes, build_runtime_scan_report, detect_local_runtime_urls, format_fix_report,
+    format_runtime_scan_error_report, format_runtime_scan_report, format_search_json,
+    format_search_text, format_terminal_report, prompt_runtime_scan_url_with_io,
+    record_runtime_trace, resolve_runtime_scan_format, scan_workspace_with_overrides,
+    search_symbols, should_highlight_stdout, write_and_open_html_report,
 };
 
 #[derive(Debug, Parser)]
@@ -34,6 +35,8 @@ enum Commands {
     Fix(FixArgs),
     /// Generate a self-contained visual HTML report with Render Cascade diagrams.
     Report(ReportArgs),
+    /// Fuzzy-search declared Symbol Outlines across files or directories.
+    Search(SearchArgs),
     /// Profile live React interactions in Chrome via CDP and save a `.json.gz` trace.
     Scan(ScanArgs),
 }
@@ -147,6 +150,39 @@ struct ReportArgs {
     config: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SearchFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Args)]
+struct SearchArgs {
+    /// Fuzzy query string matched against symbol names.
+    #[arg(value_name = "QUERY")]
+    query: String,
+
+    /// Files or directories to search (defaults to current directory).
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+
+    /// Comma-separated symbol kinds to include (default: class,enum,function,interface,method,property,type).
+    #[arg(short = 'k', long = "kind", value_name = "KINDS")]
+    kind: Option<String>,
+
+    /// Maximum number of ranked matches to return.
+    #[arg(short = 'l', long = "limit", default_value_t = 50, value_name = "N")]
+    limit: usize,
+
+    /// Output format (`text` or `json`).
+    #[arg(short = 'f', long = "format", value_enum, default_value_t = SearchFormat::Text, value_name = "FORMAT")]
+    format: SearchFormat,
+
+    /// Disable ANSI syntax highlighting in text output.
+    #[arg(long)]
+    no_color: bool,
+}
+
 #[derive(Debug, Clone, Args)]
 struct ScanArgs {
     /// Target `http://` or `https://` URL to profile (optional in interactive terminals).
@@ -172,6 +208,7 @@ fn main() -> ExitCode {
         Some(Commands::Check(args)) => run_check(&args),
         Some(Commands::Fix(args)) => run_fix(&args),
         Some(Commands::Report(args)) => run_report(&args),
+        Some(Commands::Search(args)) => run_search(&args),
         Some(Commands::Scan(args)) => run_scan(&args),
         None => run_check(&cli.check_args),
     }
@@ -319,6 +356,86 @@ fn run_report(args: &ReportArgs) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn parse_symbol_kinds_arg(raw: &str) -> Result<Vec<SymbolKind>, String> {
+    let mut kinds = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(kind) = SymbolKind::parse(trimmed) else {
+            let all_options = SymbolKind::ALL
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(format!(
+                "Unsupported symbol kind \"{trimmed}\". Options: {all_options}."
+            ));
+        };
+        kinds.push(kind);
+    }
+    if kinds.is_empty() {
+        return Err("Symbol kind filter cannot be empty.".to_string());
+    }
+    Ok(kinds)
+}
+
+fn run_search(args: &SearchArgs) -> ExitCode {
+    let kinds = match args.kind.as_deref() {
+        Some(raw) => match parse_symbol_kinds_arg(raw) {
+            Ok(parsed) => Some(parsed),
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
+    let options = SearchOptions {
+        paths: args.paths.clone(),
+        kinds,
+        limit: args.limit,
+        include_tests: true,
+    };
+
+    let (results, sources) = match search_symbols(&args.query, &options) {
+        Ok(res) => res,
+        Err(err) => {
+            eprintln!("error searching symbols: {err}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let root_display = args.paths.first().map_or_else(
+        || ".".to_string(),
+        |p| p.to_string_lossy().replace('\\', "/"),
+    );
+
+    match args.format {
+        SearchFormat::Json => {
+            let report = format_search_json(&args.query, &root_display, &results);
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => println!("{json}"),
+                Err(err) => {
+                    eprintln!("error serializing search JSON: {err}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        SearchFormat::Text => {
+            let highlight = should_highlight_stdout(args.no_color);
+            let rendered = format_search_text(&results, &sources, highlight);
+            if !rendered.is_empty() {
+                print!("{rendered}");
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
 }
 
 fn run_scan(args: &ScanArgs) -> ExitCode {
