@@ -8,8 +8,9 @@ pub(crate) mod prop_sync;
 pub(crate) mod types;
 
 pub use types::{
-    AutofixPatch, ByteEdit, ContextualOwnerPolicy, Diagnostic, PrescriptionTier, RuleCategory,
-    RuleId, RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, rule_registry,
+    AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
+    FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
+    RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
 };
 
 use std::path::Path;
