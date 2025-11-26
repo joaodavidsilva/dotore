@@ -83,10 +83,12 @@ fn build_derived_state_autofix(
         description: format!("Replace useState + useEffect with `{replacement_decl}`"),
         edits: vec![
             ByteEdit {
+                file: None,
                 span: decl_span,
                 replacement: replacement_decl,
             },
             ByteEdit {
+                file: None,
                 span: eff_stmt_span,
                 replacement: String::new(),
             },
@@ -271,10 +273,12 @@ fn build_initialize_state_autofix(
         ),
         edits: vec![
             ByteEdit {
+                file: None,
                 span: slot.call_span,
                 replacement: replacement_call,
             },
             ByteEdit {
+                file: None,
                 span: eff_stmt_span,
                 replacement: String::new(),
             },
