@@ -1136,8 +1136,11 @@ impl RuleId {
 }
 
 /// A single byte-range replacement in a source file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteEdit {
+    /// Optional target file path for cross-file rewrites (`None` targets the diagnostic's own file).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
     /// Byte span in the original file to replace.
     pub span: ByteSpan,
     /// Replacement source text.
@@ -1145,12 +1148,146 @@ pub struct ByteEdit {
 }
 
 /// Deterministic patch for an `Autofix`-tier diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutofixPatch {
     /// Summary of the transformation.
     pub description: String,
-    /// Non-overlapping byte edits to apply to the file.
+    /// Non-overlapping byte edits to apply to the file(s).
     pub edits: Vec<ByteEdit>,
+}
+
+/// Priority tier (`P0`–`P3`) derived from static **Blast Radius** evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BlastRadiusTier {
+    /// Critical runtime bugs, security flaws, 60fps frame-loop allocations/state updates, or deep **Render Cascades** with high fan-out.
+    P0,
+    /// High-impact `Error` diagnostics, multi-pass **Render Cascades**, or list/loop performance flaws.
+    P1,
+    /// Moderate `Surgical` or `Refactor` warnings or localized component issues.
+    P2,
+    /// Minor polish, dead-code cleanup, or low-fan-out maintainability hints.
+    P3,
+}
+
+impl BlastRadiusTier {
+    /// Canonical string representation (`"P0"`..=`"P3"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        }
+    }
+}
+
+/// Static render frequency context of a **Subject** or JSX site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RenderFrequency {
+    /// Standard component render pass (`1x`).
+    Standard,
+    /// Rendered inside a `.map()` or loop (`2x`).
+    ListLoop,
+    /// Executed inside a 60fps `useFrame` or `requestAnimationFrame` callback (`4x`).
+    FrameLoop60Fps,
+}
+
+impl RenderFrequency {
+    /// Canonical kebab-case string representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::ListLoop => "list-loop",
+            Self::FrameLoop60Fps => "frame-loop-60-fps",
+        }
+    }
+}
+
+/// Deterministic static runtime impact of a **Root-Cause Group** (see `GLOSSARY.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlastRadius {
+    /// Deterministic composite score (`>= 1`).
+    pub score: u32,
+    /// Priority tier (`P0`–`P3`).
+    pub tier: BlastRadiusTier,
+    /// Render frequency classification (`standard`, `list-loop`, `frame-loop-60-fps`).
+    pub render_frequency: RenderFrequency,
+    /// Cross-file or cross-component fan-out (**Caller Sites**, child **Subjects**, or context consumers).
+    pub fan_out: usize,
+    /// Number of extra post-render passes or steps in the **Render Cascade**.
+    pub cascade_depth: usize,
+    /// Number of individual diagnostic sites clustered in this **Root-Cause Group**.
+    pub site_count: usize,
+    /// Number of distinct files touched by this **Root-Cause Group** (including **Caller Sites**).
+    pub file_count: usize,
+}
+
+/// Verbatim source slice with 1-based line bounds attached to a [`FixCapsule`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceExcerpt {
+    /// File path of the excerpt.
+    pub file: PathBuf,
+    /// 1-based inclusive start line.
+    pub start_line: u32,
+    /// 1-based inclusive end line.
+    pub end_line: u32,
+    /// Verbatim source slice.
+    pub source: String,
+}
+
+/// Self-contained remediation unit emitted for a `Surgical` or `Refactor` **Root-Cause Group** (see `GLOSSARY.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FixCapsule {
+    /// Deterministic **Root-Cause Group** identifier.
+    pub root_cause_group_id: String,
+    /// Rule identifier.
+    pub rule: RuleId,
+    /// **Prescription Tier** (`Surgical` or `Refactor`).
+    pub tier: PrescriptionTier,
+    /// Static **Blast Radius** score and priority tier.
+    pub blast_radius: BlastRadius,
+    /// Verbatim source excerpt of the owning **Subject** (or diagnostic site).
+    pub subject_excerpt: SourceExcerpt,
+    /// Verbatim source excerpts of resolved cross-file **Caller Sites**.
+    pub caller_site_excerpts: Vec<SourceExcerpt>,
+    /// Compiled-in canonical transformation recipe in Markdown.
+    pub recipe_markdown: &'static str,
+    /// Discovered valid usage in the same repository, if available.
+    pub exemplar: Option<SourceExcerpt>,
+    /// Invariants that must be preserved when applying the transformation.
+    pub invariants: Vec<&'static str>,
+}
+
+/// Clustered group of related diagnostics sharing a single underlying defect (see `GLOSSARY.md`: **Root-Cause Group**).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RootCauseGroup {
+    /// Deterministic **Root-Cause Group** identifier (`rcg::...`).
+    pub id: String,
+    /// Primary rule identifier.
+    pub rule: RuleId,
+    /// Rule category.
+    pub category: RuleCategory,
+    /// Highest severity among clustered diagnostics.
+    pub severity: RuleSeverity,
+    /// **Prescription Tier** for the group.
+    pub tier: PrescriptionTier,
+    /// Primary file path of the root cause.
+    pub file: PathBuf,
+    /// Enclosing **Subject** name, if any.
+    pub subject_name: Option<String>,
+    /// Primary target name (prop, state slot, context, or component).
+    pub target_name: String,
+    /// Primary 1-based location.
+    pub loc: SourceLoc,
+    /// Summary message for the group.
+    pub message: String,
+    /// Static **Blast Radius** score and priority tier (`P0`–`P3`).
+    pub blast_radius: BlastRadius,
+    /// Indices into `JsonReport::diagnostics` belonging to this group.
+    pub diagnostic_indices: Vec<usize>,
 }
 
 /// A single diagnostic emitted by `dotore`.
@@ -1186,4 +1323,12 @@ pub struct Diagnostic {
     pub caller_sites: Vec<ResolvedCallerSite>,
     /// Optional deterministic auto-fix patch.
     pub autofix: Option<AutofixPatch>,
+}
+
+impl Diagnostic {
+    /// Computes the deterministic **Root-Cause Group** identifier (`rcg::...`) for this diagnostic.
+    #[must_use]
+    pub fn root_cause_group_id(&self) -> String {
+        crate::planner::compute_root_cause_group_id(self)
+    }
 }
