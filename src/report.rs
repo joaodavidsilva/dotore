@@ -1,6 +1,7 @@
 //! Terminal, JSON, and self-contained HTML cascade reporters for `dotore`.
 
 use std::{
+    collections::HashMap,
     fmt::Write as _,
     fs, io,
     path::{Path, PathBuf},
@@ -13,7 +14,8 @@ use serde::Serialize;
 use crate::{
     fixer::FileFixResult,
     graph::ProjectGraph,
-    rules::{Diagnostic, PrescriptionTier},
+    planner::{build_root_cause_groups_and_capsules, enrich_cross_file_autofixes},
+    rules::{Diagnostic, FixCapsule, PrescriptionTier, RootCauseGroup},
 };
 
 /// Aggregate metrics for a `dotore` scan.
@@ -44,11 +46,21 @@ pub struct JsonReport {
     pub summary: ReportSummary,
     /// Individual diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+    /// Clustered **Root-Cause Groups** ordered by static **Blast Radius** descending.
+    pub root_cause_groups: Vec<RootCauseGroup>,
+    /// Self-contained **Fix Capsules** for `Surgical` and `Refactor` **Root-Cause Groups**.
+    pub fix_capsules: Vec<FixCapsule>,
 }
 
-/// Builds a [`JsonReport`] from a [`ProjectGraph`] and its evaluated [`Diagnostic`]s.
+/// Builds a [`JsonReport`] from a [`ProjectGraph`], its evaluated [`Diagnostic`]s, and file sources.
 #[must_use]
-pub(crate) fn build_report(graph: &ProjectGraph, diagnostics: Vec<Diagnostic>) -> JsonReport {
+pub(crate) fn build_report(
+    graph: &ProjectGraph,
+    mut diagnostics: Vec<Diagnostic>,
+    sources: &HashMap<PathBuf, String>,
+) -> JsonReport {
+    enrich_cross_file_autofixes(graph, &mut diagnostics, sources);
+
     let files_scanned = graph.files.len();
     let subjects_scanned: usize = graph.files.iter().map(|f| f.subjects.len()).sum();
     let effects_scanned: usize = graph
@@ -70,6 +82,9 @@ pub(crate) fn build_report(graph: &ProjectGraph, diagnostics: Vec<Diagnostic>) -
         }
     }
 
+    let (root_cause_groups, fix_capsules) =
+        build_root_cause_groups_and_capsules(graph, &diagnostics, sources);
+
     let health_score = compute_health_score(effects_scanned, diagnostics.len());
 
     JsonReport {
@@ -84,6 +99,8 @@ pub(crate) fn build_report(graph: &ProjectGraph, diagnostics: Vec<Diagnostic>) -
             health_score,
         },
         diagnostics,
+        root_cause_groups,
+        fix_capsules,
     }
 }
 
