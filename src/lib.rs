@@ -17,6 +17,8 @@ pub(crate) mod fixer;
 pub(crate) mod graph;
 /// React **Subject**, **State Slot**, **Effect Node**, and **Caller Site** IR.
 pub(crate) mod ir;
+/// Deterministic **Root-Cause Grouping**, **Blast Radius**, **Fix Capsules**, and `dotore plan` generator.
+pub(crate) mod planner;
 /// Terminal and JSON reporters.
 pub(crate) mod report;
 /// Diagnostic rules engine over `SubjectIr` and `ProjectGraph`.
@@ -27,7 +29,6 @@ pub(crate) mod runtime_scan;
 pub(crate) mod scanner;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
-
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, DotoreConfig, IgnoreConfig, IgnoreOverride,
     PackageRole, WorkspacePackage, discover_workspace_packages, load_config_from_dir,
@@ -39,13 +40,15 @@ pub use ir::{
     ByteSpan, FileIr, SecuritySinkKind, SourceLoc, SymbolKind, SymbolOutline,
     inspect_file_semantic, parse_file_ir,
 };
+pub use planner::{PlanResult, compute_root_cause_group_id, format_plan_report, plan_project};
 pub use report::{
     JsonReport, ReportSummary, format_fix_report, format_terminal_report, render_html_report,
     write_and_open_html_report,
 };
 pub use rules::{
-    AutofixPatch, ByteEdit, ContextualOwnerPolicy, Diagnostic, PrescriptionTier, RuleCategory,
-    RuleId, RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, rule_registry,
+    AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
+    FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
+    RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
 };
 pub use runtime_scan::{
     BuildRuntimeScanReportInput, ComponentEventSource, LocalUrlSuggestion,
@@ -78,6 +81,7 @@ pub use search::{
 
 use config::content_enables_react_compiler;
 use graph::ProjectGraph;
+use planner::enrich_cross_file_autofixes;
 use report::build_report;
 use rules::{evaluate_file_in_package, evaluate_project, evaluate_project_with_packages};
 use scanner::collect_source_files;
@@ -166,13 +170,14 @@ pub fn analyze_project_sources(
     });
 
     if !has_virtual_manifests {
+        let sources: HashMap<PathBuf, String> = files.iter().cloned().collect();
         let file_irs: Vec<_> = files
             .into_par_iter()
             .map(|(path, source)| parse_file_ir(&path, &source))
             .collect();
         let graph = ProjectGraph::build(file_irs);
         let diagnostics = evaluate_project(&graph, enabled_rules);
-        return build_report(&graph, diagnostics);
+        return build_report(&graph, diagnostics, &sources);
     }
 
     let (packages, source_files) = extract_virtual_workspace_packages(files);
@@ -183,6 +188,7 @@ pub fn analyze_project_sources(
                 .is_none_or(|pkg| !pkg.config.is_file_ignored(path, &pkg.root_dir))
         })
         .collect();
+    let sources: HashMap<PathBuf, String> = filtered_sources.iter().cloned().collect();
 
     let file_irs: Vec<_> = filtered_sources
         .into_par_iter()
@@ -190,7 +196,7 @@ pub fn analyze_project_sources(
         .collect();
     let graph = ProjectGraph::build(file_irs);
     let diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
-    build_report(&graph, diagnostics)
+    build_report(&graph, diagnostics, &sources)
 }
 
 fn extract_virtual_workspace_packages(
@@ -354,12 +360,13 @@ pub fn scan_workspace_with_overrides(
     let graph = ProjectGraph::build(file_irs);
     let mut diagnostics =
         evaluate_project_with_packages(&graph, &packages, options.rules.as_deref());
+    enrich_cross_file_autofixes(&graph, &mut diagnostics, &sources);
 
     if let Some(allowed_tiers) = &options.tiers {
         diagnostics.retain(|d| allowed_tiers.contains(&d.tier));
     }
 
-    Ok((build_report(&graph, diagnostics), sources))
+    Ok((build_report(&graph, diagnostics, &sources), sources))
 }
 
 fn determine_workspace_root(paths: &[PathBuf]) -> PathBuf {
