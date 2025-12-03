@@ -7,10 +7,11 @@ use dotore::{
     BuildRuntimeScanReportInput, CliOverrides, PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS,
     RecordRuntimeTraceInput, RuleId, RuntimeScanFormat, ScanOptions, SearchOptions, SymbolKind,
     apply_autofixes, build_runtime_scan_report, detect_local_runtime_urls, format_fix_report,
-    format_runtime_scan_error_report, format_runtime_scan_report, format_search_json,
-    format_search_text, format_terminal_report, prompt_runtime_scan_url_with_io,
-    record_runtime_trace, resolve_runtime_scan_format, scan_workspace_with_overrides,
-    search_symbols, should_highlight_stdout, write_and_open_html_report,
+    format_plan_report, format_runtime_scan_error_report, format_runtime_scan_report,
+    format_search_json, format_search_text, format_terminal_report, plan_project,
+    prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
+    scan_workspace_with_overrides, search_symbols, should_highlight_stdout,
+    write_and_open_html_report,
 };
 
 #[derive(Debug, Parser)]
@@ -33,6 +34,8 @@ enum Commands {
     Check(CheckArgs),
     /// Apply safe deterministic (`Autofix`-tier) rewrites directly in Rust.
     Fix(FixArgs),
+    /// Generate deterministic `NNN-<slug>.md` execution plans and a prioritized `README.md` index.
+    Plan(PlanArgs),
     /// Generate a self-contained visual HTML report with Render Cascade diagrams.
     Report(ReportArgs),
     /// Fuzzy-search declared Symbol Outlines across files or directories.
@@ -115,6 +118,36 @@ struct FixArgs {
     config: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Args)]
+struct PlanArgs {
+    /// Files or directories to scan and plan (defaults to current directory).
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+
+    /// Output directory for generated `NNN-<slug>.md` plans and `README.md` index.
+    #[arg(short, long = "out", default_value = "plans", value_name = "DIR")]
+    out: PathBuf,
+
+    /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
+    #[arg(long)]
+    include_tests: bool,
+
+    /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
+    #[arg(long)]
+    no_inline_disables: bool,
+
+    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
+    #[arg(long)]
+    custom_rules_only: bool,
+
+    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
+    #[arg(long = "ignore-tag", value_name = "TAG")]
+    ignore_tags: Vec<String>,
+
+    /// Explicit path to a `dotore.config.*` file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
 #[derive(Debug, Clone, Args)]
 struct ReportArgs {
     /// Files or directories to scan (defaults to current directory).
@@ -207,6 +240,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Commands::Check(args)) => run_check(&args),
         Some(Commands::Fix(args)) => run_fix(&args),
+        Some(Commands::Plan(args)) => run_plan(&args),
         Some(Commands::Report(args)) => run_report(&args),
         Some(Commands::Search(args)) => run_search(&args),
         Some(Commands::Scan(args)) => run_scan(&args),
@@ -324,6 +358,39 @@ fn run_fix(args: &FixArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_plan(args: &PlanArgs) -> ExitCode {
+    let options = ScanOptions {
+        paths: args.paths.clone(),
+        include_tests: args.include_tests,
+        rules: None,
+        tiers: None,
+    };
+    let overrides = CliOverrides {
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: args.ignore_tags.clone(),
+        config_path: args.config.clone(),
+    };
+
+    let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
+        Ok(res) => res,
+        Err(err) => {
+            eprintln!("error scanning workspace: {err}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match plan_project(&report, &args.out) {
+        Ok(result) => {
+            print!("{}", format_plan_report(&result));
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("error writing remediation plans: {err}");
+            ExitCode::from(2)
+        }
+    }
+}
 fn run_report(args: &ReportArgs) -> ExitCode {
     let options = ScanOptions {
         paths: args.paths.clone(),
