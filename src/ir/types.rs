@@ -373,6 +373,46 @@ pub struct JsxElementIr {
     pub loc: SourceLoc,
 }
 
+/// Structural JSX subtree hash and composition metadata for duplicate-JSX detection (`duplicate-jsx-subtree`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JsxSubtreeIr {
+    /// Deterministic structural hash (`jsx:<hex>`).
+    pub fingerprint: String,
+    /// Total JSX element/fragment nodes in this subtree.
+    pub node_count: usize,
+    /// Maximum JSX nesting depth of this subtree.
+    pub depth: usize,
+    /// Root JSX element or fragment name (`"Page"`, `"div"`, `"Fragment"`).
+    pub root_name: String,
+    /// Enclosing **Subject** or function name, if any.
+    pub enclosing_subject: Option<String>,
+    /// Start byte offset of the enclosing **Subject** or function declaration (`compositionRootStartOffset`).
+    pub composition_root_offset: Option<u32>,
+    /// Composition path from enclosing **Subject** through ancestor JSX elements to `root_name`.
+    pub composition_path: Vec<String>,
+    /// Full byte span `[start, end)` of the JSX element or fragment subtree.
+    pub span: ByteSpan,
+    /// 1-based start line and column.
+    pub loc: SourceLoc,
+    /// 1-based inclusive end line.
+    pub end_line: u32,
+}
+
+/// A single imported binding inside an [`ImportDeclIr`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImportBindingIr {
+    /// Exported symbol name in the target module (`"default"`, `"*"`, or named export).
+    pub imported_name: String,
+    /// Local binding identifier name in the importing module.
+    pub local_name: String,
+    /// Whether this binding is a default import (`import Foo from '...'`).
+    pub is_default: bool,
+    /// Whether this binding is a namespace import (`import * as ns from '...'`).
+    pub is_namespace: bool,
+    /// Whether this binding is type-only (`import type ...` or `import { type T } ...`).
+    pub is_type_only: bool,
+}
+
 /// A static `import` declaration in a module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImportDeclIr {
@@ -380,6 +420,8 @@ pub struct ImportDeclIr {
     pub source: String,
     /// Local binding names imported by this declaration.
     pub specifiers: Vec<String>,
+    /// Detailed imported bindings (`imported_name`, `local_name`, `is_default`, `is_namespace`, `is_type_only`).
+    pub bindings: Vec<ImportBindingIr>,
     /// Whether this is a type-only import (`import type ...`).
     pub is_type_only: bool,
     /// Byte span of the import declaration.
@@ -393,8 +435,12 @@ pub struct ImportDeclIr {
 pub struct ExportDeclIr {
     /// Exported symbol name (`"default"`, `"Button"`, `"API_URL"`).
     pub name: String,
+    /// Original or local symbol name (for `export { orig as alias } from '...'`, `export { local as alias }`, or `export default Foo`).
+    pub local_name: Option<String>,
     /// Re-export source specifier if this is `export { ... } from '...'` or `export * from '...'`.
     pub from_source: Option<String>,
+    /// Whether this export is a namespace wildcard re-export (`export * from '...'` or `export * as ns from '...'`).
+    pub is_namespace_re_export: bool,
     /// Whether this export is type-only (`export type` / `export interface`).
     pub is_type_only: bool,
     /// Whether the exported symbol is a React component.
@@ -412,8 +458,20 @@ pub struct ModuleIr {
     pub imports: Vec<ImportDeclIr>,
     /// Dynamic `import("...")` module specifiers.
     pub dynamic_imports: Vec<String>,
+    /// CommonJS `require("...")` / `require.resolve("...")` / `import.meta.resolve("...")` specifiers.
+    pub require_sources: Vec<String>,
+    /// TypeScript `import("./mod").Type` type query specifiers and optional root type name.
+    pub type_import_sources: Vec<(String, Option<String>)>,
+    /// React Router route file references (`route(..., "file")`, `index("file")`, `layout("file")`).
+    pub route_module_entries: Vec<String>,
     /// Static `export` declarations.
     pub exports: Vec<ExportDeclIr>,
+    /// Identifier names referenced locally in this module (outside export specifiers).
+    pub local_references: Vec<String>,
+    /// Namespace member accesses `(namespace_local_name, member_name)` (e.g. `ns.foo`, `<ns.Foo />`, `const { foo } = ns`).
+    pub namespace_member_accesses: Vec<(String, String)>,
+    /// Namespace local names consumed as whole objects (`Object.keys(ns)`, `{ ...ns }`, `ns[dyn]`).
+    pub whole_namespace_uses: Vec<String>,
     /// Whether the module has a `"use client"` directive.
     pub has_use_client: bool,
     /// Whether the module has a `"use server"` directive.
@@ -739,6 +797,8 @@ pub struct FileIr {
     pub caller_sites: Vec<CallerSite>,
     /// All JSX elements in this file.
     pub jsx_elements: Vec<JsxElementIr>,
+    /// Structural JSX subtrees extracted for cross-file duplicate JSX detection.
+    pub jsx_subtrees: Vec<JsxSubtreeIr>,
     /// Module-level imports, exports, and directives.
     pub module: ModuleIr,
     /// Extracted **Symbol Outlines** for fuzzy symbol search.
