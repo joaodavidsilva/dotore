@@ -164,9 +164,13 @@ pub fn analyze_project_sources(
     enabled_rules: Option<&[RuleId]>,
 ) -> JsonReport {
     let has_virtual_manifests = files.iter().any(|(p, _)| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|name| name == "package.json" || name.starts_with("dotore.config."))
+        p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+            name == "package.json"
+                || name == "tsconfig.json"
+                || name == "jsconfig.json"
+                || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+                || name.starts_with("dotore.config.")
+        })
     });
 
     if !has_virtual_manifests {
@@ -180,8 +184,11 @@ pub fn analyze_project_sources(
         return build_report(&graph, diagnostics, &sources);
     }
 
-    let (packages, source_files) = extract_virtual_workspace_packages(files);
-    let filtered_sources: Vec<(PathBuf, String)> = source_files
+    let split = extract_virtual_workspace_packages(files);
+    let packages = split.packages;
+    let manifests = split.manifests;
+    let filtered_sources: Vec<(PathBuf, String)> = split
+        .source_files
         .into_iter()
         .filter(|(path, _)| {
             resolve_package_for_file(path, &packages)
@@ -194,17 +201,22 @@ pub fn analyze_project_sources(
         .into_par_iter()
         .map(|(path, source)| parse_file_ir(&path, &source))
         .collect();
-    let graph = ProjectGraph::build(file_irs);
+    let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
     let diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
     build_report(&graph, diagnostics, &sources)
 }
 
-fn extract_virtual_workspace_packages(
-    files: Vec<(PathBuf, String)>,
-) -> (Vec<WorkspacePackage>, Vec<(PathBuf, String)>) {
+struct VirtualWorkspaceSplit {
+    packages: Vec<WorkspacePackage>,
+    manifests: HashMap<PathBuf, String>,
+    source_files: Vec<(PathBuf, String)>,
+}
+
+fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualWorkspaceSplit {
     let mut pkg_jsons: Vec<(PathBuf, String)> = Vec::new();
     let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut compiler_configs: Vec<(PathBuf, String)> = Vec::new();
+    let mut manifests: HashMap<PathBuf, String> = HashMap::new();
     let mut source_files: Vec<(PathBuf, String)> = Vec::new();
 
     for (path, content) in files {
@@ -219,16 +231,27 @@ fn extract_virtual_workspace_packages(
             .to_path_buf();
 
         if file_name == "package.json" {
+            manifests.insert(path, content.clone());
             pkg_jsons.push((parent_dir, content));
+        } else if file_name == "tsconfig.json"
+            || file_name == "jsconfig.json"
+            || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
+            || file_name == "app.json"
+        {
+            if is_compiler_config_filename(file_name) {
+                compiler_configs.push((parent_dir, content.clone()));
+            }
+            manifests.insert(path, content);
         } else if file_name.starts_with("dotore.config.") {
             config_files.push((parent_dir, path, content));
-        } else if is_compiler_config_filename(file_name) {
-            compiler_configs.push((parent_dir, content));
         } else {
+            if is_compiler_config_filename(file_name) {
+                compiler_configs.push((parent_dir, content.clone()));
+            }
+            manifests.insert(path.clone(), content.clone());
             source_files.push((path, content));
         }
     }
-
     let root_config = config_files
         .iter()
         .find(|(dir, _, _)| dir == Path::new("."))
@@ -285,7 +308,11 @@ fn extract_virtual_workspace_packages(
         });
     }
 
-    (packages, source_files)
+    VirtualWorkspaceSplit {
+        packages,
+        manifests,
+        source_files,
+    }
 }
 
 fn is_compiler_config_filename(file_name: &str) -> bool {
@@ -357,7 +384,8 @@ pub fn scan_workspace_with_overrides(
         .map(|(path, source)| parse_file_ir(&path, &source))
         .collect();
 
-    let graph = ProjectGraph::build(file_irs);
+    let manifests = load_disk_manifests(&workspace_root, &packages, &sources);
+    let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
     let mut diagnostics =
         evaluate_project_with_packages(&graph, &packages, options.rules.as_deref());
     enrich_cross_file_autofixes(&graph, &mut diagnostics, &sources);
@@ -396,4 +424,47 @@ fn apply_cli_overrides_to_config(config: &mut DotoreConfig, overrides: &CliOverr
             config.ignore.tags.push(tag.clone());
         }
     }
+}
+
+fn load_disk_manifests(
+    workspace_root: &Path,
+    packages: &[WorkspacePackage],
+    sources: &HashMap<PathBuf, String>,
+) -> HashMap<PathBuf, String> {
+    let mut manifests = HashMap::new();
+    let mut candidate_dirs = vec![workspace_root.to_path_buf()];
+    for pkg in packages {
+        if !candidate_dirs.contains(&pkg.root_dir) {
+            candidate_dirs.push(pkg.root_dir.clone());
+        }
+    }
+    for dir in candidate_dirs {
+        for name in [
+            "package.json",
+            "tsconfig.json",
+            "tsconfig.base.json",
+            "tsconfig.app.json",
+            "jsconfig.json",
+            "app.json",
+        ] {
+            let p = if dir == Path::new(".") {
+                PathBuf::from(name)
+            } else {
+                dir.join(name)
+            };
+            if let Ok(content) = fs::read_to_string(&p) {
+                manifests.insert(p, content);
+            }
+        }
+    }
+    for (path, content) in sources {
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".config.") || n.contains(".setup."))
+        {
+            manifests.insert(path.clone(), content.clone());
+        }
+    }
+    manifests
 }
