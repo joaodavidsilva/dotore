@@ -920,6 +920,12 @@ fn subject_matches_rule_exemplar(rule: RuleId, subj: &SubjectIr, subj_src: &str)
         | RuleId::AsyncAwaitInLoop
         | RuleId::NoRenderPropChildren
         | RuleId::UnusedFile
+        | RuleId::UnusedExport
+        | RuleId::UnusedType
+        | RuleId::UnusedDependency
+        | RuleId::UnusedDevDependency
+        | RuleId::CircularDependency
+        | RuleId::DuplicateJsxSubtree
         | RuleId::NextjsNoImgElement
         | RuleId::RnNoRawText
         | RuleId::ExpoNoNonInlinedEnv
@@ -974,6 +980,12 @@ fn invariants_for_rule(rule: RuleId, tier: PrescriptionTier) -> Vec<&'static str
         | RuleId::AsyncAwaitInLoop
         | RuleId::NoRenderPropChildren
         | RuleId::UnusedFile
+        | RuleId::UnusedExport
+        | RuleId::UnusedType
+        | RuleId::UnusedDependency
+        | RuleId::UnusedDevDependency
+        | RuleId::CircularDependency
+        | RuleId::DuplicateJsxSubtree
         | RuleId::NextjsNoImgElement
         | RuleId::RnNoRawText
         | RuleId::ExpoNoNonInlinedEnv
