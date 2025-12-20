@@ -76,6 +76,7 @@ pub(crate) fn evaluate_project_with_packages(
             &mut diagnostics,
         );
     }
+    evaluate_project_graph_rules(graph, packages, enabled_rules, &mut diagnostics);
     diagnostics
 }
 
@@ -130,6 +131,334 @@ pub(crate) fn evaluate_file_in_package(
         retained.push(diag);
     }
     out.extend(retained);
+}
+
+fn evaluate_project_graph_rules(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let run_dead_code = graph.has_manifests || enabled_rules.is_some();
+
+    if run_dead_code {
+        for &file_idx in &graph.unused_file_indices {
+            let file = &graph.files[file_idx];
+            let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
+                continue;
+            };
+            if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
+                continue;
+            }
+            let Some(sev) = resolve_rule_activation(
+                RuleId::UnusedFile,
+                file,
+                &pkg.root_dir,
+                &pkg.capability_gate,
+                &pkg.config,
+                enabled_rules,
+            ) else {
+                continue;
+            };
+            let loc = crate::ir::SourceLoc { line: 1, column: 1 };
+            let span = crate::ir::ByteSpan { start: 0, end: 0 };
+            if pkg.config.respect_inline_disables
+                && file.suppressions.is_suppressed(
+                    RuleId::UnusedFile,
+                    loc.line,
+                    span,
+                    &file.jsx_elements,
+                    &file.subjects,
+                )
+            {
+                continue;
+            }
+            let meta = RuleId::UnusedFile.metadata();
+            out.push(Diagnostic {
+                file: file.path.clone(),
+                subject_name: None,
+                rule: RuleId::UnusedFile,
+                category: meta.category,
+                severity: sev,
+                message_id: "unusedFile",
+                tier: meta.default_tier,
+                target_name: file.path.to_string_lossy().to_string(),
+                message:
+                    "No discovered application, package, or framework entry point reaches this file."
+                        .to_string(),
+                docs_url: meta.docs_url,
+                loc,
+                span,
+                cascade_steps: Vec::new(),
+                caller_sites: Vec::new(),
+                autofix: None,
+            });
+        }
+
+        for unused_exp in &graph.unused_exports {
+            let file = &graph.files[unused_exp.file_index];
+            let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
+                continue;
+            };
+            if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
+                continue;
+            }
+            let rule = if unused_exp.is_type_only {
+                RuleId::UnusedType
+            } else {
+                RuleId::UnusedExport
+            };
+            let Some(sev) = resolve_rule_activation(
+                rule,
+                file,
+                &pkg.root_dir,
+                &pkg.capability_gate,
+                &pkg.config,
+                enabled_rules,
+            ) else {
+                continue;
+            };
+            if pkg.config.respect_inline_disables
+                && file.suppressions.is_suppressed(
+                    rule,
+                    unused_exp.loc.line,
+                    unused_exp.span,
+                    &file.jsx_elements,
+                    &file.subjects,
+                )
+            {
+                continue;
+            }
+            let meta = rule.metadata();
+            let (message_id, kind_label) = if unused_exp.is_type_only {
+                ("unusedType", "type export")
+            } else {
+                ("unusedExport", "value export")
+            };
+            out.push(Diagnostic {
+                file: file.path.clone(),
+                subject_name: None,
+                rule,
+                category: meta.category,
+                severity: sev,
+                message_id,
+                tier: meta.default_tier,
+                target_name: unused_exp.name.clone(),
+                message: format!(
+                    "Unused {kind_label}: `{}` has no importer in the analyzed project graph.",
+                    unused_exp.name
+                ),
+                docs_url: meta.docs_url,
+                loc: unused_exp.loc,
+                span: unused_exp.span,
+                cascade_steps: Vec::new(),
+                caller_sites: Vec::new(),
+                autofix: None,
+            });
+        }
+
+        for dep in &graph.unused_dependencies {
+            let rule = if dep.is_dev_dependency {
+                RuleId::UnusedDevDependency
+            } else {
+                RuleId::UnusedDependency
+            };
+            if let Some(explicit_list) = enabled_rules
+                && !explicit_list.contains(&rule)
+            {
+                continue;
+            }
+            if enabled_rules.is_none() && !dep.has_package_entrypoint {
+                continue;
+            }
+            let Some(pkg) = resolve_package_for_file(&dep.manifest_path, packages) else {
+                continue;
+            };
+            if pkg
+                .config
+                .is_file_ignored(&dep.manifest_path, &pkg.root_dir)
+            {
+                continue;
+            }
+            let meta = rule.metadata();
+            let has_explicit_cli = enabled_rules.is_some_and(|l| l.contains(&rule));
+            let Some(sev) = (if has_explicit_cli {
+                Some(
+                    pkg.config
+                        .effective_severity(rule)
+                        .unwrap_or(meta.default_severity),
+                )
+            } else {
+                pkg.config.effective_severity(rule)
+            }) else {
+                continue;
+            };
+            let (message_id, dep_label) = if dep.is_dev_dependency {
+                ("unusedDevDependency", "devDependency")
+            } else {
+                ("unusedDependency", "dependency")
+            };
+            out.push(Diagnostic {
+                file: dep.manifest_path.clone(),
+                subject_name: None,
+                rule,
+                category: meta.category,
+                severity: sev,
+                message_id,
+                tier: meta.default_tier,
+                target_name: dep.package_name.clone(),
+                message: format!("Unused {dep_label}: `{}`", dep.package_name),
+                docs_url: meta.docs_url,
+                loc: dep.loc,
+                span: dep.span,
+                cascade_steps: Vec::new(),
+                caller_sites: Vec::new(),
+                autofix: None,
+            });
+        }
+    }
+
+    for cycle in &graph.circular_dependencies {
+        let file = &graph.files[cycle.primary_file_index];
+        let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
+            continue;
+        };
+        if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
+            continue;
+        }
+        let Some(sev) = resolve_rule_activation(
+            RuleId::CircularDependency,
+            file,
+            &pkg.root_dir,
+            &pkg.capability_gate,
+            &pkg.config,
+            enabled_rules,
+        ) else {
+            continue;
+        };
+        let loc = crate::ir::SourceLoc { line: 1, column: 1 };
+        let span = crate::ir::ByteSpan { start: 0, end: 0 };
+        if pkg.config.respect_inline_disables
+            && file.suppressions.is_suppressed(
+                RuleId::CircularDependency,
+                loc.line,
+                span,
+                &file.jsx_elements,
+                &file.subjects,
+            )
+        {
+            continue;
+        }
+        let meta = RuleId::CircularDependency.metadata();
+        let cycle_str = cycle
+            .cycle_paths
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>()
+            .join(" → ");
+        out.push(Diagnostic {
+            file: file.path.clone(),
+            subject_name: None,
+            rule: RuleId::CircularDependency,
+            category: meta.category,
+            severity: sev,
+            message_id: "circularDependency",
+            tier: meta.default_tier,
+            target_name: cycle_str.clone(),
+            message: format!(
+                "Runtime import cycle: {cycle_str}. Modules in the cycle can observe partially initialized exports."
+            ),
+            docs_url: meta.docs_url,
+            loc,
+            span,
+            cascade_steps: Vec::new(),
+            caller_sites: Vec::new(),
+            autofix: None,
+        });
+    }
+
+    for family in &graph.duplicate_jsx_families {
+        let Some(primary) = family.occurrences.first() else {
+            continue;
+        };
+        let file = &graph.files[primary.file_index];
+        let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
+            continue;
+        };
+        if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
+            continue;
+        }
+        let Some(sev) = resolve_rule_activation(
+            RuleId::DuplicateJsxSubtree,
+            file,
+            &pkg.root_dir,
+            &pkg.capability_gate,
+            &pkg.config,
+            enabled_rules,
+        ) else {
+            continue;
+        };
+        if pkg.config.respect_inline_disables
+            && file.suppressions.is_suppressed(
+                RuleId::DuplicateJsxSubtree,
+                primary.loc.line,
+                primary.span,
+                &file.jsx_elements,
+                &file.subjects,
+            )
+        {
+            continue;
+        }
+        let meta = RuleId::DuplicateJsxSubtree.metadata();
+        let file_label = if family.distinct_file_count == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        let line_label = if family.estimated_removable_line_count == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        let comp_path = primary.composition_path.join(" > ");
+        let caller_sites = family
+            .occurrences
+            .iter()
+            .map(|occ| crate::graph::ResolvedCallerSite {
+                caller_file: occ.path.clone(),
+                parent_subject_name: occ.enclosing_subject.clone(),
+                component_name: occ.root_name.clone(),
+                loc: occ.loc,
+                span: occ.span,
+                has_key: false,
+                passed_props: Vec::new(),
+            })
+            .collect();
+
+        out.push(Diagnostic {
+            file: primary.path.clone(),
+            subject_name: primary.enclosing_subject.clone(),
+            rule: RuleId::DuplicateJsxSubtree,
+            category: meta.category,
+            severity: sev,
+            message_id: "duplicateJsxSubtree",
+            tier: meta.default_tier,
+            target_name: family.fingerprint.clone(),
+            message: format!(
+                "{} copies of this {}-node JSX tree appear across {} {file_label}, repeating about {} {line_label}. Composition path: {comp_path}.",
+                family.occurrence_count,
+                family.node_count,
+                family.distinct_file_count,
+                family.estimated_removable_line_count
+            ),
+            docs_url: meta.docs_url,
+            loc: primary.loc,
+            span: primary.span,
+            cascade_steps: Vec::new(),
+            caller_sites,
+            autofix: None,
+        });
+    }
 }
 
 fn resolve_rule_activation(
