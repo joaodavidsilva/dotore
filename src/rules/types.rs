@@ -89,6 +89,16 @@ pub enum RuleSeverityOverride {
 }
 
 impl RuleSeverityOverride {
+    /// Returns `"error"`, `"warn"`, or `"off"`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Off => "off",
+        }
+    }
+
     /// Parses a severity override string (`"off"`, `"warn"`, `"warning"`, `"error"`).
     #[must_use]
     pub fn parse(input: &str) -> Option<Self> {
