@@ -6,7 +6,10 @@ pub(crate) mod loader;
 
 pub(crate) use capability_gate::content_enables_react_compiler;
 pub use capability_gate::{Capability, CapabilityGate, CapabilityPredicate, PackageRole};
-pub use loader::{DotoreConfig, IgnoreConfig, IgnoreOverride, load_config_from_dir};
+pub use loader::{
+    ConfigMutation, ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride,
+    MutateConfigResult, load_config_from_dir, mutate_config_in_dir,
+};
 
 use std::{
     collections::HashSet,
