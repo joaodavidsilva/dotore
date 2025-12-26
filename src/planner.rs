@@ -681,7 +681,7 @@ fn extract_context_provider_name(diag: &Diagnostic) -> Option<String> {
     None
 }
 
-fn build_fix_capsule(
+pub(crate) fn build_fix_capsule(
     graph: &ProjectGraph,
     group: &RootCauseGroup,
     diagnostics: &[Diagnostic],
