@@ -30,8 +30,9 @@ pub(crate) mod scanner;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
 pub use config::{
-    Capability, CapabilityGate, CapabilityPredicate, DotoreConfig, IgnoreConfig, IgnoreOverride,
-    PackageRole, WorkspacePackage, discover_workspace_packages, load_config_from_dir,
+    Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
+    DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, WorkspacePackage,
+    discover_workspace_packages, load_config_from_dir, mutate_config_in_dir,
     resolve_package_for_file,
 };
 pub use fixer::{FileFixResult, apply_autofixes, apply_patches_to_source};
@@ -42,8 +43,12 @@ pub use ir::{
 };
 pub use planner::{PlanResult, compute_root_cause_group_id, format_plan_report, plan_project};
 pub use report::{
-    JsonReport, ReportSummary, format_fix_report, format_terminal_report, render_html_report,
-    write_and_open_html_report,
+    CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult, JsonReport,
+    ReportSummary, RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport,
+    build_rule_catalog, ci_config, ci_install, ci_upgrade, explain_location, explain_rule,
+    format_design_report, format_fix_report, format_install_report, format_rule_catalog_text,
+    format_rule_explanation_text, format_terminal_report, format_why_report_text, install_dotore,
+    parse_why_location, render_html_report, write_and_open_html_report,
 };
 pub use rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
@@ -395,6 +400,64 @@ pub fn scan_workspace_with_overrides(
     }
 
     Ok((build_report(&graph, diagnostics, &sources), sources))
+}
+
+/// Returns all [`RuleId`]s tagged with [`RuleTag::Design`] (excluding whole-project analysis rules).
+#[must_use]
+pub fn design_rule_ids() -> Vec<RuleId> {
+    rule_registry()
+        .iter()
+        .filter(|meta| {
+            meta.tags.contains(&RuleTag::Design) && !meta.tags.contains(&RuleTag::ProjectAnalysis)
+        })
+        .map(|meta| meta.id)
+        .collect()
+}
+
+/// Runs a focused UI design audit (`dotore design`), enabling all [`RuleTag::Design`] rules
+/// while skipping unrelated project-analysis, supply-chain, and general effect/state rules.
+///
+/// # Errors
+/// Returns an `io::Error` if reading discovered files or an explicit `--config` file fails.
+pub fn scan_design(
+    options: &ScanOptions,
+    overrides: &CliOverrides,
+) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
+    let mut design_rules = design_rule_ids();
+    if let Some(explicit_rules) = &options.rules {
+        design_rules.retain(|r| explicit_rules.contains(r));
+    }
+    let design_options = ScanOptions {
+        paths: options.paths.clone(),
+        include_tests: options.include_tests,
+        rules: Some(design_rules),
+        tiers: options.tiers.clone(),
+    };
+    let (mut report, sources) = scan_workspace_with_overrides(&design_options, overrides)?;
+    let workspace_root = determine_workspace_root(&options.paths);
+    let packages = discover_workspace_packages(&workspace_root);
+    report.diagnostics.retain(|d| {
+        resolve_package_for_file(&d.file, &packages).is_none_or(|pkg| {
+            pkg.config.explicit_rule_override(d.rule) != Some(RuleSeverityOverride::Off)
+        })
+    });
+    report.summary.total_diagnostics = report.diagnostics.len();
+    report.summary.autofix_count = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.tier == PrescriptionTier::Autofix)
+        .count();
+    report.summary.surgical_count = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.tier == PrescriptionTier::Surgical)
+        .count();
+    report.summary.refactor_count = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.tier == PrescriptionTier::Refactor)
+        .count();
+    Ok((report, sources))
 }
 
 fn determine_workspace_root(paths: &[PathBuf]) -> PathBuf {
