@@ -1415,7 +1415,7 @@ pub struct RootCauseGroup {
 }
 
 /// A single diagnostic emitted by `dotore`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     /// File path where the diagnostic occurred.
     pub file: PathBuf,
@@ -1450,9 +1450,56 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// Computes the deterministic occurrence identity (`<file>::<line>:<col>::dotore/<rule>::<digest>`).
+    #[must_use]
+    pub fn id(&self) -> String {
+        crate::diff::compute_diagnostic_id(self, None)
+    }
+
+    /// Computes the rename- and formatting-resilient fingerprint (`fp::<rule>::<digest>`) for this diagnostic.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        crate::diff::compute_structural_fingerprint(self)
+    }
+
+    /// Computes the normalized AST-token fingerprint (`fp::<rule>::<digest>`) using the file's source text when available.
+    #[must_use]
+    pub fn fingerprint_with_source(&self, source: Option<&str>) -> String {
+        crate::diff::compute_diagnostic_fingerprint(self, source)
+    }
+
     /// Computes the deterministic **Root-Cause Group** identifier (`rcg::...`) for this diagnostic.
     #[must_use]
     pub fn root_cause_group_id(&self) -> String {
         crate::planner::compute_root_cause_group_id(self)
+    }
+}
+
+impl Serialize for Diagnostic {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+        let mut state = serializer.serialize_struct("Diagnostic", 18)?;
+        state.serialize_field("id", &self.id())?;
+        state.serialize_field("fingerprint", &self.fingerprint())?;
+        state.serialize_field("root_cause_group_id", &self.root_cause_group_id())?;
+        state.serialize_field("file", &self.file)?;
+        state.serialize_field("subject_name", &self.subject_name)?;
+        state.serialize_field("rule", &self.rule)?;
+        state.serialize_field("category", &self.category)?;
+        state.serialize_field("severity", &self.severity)?;
+        state.serialize_field("message_id", &self.message_id)?;
+        state.serialize_field("tier", &self.tier)?;
+        state.serialize_field("target_name", &self.target_name)?;
+        state.serialize_field("message", &self.message)?;
+        state.serialize_field("docs_url", &self.docs_url)?;
+        state.serialize_field("loc", &self.loc)?;
+        state.serialize_field("span", &self.span)?;
+        state.serialize_field("cascade_steps", &self.cascade_steps)?;
+        state.serialize_field("caller_sites", &self.caller_sites)?;
+        state.serialize_field("autofix", &self.autofix)?;
+        state.end()
     }
 }
