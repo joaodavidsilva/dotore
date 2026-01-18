@@ -691,8 +691,53 @@ fn evaluate_file_ir_facets<F>(
         }
     }
 
-    // 6. Single-pass semantic AST sites
+    // 6. Fast Refresh `only-export-components` (ContextualOwnerPolicy::File)
+    let is_subj_component = |name: &str| {
+        file.subjects.iter().any(|s| {
+            s.kind == crate::ir::types::SubjectKind::Component && s.name.as_deref() == Some(name)
+        })
+    };
+    if (has_explicit_rule_filter
+        || config
+            .explicit_rule_override(RuleId::OnlyExportComponents)
+            .is_some())
+        && is_active(RuleId::OnlyExportComponents).is_some()
+        && file
+            .module
+            .exports
+            .iter()
+            .any(|e| is_subj_component(&e.name))
+    {
+        for exp in &file.module.exports {
+            if !is_subj_component(&exp.name) && !exp.is_type_only && exp.from_source.is_none() {
+                push_simple_diagnostic(
+                    out,
+                    file,
+                    None,
+                    RuleId::OnlyExportComponents,
+                    "onlyExportComponents",
+                    &exp.name,
+                    format!(
+                        "Fast Refresh only works when a file only exports components. Move non-component export {:?} to a separate file.",
+                        exp.name
+                    ),
+                    exp.loc,
+                    exp.span,
+                );
+            }
+        }
+    }
+
+    // 7. Single-pass semantic AST sites
     for site in &file.semantic_sites {
+        if site.rule == RuleId::ExhaustiveDeps
+            && !has_explicit_rule_filter
+            && config
+                .explicit_rule_override(RuleId::ExhaustiveDeps)
+                .is_none()
+        {
+            continue;
+        }
         if is_active(site.rule).is_some() {
             push_simple_diagnostic(
                 out,
