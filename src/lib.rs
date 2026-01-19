@@ -11,6 +11,8 @@ use rayon::prelude::*;
 
 /// Project configuration loader (`dotore.config.*` / `package.json#dotore`) and **Capability Gate**.
 pub(crate) mod config;
+/// Git diff scopes (`--scope`, `--base`, `--staged`), **Contextual Owner** filtering, and `--baseline` multiset comparison.
+pub(crate) mod diff;
 /// Surgical auto-fixer for `Autofix`-tier diagnostics.
 pub(crate) mod fixer;
 /// Cross-file JSX caller index and multi-effect **Render Cascade** solver.
@@ -27,6 +29,8 @@ pub(crate) mod rules;
 pub(crate) mod runtime_scan;
 /// Parallel gitignore-aware file discovery.
 pub(crate) mod scanner;
+/// Deterministic local `0..=100` Health Score and `P0`–`P3` tier calculation.
+pub(crate) mod score;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
 pub use config::{
@@ -34,6 +38,14 @@ pub use config::{
     DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, WorkspacePackage,
     discover_workspace_packages, load_config_from_dir, mutate_config_in_dir,
     resolve_package_for_file,
+};
+pub use diff::{
+    BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
+    ChangedFileLineRanges, DiffScope, GitDiffInfo, ScanMode, compare_baseline_diagnostics,
+    compute_diagnostic_fingerprint, compute_diagnostic_id, compute_structural_fingerprint,
+    diagnostic_intersects_changed_lines, filter_diagnostics_by_scope, normalize_ast_tokens,
+    parse_baseline_report_str, parse_changed_line_ranges, resolve_scan_exit_code,
+    validate_git_revision, validate_warning_exit_code,
 };
 pub use fixer::{FileFixResult, apply_autofixes, apply_patches_to_source};
 pub use graph::ResolvedCallerSite;
@@ -43,12 +55,13 @@ pub use ir::{
 };
 pub use planner::{PlanResult, compute_root_cause_group_id, format_plan_report, plan_project};
 pub use report::{
-    CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult, JsonReport,
-    ReportSummary, RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport,
-    build_rule_catalog, ci_config, ci_install, ci_upgrade, explain_location, explain_rule,
-    format_design_report, format_fix_report, format_install_report, format_rule_catalog_text,
+    CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
+    JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
+    RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_rule_catalog,
+    ci_config, ci_install, ci_upgrade, explain_location, explain_rule, format_design_report,
+    format_fix_report, format_install_report, format_rule_catalog_text,
     format_rule_explanation_text, format_terminal_report, format_why_report_text, install_dotore,
-    parse_why_location, render_html_report, write_and_open_html_report,
+    parse_why_location, render_html_report, write_and_open_html_report, write_json_report,
 };
 pub use rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
@@ -78,6 +91,7 @@ pub use runtime_scan::{
     record_runtime_trace, resolve_runtime_scan_format, resolve_runtime_trace_path,
     sanitize_runtime_text, sanitize_runtime_url,
 };
+pub use score::{HealthScore, compute_local_health_score, score_label};
 pub use search::{
     SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
     format_search_json, format_search_text, score_fuzzy, search_project_sources, search_symbols,
@@ -85,9 +99,10 @@ pub use search::{
 };
 
 use config::content_enables_react_compiler;
+use diff::{collect_git_diff, load_baseline_entries};
 use graph::ProjectGraph;
 use planner::enrich_cross_file_autofixes;
-use report::build_report;
+use report::{build_report, build_report_with_packages};
 use rules::{evaluate_file_in_package, evaluate_project, evaluate_project_with_packages};
 use scanner::collect_source_files;
 
@@ -115,6 +130,14 @@ pub struct CliOverrides {
     pub ignore_tags: Vec<String>,
     /// Optional explicit path to a `dotore.config.*` file (`--config`).
     pub config_path: Option<PathBuf>,
+    /// Git diff scan scope (`--scope full|changed|contextual|lines`).
+    pub scope: DiffScope,
+    /// Optional git base revision or range (`--base <ref>`).
+    pub base_ref: Option<String>,
+    /// Scan staged git index changes (`--staged`).
+    pub staged: bool,
+    /// Optional path to a baseline JSON report or git revision (`--baseline <report.json>`).
+    pub baseline_path: Option<PathBuf>,
 }
 
 /// Analyzes a single in-memory source file and returns its [`Diagnostic`]s.
@@ -208,7 +231,7 @@ pub fn analyze_project_sources(
         .collect();
     let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
     let diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
-    build_report(&graph, diagnostics, &sources)
+    build_report_with_packages(&graph, diagnostics, &sources, &packages)
 }
 
 struct VirtualWorkspaceSplit {
@@ -399,7 +422,86 @@ pub fn scan_workspace_with_overrides(
         diagnostics.retain(|d| allowed_tiers.contains(&d.tier));
     }
 
-    Ok((build_report(&graph, diagnostics, &sources), sources))
+    let effective_scope = if overrides.staged && overrides.scope == DiffScope::Full {
+        DiffScope::Changed
+    } else {
+        overrides.scope
+    };
+
+    let mut mode = ScanMode::Full;
+    let mut diff_info = None;
+    let mut baseline_summary = None;
+    let mut baseline_degraded = false;
+
+    if effective_scope != DiffScope::Full || overrides.staged || overrides.base_ref.is_some() {
+        let diff_snap = collect_git_diff(
+            &workspace_root,
+            overrides.base_ref.as_deref(),
+            overrides.staged,
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        diagnostics = filter_diagnostics_by_scope(
+            diagnostics,
+            effective_scope,
+            &diff_snap.repo_root,
+            &diff_snap.changed_files,
+            &diff_snap.line_ranges,
+            &graph.files,
+            &sources,
+        );
+        diff_info = Some(diff_snap.info);
+        mode = if overrides.staged {
+            ScanMode::Staged
+        } else {
+            ScanMode::Diff
+        };
+    }
+
+    if let Some(baseline_arg) = &overrides.baseline_path {
+        match load_baseline_entries(&workspace_root, baseline_arg, options.rules.as_deref()) {
+            Ok(base_entries) => {
+                let delta = compare_baseline_diagnostics(
+                    &diagnostics,
+                    &sources,
+                    &base_entries,
+                    &baseline_arg.to_string_lossy(),
+                );
+                diagnostics = delta.introduced_diagnostics;
+                baseline_summary = Some(delta.summary);
+                mode = ScanMode::Baseline;
+            }
+            Err(_) => {
+                baseline_degraded = true;
+                mode = ScanMode::Diff;
+                if diff_info.is_none()
+                    && let Ok(diff_snap) = collect_git_diff(
+                        &workspace_root,
+                        overrides.base_ref.as_deref(),
+                        overrides.staged,
+                    )
+                {
+                    diagnostics = filter_diagnostics_by_scope(
+                        diagnostics,
+                        DiffScope::Changed,
+                        &diff_snap.repo_root,
+                        &diff_snap.changed_files,
+                        &diff_snap.line_ranges,
+                        &graph.files,
+                        &sources,
+                    );
+                    diff_info = Some(diff_snap.info);
+                }
+            }
+        }
+    }
+
+    let mut report = build_report_with_packages(&graph, diagnostics, &sources, &packages);
+    report.mode = mode;
+    report.diff = diff_info;
+    report.baseline = baseline_summary;
+    report.baseline_degraded = baseline_degraded;
+
+    Ok((report, sources))
 }
 
 /// Returns all [`RuleId`]s tagged with [`RuleTag::Design`] (excluding whole-project analysis rules).
