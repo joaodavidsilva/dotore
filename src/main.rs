@@ -7,18 +7,20 @@ use std::{
 
 use clap::{Args, Parser, Subcommand};
 use dotore::{
-    BuildRuntimeScanReportInput, CiOptions, CiProviderKind, CliOverrides, ConfigMutation,
-    InstallOptions, PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS, RecordRuntimeTraceInput,
-    RuleCategory, RuleId, RuleSeverity, RuleSeverityOverride, RuleTag, RulesListOptions,
-    RuntimeScanFormat, ScanOptions, SearchOptions, SymbolKind, apply_autofixes, build_rule_catalog,
-    build_runtime_scan_report, ci_config, ci_install, ci_upgrade, detect_local_runtime_urls,
-    explain_location, explain_rule, format_design_report, format_fix_report, format_install_report,
-    format_plan_report, format_rule_catalog_text, format_rule_explanation_text,
-    format_runtime_scan_error_report, format_runtime_scan_report, format_search_json,
-    format_search_text, format_terminal_report, format_why_report_text, install_dotore,
-    load_config_from_dir, mutate_config_in_dir, plan_project, prompt_runtime_scan_url_with_io,
-    record_runtime_trace, resolve_runtime_scan_format, scan_design, scan_workspace_with_overrides,
-    search_symbols, should_highlight_stdout, write_and_open_html_report,
+    BlockingLevel, BuildRuntimeScanReportInput, CiOptions, CiProviderKind, CliOverrides,
+    ConfigMutation, DiffScope, InstallOptions, PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS,
+    RecordRuntimeTraceInput, RuleCategory, RuleId, RuleSeverity, RuleSeverityOverride, RuleTag,
+    RulesListOptions, RuntimeScanFormat, ScanOptions, SearchOptions, SymbolKind, apply_autofixes,
+    build_rule_catalog, build_runtime_scan_report, ci_config, ci_install, ci_upgrade,
+    detect_local_runtime_urls, explain_location, explain_rule, format_design_report,
+    format_fix_report, format_install_report, format_plan_report, format_rule_catalog_text,
+    format_rule_explanation_text, format_runtime_scan_error_report, format_runtime_scan_report,
+    format_search_json, format_search_text, format_terminal_report, format_why_report_text,
+    install_dotore, load_config_from_dir, mutate_config_in_dir, plan_project,
+    prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
+    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols,
+    should_highlight_stdout, validate_warning_exit_code, write_and_open_html_report,
+    write_json_report,
 };
 
 #[derive(Debug, Parser)]
@@ -70,7 +72,38 @@ struct CheckArgs {
     #[arg(long)]
     json: bool,
 
-    /// Exit with code 0 even when diagnostics are found.
+    /// Write the versioned machine-readable JSON report to a file on disk.
+    #[arg(long = "json-out", value_name = "FILE")]
+    json_out: Option<PathBuf>,
+
+    /// Print only the numeric `0..=100` Health Score to stdout.
+    #[arg(long)]
+    score: bool,
+
+    /// Git diff scan scope (`full`, `changed`, `contextual`, `lines`).
+    #[arg(long, default_value = "full", value_name = "SCOPE")]
+    scope: String,
+
+    /// Base git branch, revision, or commit range (`A..B`, `A...B`) for diff scopes.
+    #[arg(long = "base", value_name = "REF")]
+    base_ref: Option<String>,
+
+    /// Restrict scan to staged git index changes (`git diff --cached`).
+    #[arg(long)]
+    staged: bool,
+
+    /// Compare against a saved baseline JSON report or git revision as a fingerprint multiset.
+    #[arg(long, value_name = "REPORT_JSON")]
+    baseline: Option<PathBuf>,
+
+    /// Severity threshold that blocks CI (`error`, `warning`, `none`).
+    #[arg(long, value_name = "LEVEL")]
+    blocking: Option<String>,
+    /// Custom exit code (`2..=255`) returned when warnings are present and no blocking errors occurred.
+    #[arg(long = "warning-exit-code", value_name = "CODE")]
+    warning_exit_code: Option<u32>,
+
+    /// Exit with code 0 even when diagnostics are found (alias for `--blocking none`).
     #[arg(long)]
     no_fail: bool,
 
@@ -512,6 +545,41 @@ fn build_scan_options(
 }
 
 fn run_check(args: &CheckArgs) -> ExitCode {
+    let Some(scope) = DiffScope::parse(&args.scope) else {
+        eprintln!(
+            "error: Unknown --scope {:?} (expected full, changed, contextual, or lines)",
+            args.scope
+        );
+        return ExitCode::from(2);
+    };
+
+    let blocking = if args.no_fail {
+        BlockingLevel::None
+    } else if let Some(raw_blocking) = &args.blocking {
+        let Some(parsed) = BlockingLevel::parse(raw_blocking) else {
+            eprintln!(
+                "error: Unknown --blocking {raw_blocking:?} (expected error, warning, or none)"
+            );
+            return ExitCode::from(2);
+        };
+        parsed
+    } else if args.warning_exit_code.is_some() {
+        BlockingLevel::Error
+    } else {
+        BlockingLevel::Warning
+    };
+
+    let warning_exit_code = match args.warning_exit_code {
+        Some(raw) => match validate_warning_exit_code(raw) {
+            Ok(valid) => Some(valid),
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
     let options =
         match build_scan_options(&args.paths, args.include_tests, &args.rules, &args.tiers) {
             Ok(opts) => opts,
@@ -526,6 +594,10 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        scope,
+        base_ref: args.base_ref.clone(),
+        staged: args.staged,
+        baseline_path: args.baseline.clone(),
     };
 
     let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
@@ -536,7 +608,16 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         }
     };
 
-    if args.json {
+    if let Some(out_path) = &args.json_out
+        && let Err(err) = write_json_report(&report, out_path)
+    {
+        eprintln!("error writing JSON report to {}: {err}", out_path.display());
+        return ExitCode::from(2);
+    }
+
+    if args.score {
+        println!("{}", report.summary.health_score);
+    } else if args.json {
         match serde_json::to_string_pretty(&report) {
             Ok(json) => println!("{json}"),
             Err(err) => {
@@ -548,11 +629,8 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         print!("{}", format_terminal_report(&report));
     }
 
-    if !args.no_fail && report.summary.total_diagnostics > 0 {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+    let code = resolve_scan_exit_code(&report.diagnostics, blocking, warning_exit_code);
+    ExitCode::from(code)
 }
 
 fn run_fix(args: &FixArgs) -> ExitCode {
@@ -567,6 +645,7 @@ fn run_fix(args: &FixArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        ..Default::default()
     };
 
     let (report, sources) = match scan_workspace_with_overrides(&options, &overrides) {
@@ -601,6 +680,7 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        ..Default::default()
     };
 
     let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
@@ -634,6 +714,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        ..Default::default()
     };
 
     let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
@@ -1048,6 +1129,7 @@ fn run_design(args: &CheckArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        ..Default::default()
     };
     let (report, _) = match scan_design(&options, &overrides) {
         Ok(res) => res,
