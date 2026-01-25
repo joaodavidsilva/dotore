@@ -144,6 +144,11 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("react-router", &[Capability::ReactRouter]),
     ("react-router-dom", &[Capability::ReactRouter]),
     ("@react-router/dev", &[Capability::ReactRouter]),
+    ("radix-ui", &[Capability::RadixUi]),
+    ("@base-ui/react", &[Capability::BaseUi]),
+    ("@base-ui-components/react", &[Capability::BaseUi]),
+    ("react-aria-components", &[Capability::ReactAria]),
+    ("styled-components", &[Capability::StyledComponents]),
 ];
 
 /// Technology capability token inferred for a project or workspace package.
@@ -198,6 +203,22 @@ pub enum Capability {
     Tailwind,
     /// React Router (`react-router`, `react-router-dom`, `@react-router/dev`).
     ReactRouter,
+    /// Tailwind CSS v3.4+ (`tailwindcss` >= 3.4).
+    #[serde(rename = "tailwind:3.4")]
+    Tailwind34,
+    /// Tailwind CSS v4+ (`tailwindcss` >= 4.0).
+    #[serde(rename = "tailwind:4")]
+    Tailwind4,
+    /// Radix UI primitives (`radix-ui`, `@radix-ui/react-*`).
+    RadixUi,
+    /// Base UI primitives (`@base-ui/react`, `@base-ui-components/react`).
+    BaseUi,
+    /// React Aria Components (`react-aria-components`).
+    ReactAria,
+    /// shadcn/ui component conventions (`components.json` or shadcn dependencies).
+    Shadcn,
+    /// styled-components CSS-in-JS library (`styled-components`).
+    StyledComponents,
 }
 
 impl Capability {
@@ -229,6 +250,13 @@ impl Capability {
             Self::TypeScript => "typescript",
             Self::Tailwind => "tailwind",
             Self::ReactRouter => "react-router",
+            Self::Tailwind34 => "tailwind:3.4",
+            Self::Tailwind4 => "tailwind:4",
+            Self::RadixUi => "radix-ui",
+            Self::BaseUi => "base-ui",
+            Self::ReactAria => "react-aria",
+            Self::Shadcn => "shadcn",
+            Self::StyledComponents => "styled-components",
         }
     }
 }
@@ -307,7 +335,18 @@ impl CapabilityGate {
     /// Default capability gate for standalone React/TypeScript source analysis when no `package.json` is present.
     #[must_use]
     pub fn default_react() -> Self {
-        Self::with_capabilities([Capability::React, Capability::TypeScript])
+        Self::with_capabilities([
+            Capability::React,
+            Capability::TypeScript,
+            Capability::Tailwind,
+            Capability::Tailwind34,
+            Capability::Tailwind4,
+            Capability::RadixUi,
+            Capability::BaseUi,
+            Capability::ReactAria,
+            Capability::Shadcn,
+            Capability::StyledComponents,
+        ])
     }
 
     /// Constructs a [`CapabilityGate`] from an explicit iterator of [`Capability`] tokens.
@@ -373,6 +412,12 @@ impl CapabilityGate {
             || package_dir.is_some_and(|d| d.join("tsconfig.json").is_file())
         {
             capabilities.insert(Capability::TypeScript);
+        }
+        if package_dir
+            .and_then(|d| find_nearest_ancestor_file(d, "components.json"))
+            .is_some()
+        {
+            capabilities.insert(Capability::Shadcn);
         }
         if val
             .get("reactCompiler")
@@ -470,7 +515,40 @@ fn infer_capabilities_from_deps(deps: &HashMap<String, String>) -> HashSet<Capab
     if deps.contains_key("preact") && !deps.contains_key("react") {
         caps.insert(Capability::PurePreact);
     }
+    if deps.keys().any(|k| {
+        k == "radix-ui" || (k.starts_with("@radix-ui/react-") && k != "@radix-ui/react-icons")
+    }) {
+        caps.insert(Capability::RadixUi);
+    }
+    if deps.contains_key("shadcn")
+        || deps.contains_key("shadcn-ui")
+        || deps.contains_key("class-variance-authority")
+    {
+        caps.insert(Capability::Shadcn);
+    }
+    if let Some(tw_ver) = deps.get("tailwindcss") {
+        let parsed = parse_major_minor_spec(tw_ver);
+        if parsed.is_none_or(|(maj, min)| maj > 3 || (maj == 3 && min >= 4)) {
+            caps.insert(Capability::Tailwind34);
+        }
+        if parsed.is_some_and(|(maj, _)| maj >= 4) {
+            caps.insert(Capability::Tailwind4);
+        }
+    }
     caps
+}
+
+fn parse_major_minor_spec(spec: &str) -> Option<(u32, u32)> {
+    let trimmed = spec.trim();
+    let start = trimmed.find(|c: char| c.is_ascii_digit())?;
+    let rest = &trimmed[start..];
+    let mut parts = rest.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some((major, minor))
 }
 
 fn extract_package_role_and_entrypoints(val: &Value) -> (PackageRole, HashSet<PathBuf>) {
