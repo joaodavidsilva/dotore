@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::rules::RuleId;
+use crate::rules::{AutofixPatch, RuleId};
 
 /// 1-based line and column in a source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +363,8 @@ pub struct JsxElementIr {
     pub has_render_prop_children: bool,
     /// Whether the root component identifier is unresolved in `oxc_semantic` scope.
     pub is_unresolved_component: bool,
+    /// Static `#target` fragment ID if this element has an `href="#target"` attribute (for `anchor-target-exists`).
+    pub fragment_href_target: Option<String>,
     /// 1-based start line of the `<Tag` opening element.
     pub opener_start_line: u32,
     /// 1-based end line of the `<Tag ...>` opening element.
@@ -782,6 +784,108 @@ pub struct SemanticRuleSite {
     pub loc: SourceLoc,
     /// Byte span of the flagged AST node.
     pub span: ByteSpan,
+    /// Optional deterministic auto-fix patch.
+    pub autofix: Option<AutofixPatch>,
+}
+
+/// Classification of a motion expression or export for `require-reduced-motion`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct MotionExpressionEvidence {
+    /// Whether the expression is an animation function (`animate`).
+    pub is_animation_function: bool,
+    /// Whether the expression is a motion component (`motion.div`, `m.div`, `Reorder.Item`).
+    pub is_motion_component: bool,
+    /// Whether the expression is a motion component factory (`motion`, `m`).
+    pub is_motion_component_factory: bool,
+    /// Whether the expression is a motion component namespace (`Reorder`).
+    pub is_motion_component_namespace: bool,
+    /// Whether the expression is `MotionConfig`.
+    pub is_motion_config: bool,
+    /// Whether the expression is a namespace import of a motion library (`import * as Framer`).
+    pub is_motion_namespace: bool,
+    /// Whether the expression is `useReducedMotion`.
+    pub is_reduced_motion_hook: bool,
+}
+
+impl MotionExpressionEvidence {
+    /// Merges two [`MotionExpressionEvidence`] records.
+    #[must_use]
+    pub const fn merge(self, other: Self) -> Self {
+        Self {
+            is_animation_function: self.is_animation_function || other.is_animation_function,
+            is_motion_component: self.is_motion_component || other.is_motion_component,
+            is_motion_component_factory: self.is_motion_component_factory
+                || other.is_motion_component_factory,
+            is_motion_component_namespace: self.is_motion_component_namespace
+                || other.is_motion_component_namespace,
+            is_motion_config: self.is_motion_config || other.is_motion_config,
+            is_motion_namespace: self.is_motion_namespace || other.is_motion_namespace,
+            is_reduced_motion_hook: self.is_reduced_motion_hook || other.is_reduced_motion_hook,
+        }
+    }
+
+    /// Returns `true` if any motion capability flag is set.
+    #[must_use]
+    pub const fn has_any(self) -> bool {
+        self.is_animation_function
+            || self.is_motion_component
+            || self.is_motion_component_factory
+            || self.is_motion_component_namespace
+            || self.is_motion_config
+            || self.is_motion_namespace
+            || self.is_reduced_motion_hook
+    }
+}
+
+/// An unresolved cross-file motion usage or re-export waiting on `ProjectGraph` resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingMotionRef {
+    /// Relative module specifier (`"./motion-barrel"`).
+    pub module_source: String,
+    /// Exported symbol name in the target module (`"AnimatedCard"`, `"default"`, `"*"`).
+    pub imported_name: String,
+    /// Member accesses applied to the imported symbol (`["div"]` for `<animated.div>`).
+    pub member_chain: Vec<String>,
+    /// How the resulting expression is used in this file.
+    pub usage: PendingMotionUsage,
+}
+
+/// How an unresolved cross-file motion symbol is used in a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PendingMotionUsage {
+    /// Rendered as a JSX tag (`<AnimatedCard />` or `<animated.div />`).
+    JsxTag {
+        /// Static `reducedMotion` attribute value if present (`"user"`, `"always"`, `"never"`).
+        reduced_motion_prop: Option<String>,
+    },
+    /// Called as a function (`runAnimation(...)` or `usePref()`).
+    Call {
+        /// Whether the call's return value is consumed (not an expression statement or `void`).
+        value_consumed: bool,
+        /// Whether the call was invoked via `.call(...)` or `.apply(...)`.
+        via_call_or_apply: bool,
+    },
+    /// Re-exported from this module as `exported_as`.
+    ReExport {
+        /// Name under which this module exports the symbol.
+        exported_as: String,
+    },
+}
+
+/// Single-pass motion library and CSS reduced-motion facts extracted for `require-reduced-motion`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MotionFileIr {
+    /// Direct motion animation use proven within this file.
+    pub has_motion_use: bool,
+    /// Direct reduced-motion handling (`useReducedMotion()`, `<MotionConfig reducedMotion="user"|"always">`, or CSS `@media (prefers-reduced-motion: reduce)`) proven within this file.
+    pub has_reduced_motion_handling: bool,
+    /// Direct motion evidence for symbols exported by this file (`export_name -> evidence`).
+    pub exported_evidence: Vec<(String, MotionExpressionEvidence)>,
+    /// Non-type `export * from "..."` module sources in this file.
+    pub star_reexports: Vec<String>,
+    /// Cross-file motion usages and re-exports that depend on local module resolution.
+    pub pending_refs: Vec<PendingMotionRef>,
 }
 
 /// Complete single-pass intermediate representation for a source file.
@@ -813,6 +917,12 @@ pub struct FileIr {
     pub suppressions: FileSuppressions,
     /// Semantic rule sites captured directly from `oxc_semantic` during the single parse pass.
     pub semantic_sites: Vec<SemanticRuleSite>,
+    /// Single-pass motion and reduced-motion evidence for `require-reduced-motion`.
+    pub motion: MotionFileIr,
+    /// Static DOM `id` values declared on JSX or HTML elements in this file (for `anchor-target-exists`).
+    pub static_dom_ids: Vec<String>,
+    /// Whether any JSX element in this file has an unresolved dynamic spread `{...props}` that could supply an `id`.
+    pub has_unresolved_id_spread: bool,
 }
 
 /// Computes 0-based line start byte offsets for `source`.
