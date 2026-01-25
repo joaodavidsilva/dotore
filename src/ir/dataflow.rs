@@ -821,6 +821,7 @@ pub(crate) fn extract_semantic_rule_sites(
                 message: "`useQuery` `queryFn` does not return a value; TanStack Query requires `queryFn` to return a resolved data value or promise.".to_string(),
                 loc,
                 span,
+                autofix: None,
             });
         }
 
@@ -837,6 +838,7 @@ pub(crate) fn extract_semantic_rule_sites(
                     message: "Avoid `new` object allocations inside `useFrame` (runs at 60fps); hoist reusable instances outside the frame loop.".to_string(),
                     loc,
                     span,
+                    autofix: None,
                 });
             }
         }
@@ -854,6 +856,7 @@ pub(crate) fn extract_semantic_rule_sites(
                     message: "Avoid allocating Three.js Geometry inside `requestAnimationFrame`; create geometries once outside the animation loop.".to_string(),
                     loc,
                     span,
+                    autofix: None,
                 });
             }
         }
@@ -877,6 +880,7 @@ pub(crate) fn extract_semantic_rule_sites(
                 ),
                 loc,
                 span,
+                autofix: None,
             });
         }
 
@@ -889,6 +893,7 @@ pub(crate) fn extract_semantic_rule_sites(
                 message: "Avoid calling `selectAtom(...)` directly in render without `useMemo` or hoisting to module scope.".to_string(),
                 loc,
                 span,
+                autofix: None,
             });
         }
 
@@ -910,6 +915,7 @@ pub(crate) fn extract_semantic_rule_sites(
                 ),
                 loc,
                 span,
+                autofix: None,
             });
         }
 
@@ -929,6 +935,7 @@ pub(crate) fn extract_semantic_rule_sites(
                     ),
                     loc,
                     span,
+                    autofix: None,
                 });
             }
         }
@@ -956,6 +963,7 @@ pub(crate) fn extract_semantic_rule_sites(
                     start: deps_span.start,
                     end: deps_span.end,
                 },
+                autofix: None,
             });
         }
     }
