@@ -453,7 +453,7 @@ pub(crate) fn extract_jsx_elements(
         ancestor_elements.reverse();
 
         let (in_array_map, map_index_param) = check_enclosing_array_map(semantic, node_id);
-        let (attributes, has_key, key_is_array_index, object_literal_props) =
+        let (attributes, has_key, key_is_array_index, object_literal_props, fragment_href_target) =
             extract_jsx_element_attributes(&opening.attributes, map_index_param.as_deref());
         let (has_raw_text_child, raw_text_preview, has_element_children, has_render_prop_children) =
             inspect_jsx_children(&jsx_el.children);
@@ -477,6 +477,7 @@ pub(crate) fn extract_jsx_elements(
             has_element_children,
             has_render_prop_children,
             is_unresolved_component,
+            fragment_href_target,
             opener_start_line: opener_start_loc.line,
             opener_end_line: opener_end_loc.line,
             span: ByteSpan {
@@ -492,12 +493,12 @@ pub(crate) fn extract_jsx_elements(
 fn extract_jsx_element_attributes(
     attr_items: &[JSXAttributeItem<'_>],
     map_index_param: Option<&str>,
-) -> (Vec<String>, bool, bool, Vec<String>) {
+) -> (Vec<String>, bool, bool, Vec<String>, Option<String>) {
     let mut attributes = Vec::new();
     let mut has_key = false;
     let mut key_is_array_index = false;
     let mut object_literal_props = Vec::new();
-
+    let mut fragment_href_target = None;
     for attr_item in attr_items {
         let Some(attr) = attr_item.as_attribute() else {
             continue;
@@ -517,6 +518,12 @@ fn extract_jsx_element_attributes(
                 key_is_array_index = true;
             }
         } else {
+            if matches!(attr_name.as_str(), "href" | "to")
+                && let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
+                && let Some(raw) = s.value.as_str()
+            {
+                fragment_href_target = parse_fragment_target_id(raw);
+            }
             if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
                 && let Some(expr) = container.expression.as_expression()
                 && matches!(expr.without_parentheses(), Expression::ObjectExpression(_))
@@ -531,7 +538,21 @@ fn extract_jsx_element_attributes(
         has_key,
         key_is_array_index,
         object_literal_props,
+        fragment_href_target,
     )
+}
+
+fn parse_fragment_target_id(href: &str) -> Option<String> {
+    if !href.starts_with('#') || href.len() <= 1 || href.starts_with("#/") || href.starts_with("#!")
+    {
+        return None;
+    }
+    let rest = &href[1..];
+    let target = rest.split(":~:").next().unwrap_or(rest);
+    if target.is_empty() || target.eq_ignore_ascii_case("top") {
+        return None;
+    }
+    Some(target.to_string())
 }
 
 fn inspect_jsx_children(children: &[JSXChild<'_>]) -> (bool, Option<String>, bool, bool) {
