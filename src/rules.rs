@@ -1,10 +1,13 @@
 //! Diagnostic rules engine gated by **Capability Gate**, user configuration (`dotore.config.*` / `package.json#dotore`),
 //! file context (`test-noise` / `migration-hint`), library role, and inline suppression directives.
 
+pub(crate) mod a11y;
 pub(crate) mod derived_state;
+pub(crate) mod design;
 pub(crate) mod external_sync;
 pub(crate) mod parent_flow;
 pub(crate) mod prop_sync;
+pub(crate) mod reduced_motion;
 pub(crate) mod types;
 
 pub use types::{
@@ -20,6 +23,7 @@ use crate::{
     graph::ProjectGraph,
     ir::{FileContext, FileIr, JsxElementIr, SecuritySinkKind, SubjectIr},
     rules::{
+        a11y::check_anchor_target_exists,
         derived_state::{
             check_no_chain_state_updates, check_no_derived_state, check_no_initialize_state,
         },
@@ -31,12 +35,11 @@ use crate::{
         prop_sync::{
             check_no_adjust_state_on_prop_change, check_no_reset_all_state_on_prop_change,
         },
+        reduced_motion::evaluate_project_reduced_motion,
     },
 };
 
 const BUILTIN_RN_TEXT_COMPONENTS: &[&str] = &["Text", "TSpan", "Animated.Text"];
-
-const VAGUE_BUTTON_LABELS: &[&str] = &["click here", "submit", "button", "link", "here", "more"];
 
 /// Evaluates all enabled rules across the [`ProjectGraph`] using default React capability gate and config.
 #[must_use]
@@ -77,6 +80,7 @@ pub(crate) fn evaluate_project_with_packages(
         );
     }
     evaluate_project_graph_rules(graph, packages, enabled_rules, &mut diagnostics);
+    evaluate_project_reduced_motion(graph, packages, enabled_rules, &mut diagnostics);
     diagnostics
 }
 
@@ -106,6 +110,7 @@ pub(crate) fn evaluate_file_in_package(
         }
         evaluate_subject(file, subject, &is_active, out);
     }
+    check_anchor_target_exists(graph, file, &is_active, out);
 
     evaluate_file_ir_facets(file, config, enabled_rules.is_some(), &is_active, out);
 
@@ -739,17 +744,28 @@ fn evaluate_file_ir_facets<F>(
             continue;
         }
         if is_active(site.rule).is_some() {
-            push_simple_diagnostic(
-                out,
-                file,
-                site.subject_name.clone(),
-                site.rule,
-                site.message_id,
-                &site.target_name,
-                site.message.clone(),
-                site.loc,
-                site.span,
-            );
+            let meta = site.rule.metadata();
+            out.push(Diagnostic {
+                file: file.path.clone(),
+                subject_name: site.subject_name.clone(),
+                rule: site.rule,
+                category: meta.category,
+                severity: meta.default_severity,
+                message_id: site.message_id,
+                tier: if site.autofix.is_some() {
+                    PrescriptionTier::Autofix
+                } else {
+                    meta.default_tier
+                },
+                target_name: site.target_name.clone(),
+                message: site.message.clone(),
+                docs_url: meta.docs_url,
+                loc: site.loc,
+                span: site.span,
+                cascade_steps: Vec::new(),
+                caller_sites: Vec::new(),
+                autofix: site.autofix.clone(),
+            });
         }
     }
 }
@@ -873,39 +889,19 @@ fn evaluate_jsx_element_rules<F>(
         }
     }
 
-    // 5. `alt-text` and `nextjs-no-img-element`
-    if jsx.name == "img" {
-        if !jsx
-            .attributes
-            .iter()
-            .any(|a| a == "alt" || a == "aria-label" || a == "aria-labelledby")
-            && is_active(RuleId::AltText).is_some()
-        {
-            push_simple_diagnostic(
-                out,
-                file,
-                jsx.enclosing_subject.clone(),
-                RuleId::AltText,
-                "missingAltText",
-                "img",
-                "`<img>` element must have an `alt` attribute for screen readers.".to_string(),
-                jsx.loc,
-                jsx.span,
-            );
-        }
-        if is_active(RuleId::NextjsNoImgElement).is_some() {
-            push_simple_diagnostic(
-                out,
-                file,
-                jsx.enclosing_subject.clone(),
-                RuleId::NextjsNoImgElement,
-                "nextjsNoImgElement",
-                "img",
-                "Prefer `<Image />` from `next/image` over raw `<img>` in Next.js.".to_string(),
-                jsx.loc,
-                jsx.span,
-            );
-        }
+    // 5. `nextjs-no-img-element` (`alt-text` is evaluated by `src/rules/a11y.rs`)
+    if jsx.name == "img" && is_active(RuleId::NextjsNoImgElement).is_some() {
+        push_simple_diagnostic(
+            out,
+            file,
+            jsx.enclosing_subject.clone(),
+            RuleId::NextjsNoImgElement,
+            "nextjsNoImgElement",
+            "img",
+            "Prefer `<Image />` from `next/image` over raw `<img>` in Next.js.".to_string(),
+            jsx.loc,
+            jsx.span,
+        );
     }
 
     // 6. `jsx-no-new-object-as-prop` (on custom components, disabled when ReactCompiler is active)
@@ -947,25 +943,6 @@ fn evaluate_jsx_element_rules<F>(
                 "Avoid passing an inline render-prop function as children to `<{}>`; prefer hooks or composition.",
                 jsx.name
             ),
-            jsx.loc,
-            jsx.span,
-        );
-    }
-
-    // 8. `design-no-vague-button-label` (opt-in `design` tag rule)
-    if (jsx.name == "button" || jsx.name == "Button")
-        && let Some(text) = &jsx.raw_text_preview
-        && VAGUE_BUTTON_LABELS.contains(&text.to_ascii_lowercase().as_str())
-        && is_active(RuleId::DesignNoVagueButtonLabel).is_some()
-    {
-        push_simple_diagnostic(
-            out,
-            file,
-            jsx.enclosing_subject.clone(),
-            RuleId::DesignNoVagueButtonLabel,
-            "designNoVagueButtonLabel",
-            text,
-            format!("Button label {text:?} is vague; use a specific action verb."),
             jsx.loc,
             jsx.span,
         );
