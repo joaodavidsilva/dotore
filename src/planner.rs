@@ -877,6 +877,10 @@ fn find_repository_exemplar(
     None
 }
 
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Only effect/memo/store rules have subject exemplar heuristics; remaining rules default to false"
+)]
 fn subject_matches_rule_exemplar(rule: RuleId, subj: &SubjectIr, subj_src: &str) -> bool {
     match rule {
         RuleId::NoExternalStoreSubscription => subj_src.contains("useSyncExternalStore("),
@@ -902,43 +906,14 @@ fn subject_matches_rule_exemplar(rule: RuleId, subj: &SubjectIr, subj_src: &str)
             subj.effect_nodes.iter().any(|e| e.has_cleanup)
                 && (subj_src.contains("autorun(") || subj_src.contains("reaction("))
         }
-        RuleId::NoEventHandler
-        | RuleId::NoResetAllStateOnPropChange
-        | RuleId::NoPassLiveStateToParent
-        | RuleId::NoPassDataToParent
-        | RuleId::JsxKey
-        | RuleId::NoArrayIndexAsKey
-        | RuleId::JsxNoUndef
-        | RuleId::ExhaustiveDeps
-        | RuleId::OnlyExportComponents
-        | RuleId::NoDirectMutationState
-        | RuleId::AltText
-        | RuleId::RequireReducedMotion
-        | RuleId::DesignNoVagueButtonLabel
-        | RuleId::NoDanger
-        | RuleId::ServerAuthActions
-        | RuleId::AsyncAwaitInLoop
-        | RuleId::NoRenderPropChildren
-        | RuleId::UnusedFile
-        | RuleId::UnusedExport
-        | RuleId::UnusedType
-        | RuleId::UnusedDependency
-        | RuleId::UnusedDevDependency
-        | RuleId::CircularDependency
-        | RuleId::DuplicateJsxSubtree
-        | RuleId::NextjsNoImgElement
-        | RuleId::RnNoRawText
-        | RuleId::ExpoNoNonInlinedEnv
-        | RuleId::TanstackStartServerFnValidateInput
-        | RuleId::ThreeNoGeometryInFrameLoop
-        | RuleId::R3fNoNewInUseFrame
-        | RuleId::ValtioNoSnapshotInCallback
-        | RuleId::PreactNoReactImport
-        | RuleId::InkNoRawText
-        | RuleId::ZodV4DeprecatedParse => false,
+        _ => false,
     }
 }
 
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Only state/effect rules add custom invariants beyond the tier-based default"
+)]
 fn invariants_for_rule(rule: RuleId, tier: PrescriptionTier) -> Vec<&'static str> {
     let mut inv = vec![
         "Do not introduce inline suppression comments (`dotore-disable`, `eslint-disable`, `oxlint-disable`).",
@@ -964,42 +939,7 @@ fn invariants_for_rule(rule: RuleId, tier: PrescriptionTier) -> Vec<&'static str
         RuleId::NoFetchInEffect => {
             inv.push("Ensure in-flight requests are canceled or deduplicated so stale responses never overwrite newer state.");
         }
-        RuleId::NoInitializeState
-        | RuleId::JsxKey
-        | RuleId::NoArrayIndexAsKey
-        | RuleId::JsxNoUndef
-        | RuleId::ExhaustiveDeps
-        | RuleId::OnlyExportComponents
-        | RuleId::NoDirectMutationState
-        | RuleId::JsxNoNewObjectAsProp
-        | RuleId::AltText
-        | RuleId::RequireReducedMotion
-        | RuleId::DesignNoVagueButtonLabel
-        | RuleId::NoDanger
-        | RuleId::ServerAuthActions
-        | RuleId::AsyncAwaitInLoop
-        | RuleId::NoRenderPropChildren
-        | RuleId::UnusedFile
-        | RuleId::UnusedExport
-        | RuleId::UnusedType
-        | RuleId::UnusedDependency
-        | RuleId::UnusedDevDependency
-        | RuleId::CircularDependency
-        | RuleId::DuplicateJsxSubtree
-        | RuleId::NextjsNoImgElement
-        | RuleId::RnNoRawText
-        | RuleId::ExpoNoNonInlinedEnv
-        | RuleId::QueryNoVoidQueryFn
-        | RuleId::TanstackStartServerFnValidateInput
-        | RuleId::ThreeNoGeometryInFrameLoop
-        | RuleId::R3fNoNewInUseFrame
-        | RuleId::ZustandNoWholeStoreDestructure
-        | RuleId::JotaiSelectAtomInRenderBody
-        | RuleId::MobxReactionDisposerDiscarded
-        | RuleId::ValtioNoSnapshotInCallback
-        | RuleId::PreactNoReactImport
-        | RuleId::InkNoRawText
-        | RuleId::ZodV4DeprecatedParse => match tier {
+        _ => match tier {
             PrescriptionTier::Refactor => {
                 inv.push("Verify all cross-file Caller Sites and consumers remain consistent after updating the Subject contract.");
             }
