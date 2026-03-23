@@ -18,7 +18,12 @@ use oxc_parser::Parser;
 use oxc_semantic::{NodeId, ReferenceId, Semantic, SemanticBuilder, SymbolId};
 use oxc_span::{GetSpan, SourceType, Span};
 
-use crate::rules::RuleId;
+use crate::rules::{
+    RuleId,
+    a11y::extract_a11y_sites_and_dom_ids,
+    design::extract_design_sites,
+    reduced_motion::{extract_script_motion_ir, extract_stylesheet_motion_ir},
+};
 
 use super::{
     dataflow::{
@@ -37,8 +42,8 @@ use super::{
     types::{
         BlockDisableRange, ByteSpan, DepRef, DepsSpec, EffectNode, ExportDeclIr, ExternalStoreSite,
         FetchSite, FileIr, FileSuppressions, IfGuardSite, ImportBindingIr, ImportDeclIr,
-        LineDisableDirective, ModuleIr, PropCallSite, SetterCallSite, SourceLoc, StateSlot,
-        SubjectIr, SubjectKind, SymbolKind, SymbolOutline, classify_file_context,
+        LineDisableDirective, ModuleIr, MotionFileIr, PropCallSite, SetterCallSite, SourceLoc,
+        StateSlot, SubjectIr, SubjectKind, SymbolKind, SymbolOutline, classify_file_context,
         compute_line_starts, loc_from_line_starts,
     },
 };
@@ -56,6 +61,63 @@ pub fn inspect_file_semantic<F, R>(path: &Path, source: &str, f: F) -> R
 where
     F: FnOnce(&FileIr, &Semantic<'_>) -> R,
 {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    if matches!(ext, "css" | "scss") {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, "", SourceType::default()).parse();
+        let semantic_ret = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program);
+        let file_ir = FileIr {
+            path: path.to_path_buf(),
+            file_context: classify_file_context(path),
+            subjects: Vec::new(),
+            caller_sites: Vec::new(),
+            jsx_elements: Vec::new(),
+            jsx_subtrees: Vec::new(),
+            module: ModuleIr::default(),
+            symbol_outlines: Vec::new(),
+            mutations: Vec::new(),
+            async_flows: Vec::new(),
+            security_sinks: Vec::new(),
+            suppressions: FileSuppressions::default(),
+            semantic_sites: Vec::new(),
+            motion: extract_stylesheet_motion_ir(source),
+            static_dom_ids: Vec::new(),
+            has_unresolved_id_spread: false,
+        };
+        return f(&file_ir, &semantic_ret.semantic);
+    }
+    if matches!(ext, "html" | "htm") {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, "", SourceType::default()).parse();
+        let semantic_ret = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program);
+        let file_ir = FileIr {
+            path: path.to_path_buf(),
+            file_context: classify_file_context(path),
+            subjects: Vec::new(),
+            caller_sites: Vec::new(),
+            jsx_elements: Vec::new(),
+            jsx_subtrees: Vec::new(),
+            module: ModuleIr::default(),
+            symbol_outlines: Vec::new(),
+            mutations: Vec::new(),
+            async_flows: Vec::new(),
+            security_sinks: Vec::new(),
+            suppressions: FileSuppressions::default(),
+            semantic_sites: Vec::new(),
+            motion: MotionFileIr::default(),
+            static_dom_ids: Vec::new(),
+            has_unresolved_id_spread: false,
+        };
+        return f(&file_ir, &semantic_ret.semantic);
+    }
+
     let line_starts = compute_line_starts(source);
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
@@ -80,7 +142,17 @@ where
     let async_flows = extract_async_flows(&semantic, &line_starts);
     let security_sinks = extract_security_sinks(&parsed.program, &semantic, &module, &line_starts);
     let suppressions = extract_file_suppressions(source);
-    let semantic_sites = extract_semantic_rule_sites(&semantic, &ref_entries, &line_starts);
+    let mut semantic_sites = extract_semantic_rule_sites(&semantic, &ref_entries, &line_starts);
+    let (a11y_sites, static_dom_ids, has_unresolved_id_spread) =
+        extract_a11y_sites_and_dom_ids(path, &parsed.program, &semantic, &line_starts);
+    semantic_sites.extend(a11y_sites);
+    semantic_sites.extend(extract_design_sites(
+        path,
+        &parsed.program,
+        &semantic,
+        &line_starts,
+    ));
+    let motion = extract_script_motion_ir(&parsed.program, &semantic);
 
     let file_ir = FileIr {
         path: path.to_path_buf(),
@@ -96,6 +168,9 @@ where
         security_sinks,
         suppressions,
         semantic_sites,
+        motion,
+        static_dom_ids,
+        has_unresolved_id_spread,
     };
 
     f(&file_ir, &semantic)
