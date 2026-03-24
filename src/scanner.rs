@@ -7,6 +7,8 @@ use ignore::{WalkBuilder, gitignore::GitignoreBuilder};
 
 const SOURCE_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts"];
 
+const STYLE_EXTENSIONS: &[&str] = &["css", "scss"];
+
 const IGNORED_DIRS: &[&str] = &[
     "node_modules",
     "dist",
@@ -61,6 +63,65 @@ pub(crate) fn collect_source_files(paths: &[PathBuf], include_tests: bool) -> Ve
         for result in builder.build().flatten() {
             let path = result.path();
             if path.is_file() && is_supported_file(path, include_tests) {
+                files.push(path.to_path_buf());
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Collects all `.css` and `.scss` stylesheets under `paths` for reduced-motion analysis.
+#[must_use]
+pub(crate) fn collect_style_files(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
+
+    for root in roots {
+        if root.is_file() {
+            if root
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| STYLE_EXTENSIONS.contains(&ext))
+                && !is_explicit_file_ignored(&root)
+            {
+                files.push(root);
+            }
+            continue;
+        }
+
+        let mut builder = WalkBuilder::new(&root);
+        builder
+            .hidden(true)
+            .parents(true)
+            .ignore(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .require_git(false);
+        builder.filter_entry(|entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir())
+                && let Some(name) = entry.file_name().to_str()
+            {
+                return !IGNORED_DIRS.contains(&name);
+            }
+            true
+        });
+
+        for result in builder.build().flatten() {
+            let path = result.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| STYLE_EXTENSIONS.contains(&ext))
+            {
                 files.push(path.to_path_buf());
             }
         }
