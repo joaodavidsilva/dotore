@@ -159,7 +159,16 @@ pub(crate) fn build_report_with_packages(
 ) -> JsonReport {
     enrich_cross_file_autofixes(graph, &mut diagnostics, sources);
 
-    let files_scanned = graph.files.len();
+    let files_scanned = graph
+        .files
+        .iter()
+        .filter(|f| {
+            !matches!(
+                f.path.extension().and_then(|e| e.to_str()),
+                Some("css" | "scss" | "html" | "htm")
+            )
+        })
+        .count();
     let subjects_scanned: usize = graph.files.iter().map(|f| f.subjects.len()).sum();
     let effects_scanned: usize = graph
         .files
