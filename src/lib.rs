@@ -104,7 +104,7 @@ use graph::ProjectGraph;
 use planner::enrich_cross_file_autofixes;
 use report::{build_report, build_report_with_packages};
 use rules::{evaluate_file_in_package, evaluate_project, evaluate_project_with_packages};
-use scanner::collect_source_files;
+use scanner::{collect_source_files, collect_style_files};
 
 /// Options for scanning a project or file list.
 #[derive(Debug, Clone, Default)]
@@ -407,6 +407,19 @@ pub fn scan_workspace_with_overrides(
         }
     }
 
+    if packages
+        .iter()
+        .any(|pkg| pkg.capability_gate.has(Capability::Motion))
+    {
+        for style_path in collect_style_files(&options.paths) {
+            if resolve_package_for_file(&style_path, &packages)
+                .is_none_or(|pkg| !pkg.config.is_file_ignored(&style_path, &pkg.root_dir))
+                && let Ok(content) = fs::read_to_string(&style_path)
+            {
+                pairs.push((style_path, content));
+            }
+        }
+    }
     let file_irs: Vec<_> = pairs
         .into_par_iter()
         .map(|(path, source)| parse_file_ir(&path, &source))
