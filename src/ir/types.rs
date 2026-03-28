@@ -888,6 +888,92 @@ pub struct MotionFileIr {
     pub pending_refs: Vec<PendingMotionRef>,
 }
 
+/// Kind of 60fps animation/frame loop registration (`useFrame`, `requestAnimationFrame`, or `setAnimationLoop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FrameLoopRootKind {
+    /// React Three Fiber `useFrame(...)` callback.
+    UseFrame,
+    /// Browser `requestAnimationFrame(...)` or Three.js `renderer.setAnimationLoop(...)` callback.
+    AnimationLoop,
+}
+
+/// Outgoing function call inside a 60fps frame loop callback or helper function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameCallTargetIr {
+    /// Local callee identifier or member method name (`"stepPhysics"`).
+    pub callee_name: String,
+    /// Exported symbol name in the target module (`"stepPhysics"`, `"default"`) if imported.
+    pub imported_name: Option<String>,
+    /// Module specifier (`"./physics"`) if imported.
+    pub import_source: Option<String>,
+    /// 1-based location of the call site.
+    pub call_loc: SourceLoc,
+    /// Byte span of the call site.
+    pub call_span: ByteSpan,
+}
+
+/// A 60fps `useFrame`, `requestAnimationFrame`, or `setAnimationLoop` callback registered in a module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameLoopRootIr {
+    /// Kind of frame loop (`UseFrame` or `AnimationLoop`).
+    pub kind: FrameLoopRootKind,
+    /// Enclosing React **Subject** or function name, if any.
+    pub subject_name: Option<String>,
+    /// 1-based location of the loop registration call.
+    pub loc: SourceLoc,
+    /// Byte span of the loop registration call.
+    pub span: ByteSpan,
+    /// Outgoing calls made unconditionally inside the frame loop callback.
+    pub outgoing_calls: Vec<FrameCallTargetIr>,
+}
+
+/// Kind of per-frame allocation, state update, or synchronous GPU readback inside a helper function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FrameHelperHazardKind {
+    /// `new <Constructor>(...)` object allocation (`"Vector3"`, `"BoxGeometry"`, etc.).
+    NewAllocation(String),
+    /// `.clone()` call allocating a new Three.js object.
+    CloneAllocation(String),
+    /// Fresh array literal (`[...]`) or array allocation.
+    ArrayAllocation,
+    /// Fresh object literal (`{ ... }`).
+    ObjectAllocation,
+    /// React `setState` setter invocation or store `.setState(...)` call.
+    StateUpdate(String),
+    /// Synchronous GPU readback (`readPixels`, `readRenderTargetPixels`, `getParameter`, `getError`, `finish`, `getBufferSubData`).
+    SyncReadback(String),
+}
+
+/// A per-frame hazard recorded inside a declared helper function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameHelperHazard {
+    /// Kind of per-frame hazard.
+    pub kind: FrameHelperHazardKind,
+    /// 1-based location of the hazard inside the helper function.
+    pub loc: SourceLoc,
+    /// Byte span of the hazard inside the helper function.
+    pub span: ByteSpan,
+}
+
+/// A declared function or arrow function helper in a module analyzed for 60fps frame-loop call graphs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameHelperIr {
+    /// Local binding name of the helper function (`"stepPhysics"`).
+    pub name: String,
+    /// Exported names under which this helper is exposed from the module (`["stepPhysics"]`, `["default"]`).
+    pub exported_names: Vec<String>,
+    /// 1-based location of the helper declaration.
+    pub loc: SourceLoc,
+    /// Byte span of the helper declaration.
+    pub span: ByteSpan,
+    /// Per-frame hazards executed inside this helper function.
+    pub hazards: Vec<FrameHelperHazard>,
+    /// Outgoing calls to other local or imported functions inside this helper.
+    pub outgoing_calls: Vec<FrameCallTargetIr>,
+}
+
 /// Complete single-pass intermediate representation for a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileIr {
@@ -923,6 +1009,10 @@ pub struct FileIr {
     pub static_dom_ids: Vec<String>,
     /// Whether any JSX element in this file has an unresolved dynamic spread `{...props}` that could supply an `id`.
     pub has_unresolved_id_spread: bool,
+    /// 60fps `useFrame` and `requestAnimationFrame` callback registrations and their outgoing calls.
+    pub frame_loop_roots: Vec<FrameLoopRootIr>,
+    /// Declared functions/helpers in this module with their per-frame hazards and outgoing calls.
+    pub frame_helpers: Vec<FrameHelperIr>,
 }
 
 /// Computes 0-based line start byte offsets for `source`.
