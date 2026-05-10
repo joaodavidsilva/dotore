@@ -88,6 +88,8 @@ where
             motion: extract_stylesheet_motion_ir(source),
             static_dom_ids: Vec::new(),
             has_unresolved_id_spread: false,
+            frame_loop_roots: Vec::new(),
+            frame_helpers: Vec::new(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -114,6 +116,8 @@ where
             motion: MotionFileIr::default(),
             static_dom_ids: Vec::new(),
             has_unresolved_id_spread: false,
+            frame_loop_roots: Vec::new(),
+            frame_helpers: Vec::new(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -153,6 +157,13 @@ where
         &line_starts,
     ));
     let motion = extract_script_motion_ir(&parsed.program, &semantic);
+    let (frame_loop_roots, frame_helpers) = crate::rules::r3f::extract_r3f_webgl_file_ir(
+        &parsed.program,
+        &semantic,
+        &module,
+        &line_starts,
+        &mut semantic_sites,
+    );
 
     let file_ir = FileIr {
         path: path.to_path_buf(),
@@ -171,6 +182,8 @@ where
         motion,
         static_dom_ids,
         has_unresolved_id_spread,
+        frame_loop_roots,
+        frame_helpers,
     };
 
     f(&file_ir, &semantic)
