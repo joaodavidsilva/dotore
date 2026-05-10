@@ -92,6 +92,24 @@ pub(crate) struct DuplicateJsxFamilyFinding {
     pub occurrences: Vec<DuplicateJsxOccurrence>,
 }
 
+/// A cross-file 60fps `useFrame` or `requestAnimationFrame` call-graph hazard traced by [`ProjectGraph`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CrossFileFrameLoopFinding {
+    pub root_file_index: usize,
+    pub root_kind: crate::ir::types::FrameLoopRootKind,
+    pub root_subject_name: Option<String>,
+    pub root_loc: SourceLoc,
+    pub root_span: ByteSpan,
+    pub call_loc: SourceLoc,
+    pub call_span: ByteSpan,
+    pub helper_file_index: usize,
+    pub helper_name: String,
+    pub helper_loc: SourceLoc,
+    pub helper_span: ByteSpan,
+    pub hazard: crate::ir::types::FrameHelperHazard,
+    pub call_chain: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ComponentTarget {
     file: PathBuf,
@@ -346,6 +364,8 @@ pub(crate) struct ProjectGraph {
     pub circular_dependencies: Vec<CircularDependencyFinding>,
     /// Maximal duplicated JSX subtree families (`duplicate-jsx-subtree`).
     pub duplicate_jsx_families: Vec<DuplicateJsxFamilyFinding>,
+    /// Cross-file 60fps `useFrame` and `requestAnimationFrame` helper call-graph findings.
+    pub frame_loop_findings: Vec<CrossFileFrameLoopFinding>,
 }
 
 impl ProjectGraph {
@@ -452,6 +472,16 @@ impl ProjectGraph {
 
         let circular_dependencies = detect_circular_dependencies(&files, &edges);
         let duplicate_jsx_families = detect_duplicate_jsx_families(&files);
+        let frame_loop_findings =
+            crate::rules::r3f::trace_cross_file_frame_loops(&files, |importer_path, specifier| {
+                resolve_specifier_to_target_indices(
+                    importer_path,
+                    specifier,
+                    &targets,
+                    &ts_mappings,
+                    &pkg_manifests,
+                )
+            });
 
         Self {
             files,
@@ -462,6 +492,7 @@ impl ProjectGraph {
             unused_dependencies,
             circular_dependencies,
             duplicate_jsx_families,
+            frame_loop_findings,
         }
     }
 
