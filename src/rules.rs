@@ -7,6 +7,7 @@ pub(crate) mod design;
 pub(crate) mod external_sync;
 pub(crate) mod parent_flow;
 pub(crate) mod prop_sync;
+pub(crate) mod r3f;
 pub(crate) mod reduced_motion;
 pub(crate) mod types;
 
@@ -464,6 +465,14 @@ fn evaluate_project_graph_rules(
             autofix: None,
         });
     }
+
+    r3f::evaluate_cross_file_frame_loop_findings(
+        graph,
+        packages,
+        enabled_rules,
+        resolve_rule_activation,
+        out,
+    );
 }
 
 fn resolve_rule_activation(
