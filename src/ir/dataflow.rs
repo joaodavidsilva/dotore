@@ -825,42 +825,6 @@ pub(crate) fn extract_semantic_rule_sites(
             });
         }
 
-        if callee_name == Some("useFrame")
-            && let Some(first_arg) = call.arguments.first()
-        {
-            let body_text = first_arg.span().source_text(semantic.source_text());
-            if body_text.contains("new ") {
-                sites.push(SemanticRuleSite {
-                    rule: RuleId::R3fNoNewInUseFrame,
-                    subject_name: subject_name.clone(),
-                    message_id: "noNewInUseFrame",
-                    target_name: "useFrame".to_string(),
-                    message: "Avoid `new` object allocations inside `useFrame` (runs at 60fps); hoist reusable instances outside the frame loop.".to_string(),
-                    loc,
-                    span,
-                    autofix: None,
-                });
-            }
-        }
-
-        if callee_name == Some("requestAnimationFrame")
-            && let Some(first_arg) = call.arguments.first()
-        {
-            let body_text = first_arg.span().source_text(semantic.source_text());
-            if body_text.contains("Geometry(") {
-                sites.push(SemanticRuleSite {
-                    rule: RuleId::ThreeNoGeometryInFrameLoop,
-                    subject_name: subject_name.clone(),
-                    message_id: "noGeometryInFrameLoop",
-                    target_name: "requestAnimationFrame".to_string(),
-                    message: "Avoid allocating Three.js Geometry inside `requestAnimationFrame`; create geometries once outside the animation loop.".to_string(),
-                    loc,
-                    span,
-                    autofix: None,
-                });
-            }
-        }
-
         if subject_name.is_some()
             && call.arguments.is_empty()
             && callee_name.is_some_and(|n| {
