@@ -413,6 +413,8 @@ pub struct ImportBindingIr {
     pub is_namespace: bool,
     /// Whether this binding is type-only (`import type ...` or `import { type T } ...`).
     pub is_type_only: bool,
+    /// Whether this binding is referenced in a runtime value position (including JSX or value re-export).
+    pub has_runtime_value_reference: bool,
 }
 
 /// A static `import` declaration in a module.
@@ -478,6 +480,8 @@ pub struct ModuleIr {
     pub has_use_client: bool,
     /// Whether the module has a `"use server"` directive.
     pub has_use_server: bool,
+    /// Whether the module body consists solely of imports and re-exports (an aggregation barrel).
+    pub is_aggregation_barrel: bool,
 }
 
 /// Kind of **Symbol Outline** extracted for fuzzy symbol search (`dotore search`).
@@ -785,6 +789,7 @@ pub struct SemanticRuleSite {
     /// Byte span of the flagged AST node.
     pub span: ByteSpan,
     /// Optional deterministic auto-fix patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub autofix: Option<AutofixPatch>,
 }
 
