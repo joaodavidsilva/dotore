@@ -512,6 +512,20 @@ impl ProjectGraph {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// Resolves a relative module specifier (`./...` or `../...`) from `importer_path`
+    /// to the matching file index in `self.files`.
+    #[must_use]
+    pub(crate) fn resolve_relative_import(
+        &self,
+        importer_path: &Path,
+        specifier: &str,
+    ) -> Option<usize> {
+        let targets = collect_indexed_targets(&self.files);
+        resolve_specifier_to_target_indices(importer_path, specifier, &targets, &[], &[])
+            .into_iter()
+            .next()
+    }
 }
 
 /// Intra-**Subject** multi-effect **Render Cascade** where one **Effect Node** writes to an
