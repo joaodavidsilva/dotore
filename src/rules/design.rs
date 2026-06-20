@@ -2589,60 +2589,6 @@ fn check_extended_design_patterns(
         );
     }
 
-    // `no-excessive-motion-stagger` & `prefer-motion-transform-property`
-    if let Some(trans_attr) = find_attr(&opening.attributes, "transition") {
-        let src = trans_attr.span.source_text(semantic.source_text());
-        if let Some(idx) = src.find("staggerChildren:") {
-            let rest = src[idx + "staggerChildren:".len()..].trim_start();
-            let num_str: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect();
-            if let Ok(sec) = num_str.parse::<f64>()
-                && sec > 0.08
-            {
-                push_design_site(
-                    sites,
-                    RuleId::NoExcessiveMotionStagger,
-                    subject_name.clone(),
-                    "noExcessiveMotionStagger",
-                    "staggerChildren",
-                    format!("Motion `staggerChildren: {sec}` exceeds 0.08s."),
-                    loc_from_line_starts(line_starts, trans_attr.span.start),
-                    ByteSpan {
-                        start: trans_attr.span.start,
-                        end: trans_attr.span.end,
-                    },
-                    None,
-                );
-            }
-        }
-    }
-    if let Some(anim_attr) = find_attr(&opening.attributes, "animate") {
-        let src = anim_attr.span.source_text(semantic.source_text());
-        if (src.contains("x:")
-            || src.contains("y:")
-            || src.contains("scale:")
-            || src.contains("rotate:"))
-            && !src.contains("transform:")
-        {
-            push_design_site(
-                sites,
-                RuleId::PreferMotionTransformProperty,
-                subject_name.clone(),
-                "preferMotionTransformProperty",
-                "animate",
-                "Motion individual transform keys can run on the main thread; prefer a single `transform` string when compositor acceleration is required.".to_string(),
-                loc_from_line_starts(line_starts, anim_attr.span.start),
-                ByteSpan {
-                    start: anim_attr.span.start,
-                    end: anim_attr.span.end,
-                },
-                None,
-            );
-        }
-    }
-
     // `no-shape-assembled-illustration`
     if tag == "svg" {
         let mut shape_count = 0;
