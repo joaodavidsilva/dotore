@@ -140,7 +140,7 @@ where
     let caller_sites = extract_caller_sites(&semantic, &line_starts);
     let jsx_elements = extract_jsx_elements(&semantic, &line_starts);
     let jsx_subtrees = extract_jsx_subtrees(&semantic, &line_starts);
-    let module = extract_module_ir(&parsed.program, &semantic, &line_starts);
+    let module = extract_module_ir(&parsed.program, &semantic, &jsx_elements, &line_starts);
     let symbol_outlines = extract_symbol_outlines(&semantic, source, &line_starts);
     let mutations = extract_mutations(&semantic, &ref_entries, &line_starts);
     let async_flows = extract_async_flows(&semantic, &line_starts);
@@ -159,6 +159,28 @@ where
     let motion = extract_script_motion_ir(&parsed.program, &semantic);
     let (frame_loop_roots, frame_helpers) = crate::rules::r3f::extract_r3f_webgl_file_ir(
         &parsed.program,
+        &semantic,
+        &module,
+        &line_starts,
+        &mut semantic_sites,
+    );
+    crate::rules::bundle_size::extract_bundle_size_sites(
+        path,
+        &semantic,
+        &module,
+        &jsx_elements,
+        &line_starts,
+        &mut semantic_sites,
+    );
+    crate::rules::js_performance::extract_js_performance_sites(
+        path,
+        &semantic,
+        &module,
+        &line_starts,
+        &mut semantic_sites,
+    );
+    crate::rules::performance::extract_performance_sites(
+        path,
         &semantic,
         &module,
         &line_starts,
@@ -1036,6 +1058,7 @@ fn is_fetch_callee(callee: &Expression<'_>) -> bool {
 fn extract_module_ir(
     program: &Program<'_>,
     semantic: &Semantic<'_>,
+    jsx_elements: &[super::types::JsxElementIr],
     line_starts: &[u32],
 ) -> ModuleIr {
     let mut module = ModuleIr::default();
@@ -1061,7 +1084,8 @@ fn extract_module_ir(
             },
             AstKind::ImportDeclaration(imp) => {
                 let is_type_only = imp.import_kind.is_type();
-                let (specifiers, bindings) = extract_import_bindings(imp, is_type_only);
+                let (specifiers, bindings) =
+                    extract_import_bindings(imp, is_type_only, semantic, jsx_elements);
                 for b in &bindings {
                     if b.is_namespace {
                         namespace_locals.insert(b.local_name.clone());
@@ -1305,6 +1329,7 @@ fn extract_module_ir(
         whole_uses.sort();
         module.whole_namespace_uses = whole_uses;
     }
+    module.is_aggregation_barrel = is_aggregation_barrel_program(program, &module);
     module
 }
 
@@ -1341,6 +1366,8 @@ fn collect_declarator_namespace_uses(
 fn extract_import_bindings(
     imp: &ImportDeclaration<'_>,
     decl_type_only: bool,
+    semantic: &Semantic<'_>,
+    jsx_elements: &[super::types::JsxElementIr],
 ) -> (Vec<String>, Vec<ImportBindingIr>) {
     let Some(specs) = &imp.specifiers else {
         return (Vec::new(), Vec::new());
@@ -1352,17 +1379,33 @@ fn extract_import_bindings(
             ImportDeclarationSpecifier::ImportSpecifier(s) => {
                 let local = s.local.name.to_string();
                 let imported = s.imported.name().as_str().to_string();
+                let is_type_only = decl_type_only || s.import_kind.is_type();
+                let has_runtime_value_reference = !is_type_only
+                    && has_non_reexport_runtime_reference(
+                        semantic,
+                        s.local.symbol_id.get(),
+                        &local,
+                        jsx_elements,
+                    );
                 names.push(local.clone());
                 bindings.push(ImportBindingIr {
                     is_default: imported == "default",
                     imported_name: imported,
                     local_name: local,
                     is_namespace: false,
-                    is_type_only: decl_type_only || s.import_kind.is_type(),
+                    is_type_only,
+                    has_runtime_value_reference,
                 });
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                 let local = s.local.name.to_string();
+                let has_runtime_value_reference = !decl_type_only
+                    && has_non_reexport_runtime_reference(
+                        semantic,
+                        s.local.symbol_id.get(),
+                        &local,
+                        jsx_elements,
+                    );
                 names.push(local.clone());
                 bindings.push(ImportBindingIr {
                     imported_name: "default".to_string(),
@@ -1370,10 +1413,18 @@ fn extract_import_bindings(
                     is_default: true,
                     is_namespace: false,
                     is_type_only: decl_type_only,
+                    has_runtime_value_reference,
                 });
             }
             ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                 let local = s.local.name.to_string();
+                let has_runtime_value_reference = !decl_type_only
+                    && has_non_reexport_runtime_reference(
+                        semantic,
+                        s.local.symbol_id.get(),
+                        &local,
+                        jsx_elements,
+                    );
                 names.push(local.clone());
                 bindings.push(ImportBindingIr {
                     imported_name: "*".to_string(),
@@ -1381,11 +1432,83 @@ fn extract_import_bindings(
                     is_default: false,
                     is_namespace: true,
                     is_type_only: decl_type_only,
+                    has_runtime_value_reference,
                 });
             }
         }
     }
     (names, bindings)
+}
+
+fn has_non_reexport_runtime_reference(
+    semantic: &Semantic<'_>,
+    sym_id: Option<SymbolId>,
+    local_name: &str,
+    jsx_elements: &[super::types::JsxElementIr],
+) -> bool {
+    if let Some(sym) = sym_id {
+        for reference in semantic.scoping().get_resolved_references(sym) {
+            if !reference.is_value() {
+                continue;
+            }
+            let parent_kind = semantic.nodes().parent_kind(reference.node_id());
+            if matches!(parent_kind, AstKind::ExportSpecifier(_)) {
+                continue;
+            }
+            let in_type = semantic
+                .nodes()
+                .ancestor_ids(reference.node_id())
+                .any(|anc_id| {
+                    matches!(
+                        semantic.nodes().kind(anc_id),
+                        AstKind::TSTypeAnnotation(_)
+                            | AstKind::TSTypeReference(_)
+                            | AstKind::TSTypeQuery(_)
+                            | AstKind::TSInterfaceDeclaration(_)
+                            | AstKind::TSTypeAliasDeclaration(_)
+                    )
+                });
+            if !in_type {
+                return true;
+            }
+        }
+    }
+    jsx_elements
+        .iter()
+        .any(|el| el.root_identifier == local_name)
+}
+
+fn is_aggregation_barrel_program(program: &Program<'_>, module: &ModuleIr) -> bool {
+    let mut has_export_stmt = false;
+    for stmt in &program.body {
+        match stmt {
+            oxc_ast::ast::Statement::ImportDeclaration(_) => {}
+            oxc_ast::ast::Statement::ExportAllDeclaration(_)
+            | oxc_ast::ast::Statement::ExportFromDeclaration(_)
+            | oxc_ast::ast::Statement::ExportNamedDeclaration(_) => {
+                has_export_stmt = true;
+            }
+            _ => return false,
+        }
+    }
+    if !has_export_stmt {
+        return false;
+    }
+    for imp in &module.imports {
+        for b in &imp.bindings {
+            if b.is_type_only {
+                continue;
+            }
+            let exported = module.exports.iter().any(|e| {
+                e.local_name.as_deref() == Some(b.local_name.as_str())
+                    || (e.local_name.is_none() && e.name == b.local_name)
+            });
+            if !exported {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn extract_static_string_expr(expr: &Expression<'_>) -> Option<String> {
