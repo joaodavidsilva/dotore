@@ -2,10 +2,13 @@
 //! file context (`test-noise` / `migration-hint`), library role, and inline suppression directives.
 
 pub(crate) mod a11y;
+pub(crate) mod bundle_size;
 pub(crate) mod derived_state;
 pub(crate) mod design;
 pub(crate) mod external_sync;
+pub(crate) mod js_performance;
 pub(crate) mod parent_flow;
+pub(crate) mod performance;
 pub(crate) mod prop_sync;
 pub(crate) mod r3f;
 pub(crate) mod reduced_motion;
@@ -114,6 +117,7 @@ pub(crate) fn evaluate_file_in_package(
     check_anchor_target_exists(graph, file, &is_active, out);
 
     evaluate_file_ir_facets(file, config, enabled_rules.is_some(), &is_active, out);
+    bundle_size::evaluate_barrel_imports(graph, file, gate, &is_active, out);
 
     // Restamp severities and apply inline suppressions for diagnostics emitted on this file
     let mut retained = Vec::with_capacity(out.len().saturating_sub(start_idx));
@@ -505,9 +509,21 @@ fn resolve_rule_activation(
 
     // 2. Library packages skip application-only rules on library entrypoints unless explicitly opted in
     if meta.capability_gate.app_only
-        && gate.is_library_entrypoint(&file.path, package_root)
-        && !has_explicit_cli_rule
-        && explicit_config_override.is_none()
+        && (rule == RuleId::PreferDynamicImport
+            && gate.package_role == crate::config::PackageRole::Library
+            || gate.is_library_entrypoint(&file.path, package_root)
+                && !has_explicit_cli_rule
+                && explicit_config_override.is_none())
+    {
+        return None;
+    }
+    if rule == RuleId::NoFullLodashImport
+        && gate.package_role == crate::config::PackageRole::Library
+        && file
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".page."))
     {
         return None;
     }
@@ -621,28 +637,6 @@ fn evaluate_file_ir_facets<F>(
                     ),
                     mutation.loc,
                     mutation.span,
-                );
-            }
-        }
-    }
-
-    // 4. Async flows (`async-await-in-loop`)
-    if is_active(RuleId::AsyncAwaitInLoop).is_some() {
-        for flow in &file.async_flows {
-            if flow.inside_loop {
-                push_simple_diagnostic(
-                    out,
-                    file,
-                    flow.enclosing_name.clone(),
-                    RuleId::AsyncAwaitInLoop,
-                    "asyncAwaitInLoop",
-                    &flow.awaited_expr,
-                    format!(
-                        "Avoid sequential `await {}` inside a loop; collect promises and use `await Promise.all(...)`.",
-                        flow.awaited_expr
-                    ),
-                    flow.loc,
-                    flow.span,
                 );
             }
         }
@@ -763,6 +757,8 @@ fn evaluate_file_ir_facets<F>(
                 message_id: site.message_id,
                 tier: if site.autofix.is_some() {
                     PrescriptionTier::Autofix
+                } else if meta.default_tier == PrescriptionTier::Autofix {
+                    PrescriptionTier::Surgical
                 } else {
                     meta.default_tier
                 },
