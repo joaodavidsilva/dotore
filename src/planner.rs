@@ -896,9 +896,10 @@ fn subject_matches_rule_exemplar(rule: RuleId, subj: &SubjectIr, subj_src: &str)
             subj.effect_nodes.is_empty()
                 && subj.state_slots.iter().any(|s| s.init_arg_text.is_some())
         }
-        RuleId::JsxNoNewObjectAsProp | RuleId::JotaiSelectAtomInRenderBody => {
-            subj_src.contains("useMemo(")
-        }
+        RuleId::JsxNoNewObjectAsProp
+        | RuleId::NoInlinePropOnMemoComponent
+        | RuleId::ContextProviderValueFromUnmemoizedLocalLiteral
+        | RuleId::JotaiSelectAtomInRenderBody => subj_src.contains("useMemo("),
         RuleId::ZustandNoWholeStoreDestructure => {
             subj_src.contains("Store((s") || subj_src.contains("Store((state")
         }
