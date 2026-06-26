@@ -55,6 +55,51 @@ pub struct IgnoreConfig {
     pub tags: Vec<String>,
 }
 
+/// Supply-chain Socket.dev PURL scoring configuration inside [`DotoreConfig`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupplyChainConfig {
+    /// Whether the supply-chain check is enabled. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum acceptable Socket security-axis score (`0..=100`). Defaults to `50`.
+    #[serde(default = "default_supply_chain_min_score")]
+    pub min_score: u32,
+    /// Diagnostic severity (`"error"` or `"warning"`). Defaults to `RuleSeverity::Error`.
+    #[serde(default = "default_supply_chain_severity")]
+    pub severity: RuleSeverity,
+    /// Whether `devDependencies` are scored (gated on `supplyChain` axis only). Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub include_dev_dependencies: bool,
+    /// Optional local cache directory for per-PURL Socket artifacts.
+    #[serde(default)]
+    pub cache_dir: Option<String>,
+    /// Optional custom Socket PURL API base URL (defaults to `"https://firewall-api.socket.dev/purl"`).
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+}
+
+const fn default_supply_chain_min_score() -> u32 {
+    50
+}
+
+const fn default_supply_chain_severity() -> RuleSeverity {
+    RuleSeverity::Error
+}
+
+impl Default for SupplyChainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_score: 50,
+            severity: RuleSeverity::Error,
+            include_dev_dependencies: true,
+            cache_dir: None,
+            api_base_url: None,
+        }
+    }
+}
+
 /// Project configuration loaded from `dotore.config.*` or `package.json#dotore`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +125,12 @@ pub struct DotoreConfig {
     /// Capitalized component identifiers injected at runtime (suppressing `jsx-no-undef`).
     #[serde(default)]
     pub runtime_globals: Vec<String>,
+    /// Custom server authentication guard function names for `server-auth-actions`.
+    #[serde(default)]
+    pub server_auth_function_names: Vec<String>,
+    /// Supply-chain Socket.dev PURL dependency scoring configuration.
+    #[serde(default)]
+    pub supply_chain: SupplyChainConfig,
     /// Whether inline disable comments (`// dotore-disable-next-line`, etc.) are respected. Defaults to `true`.
     #[serde(default = "default_true")]
     pub respect_inline_disables: bool,
@@ -102,6 +153,8 @@ impl Default for DotoreConfig {
             text_components: Vec::new(),
             raw_text_wrapper_components: Vec::new(),
             runtime_globals: Vec::new(),
+            server_auth_function_names: Vec::new(),
+            supply_chain: SupplyChainConfig::default(),
             respect_inline_disables: true,
             warnings: true,
         }
