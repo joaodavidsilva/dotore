@@ -984,6 +984,8 @@ pub struct FrameHelperIr {
 pub struct FileIr {
     /// Path to the source file.
     pub path: PathBuf,
+    /// Verbatim source text of the file.
+    pub source: String,
     /// Classification of the file (`Production`, `Test`, or `Story`).
     pub file_context: FileContext,
     /// React **Subjects** (components and custom hooks) in this file.
