@@ -73,6 +73,7 @@ where
             .build(&parsed.program);
         let file_ir = FileIr {
             path: path.to_path_buf(),
+            source: source.to_string(),
             file_context: classify_file_context(path),
             subjects: Vec::new(),
             caller_sites: Vec::new(),
@@ -101,6 +102,7 @@ where
             .build(&parsed.program);
         let file_ir = FileIr {
             path: path.to_path_buf(),
+            source: source.to_string(),
             file_context: classify_file_context(path),
             subjects: Vec::new(),
             caller_sites: Vec::new(),
@@ -189,6 +191,7 @@ where
 
     let file_ir = FileIr {
         path: path.to_path_buf(),
+        source: source.to_string(),
         file_context: classify_file_context(path),
         subjects,
         caller_sites,
