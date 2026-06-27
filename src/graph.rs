@@ -350,8 +350,13 @@ const MAX_TOTAL_CYCLES: usize = 200;
 pub(crate) struct ProjectGraph {
     /// Parsed IR for every file in scope.
     pub files: Vec<FileIr>,
+    /// Raw manifest contents (`package.json`, `tsconfig.json`, `pnpm-workspace.yaml`, lockfiles, etc.).
+    pub manifests: HashMap<PathBuf, String>,
     /// Resolved JSX **Caller Sites** indexed by target `(file, component_name)`.
     callers_by_target: HashMap<ComponentTarget, Vec<ResolvedCallerSite>>,
+    targets: Vec<IndexedTargetFile>,
+    ts_mappings: Vec<CompiledPathMapping>,
+    pkg_manifests: Vec<PackageManifestInfo>,
     /// Whether any `package.json` or `tsconfig.json` manifests were supplied.
     pub has_manifests: bool,
     /// Indices into `files` that are unreachable orphan files (`unused-file`).
@@ -485,7 +490,11 @@ impl ProjectGraph {
 
         Self {
             files,
+            manifests,
             callers_by_target,
+            targets,
+            ts_mappings,
+            pkg_manifests,
             has_manifests,
             unused_file_indices,
             unused_exports,
@@ -525,6 +534,107 @@ impl ProjectGraph {
         resolve_specifier_to_target_indices(importer_path, specifier, &targets, &[], &[])
             .into_iter()
             .next()
+    }
+
+    /// Resolves `specifier` imported from `importer_path` to matching [`FileIr`] entries in the graph.
+    #[must_use]
+    pub(crate) fn resolve_imported_module_files(
+        &self,
+        importer_path: &Path,
+        specifier: &str,
+    ) -> Vec<&FileIr> {
+        resolve_specifier_to_target_indices(
+            importer_path,
+            specifier,
+            &self.targets,
+            &self.ts_mappings,
+            &self.pkg_manifests,
+        )
+        .into_iter()
+        .filter_map(|idx| self.files.get(idx))
+        .collect()
+    }
+
+    /// Resolves an imported symbol `(importer_path, specifier, exported_name)` across module boundaries
+    /// and barrel re-exports (`export { a as b } from ...`, `export * from ...`) to `(defining_file, local_name)`.
+    #[must_use]
+    pub(crate) fn resolve_exported_symbol(
+        &self,
+        importer_path: &Path,
+        specifier: &str,
+        exported_name: &str,
+    ) -> Option<(&FileIr, String)> {
+        self.resolve_exported_symbol_depth(importer_path, specifier, exported_name, 0)
+    }
+
+    fn resolve_exported_symbol_depth(
+        &self,
+        importer_path: &Path,
+        specifier: &str,
+        exported_name: &str,
+        depth: usize,
+    ) -> Option<(&FileIr, String)> {
+        if depth > 8 {
+            return None;
+        }
+        for target_file in self.resolve_imported_module_files(importer_path, specifier) {
+            if let Some(found) = self.resolve_export_in_file(target_file, exported_name, depth) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn resolve_export_in_file<'a>(
+        &'a self,
+        target_file: &'a FileIr,
+        exported_name: &str,
+        depth: usize,
+    ) -> Option<(&'a FileIr, String)> {
+        // 1. Direct export (`export const foo`, `export default bar`, `export { local as exported }`)
+        for exp in &target_file.module.exports {
+            if !exp.is_type_only && exp.from_source.is_none() && exp.name == exported_name {
+                let local = exp.local_name.clone().unwrap_or_else(|| exp.name.clone());
+                return Some((target_file, local));
+            }
+        }
+        // 2. Named re-export (`export { orig as alias } from './other'`)
+        for exp in &target_file.module.exports {
+            if exp.is_type_only || exp.is_namespace_re_export || exp.name != exported_name {
+                continue;
+            }
+            if let Some(re_spec) = &exp.from_source {
+                let upstream_name = exp.local_name.as_deref().unwrap_or(exp.name.as_str());
+                if let Some(found) = self.resolve_exported_symbol_depth(
+                    &target_file.path,
+                    re_spec,
+                    upstream_name,
+                    depth + 1,
+                ) {
+                    return Some(found);
+                }
+            }
+        }
+        // 3. Wildcard barrel re-export (`export * from './other'`)
+        if exported_name == "default" {
+            return None;
+        }
+        for exp in &target_file.module.exports {
+            if exp.is_type_only || !exp.is_namespace_re_export || exp.name != "*" {
+                continue;
+            }
+            if let Some(re_spec) = &exp.from_source
+                && let Some(found) = self.resolve_exported_symbol_depth(
+                    &target_file.path,
+                    re_spec,
+                    exported_name,
+                    depth + 1,
+                )
+            {
+                return Some(found);
+            }
+        }
+        None
     }
 }
 
