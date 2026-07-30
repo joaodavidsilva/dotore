@@ -12,8 +12,12 @@ pub(crate) mod performance;
 pub(crate) mod prop_sync;
 pub(crate) mod r3f;
 pub(crate) mod reduced_motion;
+pub(crate) mod security;
+pub(crate) mod server_nextjs;
+pub(crate) mod supply_chain;
 pub(crate) mod types;
 
+pub use supply_chain::supply_chain_purl_hash;
 pub use types::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
     FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
@@ -118,6 +122,8 @@ pub(crate) fn evaluate_file_in_package(
 
     evaluate_file_ir_facets(file, config, enabled_rules.is_some(), &is_active, out);
     bundle_size::evaluate_barrel_imports(graph, file, gate, &is_active, out);
+    security::evaluate_security_rules(graph, file, &is_active, out);
+    server_nextjs::evaluate_server_and_nextjs_rules(graph, file, config, &is_active, out);
 
     // Restamp severities and apply inline suppressions for diagnostics emitted on this file
     let mut retained = Vec::with_capacity(out.len().saturating_sub(start_idx));
@@ -477,6 +483,7 @@ fn evaluate_project_graph_rules(
         resolve_rule_activation,
         out,
     );
+    supply_chain::evaluate_project_supply_chain_rules(graph, packages, enabled_rules, out);
 }
 
 fn resolve_rule_activation(
@@ -669,24 +676,6 @@ fn evaluate_file_ir_facets<F>(
                     "expoNoNonInlinedEnv",
                     &sink.target_name,
                     "Dynamic `process.env[key]` cannot be inlined by Expo Metro bundler; use static `process.env.EXPO_PUBLIC_*` property access.".to_string(),
-                    sink.loc,
-                    sink.span,
-                );
-            }
-            SecuritySinkKind::UnauthenticatedServerAction
-                if is_active(RuleId::ServerAuthActions).is_some() =>
-            {
-                push_simple_diagnostic(
-                    out,
-                    file,
-                    sink.subject_name.clone(),
-                    RuleId::ServerAuthActions,
-                    "serverAuthActions",
-                    &sink.target_name,
-                    format!(
-                        "Exported Server Action {:?} performs operations without an authentication/authorization guard.",
-                        sink.target_name
-                    ),
                     sink.loc,
                     sink.span,
                 );
@@ -892,21 +881,6 @@ fn evaluate_jsx_element_rules<F>(
                 jsx.span,
             );
         }
-    }
-
-    // 5. `nextjs-no-img-element` (`alt-text` is evaluated by `src/rules/a11y.rs`)
-    if jsx.name == "img" && is_active(RuleId::NextjsNoImgElement).is_some() {
-        push_simple_diagnostic(
-            out,
-            file,
-            jsx.enclosing_subject.clone(),
-            RuleId::NextjsNoImgElement,
-            "nextjsNoImgElement",
-            "img",
-            "Prefer `<Image />` from `next/image` over raw `<img>` in Next.js.".to_string(),
-            jsx.loc,
-            jsx.span,
-        );
     }
 
     // 6. `jsx-no-new-object-as-prop` (on custom components, disabled when ReactCompiler is active)
