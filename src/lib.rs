@@ -35,8 +35,8 @@ pub(crate) mod score;
 pub(crate) mod search;
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
-    DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, WorkspacePackage,
-    discover_workspace_packages, load_config_from_dir, mutate_config_in_dir,
+    DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
+    WorkspacePackage, discover_workspace_packages, load_config_from_dir, mutate_config_in_dir,
     resolve_package_for_file,
 };
 pub use diff::{
@@ -67,6 +67,7 @@ pub use rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
     FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
     RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
+    supply_chain_purl_hash,
 };
 pub use runtime_scan::{
     BuildRuntimeScanReportInput, ComponentEventSource, LocalUrlSuggestion,
@@ -196,6 +197,10 @@ pub fn analyze_project_sources(
             name == "package.json"
                 || name == "tsconfig.json"
                 || name == "jsconfig.json"
+                || name == "pnpm-workspace.yaml"
+                || name == "pnpm-lock.yaml"
+                || name == "package-lock.json"
+                || name == "yarn.lock"
                 || (name.starts_with("tsconfig.") && name.ends_with(".json"))
                 || name.starts_with("dotore.config.")
         })
@@ -258,13 +263,23 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
+        let is_in_node_modules = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("node_modules/");
         if file_name == "package.json" {
             manifests.insert(path, content.clone());
-            pkg_jsons.push((parent_dir, content));
+            if !is_in_node_modules {
+                pkg_jsons.push((parent_dir, content));
+            }
         } else if file_name == "tsconfig.json"
             || file_name == "jsconfig.json"
             || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
             || file_name == "app.json"
+            || file_name == "pnpm-workspace.yaml"
+            || file_name == "pnpm-lock.yaml"
+            || file_name == "package-lock.json"
+            || file_name == "yarn.lock"
         {
             if is_compiler_config_filename(file_name) {
                 compiler_configs.push((parent_dir, content.clone()));
@@ -624,6 +639,14 @@ fn load_disk_manifests(
             "tsconfig.app.json",
             "jsconfig.json",
             "app.json",
+            "pnpm-workspace.yaml",
+            "pnpm-lock.yaml",
+            "package-lock.json",
+            "yarn.lock",
+            "node_modules/next/package.json",
+            "node_modules/react-server-dom-webpack/package.json",
+            "node_modules/react-server-dom-parcel/package.json",
+            "node_modules/react-server-dom-turbopack/package.json",
         ] {
             let p = if dir == Path::new(".") {
                 PathBuf::from(name)
