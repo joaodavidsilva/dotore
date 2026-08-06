@@ -148,7 +148,8 @@ where
     let async_flows = extract_async_flows(&semantic, &line_starts);
     let security_sinks = extract_security_sinks(&parsed.program, &semantic, &module, &line_starts);
     let suppressions = extract_file_suppressions(source);
-    let mut semantic_sites = extract_semantic_rule_sites(&semantic, &ref_entries, &line_starts);
+    let mut semantic_sites =
+        extract_semantic_rule_sites(path, &parsed.program, &semantic, &ref_entries, &line_starts);
     let (a11y_sites, static_dom_ids, has_unresolved_id_spread) =
         extract_a11y_sites_and_dom_ids(path, &parsed.program, &semantic, &line_starts);
     semantic_sites.extend(a11y_sites);
@@ -1333,7 +1334,62 @@ fn extract_module_ir(
         module.whole_namespace_uses = whole_uses;
     }
     module.is_aggregation_barrel = is_aggregation_barrel_program(program, &module);
+    module.component_children_targets = extract_component_children_targets(semantic);
     module
+}
+
+fn extract_component_children_targets(semantic: &Semantic<'_>) -> Vec<(String, String)> {
+    let mut targets = Vec::new();
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        let Some(comp_name) = get_subject_name(semantic, node_id) else {
+            continue;
+        };
+        if !is_component_name(&comp_name) {
+            continue;
+        }
+        let comp_span = node.span();
+        let comp_src = comp_span.source_text(semantic.source_text());
+        if !comp_src.contains("children") && !comp_src.contains("...props") {
+            continue;
+        }
+        // Find the JSX element inside this component that directly receives `{children}` or `{props.children}` or `{...props}`
+        for (_, inner_node) in semantic.nodes().iter_enumerated() {
+            let AstKind::JSXElement(jsx_el) = inner_node.kind() else {
+                continue;
+            };
+            if !comp_span.contains_inclusive(jsx_el.span) {
+                continue;
+            }
+            let forwards_in_children = jsx_el.children.iter().any(|ch| {
+                let ch_text = ch.span().source_text(semantic.source_text()).trim();
+                ch_text == "{children}"
+                    || ch_text == "{props.children}"
+                    || ch_text == "{content}"
+                    || ch_text == "<>{children}</>"
+            });
+            let forwards_in_attrs = jsx_el.opening_element.attributes.iter().any(|a| {
+                let a_text = a.span().source_text(semantic.source_text()).trim();
+                a_text == "{...props}" || a_text == "children={children}"
+            });
+            if forwards_in_children || forwards_in_attrs {
+                let target_name = jsx_el
+                    .opening_element
+                    .name
+                    .span()
+                    .source_text(semantic.source_text())
+                    .trim()
+                    .to_string();
+                if !target_name.is_empty()
+                    && target_name != "Fragment"
+                    && target_name != "React.Fragment"
+                {
+                    targets.push((comp_name.clone(), target_name));
+                    break;
+                }
+            }
+        }
+    }
+    targets
 }
 
 fn collect_declarator_namespace_uses(
