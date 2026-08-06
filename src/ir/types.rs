@@ -363,6 +363,8 @@ pub struct JsxElementIr {
     pub has_render_prop_children: bool,
     /// Whether the root component identifier is unresolved in `oxc_semantic` scope.
     pub is_unresolved_component: bool,
+    /// Whether the root component identifier resolves to a static module import binding.
+    pub is_imported_component: bool,
     /// Static `#target` fragment ID if this element has an `href="#target"` attribute (for `anchor-target-exists`).
     pub fragment_href_target: Option<String>,
     /// 1-based start line of the `<Tag` opening element.
@@ -482,6 +484,8 @@ pub struct ModuleIr {
     pub has_use_server: bool,
     /// Whether the module body consists solely of imports and re-exports (an aggregation barrel).
     pub is_aggregation_barrel: bool,
+    /// Local component declarations `(component_name, target_jsx_name)` that forward `children` into `<Target>`.
+    pub component_children_targets: Vec<(String, String)>,
 }
 
 /// Kind of **Symbol Outline** extracted for fuzzy symbol search (`dotore search`).
