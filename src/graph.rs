@@ -522,6 +522,79 @@ impl ProjectGraph {
             .unwrap_or_default()
     }
 
+    /// Resolves a component's transitive `children`-forwarding JSX target across same-file and imported declarations.
+    #[must_use]
+    pub(crate) fn resolve_children_forwarding_target(
+        &self,
+        start_file: &FileIr,
+        component_name: &str,
+        is_imported: bool,
+    ) -> Option<String> {
+        let mut current_file = start_file;
+        let mut current_name = component_name.to_string();
+        let mut must_follow_import = is_imported;
+
+        for _ in 0..8 {
+            if !must_follow_import {
+                let Some((_, next_target)) = current_file
+                    .module
+                    .component_children_targets
+                    .iter()
+                    .find(|(c, _)| c == &current_name)
+                else {
+                    break;
+                };
+                current_name = next_target.clone();
+                must_follow_import = current_file
+                    .module
+                    .imports
+                    .iter()
+                    .any(|imp| imp.specifiers.contains(&current_name));
+                continue;
+            }
+            // Check if `current_name` is imported from another file in `self.files`
+            let resolved_import = current_file
+                .module
+                .imports
+                .iter()
+                .flat_map(|imp| imp.bindings.iter().map(move |b| (imp, b)))
+                .find(|(_, b)| b.local_name == current_name && !b.is_namespace && !b.is_type_only)
+                .map(|(imp, b)| (imp.source.as_str(), b.imported_name.as_str()));
+
+            let Some((specifier, exported_name)) = resolved_import else {
+                break;
+            };
+            if !specifier.starts_with('.') && !specifier.starts_with('/') {
+                break;
+            }
+
+            let Some(target_file) = self.find_imported_file(&current_file.path, specifier) else {
+                break;
+            };
+            current_file = target_file;
+            if exported_name != "default" {
+                current_name = exported_name.to_string();
+            }
+            must_follow_import = false;
+        }
+
+        (current_name != component_name).then_some(current_name)
+    }
+
+    fn find_imported_file(&self, importer_path: &Path, specifier: &str) -> Option<&FileIr> {
+        let base_dir = importer_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let joined = normalize_path_components(&base_dir.join(specifier));
+        let joined_stem = strip_source_extension(&joined);
+        self.files.iter().find(|f| {
+            let f_norm = normalize_path_components(&f.path);
+            let f_stem = strip_source_extension(&f_norm);
+            f_norm == joined || f_stem == joined_stem || f_stem == format!("{joined_stem}/index")
+        })
+    }
+
     /// Resolves a relative module specifier (`./...` or `../...`) from `importer_path`
     /// to the matching file index in `self.files`.
     #[must_use]
