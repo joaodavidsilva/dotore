@@ -4,7 +4,7 @@ use oxc_ast::{
     AstKind,
     ast::{
         ArrowFunctionBody, BindingPattern, CallExpression, Expression, JSXAttributeItem,
-        JSXAttributeValue, JSXChild, JSXElementName, JSXExpression, Statement,
+        JSXAttributeValue, JSXChild, JSXElementName, JSXExpression, Program, Statement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, Semantic, SymbolFlags, SymbolId};
@@ -118,6 +118,61 @@ pub(crate) fn is_use_ref_node(semantic: &Semantic<'_>, node_id: NodeId) -> bool 
 /// Checks if `call` is a `useEffect(...)` call (intentionally excluding `useLayoutEffect`).
 pub(crate) fn is_use_effect_call(semantic: &Semantic<'_>, call: &CallExpression<'_>) -> bool {
     is_react_hook_callee(semantic, &call.callee, "useEffect")
+}
+
+/// Extracts the short identifier or static member property name of a `CallExpression` callee.
+pub(crate) fn extract_callee_short_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
+    match callee.without_parentheses() {
+        Expression::Identifier(id) => Some(id.name.as_str()),
+        Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str()),
+        _ => None,
+    }
+}
+
+/// Checks if `program` contains a static `import` declaration from any module in `allowed_sources`.
+pub(crate) fn has_import_from(program: &Program<'_>, allowed_sources: &[&str]) -> bool {
+    for stmt in &program.body {
+        if let Statement::ImportDeclaration(imp) = stmt
+            && let Some(src) = imp.source.value.as_str()
+            && allowed_sources.contains(&src)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks if `node_id` is nested inside a `useEffect(...)` call.
+pub(crate) fn is_inside_use_effect(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        if let AstKind::CallExpression(call) = semantic.nodes().kind(anc_id)
+            && is_use_effect_call(semantic, call)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks if `node_id` executes directly in the render body of an enclosing **Subject**
+/// (not inside a nested callback, effect, or event handler function).
+pub(crate) fn is_direct_render_phase_node(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        if matches!(
+            semantic.nodes().kind(anc_id),
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        ) {
+            if find_enclosing_react_node(semantic, anc_id) == Some(anc_id) {
+                return true;
+            }
+            let p_id = semantic.nodes().parent_id(anc_id);
+            if find_enclosing_react_node(semantic, p_id) == Some(p_id) {
+                return true;
+            }
+            return false;
+        }
+    }
+    false
 }
 
 /// Checks if `name` is a valid uppercase React component identifier (`MyComponent`).
@@ -460,6 +515,7 @@ pub(crate) fn extract_jsx_elements(
 
         let opener_start_loc = loc_from_line_starts(line_starts, opening.span.start);
         let opener_end_loc = loc_from_line_starts(line_starts, opening.span.end.saturating_sub(1));
+        let is_imported_component = is_jsx_root_imported(semantic, &opening.name);
 
         elements.push(JsxElementIr {
             name,
@@ -477,6 +533,7 @@ pub(crate) fn extract_jsx_elements(
             has_element_children,
             has_render_prop_children,
             is_unresolved_component,
+            is_imported_component,
             fragment_href_target,
             opener_start_line: opener_start_loc.line,
             opener_end_line: opener_end_loc.line,
@@ -654,6 +711,25 @@ pub(crate) fn classify_jsx_element_name(
         }
         JSXElementName::ThisExpression(_) => ("this".to_string(), "this".to_string(), true, false),
     }
+}
+
+fn is_jsx_root_imported(semantic: &Semantic<'_>, name: &JSXElementName<'_>) -> bool {
+    let JSXElementName::IdentifierReference(ident) = name else {
+        return false;
+    };
+    let Some(ref_id) = ident.reference_id.get() else {
+        return false;
+    };
+    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+        return false;
+    };
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    matches!(
+        semantic.nodes().kind(decl_id),
+        AstKind::ImportSpecifier(_)
+            | AstKind::ImportDefaultSpecifier(_)
+            | AstKind::ImportNamespaceSpecifier(_)
+    )
 }
 
 pub(crate) fn check_enclosing_array_map(
