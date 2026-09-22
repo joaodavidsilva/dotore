@@ -615,27 +615,6 @@ const COMMON_LANG_TAGS: &[&str] = &[
     "art", "cel", "sgn", "i",
 ];
 
-const INK_ARIA_ROLES: &[&str] = &[
-    "button",
-    "checkbox",
-    "combobox",
-    "list",
-    "listbox",
-    "listitem",
-    "menu",
-    "menuitem",
-    "option",
-    "progressbar",
-    "radio",
-    "radiogroup",
-    "tab",
-    "tablist",
-    "table",
-    "textbox",
-    "timer",
-    "toolbar",
-];
-
 /// Extracts all single-pass `a11y` rule sites and static DOM `id`s from `semantic`.
 #[must_use]
 pub(crate) fn extract_a11y_sites_and_dom_ids(
@@ -3229,27 +3208,6 @@ fn check_custom_a11y_rules(
                 }
             }
         }
-    }
-
-    // 24. `ink-valid-aria-semantics`
-    if matches!(tag, "Box" | "Text")
-        && let Some(ar_attr) = find_attr(&opening.attributes, "aria-role")
-        && let Some(ar_val) = get_attr_static_str(semantic, ar_attr, const_strings)
-        && !INK_ARIA_ROLES.contains(&ar_val.as_str())
-    {
-        push_site(
-            sites,
-            RuleId::InkValidAriaSemantics,
-            subject_name.clone(),
-            "inkValidAriaSemantics",
-            &ar_val,
-            format!("`{ar_val}` is not a supported Ink `aria-role`."),
-            loc_from_line_starts(line_starts, ar_attr.span.start),
-            ByteSpan {
-                start: ar_attr.span.start,
-                end: ar_attr.span.end,
-            },
-        );
     }
 
     // 25. Component library composition rules (`shadcn-*`, `radix-*`, `base-ui-*`, `react-aria-*`)
