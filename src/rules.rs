@@ -5,16 +5,20 @@ pub(crate) mod a11y;
 pub(crate) mod bundle_size;
 pub(crate) mod derived_state;
 pub(crate) mod design;
+pub(crate) mod ecosystem_ui;
 pub(crate) mod external_sync;
 pub(crate) mod js_performance;
 pub(crate) mod parent_flow;
 pub(crate) mod performance;
 pub(crate) mod prop_sync;
 pub(crate) mod r3f;
+pub(crate) mod react_native;
 pub(crate) mod reduced_motion;
 pub(crate) mod security;
 pub(crate) mod server_nextjs;
+pub(crate) mod stores;
 pub(crate) mod supply_chain;
+pub(crate) mod tanstack;
 pub(crate) mod types;
 
 pub use supply_chain::supply_chain_purl_hash;
@@ -46,8 +50,6 @@ use crate::{
         reduced_motion::evaluate_project_reduced_motion,
     },
 };
-
-const BUILTIN_RN_TEXT_COMPONENTS: &[&str] = &["Text", "TSpan", "Animated.Text"];
 
 /// Evaluates all enabled rules across the [`ProjectGraph`] using default React capability gate and config.
 #[must_use]
@@ -120,7 +122,14 @@ pub(crate) fn evaluate_file_in_package(
     }
     check_anchor_target_exists(graph, file, &is_active, out);
 
-    evaluate_file_ir_facets(file, config, enabled_rules.is_some(), &is_active, out);
+    evaluate_file_ir_facets(
+        graph,
+        file,
+        config,
+        enabled_rules.is_some(),
+        &is_active,
+        out,
+    );
     bundle_size::evaluate_barrel_imports(graph, file, gate, &is_active, out);
     security::evaluate_security_rules(graph, file, &is_active, out);
     server_nextjs::evaluate_server_and_nextjs_rules(graph, file, config, &is_active, out);
@@ -484,6 +493,12 @@ fn evaluate_project_graph_rules(
         out,
     );
     supply_chain::evaluate_project_supply_chain_rules(graph, packages, enabled_rules, out);
+    react_native::evaluate_react_native_and_expo_project_checks(
+        graph,
+        packages,
+        enabled_rules,
+        out,
+    );
 }
 
 fn resolve_rule_activation(
@@ -592,6 +607,7 @@ where
 }
 
 fn evaluate_file_ir_facets<F>(
+    graph: &ProjectGraph,
     file: &FileIr,
     config: &DotoreConfig,
     has_explicit_rule_filter: bool,
@@ -602,7 +618,15 @@ fn evaluate_file_ir_facets<F>(
 {
     // 1. JSX element rules
     for jsx in &file.jsx_elements {
-        evaluate_jsx_element_rules(file, jsx, config, has_explicit_rule_filter, is_active, out);
+        evaluate_jsx_element_rules(
+            graph,
+            file,
+            jsx,
+            config,
+            has_explicit_rule_filter,
+            is_active,
+            out,
+        );
     }
 
     // 2. Module import rules (e.g. `preact-no-react-import`)
@@ -765,6 +789,7 @@ fn evaluate_file_ir_facets<F>(
 }
 
 fn evaluate_jsx_element_rules<F>(
+    graph: &ProjectGraph,
     file: &FileIr,
     jsx: &JsxElementIr,
     config: &DotoreConfig,
@@ -774,10 +799,9 @@ fn evaluate_jsx_element_rules<F>(
 ) where
     F: Fn(RuleId) -> Option<RuleSeverity>,
 {
-    // 1. `rn-no-raw-text` (honoring `textComponents` and `rawTextWrapperComponents`)
-    if jsx.has_raw_text_child
-        && is_active(RuleId::RnNoRawText).is_some()
-        && !is_rn_raw_text_allowed(jsx, config)
+    // 1. `rn-no-raw-text` (honoring `textComponents`, `rawTextWrapperComponents`, and cross-file wrappers)
+    if is_active(RuleId::RnNoRawText).is_some()
+        && react_native::is_rn_raw_text_violation(graph, file, jsx, config)
     {
         push_simple_diagnostic(
             out,
@@ -796,11 +820,9 @@ fn evaluate_jsx_element_rules<F>(
         );
     }
 
-    // 2. `ink-no-raw-text`
-    if jsx.has_raw_text_child
-        && is_active(RuleId::InkNoRawText).is_some()
-        && jsx.name != "Text"
-        && !jsx.ancestor_elements.iter().any(|a| a == "Text")
+    // 2. `ink-no-raw-text` (including cross-file wrappers)
+    if is_active(RuleId::InkNoRawText).is_some()
+        && ecosystem_ui::is_ink_raw_text_violation(graph, file, jsx)
     {
         push_simple_diagnostic(
             out,
@@ -926,30 +948,6 @@ fn evaluate_jsx_element_rules<F>(
             jsx.span,
         );
     }
-}
-
-fn is_rn_raw_text_allowed(jsx: &JsxElementIr, config: &DotoreConfig) -> bool {
-    let is_text_comp = |name: &str| {
-        BUILTIN_RN_TEXT_COMPONENTS.contains(&name)
-            || config.text_components.iter().any(|c| c == name)
-    };
-
-    if is_text_comp(&jsx.name) || jsx.ancestor_elements.iter().any(|a| is_text_comp(a)) {
-        return true;
-    }
-
-    // `rawTextWrapperComponents` suppresses `rn-no-raw-text` ONLY when the wrapper's children
-    // are purely stringifiable (no sibling JSX element children).
-    if config
-        .raw_text_wrapper_components
-        .iter()
-        .any(|w| w == &jsx.name)
-        && !jsx.has_element_children
-    {
-        return true;
-    }
-
-    false
 }
 
 #[expect(
