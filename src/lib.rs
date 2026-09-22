@@ -272,15 +272,7 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             if !is_in_node_modules {
                 pkg_jsons.push((parent_dir, content));
             }
-        } else if file_name == "tsconfig.json"
-            || file_name == "jsconfig.json"
-            || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
-            || file_name == "app.json"
-            || file_name == "pnpm-workspace.yaml"
-            || file_name == "pnpm-lock.yaml"
-            || file_name == "package-lock.json"
-            || file_name == "yarn.lock"
-        {
+        } else if is_non_js_manifest_filename(file_name) {
             if is_compiler_config_filename(file_name) {
                 compiler_configs.push((parent_dir, content.clone()));
             }
@@ -365,6 +357,27 @@ fn is_compiler_config_filename(file_name: &str) -> bool {
         || file_name.starts_with("vite.config.")
         || file_name == "app.json"
         || file_name.starts_with("app.config.")
+}
+
+fn is_non_js_manifest_filename(file_name: &str) -> bool {
+    file_name == "tsconfig.json"
+        || file_name == "jsconfig.json"
+        || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
+        || file_name == "app.json"
+        || file_name == "app.config.json"
+        || file_name == "babel.config.json"
+        || file_name == ".babelrc"
+        || file_name == ".babelrc.json"
+        || file_name == "build.gradle"
+        || file_name == "build.gradle.kts"
+        || file_name == ".gitignore"
+        || file_name == "pnpm-lock.yaml"
+        || file_name == "yarn.lock"
+        || file_name == "package-lock.json"
+        || file_name == "bun.lockb"
+        || file_name == "bun.lock"
+        || file_name == "pnpm-workspace.yaml"
+        || file_name.starts_with(".env")
 }
 
 /// Scans the filesystem according to [`ScanOptions`], returning the [`JsonReport`] and source map.
@@ -639,6 +652,19 @@ fn load_disk_manifests(
             "tsconfig.app.json",
             "jsconfig.json",
             "app.json",
+            "app.config.json",
+            "babel.config.json",
+            ".babelrc",
+            ".babelrc.json",
+            "android/app/build.gradle",
+            "android/app/build.gradle.kts",
+            ".gitignore",
+            "bun.lockb",
+            "bun.lock",
+            ".env.local",
+            ".env.development.local",
+            ".env.production.local",
+            ".env.test.local",
             "pnpm-workspace.yaml",
             "pnpm-lock.yaml",
             "package-lock.json",
