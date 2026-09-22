@@ -1,13 +1,13 @@
 //! Reference traversal (`ascend`, `descend`, synchronous call chains), mutations,
 //! async flows, security sinks, and semantic rule sites over `oxc_semantic`.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
 use oxc_ast::{
     AstKind,
     ast::{
-        ArrowFunctionBody, AssignmentTarget, BindingPattern, CallExpression, Declaration,
-        Expression, ObjectPropertyKind, Program, Statement,
+        AssignmentTarget, BindingPattern, CallExpression, Declaration, Expression, Program,
+        Statement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, Semantic};
@@ -18,8 +18,8 @@ use crate::rules::RuleId;
 
 use super::{
     react_ast::{
-        RefEntry, find_enclosing_react_node, get_subject_name, is_functional_hoc,
-        is_react_hook_callee, is_use_effect_call, is_use_ref_node, is_use_state_node,
+        RefEntry, extract_callee_short_name, find_enclosing_react_node, get_subject_name,
+        is_functional_hoc, is_react_hook_callee, is_use_ref_node, is_use_state_node,
     },
     types::{
         AsyncFlowIr, ByteSpan, ModuleIr, MutationSiteIr, SecuritySinkIr, SecuritySinkKind,
@@ -793,12 +793,35 @@ pub(crate) fn extract_security_sinks(
 
 /// Extracts framework-specific semantic rule sites from the single-pass AST and scope tree.
 pub(crate) fn extract_semantic_rule_sites(
+    path: &Path,
+    program: &Program<'_>,
     semantic: &Semantic<'_>,
     _ref_entries: &[RefEntry],
     line_starts: &[u32],
 ) -> Vec<SemanticRuleSite> {
     let mut sites = Vec::new();
 
+    crate::rules::tanstack::extract_tanstack_sites(
+        path,
+        program,
+        semantic,
+        line_starts,
+        &mut sites,
+    );
+    crate::rules::react_native::extract_react_native_sites(
+        path,
+        program,
+        semantic,
+        line_starts,
+        &mut sites,
+    );
+    crate::rules::stores::extract_store_sites(program, semantic, line_starts, &mut sites);
+    crate::rules::ecosystem_ui::extract_ecosystem_ui_sites(
+        program,
+        semantic,
+        line_starts,
+        &mut sites,
+    );
     for (node_id, node) in semantic.nodes().iter_enumerated() {
         let AstKind::CallExpression(call) = node.kind() else {
             continue;
@@ -806,104 +829,6 @@ pub(crate) fn extract_semantic_rule_sites(
         let callee_name = extract_callee_short_name(&call.callee);
         let subject_name = find_enclosing_react_node(semantic, node_id)
             .and_then(|subj_id| get_subject_name(semantic, subj_id));
-        let loc = loc_from_line_starts(line_starts, call.span.start);
-        let span = ByteSpan {
-            start: call.span.start,
-            end: call.span.end,
-        };
-
-        if callee_name == Some("useQuery") && has_void_query_fn(call, semantic.source_text()) {
-            sites.push(SemanticRuleSite {
-                rule: RuleId::QueryNoVoidQueryFn,
-                subject_name: subject_name.clone(),
-                message_id: "noVoidQueryFn",
-                target_name: "useQuery".to_string(),
-                message: "`useQuery` `queryFn` does not return a value; TanStack Query requires `queryFn` to return a resolved data value or promise.".to_string(),
-                loc,
-                span,
-                autofix: None,
-            });
-        }
-
-        if subject_name.is_some()
-            && call.arguments.is_empty()
-            && callee_name.is_some_and(|n| {
-                n.starts_with("use") && n.ends_with("Store") && n != "useSyncExternalStore"
-            })
-            && let AstKind::VariableDeclarator(decl) = semantic.nodes().parent_kind(node_id)
-            && matches!(decl.id, BindingPattern::ObjectPattern(_))
-        {
-            let store_name = callee_name.unwrap_or("useStore");
-            sites.push(SemanticRuleSite {
-                rule: RuleId::ZustandNoWholeStoreDestructure,
-                subject_name: subject_name.clone(),
-                message_id: "noWholeStoreDestructure",
-                target_name: store_name.to_string(),
-                message: format!(
-                    "Destructuring `{store_name}()` without a selector subscribes the component to the entire Zustand store."
-                ),
-                loc,
-                span,
-                autofix: None,
-            });
-        }
-
-        if subject_name.is_some() && callee_name == Some("selectAtom") {
-            sites.push(SemanticRuleSite {
-                rule: RuleId::JotaiSelectAtomInRenderBody,
-                subject_name: subject_name.clone(),
-                message_id: "noSelectAtomInRenderBody",
-                target_name: "selectAtom".to_string(),
-                message: "Avoid calling `selectAtom(...)` directly in render without `useMemo` or hoisting to module scope.".to_string(),
-                loc,
-                span,
-                autofix: None,
-            });
-        }
-
-        if matches!(callee_name, Some("autorun" | "reaction"))
-            && matches!(
-                semantic.nodes().parent_kind(node_id),
-                AstKind::ExpressionStatement(_)
-            )
-            && is_inside_use_effect(semantic, node_id)
-        {
-            let fn_name = callee_name.unwrap_or("reaction");
-            sites.push(SemanticRuleSite {
-                rule: RuleId::MobxReactionDisposerDiscarded,
-                subject_name: subject_name.clone(),
-                message_id: "mobxReactionDisposerDiscarded",
-                target_name: fn_name.to_string(),
-                message: format!(
-                    "`{fn_name}(...)` disposer is discarded inside `useEffect`; return the disposer so the MobX reaction is cleaned up."
-                ),
-                loc,
-                span,
-                autofix: None,
-            });
-        }
-
-        if matches!(callee_name, Some("strict" | "passthrough"))
-            && let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
-        {
-            let obj_text = mem.object.span().source_text(semantic.source_text());
-            if obj_text.contains("z.object(") {
-                let method = callee_name.unwrap_or("strict");
-                sites.push(SemanticRuleSite {
-                    rule: RuleId::ZodV4DeprecatedParse,
-                    subject_name: subject_name.clone(),
-                    message_id: "zodV4DeprecatedObjectMethod",
-                    target_name: method.to_string(),
-                    message: format!(
-                        "`z.object(...).{method}()` is deprecated in Zod v4; use `z.strictObject(...)` or `z.looseObject(...)` instead."
-                    ),
-                    loc,
-                    span,
-                    autofix: None,
-                });
-            }
-        }
-
         if matches!(
             callee_name,
             Some("useEffect" | "useLayoutEffect" | "useMemo" | "useCallback")
@@ -933,58 +858,6 @@ pub(crate) fn extract_semantic_rule_sites(
     }
 
     sites
-}
-
-fn extract_callee_short_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
-    match callee.without_parentheses() {
-        Expression::Identifier(id) => Some(id.name.as_str()),
-        Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str()),
-        _ => None,
-    }
-}
-
-fn has_void_query_fn(call: &CallExpression<'_>, source: &str) -> bool {
-    let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
-        return false;
-    };
-    let Expression::ObjectExpression(obj) = first_arg.without_parentheses() else {
-        return false;
-    };
-    for prop_kind in &obj.properties {
-        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-            continue;
-        };
-        if prop.key.static_name().as_ref().and_then(|n| n.as_str()) != Some("queryFn") {
-            continue;
-        }
-        match prop.value.without_parentheses() {
-            Expression::ArrowFunctionExpression(arrow) => {
-                if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
-                    let body_text = body.span.source_text(source);
-                    return !body_text.contains("return ");
-                }
-            }
-            Expression::FunctionExpression(func) => {
-                if let Some(body) = &func.body {
-                    let body_text = body.span.source_text(source);
-                    return !body_text.contains("return ");
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn is_inside_use_effect(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
-    for anc_id in semantic.nodes().ancestor_ids(node_id) {
-        if let AstKind::CallExpression(call) = semantic.nodes().kind(anc_id)
-            && is_use_effect_call(semantic, call)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 fn find_missing_hook_dependencies(
