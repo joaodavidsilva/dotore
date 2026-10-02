@@ -309,6 +309,16 @@ pub struct SubjectIr {
     pub state_slots: Vec<StateSlot>,
     /// `useEffect` **Effect Nodes** registered in this **Subject**.
     pub effect_nodes: Vec<EffectNode>,
+    /// Whether wrapped in `memo(...)` / `React.memo(...)` without a custom comparator.
+    pub is_memoized: bool,
+    /// Whether wrapped in `memo(Comp, customAreEqual)` with a custom comparator.
+    pub has_custom_memo_comparator: bool,
+    /// Names of component props referenced inside hook dependency arrays (`useEffect`, `useMemo`, `useCallback`).
+    pub props_in_hook_deps: Vec<String>,
+    /// Whether this **Subject** invokes suspending APIs (`use(promise)`, `useSuspenseQuery`, `useSearchParams`, unwrapped `lazy`) without a local `<Suspense>`.
+    pub suspends: bool,
+    /// Whether this **Subject** throws synchronously in its render path without a local `<ErrorBoundary>`.
+    pub throws_in_render: bool,
 }
 
 /// A JSX element in a parent file rendering a component (`<ProfilePage userId={id} />`).
@@ -351,6 +361,12 @@ pub struct JsxElementIr {
     pub key_is_array_index: bool,
     /// Names of props whose values are inline object literals (`style={{ color: 'red' }}`).
     pub object_literal_props: Vec<String>,
+    /// Names of props whose values allocate a fresh array literal or array-producing call.
+    pub array_literal_props: Vec<String>,
+    /// Names of props whose values allocate an inline function or `.bind()` call.
+    pub function_props: Vec<String>,
+    /// Names of props whose values are inline JSX elements or fragments.
+    pub inline_jsx_props: Vec<String>,
     /// Whether this JSX element is the root element returned inside an array `.map(...)` callback.
     pub in_array_map: bool,
     /// Whether the element has non-whitespace direct `JSXText` children.
@@ -983,6 +999,42 @@ pub struct FrameHelperIr {
     pub outgoing_calls: Vec<FrameCallTargetIr>,
 }
 
+/// Extracted `<Context.Provider value={...}>` or React 19 `<Context value={...}>` site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ContextProviderSiteIr {
+    /// Base context identifier name (`"AppContext"` or `"ThemeContext"`).
+    pub(crate) context_name: String,
+    /// Full JSX tag name (`"AppContext.Provider"` or `"AppContext"`).
+    pub(crate) provider_tag_name: String,
+    /// Enclosing **Subject** name, if any.
+    pub(crate) subject_name: Option<String>,
+    /// Whether `value={...}` is an unmemoized inline literal or unmemoized render-local literal variable.
+    pub(crate) is_unmemoized_value: bool,
+    /// Property names in the provider `value` object backed by `useState` **State Slots** in the enclosing **Subject**.
+    pub(crate) state_slot_fields: Vec<String>,
+    /// Property names in the provider `value` object backed by static values, props, or setters.
+    pub(crate) static_fields: Vec<String>,
+    /// 1-based location of the provider JSX element.
+    pub(crate) loc: SourceLoc,
+    /// Byte span of the provider JSX element.
+    pub(crate) span: ByteSpan,
+}
+
+/// Extracted `useContext(MyContext)` or `use(MyContext)` consumer site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ContextConsumerSiteIr {
+    /// Consumed context identifier name (`"AppContext"`).
+    pub(crate) context_name: String,
+    /// Enclosing **Subject** name, if any.
+    pub(crate) subject_name: Option<String>,
+    /// Property names read from the context value (via object destructuring or member expressions).
+    pub(crate) read_fields: Vec<String>,
+    /// 1-based location of the `useContext` call.
+    pub(crate) loc: SourceLoc,
+    /// Byte span of the `useContext` call.
+    pub(crate) span: ByteSpan,
+}
+
 /// Complete single-pass intermediate representation for a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileIr {
@@ -1024,6 +1076,10 @@ pub struct FileIr {
     pub frame_loop_roots: Vec<FrameLoopRootIr>,
     /// Declared functions/helpers in this module with their per-frame hazards and outgoing calls.
     pub frame_helpers: Vec<FrameHelperIr>,
+    /// `<Context.Provider value={...}>` sites extracted for cross-file context analysis.
+    pub(crate) context_providers: Vec<ContextProviderSiteIr>,
+    /// `useContext(MyContext)` consumer sites extracted for cross-file context fan-out and overload analysis.
+    pub(crate) context_consumers: Vec<ContextConsumerSiteIr>,
 }
 
 /// Computes 0-based line start byte offsets for `source`.
