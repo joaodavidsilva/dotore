@@ -14,3 +14,4 @@ pub use types::{
     ByteSpan, CallerSite, DepRef, DepsSpec, EffectNode, FileContext, FileIr, JsxElementIr,
     SecuritySinkKind, SetterCallSite, SourceLoc, SubjectIr, SubjectKind, SymbolKind, SymbolOutline,
 };
+pub(crate) use types::{ContextConsumerSiteIr, ContextProviderSiteIr, SemanticRuleSite};
