@@ -581,6 +581,37 @@ impl ProjectGraph {
         (current_name != component_name).then_some(current_name)
     }
 
+    /// Resolves a JSX element (`caller_file`, `jsx_span`, `component_name`) to its target
+    /// `(&FileIr, &SubjectIr)` in the [`ProjectGraph`], if declared in the analyzed files.
+    #[must_use]
+    pub(crate) fn resolve_target_subject(
+        &self,
+        caller_file: &Path,
+        jsx_span: ByteSpan,
+        component_name: &str,
+    ) -> Option<(&FileIr, &SubjectIr)> {
+        for (target_key, callers) in &self.callers_by_target {
+            if callers
+                .iter()
+                .any(|c| c.caller_file == caller_file && c.span == jsx_span)
+                && let Some(target_file) = self.files.iter().find(|f| f.path == target_key.file)
+                && let Some(target_subj) = target_file
+                    .subjects
+                    .iter()
+                    .find(|s| s.name.as_deref() == Some(target_key.component_name.as_str()))
+            {
+                return Some((target_file, target_subj));
+            }
+        }
+
+        let same_file = self.files.iter().find(|f| f.path == caller_file)?;
+        let same_subj = same_file
+            .subjects
+            .iter()
+            .find(|s| s.name.as_deref() == Some(component_name))?;
+        Some((same_file, same_subj))
+    }
+
     fn find_imported_file(&self, importer_path: &Path, specifier: &str) -> Option<&FileIr> {
         let base_dir = importer_path
             .parent()
