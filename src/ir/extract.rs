@@ -34,10 +34,11 @@ use super::{
         is_state_setter, is_synchronous,
     },
     react_ast::{
-        RefEntry, extract_caller_sites, extract_jsx_elements, extract_jsx_subtrees,
-        find_enclosing_react_node, get_effect_cleanup_span, get_effect_fn_node, get_subject_name,
-        is_component_name, is_custom_hook, is_functional_hoc, is_react_hook_callee,
-        is_use_effect_call,
+        RefEntry, classify_subject_memoization, detect_subject_suspense_and_throws,
+        extract_caller_sites, extract_jsx_elements, extract_jsx_subtrees,
+        extract_subject_hook_dep_props, find_enclosing_react_node, get_effect_cleanup_span,
+        get_effect_fn_node, get_subject_name, is_component_name, is_custom_hook, is_functional_hoc,
+        is_react_hook_callee, is_use_effect_call,
     },
     types::{
         BlockDisableRange, ByteSpan, DepRef, DepsSpec, EffectNode, ExportDeclIr, ExternalStoreSite,
@@ -91,6 +92,8 @@ where
             has_unresolved_id_spread: false,
             frame_loop_roots: Vec::new(),
             frame_helpers: Vec::new(),
+            context_providers: Vec::new(),
+            context_consumers: Vec::new(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -120,6 +123,8 @@ where
             has_unresolved_id_spread: false,
             frame_loop_roots: Vec::new(),
             frame_helpers: Vec::new(),
+            context_providers: Vec::new(),
+            context_consumers: Vec::new(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -189,6 +194,32 @@ where
         &line_starts,
         &mut semantic_sites,
     );
+    let mut context_providers = Vec::new();
+    let mut context_consumers = Vec::new();
+    crate::rules::state_and_effects::extract_state_and_effects_sites(
+        &semantic,
+        &line_starts,
+        &mut semantic_sites,
+    );
+    crate::rules::react_builtins::extract_react_builtins_sites(
+        &semantic,
+        path,
+        &line_starts,
+        &mut semantic_sites,
+    );
+    crate::rules::correctness::extract_correctness_sites(
+        &semantic,
+        &line_starts,
+        &mut semantic_sites,
+    );
+    crate::rules::architecture::extract_architecture_sites(
+        &semantic,
+        &subjects,
+        &line_starts,
+        &mut semantic_sites,
+        &mut context_providers,
+        &mut context_consumers,
+    );
 
     let file_ir = FileIr {
         path: path.to_path_buf(),
@@ -210,6 +241,8 @@ where
         has_unresolved_id_spread,
         frame_loop_roots,
         frame_helpers,
+        context_providers,
+        context_consumers,
     };
 
     f(&file_ir, &semantic)
@@ -339,6 +372,19 @@ fn build_subject_ir(
         }
     }
 
+    let (is_memoized, has_custom_memo_comparator) = match subject_node_id {
+        Some(subj_id) => classify_subject_memoization(semantic, subj_id),
+        None => (false, false),
+    };
+    let props_in_hook_deps = match subject_node_id {
+        Some(subj_id) => extract_subject_hook_dep_props(semantic, subj_id),
+        None => Vec::new(),
+    };
+    let (suspends, throws_in_render) = match subject_node_id {
+        Some(subj_id) => detect_subject_suspense_and_throws(semantic, subj_id),
+        None => (false, false),
+    };
+
     SubjectIr {
         name,
         kind,
@@ -347,6 +393,11 @@ fn build_subject_ir(
         span,
         state_slots,
         effect_nodes,
+        is_memoized,
+        has_custom_memo_comparator,
+        props_in_hook_deps,
+        suspends,
+        throws_in_render,
     }
 }
 
