@@ -331,6 +331,33 @@ pub(crate) fn get_subject_name(semantic: &Semantic<'_>, subject_node_id: NodeId)
     }
 }
 
+/// Returns the top-level statements inside a **Subject** or function node (`Function` or `VariableDeclarator`).
+pub(crate) fn get_subject_body_statements<'a>(
+    semantic: &'a Semantic<'a>,
+    subject_node_id: NodeId,
+) -> Option<&'a [Statement<'a>]> {
+    match semantic.nodes().kind(subject_node_id) {
+        AstKind::Function(func) => func.body.as_ref().map(|b| b.statements.as_slice()),
+        AstKind::ArrowFunctionExpression(arrow) => match &arrow.body {
+            ArrowFunctionBody::FunctionBody(b) => Some(b.statements.as_slice()),
+            _ => None,
+        },
+        AstKind::VariableDeclarator(decl) => {
+            match decl.init.as_ref().map(Expression::without_parentheses) {
+                Some(Expression::ArrowFunctionExpression(arrow)) => match &arrow.body {
+                    ArrowFunctionBody::FunctionBody(b) => Some(b.statements.as_slice()),
+                    _ => None,
+                },
+                Some(Expression::FunctionExpression(func)) => {
+                    func.body.as_ref().map(|b| b.statements.as_slice())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Resolves the effect callback AST node (`ArrowFunctionExpression` or `Function`) for a `useEffect` call.
 pub(crate) fn get_effect_fn_node(semantic: &Semantic<'_>, call_node_id: NodeId) -> Option<NodeId> {
     let AstKind::CallExpression(call) = semantic.nodes().kind(call_node_id) else {
@@ -508,8 +535,13 @@ pub(crate) fn extract_jsx_elements(
         ancestor_elements.reverse();
 
         let (in_array_map, map_index_param) = check_enclosing_array_map(semantic, node_id);
-        let (attributes, has_key, key_is_array_index, object_literal_props, fragment_href_target) =
-            extract_jsx_element_attributes(&opening.attributes, map_index_param.as_deref());
+        let enclosing_subj_id = find_enclosing_react_node(semantic, node_id);
+        let attr_facts = extract_jsx_element_attributes(
+            semantic,
+            &opening.attributes,
+            map_index_param.as_deref(),
+            enclosing_subj_id,
+        );
         let (has_raw_text_child, raw_text_preview, has_element_children, has_render_prop_children) =
             inspect_jsx_children(&jsx_el.children);
 
@@ -523,10 +555,13 @@ pub(crate) fn extract_jsx_elements(
             is_component,
             enclosing_subject,
             ancestor_elements,
-            attributes,
-            has_key,
-            key_is_array_index,
-            object_literal_props,
+            attributes: attr_facts.attributes,
+            has_key: attr_facts.has_key,
+            key_is_array_index: attr_facts.key_is_array_index,
+            object_literal_props: attr_facts.object_literal_props,
+            array_literal_props: attr_facts.array_literal_props,
+            function_props: attr_facts.function_props,
+            inline_jsx_props: attr_facts.inline_jsx_props,
             in_array_map,
             has_raw_text_child,
             raw_text_preview,
@@ -534,7 +569,7 @@ pub(crate) fn extract_jsx_elements(
             has_render_prop_children,
             is_unresolved_component,
             is_imported_component,
-            fragment_href_target,
+            fragment_href_target: attr_facts.fragment_href_target,
             opener_start_line: opener_start_loc.line,
             opener_end_line: opener_end_loc.line,
             span: ByteSpan {
@@ -547,15 +582,35 @@ pub(crate) fn extract_jsx_elements(
     elements
 }
 
+struct JsxAttrFacts {
+    attributes: Vec<String>,
+    has_key: bool,
+    key_is_array_index: bool,
+    object_literal_props: Vec<String>,
+    array_literal_props: Vec<String>,
+    function_props: Vec<String>,
+    inline_jsx_props: Vec<String>,
+    fragment_href_target: Option<String>,
+}
+
 fn extract_jsx_element_attributes(
+    semantic: &Semantic<'_>,
     attr_items: &[JSXAttributeItem<'_>],
     map_index_param: Option<&str>,
-) -> (Vec<String>, bool, bool, Vec<String>, Option<String>) {
-    let mut attributes = Vec::new();
-    let mut has_key = false;
-    let mut key_is_array_index = false;
-    let mut object_literal_props = Vec::new();
-    let mut fragment_href_target = None;
+    enclosing_subj_id: Option<NodeId>,
+) -> JsxAttrFacts {
+    let mut facts = JsxAttrFacts {
+        attributes: Vec::new(),
+        has_key: false,
+        key_is_array_index: false,
+        object_literal_props: Vec::new(),
+        array_literal_props: Vec::new(),
+        function_props: Vec::new(),
+        inline_jsx_props: Vec::new(),
+        fragment_href_target: None,
+    };
+    let subj_span = enclosing_subj_id.map(|id| semantic.nodes().get_node(id).span());
+
     for attr_item in attr_items {
         let Some(attr) = attr_item.as_attribute() else {
             continue;
@@ -565,38 +620,285 @@ fn extract_jsx_element_attributes(
         };
         let attr_name = ident_name.name.to_string();
         if attr_name == "key" {
-            has_key = true;
+            facts.has_key = true;
             if let Some(idx_param) = map_index_param
                 && let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
                 && let Some(expr) = container.expression.as_expression()
-                && let Expression::Identifier(id) = expr.without_parentheses()
-                && id.name.as_str() == idx_param
+                && expr_uses_array_index_as_key(expr, idx_param)
             {
-                key_is_array_index = true;
+                facts.key_is_array_index = true;
             }
-        } else {
-            if matches!(attr_name.as_str(), "href" | "to")
-                && let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
-                && let Some(raw) = s.value.as_str()
+            continue;
+        }
+        record_non_key_jsx_attribute(semantic, attr, &attr_name, subj_span, &mut facts);
+        facts.attributes.push(attr_name);
+    }
+    facts
+}
+
+fn record_non_key_jsx_attribute(
+    semantic: &Semantic<'_>,
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    attr_name: &str,
+    subj_span: Option<Span>,
+    facts: &mut JsxAttrFacts,
+) {
+    if matches!(attr_name, "href" | "to")
+        && let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
+        && let Some(raw) = s.value.as_str()
+    {
+        facts.fragment_href_target = parse_fragment_target_id(raw);
+    }
+    match &attr.value {
+        Some(JSXAttributeValue::Element(_) | JSXAttributeValue::Fragment(_)) => {
+            facts.inline_jsx_props.push(attr_name.to_string());
+        }
+        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+            let Some(expr) = container.expression.as_expression() else {
+                return;
+            };
+            let unwrapped = expr.without_parentheses();
+            if expr_is_fresh_object_prop(semantic, unwrapped, subj_span) {
+                facts.object_literal_props.push(attr_name.to_string());
+            }
+            if !attr_name.ends_with("Props")
+                && expr_is_fresh_array_prop(semantic, unwrapped, subj_span)
             {
-                fragment_href_target = parse_fragment_target_id(raw);
+                facts.array_literal_props.push(attr_name.to_string());
             }
-            if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
-                && let Some(expr) = container.expression.as_expression()
-                && matches!(expr.without_parentheses(), Expression::ObjectExpression(_))
+            if expr_is_fresh_function_prop(semantic, unwrapped, subj_span) {
+                facts.function_props.push(attr_name.to_string());
+            }
+            if matches!(
+                unwrapped,
+                Expression::JSXElement(_) | Expression::JSXFragment(_)
+            ) {
+                facts.inline_jsx_props.push(attr_name.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn expr_uses_array_index_as_key(expr: &Expression<'_>, idx_param: &str) -> bool {
+    match expr.without_parentheses() {
+        Expression::Identifier(id) => id.name.as_str() == idx_param,
+        Expression::TemplateLiteral(tpl) => tpl.expressions.iter().any(|e| {
+            matches!(
+                e.without_parentheses(),
+                Expression::Identifier(id) if id.name.as_str() == idx_param
+            )
+        }),
+        Expression::BinaryExpression(bin) => {
+            expr_uses_array_index_as_key(&bin.left, idx_param)
+                || expr_uses_array_index_as_key(&bin.right, idx_param)
+        }
+        Expression::CallExpression(call) => match call.callee.without_parentheses() {
+            Expression::StaticMemberExpression(mem)
+                if mem.property.name == "toString"
+                    && expr_uses_array_index_as_key(&mem.object, idx_param) =>
             {
-                object_literal_props.push(attr_name.clone());
+                true
             }
-            attributes.push(attr_name);
+            Expression::Identifier(id) if id.name == "String" => call
+                .arguments
+                .first()
+                .and_then(|a| a.as_expression())
+                .is_some_and(|a| expr_uses_array_index_as_key(a, idx_param)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn expr_is_fresh_object_prop(
+    semantic: &Semantic<'_>,
+    expr: &Expression<'_>,
+    subj_span: Option<Span>,
+) -> bool {
+    match expr.without_parentheses() {
+        Expression::ObjectExpression(_) => true,
+        Expression::CallExpression(call) => {
+            if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
+                && matches!(
+                    mem.property.name.as_str(),
+                    "freeze" | "seal" | "preventExtensions"
+                )
+                && matches!(
+                    mem.object.without_parentheses(),
+                    Expression::Identifier(obj_id) if obj_id.name == "Object"
+                )
+                && let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression())
+            {
+                expr_is_fresh_object_prop(semantic, first_arg, subj_span)
+            } else {
+                false
+            }
+        }
+        Expression::Identifier(ident) => {
+            let Some(s_span) = subj_span else {
+                return false;
+            };
+            let Some(ref_id) = ident.reference_id.get() else {
+                return false;
+            };
+            let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+                return false;
+            };
+            let decl_id = semantic.scoping().symbol_declaration(sym_id);
+            let decl_node = semantic.nodes().get_node(decl_id);
+            if !s_span.contains_inclusive(decl_node.span()) {
+                return false;
+            }
+            if let AstKind::VariableDeclarator(decl) = decl_node.kind()
+                && matches!(decl.id, BindingPattern::BindingIdentifier(_))
+                && let Some(init) = &decl.init
+            {
+                return expr_is_fresh_object_prop(semantic, init, subj_span);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn expr_is_fresh_array_prop(
+    semantic: &Semantic<'_>,
+    expr: &Expression<'_>,
+    subj_span: Option<Span>,
+) -> bool {
+    match expr.without_parentheses() {
+        Expression::ArrayExpression(_) => true,
+        Expression::CallExpression(call) => {
+            if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() {
+                if matches!(
+                    mem.property.name.as_str(),
+                    "freeze" | "seal" | "preventExtensions"
+                ) && matches!(
+                    mem.object.without_parentheses(),
+                    Expression::Identifier(obj_id) if obj_id.name == "Object"
+                ) && let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression())
+                {
+                    return expr_is_fresh_array_prop(semantic, first_arg, subj_span);
+                }
+                matches!(
+                    mem.property.name.as_str(),
+                    "concat" | "filter" | "map" | "slice" | "flat" | "flatMap" | "toSorted"
+                )
+            } else {
+                false
+            }
+        }
+        Expression::Identifier(ident) => {
+            let Some(s_span) = subj_span else {
+                return false;
+            };
+            let Some(ref_id) = ident.reference_id.get() else {
+                return false;
+            };
+            let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+                return false;
+            };
+            let decl_id = semantic.scoping().symbol_declaration(sym_id);
+            let decl_node = semantic.nodes().get_node(decl_id);
+            if !s_span.contains_inclusive(decl_node.span()) {
+                return false;
+            }
+            let AstKind::VariableDeclarator(decl) = decl_node.kind() else {
+                return false;
+            };
+            if matches!(decl.id, BindingPattern::BindingIdentifier(_))
+                && let Some(init) = &decl.init
+            {
+                return expr_is_fresh_array_prop(semantic, init, subj_span);
+            }
+            has_non_empty_array_destructure_default(&decl.id, ident.name.as_str())
+        }
+        _ => false,
+    }
+}
+
+fn has_non_empty_array_destructure_default(
+    pattern: &BindingPattern<'_>,
+    target_name: &str,
+) -> bool {
+    let BindingPattern::ObjectPattern(obj_pat) = pattern else {
+        return false;
+    };
+    for prop in &obj_pat.properties {
+        if let BindingPattern::AssignmentPattern(assign_pat) = &prop.value
+            && assign_pat
+                .left
+                .get_binding_identifier()
+                .is_some_and(|b| b.name == target_name)
+            && let Expression::ArrayExpression(arr) = assign_pat.right.without_parentheses()
+        {
+            return !arr.elements.is_empty();
         }
     }
-    (
-        attributes,
-        has_key,
-        key_is_array_index,
-        object_literal_props,
-        fragment_href_target,
-    )
+    false
+}
+
+fn expr_is_fresh_function_prop(
+    semantic: &Semantic<'_>,
+    expr: &Expression<'_>,
+    subj_span: Option<Span>,
+) -> bool {
+    match expr.without_parentheses() {
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => true,
+        Expression::CallExpression(call) => {
+            matches!(
+                call.callee.without_parentheses(),
+                Expression::StaticMemberExpression(mem) if mem.property.name == "bind"
+            )
+        }
+        Expression::NewExpression(new_expr) => {
+            matches!(
+                new_expr.callee.without_parentheses(),
+                Expression::Identifier(id) if id.name == "Function"
+            )
+        }
+        Expression::LogicalExpression(log) => {
+            expr_is_fresh_function_prop(semantic, &log.left, subj_span)
+                || expr_is_fresh_function_prop(semantic, &log.right, subj_span)
+        }
+        Expression::ConditionalExpression(cond) => {
+            expr_is_fresh_function_prop(semantic, &cond.consequent, subj_span)
+                || expr_is_fresh_function_prop(semantic, &cond.alternate, subj_span)
+        }
+        Expression::Identifier(ident) => {
+            let Some(s_span) = subj_span else {
+                return false;
+            };
+            let Some(ref_id) = ident.reference_id.get() else {
+                return false;
+            };
+            let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+                return false;
+            };
+            let decl_id = semantic.scoping().symbol_declaration(sym_id);
+            let decl_node = semantic.nodes().get_node(decl_id);
+            if !s_span.contains_inclusive(decl_node.span()) {
+                return false;
+            }
+            match decl_node.kind() {
+                AstKind::Function(func) => func.span != s_span,
+                AstKind::VariableDeclarator(decl) => {
+                    if let Some(init) = &decl.init {
+                        matches!(
+                            init.without_parentheses(),
+                            Expression::ArrowFunctionExpression(_)
+                                | Expression::FunctionExpression(_)
+                        )
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 fn parse_fragment_target_id(href: &str) -> Option<String> {
@@ -1232,4 +1534,237 @@ fn hash_framed_parts(parts: &[&str]) -> String {
         }
     }
     format!("{h1:016x}{h2:016x}")
+}
+
+/// Inspects a **Subject** node (`Function` or `VariableDeclarator`) to determine if it is
+/// wrapped in `memo(...)` / `React.memo(...)` and whether a custom comparator is supplied.
+pub(crate) fn classify_subject_memoization(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+) -> (bool, bool) {
+    if let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(subject_node_id)
+        && let Some(Expression::CallExpression(call)) =
+            decl.init.as_ref().map(Expression::without_parentheses)
+        && is_memo_callee(&call.callee)
+    {
+        if call.arguments.len() >= 2 {
+            return (false, true);
+        }
+        return (true, false);
+    }
+
+    // Also check if `export default memo(SubjectName)` wraps this Subject in the same file
+    if let Some(subj_name) = get_subject_name(semantic, subject_node_id) {
+        for (_, node) in semantic.nodes().iter_enumerated() {
+            if let AstKind::ExportDefaultDeclaration(exp) = node.kind()
+                && let Some(expr) = exp.declaration.as_expression()
+                && let Expression::CallExpression(call) = expr.without_parentheses()
+                && is_memo_callee(&call.callee)
+                && let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression())
+                && let Expression::Identifier(id) = first_arg.without_parentheses()
+                && id.name.as_str() == subj_name
+            {
+                if call.arguments.len() >= 2 {
+                    return (false, true);
+                }
+                return (true, false);
+            }
+        }
+    }
+
+    (false, false)
+}
+
+fn is_memo_callee(callee: &Expression<'_>) -> bool {
+    match callee.without_parentheses() {
+        Expression::Identifier(id) => id.name == "memo",
+        Expression::StaticMemberExpression(mem) => {
+            mem.property.name == "memo"
+                && matches!(
+                    mem.object.without_parentheses(),
+                    Expression::Identifier(obj) if obj.name == "React"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Collects all component prop names that appear inside `useEffect`, `useLayoutEffect`,
+/// `useMemo`, or `useCallback` dependency arrays within `subject_node_id`.
+pub(crate) fn extract_subject_hook_dep_props(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+) -> Vec<String> {
+    let subj_span = semantic.nodes().get_node(subject_node_id).span();
+    let mut prop_names = Vec::new();
+
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        if !subj_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        if find_enclosing_react_node(semantic, node_id) != Some(subject_node_id) {
+            continue;
+        }
+        let is_deps_hook = ["useEffect", "useLayoutEffect", "useMemo", "useCallback"]
+            .iter()
+            .any(|h| is_react_hook_callee(semantic, &call.callee, h));
+        if !is_deps_hook {
+            continue;
+        }
+        let Some(deps_arg) = call.arguments.get(1).and_then(|a| a.as_expression()) else {
+            continue;
+        };
+        let Expression::ArrayExpression(arr) = deps_arg.without_parentheses() else {
+            continue;
+        };
+        for elem in &arr.elements {
+            let Some(expr) = elem.as_expression() else {
+                continue;
+            };
+            if let Some(root_ident) = extract_root_identifier(expr)
+                && let Some(ref_id) = root_ident.reference_id.get()
+                && super::dataflow::is_prop(semantic, ref_id)
+                && !prop_names.contains(&root_ident.name.to_string())
+            {
+                prop_names.push(root_ident.name.to_string());
+            }
+        }
+    }
+    prop_names
+}
+
+fn extract_root_identifier<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    match expr.without_parentheses() {
+        Expression::Identifier(id) => Some(id),
+        Expression::StaticMemberExpression(mem) => extract_root_identifier(&mem.object),
+        Expression::ComputedMemberExpression(comp) => extract_root_identifier(&comp.object),
+        Expression::ChainExpression(chain) => match &chain.expression {
+            oxc_ast::ast::ChainElement::StaticMemberExpression(mem) => {
+                extract_root_identifier(&mem.object)
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(comp) => {
+                extract_root_identifier(&comp.object)
+            }
+            oxc_ast::ast::ChainElement::CallExpression(call) => {
+                extract_root_identifier(&call.callee)
+            }
+            oxc_ast::ast::ChainElement::TSNonNullExpression(nn) => {
+                extract_root_identifier(&nn.expression)
+            }
+            oxc_ast::ast::ChainElement::PrivateFieldExpression(_) => None,
+        },
+        _ => None,
+    }
+}
+
+/// Checks whether `subject_node_id` invokes suspending hooks/APIs (`use(promise)`, `useSuspenseQuery`,
+/// `useSearchParams`) or throws synchronously in render without a local `<Suspense>` / `<ErrorBoundary>`.
+pub(crate) fn detect_subject_suspense_and_throws(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+) -> (bool, bool) {
+    let subj_span = semantic.nodes().get_node(subject_node_id).span();
+    let mut has_local_suspense = false;
+    let mut has_local_error_boundary = false;
+
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !subj_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        if let AstKind::JSXOpeningElement(opening) = node.kind() {
+            let (tag_name, _, _, _) = classify_jsx_element_name(semantic, &opening.name);
+            if tag_name == "Suspense" || tag_name.ends_with(".Suspense") {
+                has_local_suspense = true;
+            }
+            if tag_name.contains("ErrorBoundary") {
+                has_local_error_boundary = true;
+            }
+        }
+    }
+
+    let mut suspends = false;
+    let mut throws_in_render = false;
+
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        if !subj_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        if find_enclosing_react_node(semantic, node_id) != Some(subject_node_id) {
+            continue;
+        }
+        match node.kind() {
+            AstKind::CallExpression(call) => {
+                let callee_name = match call.callee.without_parentheses() {
+                    Expression::Identifier(id) => Some(id.name.as_str()),
+                    Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str()),
+                    _ => None,
+                };
+                match callee_name {
+                    Some(
+                        "useSuspenseQuery"
+                        | "useSuspenseInfiniteQuery"
+                        | "useSuspenseQueries"
+                        | "useSearchParams",
+                    ) => {
+                        if !has_local_suspense {
+                            suspends = true;
+                        }
+                    }
+                    Some("use") => {
+                        // `use(promise)` suspends unless the argument is a Context (`*Context` / `Ctx`)
+                        let is_context_arg = call
+                            .arguments
+                            .first()
+                            .and_then(|a| a.as_expression())
+                            .is_some_and(|arg| {
+                                let txt = arg.span().source_text(semantic.source_text()).trim();
+                                txt.ends_with("Context") || txt.ends_with("Ctx")
+                            });
+                        if !is_context_arg && !has_local_suspense {
+                            suspends = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            AstKind::ThrowStatement(_)
+                if !has_local_error_boundary
+                    && is_in_subject_render_path(semantic, node_id, subject_node_id) =>
+            {
+                throws_in_render = true;
+            }
+            _ => {}
+        }
+    }
+
+    (suspends, throws_in_render)
+}
+
+fn is_in_subject_render_path(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    subject_node_id: NodeId,
+) -> bool {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        if anc_id == subject_node_id {
+            return true;
+        }
+        match semantic.nodes().kind(anc_id) {
+            AstKind::TryStatement(_) => return false,
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
+                let parent_id = semantic.nodes().parent_id(anc_id);
+                if parent_id == subject_node_id {
+                    continue;
+                }
+                return false;
+            }
+            _ => {}
+        }
+    }
+    false
 }
