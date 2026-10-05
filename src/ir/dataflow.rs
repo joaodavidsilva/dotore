@@ -5,21 +5,16 @@ use std::{collections::HashSet, path::Path};
 
 use oxc_ast::{
     AstKind,
-    ast::{
-        AssignmentTarget, BindingPattern, CallExpression, Declaration, Expression, Program,
-        Statement,
-    },
+    ast::{AssignmentTarget, BindingPattern, Declaration, Expression, Program, Statement},
 };
 use oxc_semantic::{NodeId, ReferenceId, Semantic};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::{operator::UnaryOperator, symbol::SymbolFlags};
 
-use crate::rules::RuleId;
-
 use super::{
     react_ast::{
-        RefEntry, extract_callee_short_name, find_enclosing_react_node, get_subject_name,
-        is_functional_hoc, is_react_hook_callee, is_use_ref_node, is_use_state_node,
+        RefEntry, find_enclosing_react_node, get_subject_name, is_functional_hoc,
+        is_react_hook_callee, is_use_ref_node, is_use_state_node,
     },
     types::{
         AsyncFlowIr, ByteSpan, ModuleIr, MutationSiteIr, SecuritySinkIr, SecuritySinkKind,
@@ -822,131 +817,6 @@ pub(crate) fn extract_semantic_rule_sites(
         line_starts,
         &mut sites,
     );
-    for (node_id, node) in semantic.nodes().iter_enumerated() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        let callee_name = extract_callee_short_name(&call.callee);
-        let subject_name = find_enclosing_react_node(semantic, node_id)
-            .and_then(|subj_id| get_subject_name(semantic, subj_id));
-        if matches!(
-            callee_name,
-            Some("useEffect" | "useLayoutEffect" | "useMemo" | "useCallback")
-        ) && let Some(subj_id) = find_enclosing_react_node(semantic, node_id)
-            && let Some(hook_name) = callee_name
-            && let Some((deps_span, missing)) =
-                find_missing_hook_dependencies(semantic, subj_id, call)
-        {
-            let deps_loc = loc_from_line_starts(line_starts, deps_span.start);
-            let target = missing.join(", ");
-            sites.push(SemanticRuleSite {
-                rule: RuleId::ExhaustiveDeps,
-                subject_name: subject_name.clone(),
-                message_id: "missingEffectDependency",
-                target_name: target.clone(),
-                message: format!(
-                    "React Hook `{hook_name}` has missing dependency: `{target}`. Either include it or remove the dependency array."
-                ),
-                loc: deps_loc,
-                span: ByteSpan {
-                    start: deps_span.start,
-                    end: deps_span.end,
-                },
-                autofix: None,
-            });
-        }
-    }
 
     sites
-}
-
-fn find_missing_hook_dependencies(
-    semantic: &Semantic<'_>,
-    subj_id: NodeId,
-    call: &CallExpression<'_>,
-) -> Option<(Span, Vec<String>)> {
-    let first_arg = call.arguments.first()?.as_expression()?;
-    let second_arg = call.arguments.get(1)?.as_expression()?;
-    let Expression::ArrayExpression(deps_arr) = second_arg.without_parentheses() else {
-        return None;
-    };
-
-    let mut declared_deps = Vec::new();
-    for elem in &deps_arr.elements {
-        let Some(expr) = elem.as_expression() else {
-            continue;
-        };
-        let text = expr
-            .span()
-            .source_text(semantic.source_text())
-            .trim()
-            .to_string();
-        if !text.is_empty() {
-            if let Some(root) = text.split('.').next() {
-                declared_deps.push(root.to_string());
-            }
-            declared_deps.push(text);
-        }
-    }
-
-    let subj_span = semantic.nodes().kind(subj_id).span();
-    let mut scan_spans = vec![first_arg.span()];
-    if let Expression::Identifier(cb_ident) = first_arg.without_parentheses()
-        && let Some(ref_id) = cb_ident.reference_id.get()
-        && let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id()
-    {
-        let decl_id = semantic.scoping().symbol_declaration(sym_id);
-        let decl_span = semantic.nodes().kind(decl_id).span();
-        if decl_span.start >= subj_span.start && decl_span.end <= subj_span.end {
-            scan_spans.push(decl_span);
-        }
-    }
-
-    let mut missing = Vec::new();
-    for (_id, node) in semantic.nodes().iter_enumerated() {
-        let AstKind::IdentifierReference(ident) = node.kind() else {
-            continue;
-        };
-        if !scan_spans
-            .iter()
-            .any(|sp| ident.span.start >= sp.start && ident.span.end <= sp.end)
-        {
-            continue;
-        }
-        let Some(ref_id) = ident.reference_id.get() else {
-            continue;
-        };
-        let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
-            continue;
-        };
-        if is_state_setter(semantic, ref_id) {
-            continue;
-        }
-        let decl_id = semantic.scoping().symbol_declaration(sym_id);
-        let decl_span = semantic.nodes().kind(decl_id).span();
-        // Symbol must be declared inside the Subject, but outside the hook callback itself
-        if decl_span.start < subj_span.start
-            || decl_span.end > subj_span.end
-            || (decl_span.start >= first_arg.span().start && decl_span.end <= first_arg.span().end)
-        {
-            continue;
-        }
-        // Skip if it is the named callback itself passed as `useEffect(callback, [])`
-        if matches!(
-            first_arg.without_parentheses(),
-            Expression::Identifier(cb_id) if cb_id.name == ident.name
-        ) {
-            continue;
-        }
-        let name = ident.name.to_string();
-        if !declared_deps.contains(&name) && !missing.contains(&name) {
-            missing.push(name);
-        }
-    }
-
-    if missing.is_empty() {
-        None
-    } else {
-        Some((deps_arr.span, missing))
-    }
 }
