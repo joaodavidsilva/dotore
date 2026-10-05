@@ -227,9 +227,9 @@ fn source_parses_cleanly(path: &Path, source: &str) -> bool {
     parsed.diagnostics.is_empty()
 }
 
-const fn spans_overlap(a: &ByteEdit, b: &ByteEdit) -> bool {
+fn spans_overlap(a: &ByteEdit, b: &ByteEdit) -> bool {
     if a.span.start == a.span.end && b.span.start == b.span.end {
-        return a.span.start == b.span.start;
+        return a.span.start == b.span.start && a.replacement == b.replacement;
     }
     if a.span.start == a.span.end {
         return a.span.start > b.span.start && a.span.start < b.span.end;
