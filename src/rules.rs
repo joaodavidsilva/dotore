@@ -2,7 +2,9 @@
 //! file context (`test-noise` / `migration-hint`), library role, and inline suppression directives.
 
 pub(crate) mod a11y;
+pub(crate) mod architecture;
 pub(crate) mod bundle_size;
+pub(crate) mod correctness;
 pub(crate) mod derived_state;
 pub(crate) mod design;
 pub(crate) mod ecosystem_ui;
@@ -12,10 +14,12 @@ pub(crate) mod parent_flow;
 pub(crate) mod performance;
 pub(crate) mod prop_sync;
 pub(crate) mod r3f;
+pub(crate) mod react_builtins;
 pub(crate) mod react_native;
 pub(crate) mod reduced_motion;
 pub(crate) mod security;
 pub(crate) mod server_nextjs;
+pub(crate) mod state_and_effects;
 pub(crate) mod stores;
 pub(crate) mod supply_chain;
 pub(crate) mod tanstack;
@@ -36,6 +40,7 @@ use crate::{
     ir::{FileContext, FileIr, JsxElementIr, SecuritySinkKind, SubjectIr},
     rules::{
         a11y::check_anchor_target_exists,
+        architecture::evaluate_architecture_project_graph_rules,
         derived_state::{
             check_no_chain_state_updates, check_no_derived_state, check_no_initialize_state,
         },
@@ -47,6 +52,7 @@ use crate::{
         prop_sync::{
             check_no_adjust_state_on_prop_change, check_no_reset_all_state_on_prop_change,
         },
+        react_builtins::evaluate_inline_prop_rules_with_graph,
         reduced_motion::evaluate_project_reduced_motion,
     },
 };
@@ -122,11 +128,15 @@ pub(crate) fn evaluate_file_in_package(
     }
     check_anchor_target_exists(graph, file, &is_active, out);
 
+    let core_effect_diag_spans: Vec<crate::ir::ByteSpan> =
+        out[start_idx..].iter().map(|d| d.span).collect();
+
     evaluate_file_ir_facets(
         graph,
         file,
         config,
         enabled_rules.is_some(),
+        &core_effect_diag_spans,
         &is_active,
         out,
     );
@@ -499,6 +509,13 @@ fn evaluate_project_graph_rules(
         enabled_rules,
         out,
     );
+    evaluate_architecture_project_graph_rules(
+        graph,
+        packages,
+        enabled_rules,
+        &resolve_rule_activation,
+        out,
+    );
 }
 
 fn resolve_rule_activation(
@@ -611,6 +628,7 @@ fn evaluate_file_ir_facets<F>(
     file: &FileIr,
     config: &DotoreConfig,
     has_explicit_rule_filter: bool,
+    core_effect_diag_spans: &[crate::ir::ByteSpan],
     is_active: &F,
     out: &mut Vec<Diagnostic>,
 ) where
@@ -712,50 +730,28 @@ fn evaluate_file_ir_facets<F>(
         }
     }
 
-    // 6. Fast Refresh `only-export-components` (ContextualOwnerPolicy::File)
-    let is_subj_component = |name: &str| {
-        file.subjects.iter().any(|s| {
-            s.kind == crate::ir::types::SubjectKind::Component && s.name.as_deref() == Some(name)
-        })
-    };
-    if (has_explicit_rule_filter
-        || config
-            .explicit_rule_override(RuleId::OnlyExportComponents)
-            .is_some())
-        && is_active(RuleId::OnlyExportComponents).is_some()
-        && file
-            .module
-            .exports
-            .iter()
-            .any(|e| is_subj_component(&e.name))
-    {
-        for exp in &file.module.exports {
-            if !is_subj_component(&exp.name) && !exp.is_type_only && exp.from_source.is_none() {
-                push_simple_diagnostic(
-                    out,
-                    file,
-                    None,
-                    RuleId::OnlyExportComponents,
-                    "onlyExportComponents",
-                    &exp.name,
-                    format!(
-                        "Fast Refresh only works when a file only exports components. Move non-component export {:?} to a separate file.",
-                        exp.name
-                    ),
-                    exp.loc,
-                    exp.span,
-                );
-            }
-        }
-    }
-
     // 7. Single-pass semantic AST sites
     for site in &file.semantic_sites {
-        if site.rule == RuleId::ExhaustiveDeps
-            && !has_explicit_rule_filter
-            && config
-                .explicit_rule_override(RuleId::ExhaustiveDeps)
-                .is_none()
+        // When `enabled_rules` is `None`, suppress secondary `exhaustive-deps` or `no-self-updating-effect`
+        // on an EffectNode that was already flagged by one of the 10 core effect anti-pattern rules.
+        if !has_explicit_rule_filter
+            && matches!(
+                site.rule,
+                RuleId::ExhaustiveDeps | RuleId::NoSelfUpdatingEffect
+            )
+            && core_effect_diag_spans.iter().any(|eff_span| {
+                (site.span.start <= eff_span.start && eff_span.end <= site.span.end)
+                    || (eff_span.start <= site.span.start && site.span.end <= eff_span.end)
+            })
+        {
+            continue;
+        }
+        if !has_explicit_rule_filter
+            && matches!(
+                site.rule,
+                RuleId::OnlyExportComponents | RuleId::ExhaustiveDeps
+            )
+            && config.explicit_rule_override(site.rule).is_none()
         {
             continue;
         }
@@ -905,28 +901,9 @@ fn evaluate_jsx_element_rules<F>(
         }
     }
 
-    // 6. `jsx-no-new-object-as-prop` (on custom components, disabled when ReactCompiler is active)
-    if jsx.is_component
-        && !jsx.object_literal_props.is_empty()
-        && is_active(RuleId::JsxNoNewObjectAsProp).is_some()
-    {
-        for prop_name in &jsx.object_literal_props {
-            push_simple_diagnostic(
-                out,
-                file,
-                jsx.enclosing_subject.clone(),
-                RuleId::JsxNoNewObjectAsProp,
-                "jsxNoNewObjectAsProp",
-                prop_name,
-                format!(
-                    "Prop `{prop_name}` on `<{}>` receives a fresh object literal on every render.",
-                    jsx.name
-                ),
-                jsx.loc,
-                jsx.span,
-            );
-        }
-    }
+    // 6. Inline prop reference rules (`jsx-no-new-object-as-prop`, `jsx-no-new-array-as-prop`,
+    //    `jsx-no-new-function-as-prop`, `no-inline-prop-on-memo-component`) gated by ProjectGraph cold-path analysis
+    evaluate_inline_prop_rules_with_graph(graph, file, jsx, is_active, out);
 
     // 7. `no-render-prop-children` (app-only rule, skipped on library entrypoints)
     if jsx.is_component
