@@ -1768,7 +1768,7 @@ fn check_jsx_opening_performance_rules(
         }
     }
 
-    // 4. `no-inline-prop-on-memo-component` & `prefer-stable-empty-fallback`
+    // 4. `prefer-stable-empty-fallback`
     if let Some(comp_name) = tag_ident
         && memo_registry.get(comp_name) == Some(&MemoStatus::Memoized)
     {
@@ -1788,23 +1788,6 @@ fn check_jsx_opening_performance_rules(
             let Some(expr) = cont.expression.as_expression() else {
                 continue;
             };
-            if let Some(inline_kind) = classify_inline_memo_prop(expr, semantic) {
-                out.push(SemanticRuleSite {
-                    rule: RuleId::NoInlinePropOnMemoComponent,
-                    subject_name: subject_name.clone(),
-                    message_id: "noInlinePropOnMemoComponent",
-                    target_name: comp_name.to_string(),
-                    message: format!(
-                        "This redraws {comp_name} on every render because the prop is {inline_kind} built right here, so memo() can't skip it. Move it to a stable value with useMemo, useCallback, or module scope"
-                    ),
-                    loc: loc_from_line_starts(line_starts, expr.span().start),
-                    span: ByteSpan {
-                        start: expr.span().start,
-                        end: expr.span().end,
-                    },
-                    autofix: None,
-                });
-            }
             if let Expression::LogicalExpression(log) = unwrap_expr(expr)
                 && matches!(
                     log.operator,
@@ -1838,69 +1821,6 @@ fn check_jsx_opening_performance_rules(
                         autofix: None,
                     });
                 }
-            }
-        }
-    }
-
-    // 5. `context-provider-value-from-unmemoized-local-literal`
-    if is_context_provider_element(&opening.name, semantic)
-        && let Some(enclosing_subj_id) = find_enclosing_react_node(semantic, node_id)
-    {
-        let subj_span = semantic.nodes().get_node(enclosing_subj_id).span();
-        for attr_item in &opening.attributes {
-            let JSXAttributeItem::Attribute(attr) = attr_item else {
-                continue;
-            };
-            let JSXAttributeName::Identifier(attr_name) = &attr.name else {
-                continue;
-            };
-            if attr_name.name != "value" {
-                continue;
-            }
-            let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
-                continue;
-            };
-            let Some(expr) = cont.expression.as_expression() else {
-                continue;
-            };
-            let Expression::Identifier(val_id) = unwrap_expr(expr) else {
-                continue;
-            };
-            let Some(sym_id) = resolve_ident_symbol(semantic, val_id) else {
-                continue;
-            };
-            let decl_id = semantic.scoping().symbol_declaration(sym_id);
-            let decl_span = semantic.nodes().get_node(decl_id).span();
-            if !subj_span.contains_inclusive(decl_span) {
-                continue;
-            }
-            let is_fresh_local = match semantic.nodes().kind(decl_id) {
-                AstKind::Function(_) => true,
-                AstKind::VariableDeclarator(decl) => decl.init.as_ref().is_some_and(|init| {
-                    matches!(
-                        unwrap_expr(init),
-                        Expression::ObjectExpression(_)
-                            | Expression::ArrayExpression(_)
-                            | Expression::ArrowFunctionExpression(_)
-                            | Expression::FunctionExpression(_)
-                    )
-                }),
-                _ => false,
-            };
-            if is_fresh_local {
-                out.push(SemanticRuleSite {
-                    rule: RuleId::ContextProviderValueFromUnmemoizedLocalLiteral,
-                    subject_name: subject_name.clone(),
-                    message_id: "contextProviderValueFromUnmemoizedLocalLiteral",
-                    target_name: val_id.name.to_string(),
-                    message: "Every consumer of this context redraws on each render because its `value` is a fresh object/array/function rebuilt each render — memoize it in component scope (extract mapped providers into a child component first), or move it outside the component.".to_string(),
-                    loc: loc_from_line_starts(line_starts, attr.span.start),
-                    span: ByteSpan {
-                        start: attr.span.start,
-                        end: attr.span.end,
-                    },
-                    autofix: None,
-                });
             }
         }
     }
@@ -2075,71 +1995,6 @@ fn extract_jsx_identifier_name<'a>(name: &'a JSXElementName<'a>) -> Option<&'a s
         JSXElementName::Identifier(id) => Some(id.name.as_str()),
         JSXElementName::IdentifierReference(id) => Some(id.name.as_str()),
         _ => None,
-    }
-}
-
-fn classify_inline_memo_prop(
-    expr: &Expression<'_>,
-    semantic: &Semantic<'_>,
-) -> Option<&'static str> {
-    let mut cur = unwrap_expr(expr);
-    while let Expression::CallExpression(call) = cur {
-        if let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee)
-            && matches!(
-                mem.property.name.as_str(),
-                "freeze" | "seal" | "preventExtensions"
-            )
-            && let Expression::Identifier(obj_id) = unwrap_expr(&mem.object)
-            && obj_id.name == "Object"
-            && is_global_ident(semantic, obj_id)
-            && let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression)
-        {
-            cur = unwrap_expr(first_arg);
-            continue;
-        }
-        break;
-    }
-
-    match cur {
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
-            Some("functions")
-        }
-        Expression::CallExpression(call) => {
-            if let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee)
-                && mem.property.name == "bind"
-            {
-                Some("functions")
-            } else {
-                None
-            }
-        }
-        Expression::ObjectExpression(_) => Some("objects"),
-        Expression::ArrayExpression(_) => Some("Arrays"),
-        Expression::JSXElement(_) | Expression::JSXFragment(_) => Some("JSX"),
-        _ => None,
-    }
-}
-
-fn is_context_provider_element(name: &JSXElementName<'_>, semantic: &Semantic<'_>) -> bool {
-    match name {
-        JSXElementName::MemberExpression(mem) => mem.property.name == "Provider",
-        JSXElementName::IdentifierReference(id) => {
-            if id.name.ends_with("Context") || id.name.ends_with("Provider") {
-                return true;
-            }
-            if let Some(sym_id) = resolve_ident_symbol(semantic, id) {
-                let decl_id = semantic.scoping().symbol_declaration(sym_id);
-                let text = semantic
-                    .nodes()
-                    .get_node(decl_id)
-                    .span()
-                    .source_text(semantic.source_text());
-                text.contains("createContext")
-            } else {
-                false
-            }
-        }
-        _ => false,
     }
 }
 
