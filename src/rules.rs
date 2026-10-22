@@ -168,7 +168,7 @@ pub(crate) fn evaluate_file_in_package(
     out.extend(retained);
 }
 
-fn evaluate_project_graph_rules(
+pub(crate) fn evaluate_project_graph_rules(
     graph: &ProjectGraph,
     packages: &[WorkspacePackage],
     enabled_rules: Option<&[RuleId]>,
