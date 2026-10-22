@@ -95,6 +95,12 @@ fn renders_html_report_with_score_tiers_cascades_caller_sites_and_autofix() {
             "missing key={...}",
             "has key={...}",
             autofix_desc,
+            "Root-Cause Groups (2)",
+            "Blast Radius:",
+            &report.root_cause_groups[0].id,
+            report.root_cause_groups[0].blast_radius.tier.as_str(),
+            &format!("score {}", report.root_cause_groups[0].blast_radius.score),
+            "frequency: standard, fan-out:",
         ],
     );
     assert!(html.contains("<style>"));
