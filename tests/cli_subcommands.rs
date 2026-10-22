@@ -424,6 +424,7 @@ export function UserCard({ firstName, lastName, initialBio }: { firstName: strin
     </div>
   );
 }
+export const UNUSED_HELPER_CONST = 42;
 "#;
     let comp_path = src_dir.join("UserCard.tsx");
     fs::write(&comp_path, comp_src).unwrap();
@@ -518,6 +519,16 @@ export function App() {
             .contains("UserCard")
     );
 
+    // F. Project-graph finding (`unused-export`) explained via `explain_location`
+    let unused_report = explain_location("src/UserCard.tsx:24", &dir).unwrap();
+    assert!(
+        unused_report
+            .entries
+            .iter()
+            .any(|e| e.rule == "dotore/unused-export" && e.status == "active"),
+        "Expected `dotore/unused-export` project-graph finding at src/UserCard.tsx:24, got: {:?}",
+        unused_report.entries
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -617,6 +628,26 @@ export function Hero({ title }: { title: string }) {
     assert!(!stdout_str.contains("no-derived-state"));
     assert!(!stdout_str.contains("score:"));
 
+    // 4. `scan_design` respects `test-noise` suppression in `.test.tsx` files
+    fs::write(
+        src_dir.join("Hero.test.tsx"),
+        r#"export function HeroTest() { return <div className="px-4 py-4">Loading...</div>; }"#,
+    )
+    .unwrap();
+    let (with_test_report, _) = scan_design(
+        &ScanOptions {
+            paths: vec![dir.clone()],
+            include_tests: true,
+            ..Default::default()
+        },
+        &CliOverrides::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        with_test_report.diagnostics.len(),
+        1,
+        "test-noise tagged design rules should not fire in Hero.test.tsx"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
