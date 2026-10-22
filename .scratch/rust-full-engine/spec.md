@@ -1,6 +1,6 @@
 # Dotore: Full-Catalog Deterministic Rust Static Analyzer & Remediation Engine
 
-Status: ready-for-agent
+Status: resolved
 
 ## Problem Statement
 
