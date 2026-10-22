@@ -10,7 +10,7 @@ use oxc_ast::{
 use oxc_semantic::{NodeId, ReferenceId, Semantic, SymbolFlags, SymbolId};
 use oxc_span::{GetSpan, Span};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::types::{ByteSpan, CallerSite, JsxElementIr, JsxSubtreeIr, loc_from_line_starts};
 
@@ -1663,27 +1663,23 @@ fn extract_root_identifier<'a>(
 }
 
 /// Checks whether `subject_node_id` invokes suspending hooks/APIs (`use(promise)`, `useSuspenseQuery`,
-/// `useSearchParams`) or throws synchronously in render without a local `<Suspense>` / `<ErrorBoundary>`.
+/// `useSearchParams`, `React.lazy`) or throws synchronously in render without an enclosing `<Suspense>` / `<ErrorBoundary>`.
 pub(crate) fn detect_subject_suspense_and_throws(
     semantic: &Semantic<'_>,
     subject_node_id: NodeId,
 ) -> (bool, bool) {
     let subj_span = semantic.nodes().get_node(subject_node_id).span();
-    let mut has_local_suspense = false;
-    let mut has_local_error_boundary = false;
+    let mut lazy_symbol_ids: HashSet<SymbolId> = HashSet::new();
 
     for (_, node) in semantic.nodes().iter_enumerated() {
-        if !subj_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        if let AstKind::JSXOpeningElement(opening) = node.kind() {
-            let (tag_name, _, _, _) = classify_jsx_element_name(semantic, &opening.name);
-            if tag_name == "Suspense" || tag_name.ends_with(".Suspense") {
-                has_local_suspense = true;
-            }
-            if tag_name.contains("ErrorBoundary") {
-                has_local_error_boundary = true;
-            }
+        if let AstKind::VariableDeclarator(decl) = node.kind()
+            && let Some(id) = decl.id.get_binding_identifier()
+            && let Some(sym_id) = id.symbol_id.get()
+            && let Some(init) = &decl.init
+            && let Expression::CallExpression(call) = init.without_parentheses()
+            && is_react_lazy_call(call)
+        {
+            lazy_symbol_ids.insert(sym_id);
         }
     }
 
@@ -1711,9 +1707,7 @@ pub(crate) fn detect_subject_suspense_and_throws(
                         | "useSuspenseQueries"
                         | "useSearchParams",
                     ) => {
-                        if !has_local_suspense {
-                            suspends = true;
-                        }
+                        suspends = true;
                     }
                     Some("use") => {
                         // `use(promise)` suspends unless the argument is a Context (`*Context` / `Ctx`)
@@ -1725,16 +1719,42 @@ pub(crate) fn detect_subject_suspense_and_throws(
                                 let txt = arg.span().source_text(semantic.source_text()).trim();
                                 txt.ends_with("Context") || txt.ends_with("Ctx")
                             });
-                        if !is_context_arg && !has_local_suspense {
+                        if !is_context_arg {
                             suspends = true;
                         }
                     }
-                    _ => {}
+                    _ => {
+                        if is_react_lazy_call(call)
+                            && !node_has_enclosing_jsx_boundary(
+                                semantic,
+                                node_id,
+                                subject_node_id,
+                                true,
+                            )
+                        {
+                            suspends = true;
+                        }
+                    }
+                }
+            }
+            AstKind::JSXOpeningElement(opening) => {
+                if let oxc_ast::ast::JSXElementName::IdentifierReference(ident) = &opening.name
+                    && let Some(ref_id) = ident.reference_id.get()
+                    && let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id()
+                    && lazy_symbol_ids.contains(&sym_id)
+                    && !node_has_enclosing_jsx_boundary(semantic, node_id, subject_node_id, true)
+                {
+                    suspends = true;
                 }
             }
             AstKind::ThrowStatement(_)
-                if !has_local_error_boundary
-                    && is_in_subject_render_path(semantic, node_id, subject_node_id) =>
+                if is_in_subject_render_path(semantic, node_id, subject_node_id)
+                    && !node_has_enclosing_jsx_boundary(
+                        semantic,
+                        node_id,
+                        subject_node_id,
+                        false,
+                    ) =>
             {
                 throws_in_render = true;
             }
@@ -1743,6 +1763,43 @@ pub(crate) fn detect_subject_suspense_and_throws(
     }
 
     (suspends, throws_in_render)
+}
+
+fn is_react_lazy_call(call: &CallExpression<'_>) -> bool {
+    match call.callee.without_parentheses() {
+        Expression::Identifier(id) => id.name == "lazy",
+        Expression::StaticMemberExpression(mem) => {
+            mem.property.name == "lazy"
+                && matches!(
+                    mem.object.without_parentheses(),
+                    Expression::Identifier(obj) if obj.name == "React"
+                )
+        }
+        _ => false,
+    }
+}
+
+fn node_has_enclosing_jsx_boundary(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    subject_node_id: NodeId,
+    want_suspense: bool,
+) -> bool {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        if anc_id == subject_node_id {
+            break;
+        }
+        if let AstKind::JSXElement(el) = semantic.nodes().kind(anc_id) {
+            let (tag_name, _, _, _) = classify_jsx_element_name(semantic, &el.opening_element.name);
+            if want_suspense && (tag_name == "Suspense" || tag_name.ends_with(".Suspense")) {
+                return true;
+            }
+            if !want_suspense && tag_name.contains("ErrorBoundary") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_in_subject_render_path(
