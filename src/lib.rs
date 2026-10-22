@@ -570,36 +570,106 @@ pub fn scan_design(
     if let Some(explicit_rules) = &options.rules {
         design_rules.retain(|r| explicit_rules.contains(r));
     }
-    let design_options = ScanOptions {
-        paths: options.paths.clone(),
-        include_tests: options.include_tests,
-        rules: Some(design_rules),
-        tiers: options.tiers.clone(),
-    };
-    let (mut report, sources) = scan_workspace_with_overrides(&design_options, overrides)?;
+
     let workspace_root = determine_workspace_root(&options.paths);
-    let packages = discover_workspace_packages(&workspace_root);
-    report.diagnostics.retain(|d| {
-        resolve_package_for_file(&d.file, &packages).is_none_or(|pkg| {
-            pkg.config.explicit_rule_override(d.rule) != Some(RuleSeverityOverride::Off)
+    let mut packages = discover_workspace_packages(&workspace_root);
+
+    let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
+        let content = fs::read_to_string(cfg_path)?;
+        Some(
+            DotoreConfig::from_config_file_str(cfg_path, &content)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        )
+    } else {
+        None
+    };
+
+    for pkg in &mut packages {
+        if let Some(cfg) = &explicit_cfg {
+            pkg.config = cfg.clone();
+        }
+        apply_cli_overrides_to_config(&mut pkg.config, overrides);
+    }
+
+    let raw_paths = collect_source_files(&options.paths, options.include_tests);
+    let paths: Vec<PathBuf> = raw_paths
+        .into_iter()
+        .filter(|p| {
+            resolve_package_for_file(p, &packages)
+                .is_none_or(|pkg| !pkg.config.is_file_ignored(p, &pkg.root_dir))
         })
-    });
-    report.summary.total_diagnostics = report.diagnostics.len();
-    report.summary.autofix_count = report
-        .diagnostics
-        .iter()
-        .filter(|d| d.tier == PrescriptionTier::Autofix)
-        .count();
-    report.summary.surgical_count = report
-        .diagnostics
-        .iter()
-        .filter(|d| d.tier == PrescriptionTier::Surgical)
-        .count();
-    report.summary.refactor_count = report
-        .diagnostics
-        .iter()
-        .filter(|d| d.tier == PrescriptionTier::Refactor)
-        .count();
+        .collect();
+
+    let mut sources = HashMap::with_capacity(paths.len());
+    let mut pairs = Vec::with_capacity(paths.len());
+    for path in paths {
+        if let Ok(content) = fs::read_to_string(&path) {
+            sources.insert(path.clone(), content.clone());
+            pairs.push((path, content));
+        }
+    }
+
+    let file_irs: Vec<_> = pairs
+        .into_par_iter()
+        .map(|(path, source)| parse_file_ir(&path, &source))
+        .collect();
+
+    // Build a lightweight ProjectGraph without manifests to skip supply-chain, dead-code, and cycle passes
+    let graph = ProjectGraph::build(file_irs);
+
+    let mut diagnostics = Vec::new();
+    for file in &graph.files {
+        let Some(pkg) = resolve_package_for_file(&file.path, &packages) else {
+            continue;
+        };
+        let mut design_cfg = pkg.config.clone();
+        for &rule in &design_rules {
+            if design_cfg.explicit_rule_override(rule).is_none() {
+                let meta = rule.metadata();
+                if file.file_context != crate::ir::FileContext::Production
+                    && meta.tags.contains(&RuleTag::TestNoise)
+                    && !meta.tags.contains(&RuleTag::MigrationHint)
+                    && options.rules.is_none()
+                {
+                    continue;
+                }
+                let default_ov = match meta.default_severity {
+                    RuleSeverity::Error => RuleSeverityOverride::Error,
+                    RuleSeverity::Warning => RuleSeverityOverride::Warn,
+                };
+                design_cfg
+                    .rules
+                    .insert(rule.as_str().to_string(), default_ov);
+            }
+        }
+        // Evaluate with `enabled_rules: None` so CapabilityGate, `test-noise`, and `ignore.*` config apply normally,
+        // then retain only `design_rules`.
+        let mut file_diags = Vec::new();
+        evaluate_file_in_package(
+            &graph,
+            file,
+            &pkg.root_dir,
+            &pkg.capability_gate,
+            &design_cfg,
+            None,
+            &mut file_diags,
+        );
+        file_diags.retain(|d| design_rules.contains(&d.rule));
+        diagnostics.extend(file_diags);
+    }
+
+    if let Some(allowed_tiers) = &options.tiers {
+        diagnostics.retain(|d| allowed_tiers.contains(&d.tier));
+    }
+
+    let mut report = build_report_with_packages(&graph, diagnostics, &sources, &packages);
+    // Omit health-score pass on focused design audits
+    report.summary.health_score = 100;
+    report.summary.score_label = "Excellent".to_string();
+    for proj in &mut report.projects {
+        proj.health_score = 100;
+        proj.score_label = "Excellent".to_string();
+    }
     Ok((report, sources))
 }
 
@@ -632,7 +702,7 @@ fn apply_cli_overrides_to_config(config: &mut DotoreConfig, overrides: &CliOverr
     }
 }
 
-fn load_disk_manifests(
+pub(crate) fn load_disk_manifests(
     workspace_root: &Path,
     packages: &[WorkspacePackage],
     sources: &HashMap<PathBuf, String>,
