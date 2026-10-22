@@ -22,15 +22,17 @@ use crate::{
         FileContext, FileIr, parse_file_ir,
         types::{compute_line_starts, loc_from_line_starts},
     },
+    load_disk_manifests,
     planner::{
         build_fix_capsule, build_root_cause_groups_and_capsules, enrich_cross_file_autofixes,
     },
     rules::{
-        BlastRadius, Diagnostic, FixCapsule, PrescriptionTier, RootCauseGroup, RuleCategory,
-        RuleId, RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag,
-        evaluate_file_in_package, rule_registry,
+        BlastRadius, BlastRadiusTier, Diagnostic, FixCapsule, PrescriptionTier, RootCauseGroup,
+        RuleCategory, RuleId, RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag,
+        evaluate_file_in_package, evaluate_project_graph_rules,
+        reduced_motion::evaluate_project_reduced_motion, rule_registry,
     },
-    scanner::collect_source_files,
+    scanner::{collect_source_files, collect_style_files},
     score::compute_local_health_score,
 };
 
@@ -602,20 +604,75 @@ const HTML_REPORT_STYLES: &str = r#"
     font-size: 0.75rem;
     color: #a7f3d0;
   }
+  .blast-box {
+    margin-top: 0.75rem;
+    border-radius: 0.5rem;
+    background-color: rgba(15, 23, 42, 0.7);
+    border: 1px solid #334155;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.75rem;
+    color: #cbd5e1;
+  }
+  .badge-blast-p0 {
+    background-color: rgba(244, 63, 94, 0.25);
+    color: #fda4af;
+    border-color: rgba(244, 63, 94, 0.5);
+  }
+  .badge-blast-p1 {
+    background-color: rgba(245, 158, 11, 0.25);
+    color: #fcd34d;
+    border-color: rgba(245, 158, 11, 0.5);
+  }
+  .badge-blast-p2 {
+    background-color: rgba(56, 189, 248, 0.2);
+    color: #7dd3fc;
+    border-color: rgba(56, 189, 248, 0.4);
+  }
+  .badge-blast-p3 {
+    background-color: rgba(148, 163, 184, 0.2);
+    color: #cbd5e1;
+    border-color: rgba(148, 163, 184, 0.4);
+  }
+  .section-heading {
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+  }
   .docs-row { margin-top: 0.75rem; font-size: 0.75rem; }
   .docs-link { color: #22d3ee; text-decoration: none; }
   .docs-link:hover { text-decoration: underline; }
 "#;
 
-/// Renders a self-contained visual HTML report with **Render Cascade** cards,
-/// **Caller Sites**, and `Autofix` previews.
+/// Renders a self-contained visual HTML report with **Root-Cause Groups**, static **Blast Radius**
+/// (`tier`, `score`, and rationale), **Render Cascade** cards, **Caller Sites**, and `Autofix` previews.
 #[must_use]
 pub fn render_html_report(report: &JsonReport) -> String {
     let s = &report.summary;
-    let mut cards_html = String::new();
+    let mut groups_html = String::new();
+    for (idx, group) in report.root_cause_groups.iter().enumerate() {
+        append_root_cause_group_card(&mut groups_html, idx + 1, group);
+    }
+    let groups_section = if groups_html.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<h2 class="section-heading">Root-Cause Groups ({})</h2><section class="cards">{groups_html}</section><h2 class="section-heading">Diagnostics ({})</h2>"#,
+            report.root_cause_groups.len(),
+            report.diagnostics.len()
+        )
+    };
 
+    let mut cards_html = String::new();
     for (idx, diag) in report.diagnostics.iter().enumerate() {
-        append_diagnostic_card(&mut cards_html, idx + 1, diag);
+        let group = report
+            .root_cause_groups
+            .iter()
+            .find(|g| g.diagnostic_indices.contains(&idx));
+        append_diagnostic_card(&mut cards_html, idx + 1, diag, group);
     }
 
     if cards_html.is_empty() {
@@ -653,6 +710,7 @@ pub fn render_html_report(report: &JsonReport) -> String {
         </div>
       </div>
     </header>
+    {groups_section}
     <section class="cards">
       {cards_html}
     </section>
@@ -669,7 +727,75 @@ pub fn render_html_report(report: &JsonReport) -> String {
     )
 }
 
-fn append_diagnostic_card(out: &mut String, index: usize, diag: &Diagnostic) {
+fn blast_tier_badge_class(tier: BlastRadiusTier) -> &'static str {
+    match tier {
+        BlastRadiusTier::P0 => "badge-blast-p0",
+        BlastRadiusTier::P1 => "badge-blast-p1",
+        BlastRadiusTier::P2 => "badge-blast-p2",
+        BlastRadiusTier::P3 => "badge-blast-p3",
+    }
+}
+
+fn format_blast_radius_rationale(br: &BlastRadius) -> String {
+    format!(
+        "frequency: {}, fan-out: {}, cascade depth: {}, sites: {}, files: {}",
+        br.render_frequency.as_str(),
+        br.fan_out,
+        br.cascade_depth,
+        br.site_count,
+        br.file_count
+    )
+}
+
+fn append_root_cause_group_card(out: &mut String, index: usize, group: &RootCauseGroup) {
+    let tier_class = match group.tier {
+        PrescriptionTier::Autofix => "badge-autofix",
+        PrescriptionTier::Surgical => "badge-surgical",
+        PrescriptionTier::Refactor => "badge-refactor",
+    };
+    let blast_class = blast_tier_badge_class(group.blast_radius.tier);
+    let subject = html_escape(group.subject_name.as_deref().unwrap_or("<module>"));
+    let file_loc = format!(
+        "{}:{}:{}",
+        html_escape(&group.file.display().to_string()),
+        group.loc.line,
+        group.loc.column
+    );
+    let rationale = html_escape(&format_blast_radius_rationale(&group.blast_radius));
+
+    let _ = writeln!(
+        out,
+        r#"<article class="card">
+  <div class="card-header">
+    <div class="card-meta">
+      <span class="muted mono">RCG #{index}</span>
+      <span class="badge {blast_class}">{} (score {})</span>
+      <span class="badge {tier_class}">{}</span>
+      <code class="rule-code">{}</code>
+      <span class="muted">in <code>{subject}</code></span>
+    </div>
+    <code class="muted">{file_loc}</code>
+  </div>
+  <p class="message">{}</p>
+  <div class="blast-box mono">Root-Cause Group <code>{}</code> &middot; Blast Radius: {} (score {}) &mdash; {rationale}</div>
+</article>"#,
+        group.blast_radius.tier.as_str(),
+        group.blast_radius.score,
+        group.tier.as_str(),
+        group.rule.as_str(),
+        html_escape(&group.message),
+        html_escape(&group.id),
+        group.blast_radius.tier.as_str(),
+        group.blast_radius.score,
+    );
+}
+
+fn append_diagnostic_card(
+    out: &mut String,
+    index: usize,
+    diag: &Diagnostic,
+    group: Option<&RootCauseGroup>,
+) {
     let badge_class = match diag.tier {
         PrescriptionTier::Autofix => "badge-autofix",
         PrescriptionTier::Surgical => "badge-surgical",
@@ -682,6 +808,22 @@ fn append_diagnostic_card(out: &mut String, index: usize, diag: &Diagnostic) {
         diag.loc.line,
         diag.loc.column
     );
+    let blast_badge = group.map_or_else(String::new, |g| {
+        let b_class = blast_tier_badge_class(g.blast_radius.tier);
+        format!(
+            r#"<span class="badge {b_class}">{} (score {})</span>"#,
+            g.blast_radius.tier.as_str(),
+            g.blast_radius.score
+        )
+    });
+    let blast_html = group.map_or_else(String::new, |g| {
+        let rationale = html_escape(&format_blast_radius_rationale(&g.blast_radius));
+        format!(
+            r#"<div class="blast-box mono">Blast Radius: {} (score {}) &mdash; {rationale}</div>"#,
+            g.blast_radius.tier.as_str(),
+            g.blast_radius.score
+        )
+    });
     let cascade_html = render_cascade_steps_html(&diag.cascade_steps);
     let callers_html = render_caller_sites_html(diag);
     let autofix_html = render_autofix_html(diag);
@@ -693,6 +835,7 @@ fn append_diagnostic_card(out: &mut String, index: usize, diag: &Diagnostic) {
   <div class="card-header">
     <div class="card-meta">
       <span class="muted mono">#{index}</span>
+      {blast_badge}
       <span class="badge {badge_class}">{}</span>
       <code class="rule-code">{}</code>
       <span class="muted">in <code>{subject}</code></span>
@@ -700,6 +843,7 @@ fn append_diagnostic_card(out: &mut String, index: usize, diag: &Diagnostic) {
     <code class="muted">{file_loc}</code>
   </div>
   <p class="message">{}</p>
+  {blast_html}
   {cascade_html}
   {callers_html}
   {autofix_html}
@@ -1314,6 +1458,11 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
 
     let packages = discover_workspace_packages(cwd);
     let mut discovered_files = collect_source_files(&[cwd.to_path_buf()], true);
+    for style_path in collect_style_files(&[cwd.to_path_buf()]) {
+        if !discovered_files.contains(&style_path) {
+            discovered_files.push(style_path);
+        }
+    }
     if !discovered_files.contains(&resolved_file) {
         discovered_files.push(resolved_file.clone());
     }
@@ -1327,7 +1476,8 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
         }
     }
 
-    let graph = ProjectGraph::build(file_irs);
+    let manifests = load_disk_manifests(cwd, &packages, &sources);
+    let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
     let Some(target_file_ir) = graph.files.iter().find(|f| f.path == resolved_file) else {
         return Err(format!(
             "Failed to parse target file `{}`.",
@@ -1350,7 +1500,7 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
         &default_pkg
     };
 
-    // 1. Evaluate target file under active package config & capability gate
+    // 1. Evaluate target file + project-graph rules under active package config & capability gate
     let mut active_diags = Vec::new();
     evaluate_file_in_package(
         &graph,
@@ -1361,9 +1511,22 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
         None,
         &mut active_diags,
     );
+    let active_pkgs = if packages.is_empty() {
+        vec![pkg.clone()]
+    } else {
+        packages.clone()
+    };
+    let mut active_graph_diags = Vec::new();
+    evaluate_project_graph_rules(&graph, &active_pkgs, None, &mut active_graph_diags);
+    evaluate_project_reduced_motion(&graph, &active_pkgs, None, &mut active_graph_diags);
+    active_diags.extend(
+        active_graph_diags
+            .into_iter()
+            .filter(|d| d.file == resolved_file),
+    );
     enrich_cross_file_autofixes(&graph, &mut active_diags, &sources);
 
-    // 2. Evaluate target file with an unrestricted probe (all rules, all capabilities, no inline disables)
+    // 2. Evaluate target file + project-graph rules with an unrestricted probe (all rules, all capabilities, no inline disables)
     let all_rules: Vec<RuleId> = rule_registry().iter().map(|m| m.id).collect();
     let mut permissive_cfg = pkg.config.clone();
     permissive_cfg.respect_inline_disables = false;
@@ -1382,6 +1545,30 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
         &permissive_cfg,
         Some(&all_rules),
         &mut probe_diags,
+    );
+    let permissive_pkg = crate::config::WorkspacePackage {
+        name: pkg.name.clone(),
+        root_dir: pkg.root_dir.clone(),
+        capability_gate: permissive_gate,
+        config: permissive_cfg,
+    };
+    let mut probe_graph_diags = Vec::new();
+    evaluate_project_graph_rules(
+        &graph,
+        std::slice::from_ref(&permissive_pkg),
+        Some(&all_rules),
+        &mut probe_graph_diags,
+    );
+    evaluate_project_reduced_motion(
+        &graph,
+        std::slice::from_ref(&permissive_pkg),
+        Some(&all_rules),
+        &mut probe_graph_diags,
+    );
+    probe_diags.extend(
+        probe_graph_diags
+            .into_iter()
+            .filter(|d| d.file == resolved_file),
     );
     enrich_cross_file_autofixes(&graph, &mut probe_diags, &sources);
 
