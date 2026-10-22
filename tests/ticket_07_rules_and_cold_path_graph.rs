@@ -914,11 +914,12 @@ fn project_graph_flags_unstable_and_overloaded_context_providers_and_missing_bou
         (
             PathBuf::from("src/SuspendingFeed.tsx"),
             r#"
+            import { Suspense } from 'react';
             import { useSuspenseQuery } from '@tanstack/react-query';
 
             export function SuspendingFeed() {
                 const { data } = useSuspenseQuery({ queryKey: ['feed'], queryFn: fetchFeed });
-                return <div>{data}</div>;
+                return <Suspense fallback={null}><div>{data}</div></Suspense>;
             }
             "#
             .to_string(),
