@@ -61,12 +61,6 @@ pub(crate) fn evaluate_security_rules<F>(
     if is_active(RuleId::IframeMissingSandbox).is_some() {
         check_iframe_missing_sandbox(file, out);
     }
-    if is_active(RuleId::JsxNoScriptUrl).is_some() {
-        check_jsx_no_script_url(file, &line_starts, out);
-    }
-    if is_active(RuleId::JsxNoTargetBlank).is_some() {
-        check_jsx_no_target_blank(file, &line_starts, out);
-    }
 
     evaluate_security_scan_patterns(file, &path_str, &line_starts, is_active, out);
 }
@@ -1281,59 +1275,6 @@ fn check_iframe_missing_sandbox(file: &FileIr, out: &mut Vec<Diagnostic>) {
                 "`<iframe>` element is missing a `sandbox` attribute.",
                 jsx.loc,
                 jsx.span,
-            );
-        }
-    }
-}
-
-fn check_jsx_no_script_url(file: &FileIr, line_starts: &[u32], out: &mut Vec<Diagnostic>) {
-    for (line_idx, line) in file.source.lines().enumerate() {
-        let lower = line.to_ascii_lowercase();
-        if let Some(pos) = lower.find("javascript:")
-            && (lower.contains("href=") || lower.contains("src=") || lower.contains("to="))
-        {
-            let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
-            let byte_start = line_start + u32::try_from(pos).unwrap_or(0);
-            let byte_end = line_start + u32::try_from(line.len()).unwrap_or(0);
-            push_sec_diag(
-                out,
-                file,
-                RuleId::JsxNoScriptUrl,
-                "jsxNoScriptUrl",
-                "javascript:",
-                "`javascript:` URLs in JSX are a script-injection hazard; use an `onClick` handler instead.",
-                loc_from_line_starts(line_starts, byte_start),
-                ByteSpan {
-                    start: byte_start,
-                    end: byte_end,
-                },
-            );
-        }
-    }
-}
-
-fn check_jsx_no_target_blank(file: &FileIr, line_starts: &[u32], out: &mut Vec<Diagnostic>) {
-    for (line_idx, line) in file.source.lines().enumerate() {
-        if (line.contains("target=\"_blank\"") || line.contains("target='_blank'"))
-            && (!line.contains("rel=")
-                || (!line.contains("noopener") && !line.contains("noreferrer")))
-        {
-            let pos = line.find("target=").unwrap_or(0);
-            let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
-            let byte_start = line_start + u32::try_from(pos).unwrap_or(0);
-            let byte_end = line_start + u32::try_from(line.len()).unwrap_or(0);
-            push_sec_diag(
-                out,
-                file,
-                RuleId::JsxNoTargetBlank,
-                "jsxNoTargetBlank",
-                "_blank",
-                "Using `target=\"_blank\"` without `rel=\"noreferrer\"` or `rel=\"noopener\"` exposes `window.opener`.",
-                loc_from_line_starts(line_starts, byte_start),
-                ByteSpan {
-                    start: byte_start,
-                    end: byte_end,
-                },
             );
         }
     }
