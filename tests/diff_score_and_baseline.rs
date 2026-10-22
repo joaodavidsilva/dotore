@@ -1095,7 +1095,7 @@ diff --git a/src/App.tsx b/src/App.tsx
 
     // 6. Policy 5: `ContextualOwnerPolicy::File` (`only-export-components`)
     let file_src = [
-        "export const MAGIC_NUMBER = 42;",
+        "export const formatLabel = (s: string) => s.trim();",
         "export function Button() {",
         "  return <button>Click</button>;",
         "}",
