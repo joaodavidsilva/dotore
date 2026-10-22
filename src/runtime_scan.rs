@@ -2790,10 +2790,32 @@ fn launch_isolated_chrome() -> Result<(std::process::Child, PathBuf, String), St
 }
 
 fn current_iso_timestamp() -> String {
-    let secs = SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    format!("2026-08-15T00:00:{:02}.000Z", secs % 60)
+        .unwrap_or_default();
+    let total_secs = dur.as_secs();
+    let millis = dur.subsec_millis();
+
+    let secs_of_day = total_secs % 86_400;
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let second = secs_of_day % 60;
+
+    // Civil date from days since 1970-01-01 (Howard Hinnant algorithm)
+    let z = (total_secs / 86_400) + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 fn wait_for_stop_or_timeout(max_duration_ms: u64) {
@@ -3107,6 +3129,12 @@ pub fn record_runtime_trace(
         wait_for_stop_or_timeout(max_recording_ms);
         let duration_ms = start_instant.elapsed().as_secs_f64() * 1_000.0;
 
+        client.drain_binding_events(
+            &snapshot_binding_name,
+            &snapshot_token,
+            &mut collected_snapshots,
+            &mut discarded,
+        );
         if let Ok(eval_res) = client.call(
             "Runtime.evaluate",
             json!({
@@ -3116,6 +3144,12 @@ pub fn record_runtime_trace(
             }),
             Some(&session_id),
         ) {
+            client.drain_binding_events(
+                &snapshot_binding_name,
+                &snapshot_token,
+                &mut collected_snapshots,
+                &mut discarded,
+            );
             let val = &eval_res["result"]["value"];
             if is_runtime_scan_probe_snapshot(val)
                 && let Ok(snap) = serde_json::from_value::<RuntimeScanProbeSnapshot>(val.clone())
@@ -3123,12 +3157,6 @@ pub fn record_runtime_trace(
                 store_navigation_snapshot(&mut collected_snapshots, &mut discarded, snap);
             }
         }
-        client.drain_binding_events(
-            &snapshot_binding_name,
-            &snapshot_token,
-            &mut collected_snapshots,
-            &mut discarded,
-        );
 
         client.call("Tracing.end", json!({}), None)?;
         let complete_event = client
