@@ -41,11 +41,12 @@ use super::{
         is_react_hook_callee, is_use_effect_call,
     },
     types::{
-        BlockDisableRange, ByteSpan, DepRef, DepsSpec, EffectNode, ExportDeclIr, ExternalStoreSite,
-        FetchSite, FileIr, FileSuppressions, IfGuardSite, ImportBindingIr, ImportDeclIr,
-        LineDisableDirective, ModuleIr, MotionFileIr, PropCallSite, SetterCallSite, SourceLoc,
-        StateSlot, SubjectIr, SubjectKind, SymbolKind, SymbolOutline, classify_file_context,
-        compute_line_starts, loc_from_line_starts,
+        BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, DepRef, DepsSpec, EffectNode,
+        ExportDeclIr, ExternalStoreSite, FetchSite, FileIr, FileSuppressions, IfGuardSite,
+        ImportBindingIr, ImportDeclIr, LineDisableDirective, ModuleIr, MotionFileIr, PropCallSite,
+        RelatedHookOwnerSpanIr, SetterCallSite, SourceLoc, StateSlot, SubjectIr, SubjectKind,
+        SymbolKind, SymbolOutline, classify_file_context, compute_line_starts,
+        loc_from_line_starts,
     },
 };
 /// Parses a JS/TS/JSX/TSX file from `source` once via `oxc_parser` and `oxc_semantic`,
@@ -94,6 +95,7 @@ where
             frame_helpers: Vec::new(),
             context_providers: Vec::new(),
             context_consumers: Vec::new(),
+            contextual_owner_spans: ContextualOwnerSpansIr::default(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -125,6 +127,7 @@ where
             frame_helpers: Vec::new(),
             context_providers: Vec::new(),
             context_consumers: Vec::new(),
+            contextual_owner_spans: ContextualOwnerSpansIr::default(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -220,6 +223,7 @@ where
         &mut context_providers,
         &mut context_consumers,
     );
+    let contextual_owner_spans = extract_contextual_owner_spans(&semantic);
 
     let file_ir = FileIr {
         path: path.to_path_buf(),
@@ -243,6 +247,7 @@ where
         frame_helpers,
         context_providers,
         context_consumers,
+        contextual_owner_spans,
     };
 
     f(&file_ir, &semantic)
@@ -262,6 +267,162 @@ fn collect_ref_entries(semantic: &Semantic<'_>) -> Vec<RefEntry> {
         }
     }
     entries
+}
+
+fn extract_contextual_owner_spans(semantic: &Semantic<'_>) -> ContextualOwnerSpansIr {
+    let mut function_boundary_spans = Vec::new();
+    let mut related_hook_spans = Vec::new();
+
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        if let Some(fn_span) = non_hook_function_boundary_span(semantic, node_id, node.kind()) {
+            function_boundary_spans.push(ByteSpan {
+                start: fn_span.start,
+                end: fn_span.end,
+            });
+        }
+        if let AstKind::CallExpression(call) = node.kind()
+            && is_hook_or_frame_call(call)
+        {
+            let mut referenced_decl_spans = Vec::new();
+            collect_referenced_local_declarations(
+                semantic,
+                node_id,
+                call.span,
+                &mut referenced_decl_spans,
+            );
+            related_hook_spans.push(RelatedHookOwnerSpanIr {
+                call_span: ByteSpan {
+                    start: call.span.start,
+                    end: call.span.end,
+                },
+                referenced_decl_spans,
+            });
+        }
+    }
+
+    ContextualOwnerSpansIr {
+        function_boundary_spans,
+        related_hook_spans,
+    }
+}
+
+fn non_hook_function_boundary_span(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    kind: AstKind<'_>,
+) -> Option<Span> {
+    let raw_span = match kind {
+        AstKind::Function(f) => f.span,
+        AstKind::ArrowFunctionExpression(arrow) => arrow.span,
+        _ => return None,
+    };
+
+    let parent_id = semantic.nodes().parent_id(node_id);
+    match semantic.nodes().kind(parent_id) {
+        AstKind::CallExpression(call) if is_hook_or_frame_call(call) => None,
+        AstKind::VariableDeclarator(decl) => {
+            let grand_id = semantic.nodes().parent_id(parent_id);
+            if let AstKind::VariableDeclaration(var_decl) = semantic.nodes().kind(grand_id)
+                && var_decl.declarations.len() == 1
+            {
+                let great_id = semantic.nodes().parent_id(grand_id);
+                if let AstKind::ExportNamedDeclaration(exp) = semantic.nodes().kind(great_id) {
+                    return Some(exp.span);
+                }
+                return Some(var_decl.span);
+            }
+            Some(decl.span)
+        }
+        AstKind::ExportNamedDeclaration(exp) => Some(exp.span),
+        AstKind::ExportDefaultDeclaration(exp) => Some(exp.span),
+        _ => Some(raw_span),
+    }
+}
+
+fn is_hook_or_frame_call(call: &CallExpression<'_>) -> bool {
+    let name = match call.callee.without_parentheses() {
+        Expression::Identifier(id) => Some(id.name.as_str()),
+        Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str()),
+        _ => None,
+    };
+    let Some(callee) = name else {
+        return false;
+    };
+    callee == "useFrame"
+        || callee == "requestAnimationFrame"
+        || (callee.starts_with("use")
+            && callee.as_bytes().get(3).is_some_and(u8::is_ascii_uppercase))
+}
+
+fn collect_referenced_local_declarations(
+    semantic: &Semantic<'_>,
+    hook_node_id: NodeId,
+    hook_span: Span,
+    out: &mut Vec<ByteSpan>,
+) {
+    let enclosing_fn_span = semantic
+        .nodes()
+        .ancestor_ids(hook_node_id)
+        .find_map(|anc_id| match semantic.nodes().kind(anc_id) {
+            AstKind::Function(f) => Some(f.span),
+            AstKind::ArrowFunctionExpression(a) => Some(a.span),
+            _ => None,
+        });
+
+    for (_id, node) in semantic.nodes().iter_enumerated() {
+        let AstKind::IdentifierReference(ident) = node.kind() else {
+            continue;
+        };
+        if ident.span.start < hook_span.start || ident.span.end > hook_span.end {
+            continue;
+        }
+        let Some(ref_id) = ident.reference_id.get() else {
+            continue;
+        };
+        let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+            continue;
+        };
+        let decl_id = semantic.scoping().symbol_declaration(sym_id);
+        match semantic.nodes().kind(decl_id) {
+            AstKind::VariableDeclarator(decl) => {
+                let is_fn_like = decl.init.as_ref().is_some_and(|init| {
+                    matches!(
+                        init.without_parentheses(),
+                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                    )
+                });
+                if is_fn_like
+                    && enclosing_fn_span.is_none_or(|fn_sp| {
+                        decl.span.start >= fn_sp.start && decl.span.end <= fn_sp.end
+                    })
+                {
+                    let parent_id = semantic.nodes().parent_id(decl_id);
+                    let sp = if let AstKind::VariableDeclaration(var_decl) =
+                        semantic.nodes().kind(parent_id)
+                    {
+                        var_decl.span
+                    } else {
+                        decl.span
+                    };
+                    out.push(ByteSpan {
+                        start: sp.start,
+                        end: sp.end,
+                    });
+                }
+            }
+            AstKind::Function(func)
+                if enclosing_fn_span.is_none_or(|fn_sp| {
+                    func.span.start > fn_sp.start && func.span.end <= fn_sp.end
+                }) =>
+            {
+                out.push(ByteSpan {
+                    start: func.span.start,
+                    end: func.span.end,
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 fn extract_subjects(
