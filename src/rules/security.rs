@@ -2483,17 +2483,111 @@ pub(crate) fn find_function_body_in_source(source: &str, name: &str) -> Option<S
         format!("const {name}"),
         format!("let {name}"),
     ] {
-        if let Some(pos) = source.find(&prefix) {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(&prefix) {
+            let pos = search_from + rel;
             let tail = &source[pos + prefix.len()..];
             let next_char = tail.chars().next();
             if next_char.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+                search_from = pos + prefix.len();
                 continue;
             }
-            let body_end = tail.find("\nexport ").unwrap_or(tail.len());
-            return Some(tail[..body_end].to_string());
+            if let Some(end) = find_function_declaration_end(tail) {
+                return Some(tail[..end].to_string());
+            }
+            search_from = pos + prefix.len();
         }
     }
     None
+}
+
+fn find_function_declaration_end(tail: &str) -> Option<usize> {
+    let bytes = tail.as_bytes();
+    let mut i = 0;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+    let mut started_body_block = false;
+    let mut after_arrow = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(bytes.len());
+            continue;
+        }
+
+        if !started_body_block {
+            match b {
+                b'(' => paren_depth += 1,
+                b')' => paren_depth = paren_depth.saturating_sub(1),
+                b'=' if paren_depth == 0 && bytes.get(i + 1) == Some(&b'>') => {
+                    after_arrow = true;
+                    i += 2;
+                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    if bytes.get(i) == Some(&b'{') {
+                        started_body_block = true;
+                        brace_depth = 1;
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'{' if paren_depth == 0 => {
+                    started_body_block = true;
+                    brace_depth = 1;
+                }
+                b';' if after_arrow && paren_depth == 0 => {
+                    return Some(i + 1);
+                }
+                b'\n' if after_arrow && paren_depth == 0 => {
+                    return Some(i);
+                }
+                _ => {}
+            }
+        } else {
+            match b {
+                b'{' => brace_depth += 1,
+                b'}' => {
+                    brace_depth = brace_depth.saturating_sub(1);
+                    if brace_depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    if after_arrow && !started_body_block {
+        Some(tail.len())
+    } else {
+        None
+    }
 }
 
 fn resolve_static_string_in_file(source: &str, expr: &str) -> Option<String> {
