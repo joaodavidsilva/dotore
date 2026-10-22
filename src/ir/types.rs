@@ -18,7 +18,7 @@ pub struct SourceLoc {
 }
 
 /// 0-based byte span `[start, end)` in a source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteSpan {
     /// Inclusive start byte offset.
     pub start: u32,
@@ -1035,6 +1035,24 @@ pub(crate) struct ContextConsumerSiteIr {
     pub(crate) span: ByteSpan,
 }
 
+/// Related AST spans for a hook or frame-loop call expression (`useEffect`, `useMemo`, `useCallback`, `useFrame`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct RelatedHookOwnerSpanIr {
+    /// Byte span of the hook/frame `CallExpression`.
+    pub(crate) call_span: ByteSpan,
+    /// Byte spans of local function/arrow-function declarations referenced inside the hook call.
+    pub(crate) referenced_decl_spans: Vec<ByteSpan>,
+}
+
+/// Single-pass AST owner spans extracted for `--scope contextual` diff filtering.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct ContextualOwnerSpansIr {
+    /// Non-hook function and arrow-function boundary spans (including outer `const`/`export` wrapper spans).
+    pub(crate) function_boundary_spans: Vec<ByteSpan>,
+    /// Hook and frame-loop call spans paired with their referenced local callback/function declaration spans.
+    pub(crate) related_hook_spans: Vec<RelatedHookOwnerSpanIr>,
+}
+
 /// Complete single-pass intermediate representation for a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileIr {
@@ -1080,6 +1098,8 @@ pub struct FileIr {
     pub(crate) context_providers: Vec<ContextProviderSiteIr>,
     /// `useContext(MyContext)` consumer sites extracted for cross-file context fan-out and overload analysis.
     pub(crate) context_consumers: Vec<ContextConsumerSiteIr>,
+    /// Single-pass AST owner spans for `--scope contextual` diff filtering.
+    pub(crate) contextual_owner_spans: ContextualOwnerSpansIr,
 }
 
 /// Computes 0-based line start byte offsets for `source`.
