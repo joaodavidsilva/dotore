@@ -68,6 +68,7 @@ crates/
       lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
       ir.rs               # single-pass syn AST, Subject, SymbolOutline, and suppression extraction
       rules.rs            # Rust rule activation gating and core safety rule evaluation
+      tokio_perf.rs       # single-pass Tokio async hazard and Rust allocation performance detectors
 src/
   main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API
