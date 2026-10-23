@@ -18758,7 +18758,7 @@ const RULE_REGISTRY: &[RuleMetadata] = &[
         RuleId::PyOrmNoQueryInLoop,
         "py-orm-no-query-in-loop",
         "dotore/py-orm-no-query-in-loop",
-        &["PERF203", "orm/no-query-in-loop", "n-plus-one-query"],
+        &["orm/no-query-in-loop", "n-plus-one-query"],
         "SQLAlchemy or Django ORM query executed inside a loop (N+1 query)",
         RuleCategory::Performance,
         RuleSeverity::Error,

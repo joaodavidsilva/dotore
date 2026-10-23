@@ -1076,6 +1076,12 @@ pub fn build_rule_catalog(
         if let Some(fw_q) = &fw_filter {
             let matches_fw = fw_label.eq_ignore_ascii_case(fw_q)
                 || (fw_q == "global" && meta.capability_gate.requires.is_empty())
+                || (fw_q == "rxjs"
+                    && matches!(
+                        meta.id,
+                        RuleId::AngularRxjsSubscribeRequiresTeardown
+                            | RuleId::AngularNoNestedSubscribe
+                    ))
                 || meta
                     .capability_gate
                     .requires
@@ -1510,8 +1516,24 @@ pub fn explain_location_with_analyzers(
     };
 
     let packages = discover_workspace_packages_with_analyzers(cwd, analyzers);
-    let mut discovered_files =
-        collect_source_files_for_analyzers(&[cwd.to_path_buf()], true, &[*analyzer]);
+    let default_pkg;
+    let pkg = if let Some(found) = resolve_package_for_file(&resolved_file, &packages) {
+        found
+    } else {
+        default_pkg = WorkspacePackage {
+            name: "root".to_string(),
+            root_dir: cwd.to_path_buf(),
+            capability_gate: analyzer.infer_capability_gate(cwd, &[]),
+            config: load_config_from_dir(cwd),
+        };
+        &default_pkg
+    };
+
+    let mut discovered_files = collect_source_files_for_analyzers(
+        std::slice::from_ref(&pkg.root_dir),
+        true,
+        &[*analyzer],
+    );
     if !discovered_files.contains(&resolved_file) {
         discovered_files.push(resolved_file.clone());
     }
@@ -1519,6 +1541,12 @@ pub fn explain_location_with_analyzers(
     let mut sources: HashMap<PathBuf, String> = HashMap::new();
     let mut extracted_files: Vec<ExtractedFile> = Vec::new();
     for path in discovered_files {
+        if resolve_package_for_file(&path, &packages)
+            .is_some_and(|resolved| resolved.root_dir != pkg.root_dir)
+            && path != resolved_file
+        {
+            continue;
+        }
         if let Ok(src) = fs::read_to_string(&path) {
             extracted_files.push(analyzer.extract_file(&path, &src));
             sources.insert(path, src);
@@ -1534,19 +1562,7 @@ pub fn explain_location_with_analyzers(
     let target_source = sources.get(&resolved_file).cloned().unwrap_or_default();
     let line_starts = compute_line_starts(&target_source);
 
-    let default_pkg;
-    let pkg = if let Some(found) = resolve_package_for_file(&resolved_file, &packages) {
-        found
-    } else {
-        default_pkg = WorkspacePackage {
-            name: "root".to_string(),
-            root_dir: cwd.to_path_buf(),
-            capability_gate: analyzer.infer_capability_gate(cwd, &[]),
-            config: load_config_from_dir(cwd),
-        };
-        &default_pkg
-    };
-
+    // `pkg` already resolved above
     let active_res = analyzer.analyze_package(pkg, &extracted_files, None);
     let active_diags: Vec<Diagnostic> = active_res
         .diagnostics
@@ -1632,7 +1648,10 @@ pub fn explain_location_with_analyzers(
                     .unwrap_or(&groups[0]);
                 let capsule = build_fix_capsule(&extracted_files, group, &probe_at_line, &sources);
                 let is_suppressed = pkg.config.respect_inline_disables
-                    && target_extracted.is_suppressed(diag.rule, diag.loc.line, diag.span);
+                    && (target_extracted.is_suppressed(diag.rule, diag.loc.line, diag.span)
+                        || target_extracted
+                            .suppressions
+                            .matches_line_or_block(diag.rule, diag.loc.line));
                 let (status, explanation) = diagnose_why_not_active_common(
                     diag,
                     &target_extracted.path,

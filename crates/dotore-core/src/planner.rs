@@ -14,7 +14,10 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    ir::{ByteSpan, ExtractedFile, ResolvedCallerSite, compute_line_starts, loc_from_line_starts},
+    ir::{
+        ByteSpan, ExtractedFile, LanguageId, ResolvedCallerSite, compute_line_starts,
+        loc_from_line_starts,
+    },
     report::JsonReport,
     rules::{
         BlastRadius, BlastRadiusTier, Diagnostic, FixCapsule, PrescriptionTier, RenderFrequency,
@@ -78,7 +81,16 @@ pub trait PlannerContext {
 
 impl PlannerContext for [ExtractedFile] {
     fn analyzed_files(&self) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = self.iter().map(|f| f.path.clone()).collect();
+        let mut files: Vec<PathBuf> = self
+            .iter()
+            .filter(|f| {
+                !matches!(
+                    f.path.extension().and_then(|e| e.to_str()),
+                    Some("css" | "scss" | "html" | "htm")
+                )
+            })
+            .map(|f| f.path.clone())
+            .collect();
         files.sort();
         files
     }
@@ -696,20 +708,36 @@ fn find_repository_exemplar<C: PlannerContext + ?Sized>(
     let mut sorted_files = ctx.analyzed_files();
     sorted_files.sort();
 
-    for file_path in &sorted_files {
-        let Some(src) = sources.get(file_path) else {
-            continue;
-        };
-        for (subj_name, subj_span) in ctx.subject_spans_for_file(file_path) {
-            if subj_name.is_some()
-                && !flagged_subjects.contains(&(file_path.as_path(), subj_name.as_deref()))
-            {
-                return Some(excerpt_from_span(file_path, src, subj_span));
+    for same_lang_pass in [true, false] {
+        for file_path in &sorted_files {
+            if same_lang_pass != same_language_family(&group.file, file_path) {
+                continue;
+            }
+            let Some(src) = sources.get(file_path) else {
+                continue;
+            };
+            for (subj_name, subj_span) in ctx.subject_spans_for_file(file_path) {
+                if subj_name.is_some()
+                    && !flagged_subjects.contains(&(file_path.as_path(), subj_name.as_deref()))
+                {
+                    return Some(excerpt_from_span(file_path, src, subj_span));
+                }
             }
         }
     }
 
     None
+}
+
+fn same_language_family(a: &Path, b: &Path) -> bool {
+    match (LanguageId::from_path(a), LanguageId::from_path(b)) {
+        (
+            Some(LanguageId::JavaScript | LanguageId::TypeScript),
+            Some(LanguageId::JavaScript | LanguageId::TypeScript),
+        ) => true,
+        (Some(la), Some(lb)) => la == lb,
+        _ => true,
+    }
 }
 
 #[expect(

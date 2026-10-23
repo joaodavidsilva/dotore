@@ -1,40 +1,48 @@
 //! Terminal, JSON, and self-contained HTML cascade reporters for `dotore`.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
+#[cfg(feature = "js")]
+use std::{collections::HashMap, fs, path::PathBuf};
 
 pub use dotore_core::report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
     JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
-    build_extracted_report_with_packages, build_report_from_planner_context, build_rule_catalog,
-    ci_config, ci_install, ci_upgrade, diagnose_why_not_active_common,
+    build_extracted_report_with_packages, build_rule_catalog, ci_config, ci_install, ci_upgrade,
     explain_location_with_analyzers, explain_rule, format_design_report, format_fix_report,
     format_install_report, format_rule_catalog_text, format_rule_explanation_text,
     format_terminal_report, format_why_report_text, install_dotore, parse_why_location,
-    render_code_frame, render_html_report, write_and_open_html_report, write_json_report,
+    render_html_report, write_and_open_html_report, write_json_report,
 };
+#[cfg(feature = "js")]
+use dotore_core::report::{
+    build_report_from_planner_context, diagnose_why_not_active_common, render_code_frame,
+};
+#[cfg(feature = "js")]
 use dotore_core::{
     config::{
         CapabilityGate, IgnoreConfig, WorkspacePackage, discover_workspace_packages_with_analyzers,
         load_config_from_dir, resolve_package_for_file,
     },
-    ir::{ExtractedFile, LanguageAnalyzer, SubjectEffectOwner, compute_line_starts, loc_from_line_starts},
+    ir::{
+        ExtractedFile, LanguageAnalyzer, SubjectEffectOwner, compute_line_starts,
+        loc_from_line_starts,
+    },
     planner::{build_fix_capsule, build_root_cause_groups_and_capsules},
     rules::{Diagnostic, RuleId, rule_registry},
     scanner::{collect_source_files_for_analyzers, collect_style_files},
 };
+#[cfg(feature = "js")]
 use dotore_js::{
     FileIr, JsLanguageAnalyzer, ProjectGraph, enrich_cross_file_autofixes,
     evaluate_file_in_package, evaluate_project_graph_rules, evaluate_project_reduced_motion,
 };
 
+#[cfg(feature = "js")]
 use crate::load_disk_manifests;
 
 /// Builds a [`JsonReport`] from a [`ProjectGraph`], its evaluated [`Diagnostic`]s, and file sources.
+#[cfg(feature = "js")]
 #[must_use]
 pub fn build_report(
     graph: &ProjectGraph,
@@ -45,6 +53,7 @@ pub fn build_report(
 }
 
 /// Builds a [`JsonReport`] including per-project coverage metadata for discovered [`WorkspacePackage`]s.
+#[cfg(feature = "js")]
 #[must_use]
 pub fn build_report_with_packages(
     graph: &ProjectGraph,
@@ -82,6 +91,7 @@ pub fn build_report_with_packages(
 /// # Errors
 /// Returns an error string if `location_arg` is malformed or the target file cannot be read.
 pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, String> {
+    crate::register_active_core_hooks();
     let parsed_loc = parse_why_location(location_arg)?;
     let resolved_file = if parsed_loc.file.is_absolute() {
         parsed_loc.file.clone()
@@ -95,10 +105,34 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
         ));
     }
 
+    #[cfg(feature = "js")]
+    {
+        let js_analyzer = JsLanguageAnalyzer;
+        let is_js_or_style = js_analyzer.supports_path(&resolved_file)
+            || matches!(
+                resolved_file.extension().and_then(|e| e.to_str()),
+                Some("css" | "scss" | "html" | "htm")
+            );
+        if is_js_or_style {
+            return explain_js_location(&parsed_loc, &resolved_file, cwd);
+        }
+    }
+
+    explain_location_with_analyzers(location_arg, cwd, crate::default_analyzers())
+}
+
+#[cfg(feature = "js")]
+fn explain_js_location(
+    parsed_loc: &WhyLocation,
+    resolved_file: &Path,
+    cwd: &Path,
+) -> Result<WhyReport, String> {
+    let resolved_file = resolved_file.to_path_buf();
     let js_analyzer = JsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
-    let packages = discover_workspace_packages_with_analyzers(cwd, analyzers);
-    let mut discovered_files = collect_source_files_for_analyzers(&[cwd.to_path_buf()], true, analyzers);
+    let js_only: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let packages = discover_workspace_packages_with_analyzers(cwd, crate::default_analyzers());
+    let mut discovered_files =
+        collect_source_files_for_analyzers(&[cwd.to_path_buf()], true, js_only);
     for style_path in collect_style_files(&[cwd.to_path_buf()]) {
         if !discovered_files.contains(&style_path) {
             discovered_files.push(style_path);
@@ -174,7 +208,9 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
     permissive_cfg.rules.clear();
     permissive_cfg.categories.clear();
     permissive_cfg.ignore = IgnoreConfig::default();
-    let permissive_gate = CapabilityGate::default_react();
+    let mut permissive_gate = pkg.capability_gate.clone();
+    permissive_gate.merge(&CapabilityGate::default_react());
+    permissive_gate.merge(&CapabilityGate::default_angular());
     let mut probe_diags = Vec::new();
     evaluate_file_in_package(
         &graph,
@@ -333,7 +369,7 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
     };
 
     Ok(WhyReport {
-        file: parsed_loc.file,
+        file: parsed_loc.file.clone(),
         line: parsed_loc.line,
         column: parsed_loc.column,
         entries,
@@ -341,6 +377,7 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
     })
 }
 
+#[cfg(feature = "js")]
 fn diagnostic_matches_line(
     file_ir: &FileIr,
     diag: &Diagnostic,
@@ -373,6 +410,7 @@ fn diagnostic_matches_line(
     false
 }
 
+#[cfg(feature = "js")]
 fn detect_mismatched_inline_suppression(file_ir: &FileIr, diag: &Diagnostic) -> Option<String> {
     let mut candidate_lines = vec![diag.loc.line];
     for subject in &file_ir.subjects {

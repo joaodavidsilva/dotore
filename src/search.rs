@@ -2,16 +2,13 @@
 
 use std::{collections::HashMap, io, path::PathBuf};
 
-use dotore_core::ir::{LanguageAnalyzer, SymbolKind};
+use dotore_core::ir::SymbolKind;
 pub use dotore_core::search::{
     SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
     format_search_json, format_search_text, score_fuzzy, search_extracted_files,
     search_project_sources_with, search_project_sources_with_analyzers, search_symbols_with,
     search_symbols_with_analyzers, should_highlight_search, should_highlight_stdout,
 };
-use dotore_js::JsLanguageAnalyzer;
-use dotore_py::PyLanguageAnalyzer;
-use dotore_rs::RsLanguageAnalyzer;
 
 /// Searches in-memory `(PathBuf, String)` files for **Symbol Outlines** matching `query`.
 #[must_use]
@@ -21,12 +18,8 @@ pub fn search_project_sources(
     kinds: Option<&[SymbolKind]>,
     limit: usize,
 ) -> Vec<SymbolSearchResult> {
-    JsLanguageAnalyzer::register_core_hooks();
-    let js_analyzer = JsLanguageAnalyzer;
-    let py_analyzer = PyLanguageAnalyzer::new();
-    let rs_analyzer = RsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &py_analyzer, &rs_analyzer];
-    search_project_sources_with_analyzers(query, files, kinds, limit, analyzers)
+    crate::register_active_core_hooks();
+    search_project_sources_with_analyzers(query, files, kinds, limit, crate::default_analyzers())
 }
 
 /// Discovers source files under `options.paths` and fuzzy-searches their **Symbol Outlines**.
@@ -37,10 +30,6 @@ pub fn search_symbols(
     query: &str,
     options: &SearchOptions,
 ) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
-    JsLanguageAnalyzer::register_core_hooks();
-    let js_analyzer = JsLanguageAnalyzer;
-    let py_analyzer = PyLanguageAnalyzer::new();
-    let rs_analyzer = RsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &py_analyzer, &rs_analyzer];
-    search_symbols_with_analyzers(query, options, analyzers)
+    crate::register_active_core_hooks();
+    search_symbols_with_analyzers(query, options, crate::default_analyzers())
 }
