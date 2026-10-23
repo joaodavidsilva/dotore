@@ -5,9 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use dotore::{
-    ByteSpan, Capability, CapabilityGate, ExtractedFile, LanguageAnalyzer, LanguageId,
-    PackageAnalysisResult, RuleId, SourceLoc, WorkspacePackage,
-    discover_workspace_packages_with_analyzers,
+    ByteSpan, Capability, CapabilityGate, DotoreConfig, ExtractedFile, JsLanguageAnalyzer,
+    LanguageAnalyzer, LanguageId, PackageAnalysisResult, RuleId, ScanOptions, SourceLoc,
+    WorkspacePackage, analyze_project_sources, analyze_source, analyze_source_with_config,
+    apply_patches_to_source, discover_workspace_packages_with_analyzers, scan_workspace,
 };
 
 impl LanguageAnalyzer for StubPyAnalyzer {
@@ -109,5 +110,77 @@ fn root_dotore_facade_reexports_language_analyzer_and_multi_manifest_discovery()
     assert!(packages[0].capability_gate.has(Capability::Pydantic));
     assert!(packages[0].capability_gate.has(Capability::SqlAlchemy));
 
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn root_dotore_facade_dispatches_js_ts_entrypoints_through_js_language_analyzer() {
+    let js = JsLanguageAnalyzer::new();
+    assert_eq!(js.language_id(), LanguageId::Js);
+    assert!(js.supports_path(Path::new("src/App.tsx")));
+    assert!(js.supports_path(Path::new("src/index.mjs")));
+    assert!(js.supports_path(Path::new("src/index.cjs")));
+    assert_eq!(js.manifest_filenames(), &["package.json"]);
+
+    let bad_src = r#"import { useState, useEffect } from 'react';
+export function Form({ first, last }: { first: string; last: string }) {
+    const [full, setFull] = useState('');
+    useEffect(() => {
+        setFull(first + ' ' + last);
+    }, [first, last]);
+    return <div>{full}</div>;
+}
+"#;
+    let diags = analyze_source(
+        Path::new("src/Form.tsx"),
+        bad_src,
+        Some(&[RuleId::NoDerivedState]),
+    );
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].rule, RuleId::NoDerivedState);
+
+    let cfg_diags = analyze_source_with_config(
+        Path::new("src/Form.tsx"),
+        bad_src,
+        &DotoreConfig::default(),
+        &CapabilityGate::default_react(),
+        Some(&[RuleId::NoDerivedState]),
+    );
+    assert_eq!(cfg_diags.len(), 1);
+
+    let (rewritten, applied) = apply_patches_to_source(bad_src, &diags);
+    assert_eq!(applied.len(), 1);
+    assert!(js.validate_syntax(Path::new("src/Form.tsx"), &rewritten));
+    assert!(
+        analyze_source(
+            Path::new("src/Form.tsx"),
+            &rewritten,
+            Some(&[RuleId::NoDerivedState]),
+        )
+        .is_empty()
+    );
+
+    let report = analyze_project_sources(
+        vec![(PathBuf::from("src/Form.tsx"), bad_src.to_string())],
+        Some(&[RuleId::NoDerivedState]),
+    );
+    assert_eq!(report.summary.files_scanned, 1);
+    assert_eq!(report.summary.total_diagnostics, 1);
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-js-facade-scan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(temp_dir.join("src")).unwrap();
+    std::fs::write(temp_dir.join("src/Form.tsx"), bad_src).unwrap();
+    let (ws_report, ws_sources) = scan_workspace(&ScanOptions {
+        paths: vec![temp_dir.clone()],
+        include_tests: false,
+        rules: Some(vec![RuleId::NoDerivedState]),
+        tiers: None,
+    })
+    .unwrap();
+    assert_eq!(ws_report.summary.files_scanned, 1);
+    assert_eq!(ws_report.summary.total_diagnostics, 1);
+    assert_eq!(ws_sources.len(), 1);
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

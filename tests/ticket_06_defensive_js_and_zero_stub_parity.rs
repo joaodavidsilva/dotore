@@ -668,24 +668,27 @@ fn zero_stub_parity_invariant_all_921_rule_variants_have_active_detectors() {
     let registry = rule_registry();
     let cfg = DotoreConfig::default();
     let catalog = build_rule_catalog(&cfg, &RulesListOptions::default());
-    assert_eq!(
-        registry.len(),
-        921,
-        "Expected 921 total RuleId entries in rule_registry(), got {}",
+    assert!(
+        registry.len() >= 921,
+        "Expected at least 921 total RuleId entries in rule_registry(), got {}",
         registry.len()
     );
     assert_eq!(
         catalog.len(),
-        921,
-        "Expected 921 total rules in build_rule_catalog(), got {}",
+        registry.len(),
+        "Expected catalog length to match rule_registry(), got {}",
         catalog.len()
     );
 
-    // Collect all Rust source files under `src/` except `src/rules/types.rs`
+    // Collect all Rust source files under `src/` and `crates/` except `src/rules/types.rs`
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src_dir = manifest_dir.join("src");
+    let crates_dir = manifest_dir.join("crates");
     let mut detector_sources = String::new();
     collect_rs_sources_excluding_types(&src_dir, &mut detector_sources);
+    if crates_dir.is_dir() {
+        collect_rs_sources_excluding_types(&crates_dir, &mut detector_sources);
+    }
 
     let mut unwired_rules = Vec::new();
     for meta in registry {
