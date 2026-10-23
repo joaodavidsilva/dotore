@@ -130,15 +130,39 @@ pub fn analyze_source(
 ) -> Vec<Diagnostic> {
     let analyzer = JsLanguageAnalyzer;
     let extracted = analyzer.extract_file(path, source);
+    let capability_gate = if is_standalone_angular_source(path, source) {
+        CapabilityGate::default_angular()
+    } else {
+        CapabilityGate::default_react()
+    };
     let default_pkg = WorkspacePackage {
         name: "default".to_string(),
         root_dir: PathBuf::from("."),
-        capability_gate: CapabilityGate::default_react(),
+        capability_gate,
         config: DotoreConfig::default(),
     };
     analyzer
         .analyze_package(&default_pkg, &[extracted], enabled_rules)
         .diagnostics
+}
+
+fn is_standalone_angular_source(path: &Path, source: &str) -> bool {
+    if source.contains("from 'react'") || source.contains("from \"react\"") {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    source.contains("@angular/")
+        || source.contains("@Component(")
+        || source.contains("@Directive(")
+        || source.contains("@Injectable(")
+        || path_str.ends_with(".component.ts")
+        || path_str.ends_with(".directive.ts")
+        || path_str.ends_with(".service.ts")
+        || path_str.ends_with(".component.html")
+        || (matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("html" | "htm")
+        ) && source.contains("@for"))
 }
 
 /// Analyzes a single in-memory source file under an explicit [`DotoreConfig`] and [`CapabilityGate`]
@@ -174,6 +198,7 @@ pub fn analyze_project_sources(
     let has_virtual_manifests = files.iter().any(|(p, _)| {
         p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
             name == "package.json"
+                || name == "angular.json"
                 || name == "tsconfig.json"
                 || name == "jsconfig.json"
                 || name == "pnpm-workspace.yaml"
@@ -236,6 +261,7 @@ fn extract_virtual_workspace_packages(
     files: Vec<(PathBuf, String)>,
 ) -> VirtualWorkspaceSplit {
     let mut pkg_jsons: Vec<(PathBuf, String)> = Vec::new();
+    let mut angular_jsons: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut compiler_configs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut manifests: HashMap<PathBuf, String> = HashMap::new();
@@ -261,6 +287,11 @@ fn extract_virtual_workspace_packages(
             if !is_in_node_modules {
                 pkg_jsons.push((parent_dir, content));
             }
+        } else if file_name == "angular.json" {
+            if !is_in_node_modules {
+                angular_jsons.push((parent_dir, path.clone(), content.clone()));
+            }
+            manifests.insert(path, content);
         } else if is_non_js_manifest_filename(file_name) {
             if is_compiler_config_filename(file_name) {
                 compiler_configs.push((parent_dir, path.clone(), content.clone()));
@@ -297,6 +328,11 @@ fn extract_virtual_workspace_packages(
     for (dir, pkg_content) in &pkg_jsons {
         let mut dir_manifest_sources: Vec<(PathBuf, &str)> =
             vec![(dir.join("package.json"), pkg_content.as_str())];
+        for (ng_dir, ng_path, ng_text) in &angular_jsons {
+            if ng_dir == dir || ng_dir == Path::new(".") {
+                dir_manifest_sources.push((ng_path.clone(), ng_text.as_str()));
+            }
+        }
         for (c_dir, c_path, c_text) in &compiler_configs {
             if c_dir == dir {
                 dir_manifest_sources.push((c_path.clone(), c_text.as_str()));
@@ -323,6 +359,31 @@ fn extract_virtual_workspace_packages(
         });
     }
 
+    for (ng_dir, ng_path, ng_text) in &angular_jsons {
+        if packages.iter().any(|p| &p.root_dir == ng_dir) {
+            continue;
+        }
+        let dir_manifest_sources: Vec<(PathBuf, &str)> =
+            vec![(ng_path.clone(), ng_text.as_str())];
+        let gate = js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources);
+        let local_cfg = config_files
+            .iter()
+            .find(|(c_dir, _, _)| c_dir == ng_dir)
+            .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
+            .unwrap_or_else(|| root_config.clone());
+        let name = ng_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("root")
+            .to_string();
+        packages.push(WorkspacePackage {
+            name,
+            root_dir: ng_dir.clone(),
+            capability_gate: gate,
+            config: local_cfg,
+        });
+    }
+
     if packages.is_empty() {
         packages.push(WorkspacePackage {
             name: "root".to_string(),
@@ -340,7 +401,8 @@ fn extract_virtual_workspace_packages(
 }
 
 fn is_non_js_manifest_filename(file_name: &str) -> bool {
-    file_name == "tsconfig.json"
+    file_name == "angular.json"
+        || file_name == "tsconfig.json"
         || file_name == "jsconfig.json"
         || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
         || file_name == "app.json"

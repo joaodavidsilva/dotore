@@ -105,6 +105,15 @@ where
         let semantic_ret = SemanticBuilder::new()
             .with_build_nodes(true)
             .build(&parsed.program);
+        let line_starts = compute_line_starts(source);
+        let mut semantic_sites = Vec::new();
+        crate::rules::angular::extract_angular_html_template_sites(
+            source,
+            0,
+            None,
+            &line_starts,
+            &mut semantic_sites,
+        );
         let file_ir = FileIr {
             path: path.to_path_buf(),
             source: source.to_string(),
@@ -118,8 +127,8 @@ where
             mutations: Vec::new(),
             async_flows: Vec::new(),
             security_sinks: Vec::new(),
-            suppressions: FileSuppressions::default(),
-            semantic_sites: Vec::new(),
+            suppressions: extract_file_suppressions(source),
+            semantic_sites,
             motion: MotionFileIr::default(),
             static_dom_ids: Vec::new(),
             has_unresolved_id_spread: false,
@@ -236,6 +245,7 @@ where
         &line_starts,
         &mut semantic_sites,
     );
+    crate::rules::angular::extract_angular_sites(&semantic, &line_starts, &mut semantic_sites);
     let mut contextual_owner_spans = extract_contextual_owner_spans(&semantic);
     contextual_owner_spans.element_spans = jsx_subtrees.iter().map(|s| s.span).collect();
 
@@ -482,6 +492,7 @@ fn extract_subjects(
             Some(&orphan_effects),
         ));
     }
+    crate::rules::angular::extract_angular_class_subjects(semantic, line_starts, &mut subjects);
     subjects
 }
 
