@@ -337,6 +337,14 @@ pub fn format_terminal_report(report: &JsonReport) -> String {
     let mut out = String::new();
     let s = &report.summary;
 
+    if report.diagnostics.is_empty() {
+        let _ = writeln!(out, "No unnecessary effects or state cascades detected.\n");
+    } else {
+        for diag in &report.diagnostics {
+            format_single_diagnostic(&mut out, diag);
+        }
+    }
+
     let _ = writeln!(
         out,
         "dotore  score: {}/100 ({})  files: {}  subjects: {}  effects: {}  findings: {} (autofix: {}, surgical: {}, refactor: {})",
@@ -357,16 +365,6 @@ pub fn format_terminal_report(report: &JsonReport) -> String {
             base.baseline_source, base.introduced_count, base.fixed_count, base.preexisting_count
         );
     }
-    if report.diagnostics.is_empty() {
-        let _ = writeln!(out, "\nNo unnecessary effects or state cascades detected.");
-        return out;
-    }
-
-    let _ = writeln!(out);
-    for diag in &report.diagnostics {
-        format_single_diagnostic(&mut out, diag);
-    }
-
     if s.autofix_count > 0 {
         let _ = writeln!(
             out,
@@ -384,6 +382,14 @@ pub fn format_design_report(report: &JsonReport) -> String {
     let mut out = String::new();
     let s = &report.summary;
 
+    if report.diagnostics.is_empty() {
+        let _ = writeln!(out, "No UI design findings detected.\n");
+    } else {
+        for diag in &report.diagnostics {
+            format_single_diagnostic(&mut out, diag);
+        }
+    }
+
     let _ = writeln!(
         out,
         "dotore design  files: {}  subjects: {}  findings: {} (autofix: {}, surgical: {}, refactor: {})",
@@ -394,16 +400,6 @@ pub fn format_design_report(report: &JsonReport) -> String {
         s.surgical_count,
         s.refactor_count
     );
-
-    if report.diagnostics.is_empty() {
-        let _ = writeln!(out, "\nNo UI design findings detected.");
-        return out;
-    }
-
-    let _ = writeln!(out);
-    for diag in &report.diagnostics {
-        format_single_diagnostic(&mut out, diag);
-    }
     out
 }
 
