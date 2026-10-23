@@ -810,6 +810,13 @@ pub(crate) fn extract_semantic_rule_sites(
         line_starts,
         &mut sites,
     );
+    crate::rules::react_router::extract_react_router_sites(
+        path,
+        program,
+        semantic,
+        line_starts,
+        &mut sites,
+    );
     crate::rules::stores::extract_store_sites(program, semantic, line_starts, &mut sites);
     crate::rules::ecosystem_ui::extract_ecosystem_ui_sites(
         program,
