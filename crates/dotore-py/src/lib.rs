@@ -21,6 +21,8 @@ use ruff_python_ast::{
 use ruff_python_parser::{Parsed, parse_unchecked_source};
 use ruff_text_size::Ranged;
 
+mod web_orm_security;
+
 /// Single-pass intermediate representation for a Python source file (`.py` or `.pyi`).
 #[derive(Debug, Clone)]
 pub struct PyFileIr {
@@ -124,6 +126,15 @@ impl LanguageAnalyzer for PyLanguageAnalyzer {
             assigned_var_name: None,
         };
         extractor.extract_suite(parsed.suite(), true);
+        web_orm_security::extract_web_orm_security_diagnostics(
+            path,
+            source,
+            &lines,
+            &line_starts,
+            is_stub_file,
+            parsed.suite(),
+            &mut extractor.candidate_diagnostics,
+        );
         let subjects_count = extractor.subject_spans.len();
         let symbol_outlines = extractor.symbol_outlines;
         let subject_spans = extractor.subject_spans;

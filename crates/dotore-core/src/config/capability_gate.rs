@@ -692,9 +692,16 @@ impl CapabilityGate {
     #[must_use]
     pub fn allows_rule(&self, meta: &RuleMetadata) -> bool {
         let pred = &meta.capability_gate;
-        pred.requires
-            .iter()
-            .all(|req| self.capabilities.contains(req))
+        let satisfies_requires = if pred.requires == [Capability::SqlAlchemy, Capability::Django] {
+            pred.requires
+                .iter()
+                .any(|req| self.capabilities.contains(req))
+        } else {
+            pred.requires
+                .iter()
+                .all(|req| self.capabilities.contains(req))
+        };
+        satisfies_requires
             && (!meta.tags.contains(&RuleTag::ReactJsxOnly)
                 || self.capabilities.contains(&Capability::React))
             && pred
