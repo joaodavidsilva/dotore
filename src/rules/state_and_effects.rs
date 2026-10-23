@@ -246,6 +246,8 @@ fn check_subject_state_and_effects(
                         autofix: None,
                     });
                 }
+                // 4. `no-stale-timer-ref`: discarded `setTimeout` / `setInterval` return value
+                check_no_stale_timer_ref(semantic, node_id, call, &subj_name, line_starts, sites);
             }
             AstKind::StaticMemberExpression(mem)
                 if is_component && mem.property.name == "current" =>
@@ -276,6 +278,16 @@ fn check_subject_state_and_effects(
             }
             AstKind::ObjectExpression(obj) => {
                 check_spread_props_over_defaults(semantic, obj, &subj_name, line_starts, sites);
+            }
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
+                check_no_unowned_async_error_clear(
+                    semantic,
+                    node_id,
+                    &setter_to_state,
+                    &subj_name,
+                    line_starts,
+                    sites,
+                );
             }
             _ => {}
         }
@@ -527,6 +539,31 @@ fn check_effect_hook_rules(
                 target_name: id.name.to_string(),
                 message: format!(
                     "Avoid invoking parent callback prop `{}` synchronously inside `useEffect`; call it directly from the originating event handler.",
+                    id.name
+                ),
+                loc: loc_from_line_starts(line_starts, inner_call.span.start),
+                span: ByteSpan {
+                    start: inner_call.span.start,
+                    end: inner_call.span.end,
+                },
+                autofix: None,
+            });
+        }
+        if let Expression::Identifier(id) = inner_call.callee.without_parentheses()
+            && dep_names.contains(id.name.as_str())
+            && (id.name.starts_with("on")
+                || id.name.starts_with("handle")
+                || id.name.starts_with("log")
+                || id.name.starts_with("track")
+                || id.reference_id.get().is_some_and(|r| is_prop(semantic, r)))
+        {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::PreferUseEffectEvent,
+                subject_name: subj_name.clone(),
+                message_id: "preferUseEffectEvent",
+                target_name: id.name.to_string(),
+                message: format!(
+                    "Effect re-runs whenever `{}` changes; wrap non-reactive event notification logic in `useEffectEvent`.",
                     id.name
                 ),
                 loc: loc_from_line_starts(line_starts, inner_call.span.start),
@@ -1178,6 +1215,197 @@ fn check_rerender_state_only_in_handlers_and_defer_reads(
                     autofix: None,
                 });
             }
+        } else if let BindingPattern::BindingIdentifier(val_id) = &decl.id
+            && let Some(sym_id) = val_id.symbol_id.get()
+            && is_reactive_custom_hook_call(semantic, call)
+        {
+            let mut handler_reads = 0_usize;
+            let mut render_reads = 0_usize;
+            for reference in semantic.scoping().get_resolved_references(sym_id) {
+                if is_in_render_execution_scope(semantic, reference.node_id(), subject_node_id) {
+                    render_reads += 1;
+                } else {
+                    handler_reads += 1;
+                }
+            }
+            if handler_reads > 0 && render_reads == 0 {
+                sites.push(SemanticRuleSite {
+                    rule: RuleId::RerenderDeferReadsHook,
+                    subject_name: subj_name.clone(),
+                    message_id: "rerenderDeferReadsHook",
+                    target_name: val_id.name.to_string(),
+                    message: format!(
+                        "Reactive hook value `{}` is only read inside callbacks/handlers; defer the read into the callback to avoid unnecessary re-renders.",
+                        val_id.name
+                    ),
+                    loc: loc_from_line_starts(line_starts, val_id.span.start),
+                    span: ByteSpan {
+                        start: decl.span.start,
+                        end: decl.span.end,
+                    },
+                    autofix: None,
+                });
+            }
         }
+    }
+}
+
+fn is_reactive_custom_hook_call(semantic: &Semantic<'_>, call: &CallExpression<'_>) -> bool {
+    for builtin in [
+        "useState",
+        "useRef",
+        "useCallback",
+        "useMemo",
+        "useEffect",
+        "useLayoutEffect",
+        "useInsertionEffect",
+        "useImperativeHandle",
+        "useReducer",
+        "useTransition",
+        "useId",
+    ] {
+        if is_react_hook_callee(semantic, &call.callee, builtin) {
+            return false;
+        }
+    }
+    match call.callee.without_parentheses() {
+        Expression::Identifier(id) => crate::ir::react_ast::is_custom_hook_name(id.name.as_str()),
+        Expression::StaticMemberExpression(mem) => {
+            crate::ir::react_ast::is_custom_hook_name(mem.property.name.as_str())
+        }
+        _ => false,
+    }
+}
+
+fn check_no_stale_timer_ref(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let timer_name = match call.callee.without_parentheses() {
+        Expression::Identifier(id) if matches!(id.name.as_str(), "setTimeout" | "setInterval") => {
+            Some(id.name.as_str())
+        }
+        Expression::StaticMemberExpression(mem)
+            if matches!(mem.property.name.as_str(), "setTimeout" | "setInterval") =>
+        {
+            Some(mem.property.name.as_str())
+        }
+        _ => None,
+    };
+    let Some(t_name) = timer_name else {
+        return;
+    };
+    if matches!(
+        semantic.nodes().parent_kind(node_id),
+        AstKind::ExpressionStatement(_)
+    ) {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoStaleTimerRef,
+            subject_name: subj_name.clone(),
+            message_id: "noStaleTimerRef",
+            target_name: t_name.to_string(),
+            message: format!(
+                "`{t_name}(...)` timer ID is discarded; store the timer handle in `timerRef.current` and clear it on cleanup or before scheduling a new timer."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_no_unowned_async_error_clear(
+    semantic: &Semantic<'_>,
+    fn_node_id: NodeId,
+    setter_to_state: &HashMap<String, String>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let is_async = match semantic.nodes().kind(fn_node_id) {
+        AstKind::Function(f) => f.r#async,
+        AstKind::ArrowFunctionExpression(a) => a.r#async,
+        _ => false,
+    };
+    if !is_async {
+        return;
+    }
+    let fn_span = semantic.nodes().get_node(fn_node_id).span();
+    let mut first_await_start: Option<u32> = None;
+    for (_, inner) in semantic.nodes().iter_enumerated() {
+        if !fn_span.contains_inclusive(inner.span()) {
+            continue;
+        }
+        if let AstKind::AwaitExpression(aw) = inner.kind() {
+            first_await_start =
+                Some(first_await_start.map_or(aw.span.start, |prev| prev.min(aw.span.start)));
+        }
+    }
+    let Some(await_start) = first_await_start else {
+        return;
+    };
+    let fn_text = fn_span.source_text(semantic.source_text());
+    if fn_text.contains(".current")
+        || fn_text.contains("AbortController")
+        || fn_text.contains("requestId")
+        || fn_text.contains("reqId")
+    {
+        return;
+    }
+
+    for (call_id, inner) in semantic.nodes().iter_enumerated() {
+        if !fn_span.contains_inclusive(inner.span()) || inner.span().end > await_start {
+            continue;
+        }
+        let AstKind::CallExpression(call) = inner.kind() else {
+            continue;
+        };
+        let Expression::Identifier(callee_id) = call.callee.without_parentheses() else {
+            continue;
+        };
+        let is_error_setter = setter_to_state
+            .get(callee_id.name.as_str())
+            .is_some_and(|s| s.to_ascii_lowercase().contains("err"))
+            || callee_id.name.to_ascii_lowercase().contains("err");
+        if !is_error_setter {
+            continue;
+        }
+        let clears_to_falsy = call
+            .arguments
+            .first()
+            .and_then(|a| a.as_expression())
+            .is_some_and(|e| match e.without_parentheses() {
+                Expression::NullLiteral(_) => true,
+                Expression::BooleanLiteral(b) => !b.value,
+                Expression::StringLiteral(s) => s.value.is_empty(),
+                Expression::Identifier(id) => id.name == "undefined",
+                _ => false,
+            });
+        if !clears_to_falsy || is_guarded_by_cancel_if(semantic, call_id, fn_node_id) {
+            continue;
+        }
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoUnownedAsyncErrorClear,
+            subject_name: subj_name.clone(),
+            message_id: "noUnownedAsyncErrorClear",
+            target_name: callee_id.name.to_string(),
+            message: format!(
+                "`{}(...)` clears error state before an async operation without a request ownership guard, so overlapping requests can clobber each other's error state.",
+                callee_id.name
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
     }
 }

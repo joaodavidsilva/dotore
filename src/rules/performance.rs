@@ -512,6 +512,14 @@ fn check_component_function(
         out,
     );
     check_rendering_hoist_jsx(&subject_name, statements, semantic, line_starts, out);
+    check_rendering_usetransition_loading(
+        &subject_name,
+        statements,
+        body_span,
+        semantic,
+        line_starts,
+        out,
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1499,6 +1507,31 @@ fn check_jsx_opening_performance_rules(
         find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
     let is_motion = is_motion_jsx_element(&opening.name);
     let tag_ident = extract_jsx_identifier_name(&opening.name);
+    if is_motion && matches!(&opening.name, JSXElementName::MemberExpression(mem) if mem.property.name == "svg")
+        && opening.attributes.iter().any(|item| {
+            if let JSXAttributeItem::Attribute(attr) = item
+                && let JSXAttributeName::Identifier(id) = &attr.name
+            {
+                MOTION_ANIMATE_PROPS.contains(&id.name.as_str())
+            } else {
+                false
+            }
+        })
+    {
+        out.push(SemanticRuleSite {
+            rule: RuleId::RenderingAnimateSvgWrapper,
+            subject_name: subject_name.clone(),
+            message_id: "renderingAnimateSvgWrapper",
+            target_name: "motion.svg".to_string(),
+            message: "Animating an `<svg>` directly can bypass hardware-accelerated compositing; animate a wrapper `<div>` or `<span>` instead.".to_string(),
+            loc: loc_from_line_starts(line_starts, opening.span.start),
+            span: ByteSpan {
+                start: opening.span.start,
+                end: opening.span.end,
+            },
+            autofix: None,
+        });
+    }
 
     // 1. `no-transition-all` & `no-permanent-will-change`
     for attr_item in &opening.attributes {
@@ -1690,6 +1723,26 @@ fn check_jsx_opening_performance_rules(
                         target_name: prop_name.clone(),
                         message: format!(
                             "Motion's individual {prop_name} transform keys can keep this animation on the main thread. Use a single transform string when compositor acceleration is important."
+                        ),
+                        loc: loc_from_line_starts(line_starts, prop.span.start),
+                        span: ByteSpan {
+                            start: prop.span.start,
+                            end: prop.span.end,
+                        },
+                        autofix: None,
+                    });
+                }
+                if is_motion
+                    && matches!(prop_name.as_str(), "scale" | "scaleX" | "scaleY")
+                    && matches!(unwrap_expr(&prop.value), Expression::NumericLiteral(n) if n.value == 0.0)
+                {
+                    out.push(SemanticRuleSite {
+                        rule: RuleId::NoScaleFromZero,
+                        subject_name: subject_name.clone(),
+                        message_id: "noScaleFromZero",
+                        target_name: prop_name.clone(),
+                        message: format!(
+                            "Animating `{prop_name}` from `0` makes elements pop out of nowhere; start from a subtle non-zero scale such as `0.95`."
                         ),
                         loc: loc_from_line_starts(line_starts, prop.span.start),
                         span: ByteSpan {
@@ -2852,5 +2905,68 @@ fn is_react_router_loader_fn(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+fn check_rendering_usetransition_loading(
+    subject_name: &Option<String>,
+    statements: &[Statement<'_>],
+    body_span: Span,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let body_src = body_span.source_text(semantic.source_text());
+    let has_transition =
+        body_src.contains("useTransition(") || body_src.contains("startTransition(");
+    for stmt in statements {
+        let Statement::VariableDeclaration(var_decl) = stmt else {
+            continue;
+        };
+        for decl in &var_decl.declarations {
+            let Some(Expression::CallExpression(call)) = decl.init.as_ref().map(unwrap_expr) else {
+                continue;
+            };
+            if !is_named_hook_call(call, "useState") {
+                continue;
+            }
+            let BindingPattern::ArrayPattern(arr) = &decl.id else {
+                continue;
+            };
+            let Some(Some(first_pat)) = arr.elements.first() else {
+                continue;
+            };
+            let Some(state_id) = first_pat.get_binding_identifier() else {
+                continue;
+            };
+            let lower = state_id.name.to_ascii_lowercase();
+            let is_loading_name = lower == "loading"
+                || lower == "isloading"
+                || lower == "ispending"
+                || lower.ends_with("loading");
+            let is_bool_init = call
+                .arguments
+                .first()
+                .and_then(Argument::as_expression)
+                .is_some_and(|e| matches!(unwrap_expr(e), Expression::BooleanLiteral(_)));
+            if is_loading_name && (has_transition || is_bool_init) {
+                out.push(SemanticRuleSite {
+                    rule: RuleId::RenderingUsetransitionLoading,
+                    subject_name: subject_name.clone(),
+                    message_id: "renderingUsetransitionLoading",
+                    target_name: state_id.name.to_string(),
+                    message: format!(
+                        "Manual loading state `{}` forces an extra render pass; prefer `useTransition`'s `isPending` flag.",
+                        state_id.name
+                    ),
+                    loc: loc_from_line_starts(line_starts, decl.span.start),
+                    span: ByteSpan {
+                        start: decl.span.start,
+                        end: decl.span.end,
+                    },
+                    autofix: None,
+                });
+            }
+        }
     }
 }

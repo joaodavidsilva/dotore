@@ -670,6 +670,21 @@ fn check_rn_import_rules(
                         autofix: None,
                     });
                 }
+                if src == "react-native" && imported == "Animated" {
+                    sites.push(SemanticRuleSite {
+                        rule: RuleId::RnPreferReanimated,
+                        subject_name: None,
+                        message_id: "rnPreferReanimated",
+                        target_name: "Animated".to_string(),
+                        message: "Prefer `react-native-reanimated` over React Native's legacy `Animated` API so animations run on the UI thread.".to_string(),
+                        loc: loc_from_line_starts(line_starts, sp.span.start),
+                        span: ByteSpan {
+                            start: sp.span.start,
+                            end: sp.span.end,
+                        },
+                        autofix: None,
+                    });
+                }
             }
         }
     }
@@ -909,6 +924,27 @@ fn check_rn_call_rules(
             autofix: None,
         });
     }
+    // 6. `rn-no-set-native-props`
+    if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
+        && mem.property.name == "setNativeProps"
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::RnNoSetNativeProps,
+            subject_name: subject_name.clone(),
+            message_id: "rnNoSetNativeProps",
+            target_name: "setNativeProps".to_string(),
+            message: "Imperative `setNativeProps` bypasses React state and the New Architecture; use declarative props or Reanimated shared values.".to_string(),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+
+    // 7. `rn-animate-layout-property`
+    check_rn_animate_layout_property(semantic, call, subject_name, line_starts, sites);
 }
 
 fn is_single_shared_value_copy(reaction_fn: &Expression<'_>, _source: &str) -> bool {
@@ -965,6 +1001,83 @@ fn is_single_shared_value_copy(reaction_fn: &Expression<'_>, _source: &str) -> b
             )
         }
         _ => false,
+    }
+}
+
+fn check_rn_animate_layout_property(
+    semantic: &Semantic<'_>,
+    call: &CallExpression<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    const RN_LAYOUT_PROPS: &[&str] = &[
+        "width",
+        "height",
+        "top",
+        "left",
+        "right",
+        "bottom",
+        "padding",
+        "paddingTop",
+        "paddingBottom",
+        "paddingLeft",
+        "paddingRight",
+        "paddingHorizontal",
+        "paddingVertical",
+        "margin",
+        "marginTop",
+        "marginBottom",
+        "marginLeft",
+        "marginRight",
+        "marginHorizontal",
+        "marginVertical",
+        "flex",
+        "flexGrow",
+        "borderWidth",
+        "gap",
+    ];
+    let is_use_animated_style = matches!(
+        call.callee.without_parentheses(),
+        Expression::Identifier(id) if id.name == "useAnimatedStyle"
+    );
+    if !is_use_animated_style {
+        return;
+    }
+    let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression) else {
+        return;
+    };
+    let cb_span = first_arg.span();
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !cb_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        let AstKind::ObjectProperty(prop) = node.kind() else {
+            continue;
+        };
+        let Some(key_name) = prop.key.static_name() else {
+            continue;
+        };
+        let Some(k) = key_name.as_str() else {
+            continue;
+        };
+        if RN_LAYOUT_PROPS.contains(&k) {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::RnAnimateLayoutProperty,
+                subject_name: subject_name.clone(),
+                message_id: "rnAnimateLayoutProperty",
+                target_name: k.to_string(),
+                message: format!(
+                    "Animating layout property `{k}` inside `useAnimatedStyle` triggers Yoga layout recalculations on every frame; animate `transform` or `opacity` instead."
+                ),
+                loc: loc_from_line_starts(line_starts, prop.span.start),
+                span: ByteSpan {
+                    start: prop.span.start,
+                    end: prop.span.end,
+                },
+                autofix: None,
+            });
+        }
     }
 }
 
@@ -1091,6 +1204,28 @@ fn check_rn_jsx_element_rules(
                         {
                             check_style_object_shadows(obj, subject_name, line_starts, sites);
                         }
+                    }
+                    if arr.elements.len() == 1
+                        && !matches!(
+                            &arr.elements[0],
+                            oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                        )
+                    {
+                        sites.push(SemanticRuleSite {
+                            rule: RuleId::RnNoSingleElementStyleArray,
+                            subject_name: subject_name.clone(),
+                            message_id: "rnNoSingleElementStyleArray",
+                            target_name: attr_name.to_string(),
+                            message: format!(
+                                "Single-element style array `{attr_name}={{[...]}}` allocates an unnecessary array wrapper; pass the style value directly."
+                            ),
+                            loc: loc_from_line_starts(line_starts, attr.span.start),
+                            span: ByteSpan {
+                                start: attr.span.start,
+                                end: attr.span.end,
+                            },
+                            autofix: None,
+                        });
                     }
                 }
                 _ => {}
@@ -1257,6 +1392,36 @@ fn check_rn_jsx_element_rules(
         line_starts,
         sites,
     );
+    // 7. `rn-prefer-content-inset-adjustment`
+    if el_name == "SafeAreaView"
+        && jsx_el.children.iter().any(|c| {
+            if let JSXChild::Element(child_el) = c {
+                let child_name = child_el
+                    .opening_element
+                    .name
+                    .span()
+                    .source_text(source)
+                    .trim();
+                SCROLL_CONTAINER_NAMES.contains(&child_name)
+            } else {
+                false
+            }
+        })
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::RnPreferContentInsetAdjustment,
+            subject_name: subject_name.clone(),
+            message_id: "rnPreferContentInsetAdjustment",
+            target_name: "SafeAreaView".to_string(),
+            message: "Prefer `contentInsetAdjustmentBehavior=\"automatic\"` on the scrollable container instead of wrapping it in `<SafeAreaView>`.".to_string(),
+            loc: loc_from_line_starts(line_starts, opening.span.start),
+            span: ByteSpan {
+                start: opening.span.start,
+                end: opening.span.end,
+            },
+            autofix: None,
+        });
+    }
 }
 
 #[expect(

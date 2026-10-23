@@ -1649,6 +1649,7 @@ fn check_tanstack_start_call_rules(
             sites,
         );
         check_no_secrets_in_loader(semantic, options_obj, subject_name, line_starts, sites);
+        check_no_direct_fetch_in_loader(semantic, options_obj, subject_name, line_starts, sites);
     }
 
     // 3. `tanstack-start-no-navigate-in-render`
@@ -2205,6 +2206,62 @@ fn check_no_secrets_in_loader(
                     span: ByteSpan {
                         start: mem.span.start,
                         end: mem.span.end,
+                    },
+                    autofix: None,
+                });
+            }
+        }
+    }
+}
+
+fn check_no_direct_fetch_in_loader(
+    semantic: &Semantic<'_>,
+    options_obj: &ObjectExpression<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for prop_kind in &options_obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let prop_key = prop.key.static_name();
+        let Some(key_name) = prop_key.as_ref().and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if !matches!(key_name, "loader" | "beforeLoad") {
+            continue;
+        }
+        let loader_span = prop.value.span();
+        for (node_id, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            if !loader_span.contains_inclusive(call.span) {
+                continue;
+            }
+            if is_inside_server_fn_handler(semantic, node_id, loader_span) {
+                continue;
+            }
+            let is_fetch = match call.callee.without_parentheses() {
+                Expression::Identifier(id) => id.name == "fetch",
+                Expression::StaticMemberExpression(mem) => {
+                    mem.property.name == "fetch"
+                        && matches!(mem.object.without_parentheses(), Expression::Identifier(id) if matches!(id.name.as_str(), "window" | "globalThis"))
+                }
+                _ => false,
+            };
+            if is_fetch {
+                sites.push(SemanticRuleSite {
+                    rule: RuleId::TanstackStartNoDirectFetchInLoader,
+                    subject_name: subject_name.clone(),
+                    message_id: "tanstackStartNoDirectFetchInLoader",
+                    target_name: "fetch".to_string(),
+                    message: "Direct `fetch()` in a route loader bypasses TanStack Start's typed RPC boundary; call a `createServerFn` instead.".to_string(),
+                    loc: loc_from_line_starts(line_starts, call.span.start),
+                    span: ByteSpan {
+                        start: call.span.start,
+                        end: call.span.end,
                     },
                     autofix: None,
                 });
