@@ -13,37 +13,7 @@ pub use dotore_core::diff::{
     parse_baseline_report_str, parse_changed_line_ranges, resolve_scan_exit_code,
     validate_git_revision, validate_warning_exit_code,
 };
-
-use crate::{
-    ir::{ByteSpan, ContextualOwnerSpansIr, FileIr},
-    rules::RuleId,
-};
-
-impl ContextualSpanProvider for FileIr {
-    fn file_path(&self) -> &Path {
-        &self.path
-    }
-
-    fn file_source(&self) -> &str {
-        &self.source
-    }
-
-    fn for_each_element_span(&self, f: &mut dyn FnMut(ByteSpan)) {
-        for subtree in &self.jsx_subtrees {
-            f(subtree.span);
-        }
-    }
-
-    fn for_each_subject_span(&self, f: &mut dyn FnMut(ByteSpan)) {
-        for subj in &self.subjects {
-            f(subj.span);
-        }
-    }
-
-    fn contextual_owner_spans(&self) -> &ContextualOwnerSpansIr {
-        &self.contextual_owner_spans
-    }
-}
+use dotore_core::rules::RuleId;
 
 /// Attempts to load baseline diagnostic entries from a JSON file path or a git revision's base blobs.
 pub(crate) fn load_baseline_entries(

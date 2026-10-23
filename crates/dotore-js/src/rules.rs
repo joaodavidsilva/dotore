@@ -19,7 +19,8 @@ pub(crate) mod r3f;
 pub(crate) mod react_builtins;
 pub(crate) mod react_native;
 pub(crate) mod react_router;
-pub(crate) mod reduced_motion;
+/// Single-pass motion library and CSS reduced-motion rules (`require-reduced-motion`).
+pub mod reduced_motion;
 pub(crate) mod remotion;
 pub(crate) mod security;
 pub(crate) mod server_nextjs;
@@ -61,7 +62,7 @@ use crate::{
 
 /// Evaluates all enabled rules across the [`ProjectGraph`] using default React capability gate and config.
 #[must_use]
-pub(crate) fn evaluate_project(
+pub fn evaluate_project(
     graph: &ProjectGraph,
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
@@ -77,7 +78,7 @@ pub(crate) fn evaluate_project(
 /// Evaluates rules across the [`ProjectGraph`] resolving each file's nearest [`WorkspacePackage`]
 /// (`CapabilityGate` + `DotoreConfig`) and optional CLI `enabled_rules` filter.
 #[must_use]
-pub(crate) fn evaluate_project_with_packages(
+pub fn evaluate_project_with_packages(
     graph: &ProjectGraph,
     packages: &[WorkspacePackage],
     enabled_rules: Option<&[RuleId]>,
@@ -103,7 +104,7 @@ pub(crate) fn evaluate_project_with_packages(
 }
 
 /// Evaluates a single [`FileIr`] under an explicit [`DotoreConfig`] and [`CapabilityGate`].
-pub(crate) fn evaluate_file_in_package(
+pub fn evaluate_file_in_package(
     graph: &ProjectGraph,
     file: &FileIr,
     package_root: &Path,
@@ -170,7 +171,8 @@ pub(crate) fn evaluate_file_in_package(
     out.extend(retained);
 }
 
-pub(crate) fn evaluate_project_graph_rules(
+/// Evaluates cross-file [`ProjectGraph`] rules (dead code, circular dependencies, duplicate JSX, R3F frame loops, supply chain, and architecture).
+pub fn evaluate_project_graph_rules(
     graph: &ProjectGraph,
     packages: &[WorkspacePackage],
     enabled_rules: Option<&[RuleId]>,

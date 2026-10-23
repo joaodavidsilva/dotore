@@ -236,7 +236,8 @@ where
         &line_starts,
         &mut semantic_sites,
     );
-    let contextual_owner_spans = extract_contextual_owner_spans(&semantic);
+    let mut contextual_owner_spans = extract_contextual_owner_spans(&semantic);
+    contextual_owner_spans.element_spans = jsx_subtrees.iter().map(|s| s.span).collect();
 
     let file_ir = FileIr {
         path: path.to_path_buf(),

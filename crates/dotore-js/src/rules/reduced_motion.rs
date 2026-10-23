@@ -822,7 +822,7 @@ fn is_call_value_consumed(semantic: &Semantic<'_>, call_node_id: NodeId) -> bool
 }
 
 /// Evaluates project-wide `require-reduced-motion` across each [`WorkspacePackage`] in `graph`.
-pub(crate) fn evaluate_project_reduced_motion(
+pub fn evaluate_project_reduced_motion(
     graph: &ProjectGraph,
     packages: &[WorkspacePackage],
     enabled_rules: Option<&[RuleId]>,

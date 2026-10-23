@@ -2,10 +2,11 @@
 //! **Caller Sites**, JSX elements, module imports/exports, **Symbol Outlines**, mutations,
 //! async flows, security sinks, and inline suppressions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use dotore_core::diff::ContextualSpanProvider;
 pub use dotore_core::ir::{
     BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
     FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
@@ -777,5 +778,69 @@ pub struct FileIr {
     /// `useContext(MyContext)` consumer sites extracted for cross-file context fan-out and overload analysis.
     pub(crate) context_consumers: Vec<ContextConsumerSiteIr>,
     /// Single-pass AST owner spans for `--scope contextual` diff filtering.
-    pub(crate) contextual_owner_spans: ContextualOwnerSpansIr,
+    pub contextual_owner_spans: ContextualOwnerSpansIr,
+}
+
+impl FileIr {
+    /// Converts this [`FileIr`] into a language-agnostic [`ExtractedFile`] carrying `self` as its payload.
+    #[must_use]
+    pub fn into_extracted_file(self) -> ExtractedFile {
+        let language_id = LanguageId::from_path(&self.path).unwrap_or(LanguageId::JavaScript);
+        let subjects_count = self.subjects.len();
+        let effects_count = self.subjects.iter().map(|s| s.effect_nodes.len()).sum();
+        let subject_spans = self
+            .subjects
+            .iter()
+            .map(|s| (s.name.clone(), s.span, s.loc))
+            .collect();
+        let mut contextual_owner_spans = self.contextual_owner_spans.clone();
+        if contextual_owner_spans.element_spans.is_empty() && !self.jsx_subtrees.is_empty() {
+            contextual_owner_spans.element_spans =
+                self.jsx_subtrees.iter().map(|s| s.span).collect();
+        }
+        let path = self.path.clone();
+        let source = self.source.clone();
+        let file_context = self.file_context;
+        let symbol_outlines = self.symbol_outlines.clone();
+        let suppressions = self.suppressions.clone();
+        ExtractedFile {
+            path,
+            source,
+            language_id,
+            file_context,
+            symbol_outlines,
+            contextual_owner_spans,
+            suppressions,
+            subjects_count,
+            effects_count,
+            subject_spans,
+            payload: Box::new(self),
+        }
+    }
+}
+
+impl ContextualSpanProvider for FileIr {
+    fn file_path(&self) -> &Path {
+        &self.path
+    }
+
+    fn file_source(&self) -> &str {
+        &self.source
+    }
+
+    fn for_each_element_span(&self, f: &mut dyn FnMut(ByteSpan)) {
+        for subtree in &self.jsx_subtrees {
+            f(subtree.span);
+        }
+    }
+
+    fn for_each_subject_span(&self, f: &mut dyn FnMut(ByteSpan)) {
+        for subj in &self.subjects {
+            f(subj.span);
+        }
+    }
+
+    fn contextual_owner_spans(&self) -> &ContextualOwnerSpansIr {
+        &self.contextual_owner_spans
+    }
 }
