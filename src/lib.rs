@@ -5,6 +5,10 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
@@ -87,8 +91,9 @@ pub use report::{
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
     build_extracted_report_with_packages, build_rule_catalog, ci_config, ci_install, ci_upgrade,
     explain_location, explain_location_with_analyzers, explain_rule, format_design_report,
-    format_fix_report, format_install_report, format_rule_catalog_text,
-    format_rule_explanation_text, format_terminal_report, format_why_report_text, install_dotore,
+    format_design_report_pretty, format_fix_report, format_install_report,
+    format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
+    format_terminal_report_pretty, format_why_report_text, install_dotore,
     parse_why_location, render_html_report, write_and_open_html_report, write_json_report,
 };
 pub use runtime_scan::{
@@ -147,6 +152,63 @@ const DEFAULT_ANALYZERS: &[&dyn LanguageAnalyzer] = &[
 #[must_use]
 pub const fn default_analyzers() -> &'static [&'static dyn LanguageAnalyzer] {
     DEFAULT_ANALYZERS
+}
+
+/// Snapshot of live workspace scan progress for terminal loading animations.
+#[derive(Debug, Clone, Default)]
+pub struct LiveScanProgressSnapshot {
+    /// Current scan phase (`"Discovering files"`, `"Reading source files"`, `"Extracting AST & IR"`, `"Evaluating ProjectGraph & Rules"`).
+    pub phase: &'static str,
+    /// Number of files processed in the current phase.
+    pub completed_files: usize,
+    /// Total files discovered for the scan.
+    pub total_files: usize,
+    /// Most recent file path touched by a worker thread.
+    pub current_file: String,
+}
+
+static PROGRESS_PHASE_CODE: AtomicUsize = AtomicUsize::new(0);
+static PROGRESS_COMPLETED: AtomicUsize = AtomicUsize::new(0);
+static PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static PROGRESS_CURRENT_FILE: Mutex<String> = Mutex::new(String::new());
+
+fn set_progress_phase(code: usize, total: usize) {
+    PROGRESS_PHASE_CODE.store(code, Ordering::Relaxed);
+    PROGRESS_COMPLETED.store(0, Ordering::Relaxed);
+    PROGRESS_TOTAL.store(total, Ordering::Relaxed);
+}
+
+fn tick_progress_file(path: &Path) {
+    let done = PROGRESS_COMPLETED.fetch_add(1, Ordering::Relaxed) + 1;
+    if (done & 3) == 1
+        && let Ok(mut guard) = PROGRESS_CURRENT_FILE.try_lock()
+    {
+        *guard = path.display().to_string();
+    }
+}
+
+/// Returns a lock-free snapshot of the current workspace scan progress.
+#[must_use]
+pub fn current_scan_progress() -> LiveScanProgressSnapshot {
+    let phase = match PROGRESS_PHASE_CODE.load(Ordering::Relaxed) {
+        1 => "Discovering workspace & files",
+        2 => "Reading source files",
+        3 => "Extracting AST & IR (parallel)",
+        4 => "Evaluating ProjectGraph & Rules",
+        _ => "Initializing",
+    };
+    let completed_files = PROGRESS_COMPLETED.load(Ordering::Relaxed);
+    let total_files = PROGRESS_TOTAL.load(Ordering::Relaxed);
+    let current_file = PROGRESS_CURRENT_FILE
+        .try_lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    LiveScanProgressSnapshot {
+        phase,
+        completed_files,
+        total_files,
+        current_file,
+    }
 }
 
 pub(crate) fn register_active_core_hooks() {
@@ -561,12 +623,33 @@ fn analyze_polyglot_sources(
         let mut all_extracted: Vec<ExtractedFile> = Vec::new();
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
+        let total_to_extract = {
+            let mut n = 0usize;
+            #[cfg(feature = "py")]
+            {
+                n += py_pairs.len();
+            }
+            #[cfg(feature = "rs")]
+            {
+                n += rs_pairs.len();
+            }
+            #[cfg(feature = "js")]
+            {
+                n += js_pairs.len();
+            }
+            n
+        };
+        set_progress_phase(3, total_to_extract);
+
         #[cfg(feature = "py")]
         if !py_pairs.is_empty() {
             let py = PyLanguageAnalyzer::new();
             let py_extracted: Vec<ExtractedFile> = py_pairs
                 .into_par_iter()
-                .map(|(path, source)| py.extract_file(&path, &source))
+                .map(|(path, source)| {
+                    tick_progress_file(&path);
+                    py.extract_file(&path, &source)
+                })
                 .collect();
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
@@ -590,7 +673,10 @@ fn analyze_polyglot_sources(
         if !rs_pairs.is_empty() {
             let rs_extracted: Vec<ExtractedFile> = rs_pairs
                 .into_par_iter()
-                .map(|(path, source)| RsLanguageAnalyzer.extract_file(&path, &source))
+                .map(|(path, source)| {
+                    tick_progress_file(&path);
+                    RsLanguageAnalyzer.extract_file(&path, &source)
+                })
                 .collect();
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
@@ -615,8 +701,12 @@ fn analyze_polyglot_sources(
             let js_analyzer = JsLanguageAnalyzer;
             let js_extracted: Vec<ExtractedFile> = js_pairs
                 .into_par_iter()
-                .map(|(path, source)| js_analyzer.extract_file(&path, &source))
+                .map(|(path, source)| {
+                    tick_progress_file(&path);
+                    js_analyzer.extract_file(&path, &source)
+                })
                 .collect();
+            set_progress_phase(4, js_extracted.len());
             let graph = js_analyzer.build_graph_from_extracted(&js_extracted, manifests);
             let mut js_diags = evaluate_project_with_packages(&graph, packages, enabled_rules);
             enrich_cross_file_autofixes(&graph, &mut js_diags, sources);
@@ -626,7 +716,6 @@ fn analyze_polyglot_sources(
         } else {
             None
         };
-
         #[cfg(not(feature = "js"))]
         let js_graph_opt = {
             let _ = (manifests, sources);
@@ -948,6 +1037,7 @@ pub fn scan_workspace_with_overrides(
     overrides: &CliOverrides,
 ) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
     register_active_core_hooks();
+    set_progress_phase(1, 0);
     let analyzers = default_analyzers();
     let workspace_root = determine_workspace_root(&options.paths);
     let mut packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
@@ -979,16 +1069,26 @@ pub fn scan_workspace_with_overrides(
         })
         .collect();
 
-    let mut sources = HashMap::with_capacity(paths.len());
-    let mut pairs = Vec::with_capacity(paths.len());
-
-    for path in paths {
-        if let Ok(content) = fs::read_to_string(&path) {
-            sources.insert(path.clone(), content.clone());
-            pairs.push((path, content));
-        }
-    }
-
+    set_progress_phase(2, paths.len());
+    #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
+    let mut pairs: Vec<(PathBuf, String)> = paths
+        .into_par_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(&path).ok()?;
+            tick_progress_file(&path);
+            Some((path, content))
+        })
+        .collect();
+    #[cfg(not(any(feature = "js", feature = "py", feature = "rs")))]
+    let pairs: Vec<(PathBuf, String)> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(&path).ok()?;
+            tick_progress_file(&path);
+            Some((path, content))
+        })
+        .collect();
+    let sources: HashMap<PathBuf, String> = pairs.iter().cloned().collect();
     #[cfg(feature = "js")]
     if packages
         .iter()
@@ -1182,20 +1282,25 @@ fn scan_design_js(
         })
         .collect();
 
-    let mut sources = HashMap::with_capacity(paths.len());
-    let mut pairs = Vec::with_capacity(paths.len());
-    for path in paths {
-        if let Ok(content) = fs::read_to_string(&path) {
-            sources.insert(path.clone(), content.clone());
-            pairs.push((path, content));
-        }
-    }
+    set_progress_phase(2, paths.len());
+    let pairs: Vec<(PathBuf, String)> = paths
+        .into_par_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(&path).ok()?;
+            tick_progress_file(&path);
+            Some((path, content))
+        })
+        .collect();
+    let sources: HashMap<PathBuf, String> = pairs.iter().cloned().collect();
 
+    set_progress_phase(3, pairs.len());
     let extracted_files: Vec<ExtractedFile> = pairs
         .into_par_iter()
-        .map(|(path, source)| js_analyzer.extract_file(&path, &source))
+        .map(|(path, source)| {
+            tick_progress_file(&path);
+            js_analyzer.extract_file(&path, &source)
+        })
         .collect();
-
     let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
 
     let mut diagnostics = Vec::new();

@@ -65,9 +65,10 @@ pub use report::{
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
     build_extracted_report_with_packages, build_report_from_planner_context, build_rule_catalog,
     ci_config, ci_install, ci_upgrade, diagnose_why_not_active_common, explain_location,
-    explain_location_with_analyzers, explain_rule, format_design_report, format_fix_report,
-    format_install_report, format_rule_catalog_text, format_rule_explanation_text,
-    format_terminal_report, format_why_report_text, install_dotore, parse_why_location,
+    explain_location_with_analyzers, explain_rule, format_design_report,
+    format_design_report_pretty, format_fix_report, format_install_report,
+    format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
+    format_terminal_report_pretty, format_why_report_text, install_dotore, parse_why_location,
     render_code_frame, render_html_report,
     write_and_open_html_report, write_json_report,
 };

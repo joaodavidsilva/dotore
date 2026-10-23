@@ -334,17 +334,179 @@ fn build_project_coverage_metadata(
 /// Formats a human-readable terminal report with **Render Cascade** traces and **Caller Sites**.
 #[must_use]
 pub fn format_terminal_report(report: &JsonReport) -> String {
+    format_terminal_report_pretty(report, false)
+}
+
+/// Formats a human-readable terminal report with ASCII art dashboard, **Render Cascade** flow
+/// diagrams, **Caller Sites**, and optional ANSI color styling.
+#[must_use]
+pub fn format_terminal_report_pretty(report: &JsonReport, color: bool) -> String {
     let mut out = String::new();
     let s = &report.summary;
 
-    if report.diagnostics.is_empty() {
-        let _ = writeln!(out, "No unnecessary effects or state cascades detected.\n");
+    let p0 = report
+        .root_cause_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P0)
+        .count();
+    let p1 = report
+        .root_cause_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P1)
+        .count();
+    let p2 = report
+        .root_cause_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P2)
+        .count();
+    let p3 = report
+        .root_cause_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P3)
+        .count();
+
+    let cyan = if color { "\x1b[36;1m" } else { "" };
+    let dim = if color { "\x1b[2m" } else { "" };
+    let bold = if color { "\x1b[1m" } else { "" };
+    let green = if color { "\x1b[32;1m" } else { "" };
+    let yellow = if color { "\x1b[33;1m" } else { "" };
+    let red = if color { "\x1b[31;1m" } else { "" };
+    let reset = if color { "\x1b[0m" } else { "" };
+
+    let score_color = if s.health_score >= 85 {
+        green
+    } else if s.health_score >= 60 {
+        yellow
     } else {
+        red
+    };
+
+    let score_bar = ascii_progress_bar(s.health_score as usize, 100, 20);
+    let total_diag_denom = s.total_diagnostics.max(1);
+    let autofix_bar = ascii_progress_bar(s.autofix_count, total_diag_denom, 16);
+    let surgical_bar = ascii_progress_bar(s.surgical_count, total_diag_denom, 16);
+    let refactor_bar = ascii_progress_bar(s.refactor_count, total_diag_denom, 16);
+
+    let _ = writeln!(
+        out,
+        "{cyan}╭──────────────────────────────────────────────────────────────────────────────╮{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│   ____   ___ _____ ___  ____  _____                                          │{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│  |  _ \\ / _ \\_   _/ _ \\|  _ \\| ____|   {bold}STATIC ANALYZER & REMEDIATION ENGINE{reset}{cyan}  │{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│  | | | | | | || || | | | |_) |  _|     {dim}JS/TS · React · Angular · Python · Rs{reset}{cyan} │{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│  | |_| | |_| || || |_| |  _ <| |___                                          │{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│  |____/ \\___/ |_| \\___/|_| \\_\\_____|                                         │{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}├──────────────────────────────────────────────────────────────────────────────┤{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}  {bold}HEALTH SCORE{reset}   {score_color}{score_bar}  {:>3}/100 ({}){reset}",
+        s.health_score, s.score_label
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}  {bold}SCAN SCOPE{reset}     {} files · {} subjects · {} effects · {} findings",
+        s.files_scanned, s.subjects_scanned, s.effects_scanned, s.total_diagnostics
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}  {bold}SEVERITY{reset}       {red}✖ {} error(s){reset}   {yellow}▲ {} warning(s){reset}   ({} affected file(s))",
+        s.error_count, s.warning_count, s.affected_file_count
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}  {bold}TIERS{reset}          {green}⚙ Autofix {reset}   {green}{autofix_bar}{reset}  {}",
+        s.autofix_count
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}                 {yellow}✎ Surgical{reset}   {yellow}{surgical_bar}{reset}  {}",
+        s.surgical_count
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}                 {red}⇄ Refactor{reset}   {red}{refactor_bar}{reset}  {}",
+        s.refactor_count
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}  {bold}BLAST RADIUS{reset}   {red}P0: {p0}{reset}   {yellow}P1: {p1}{reset}   {cyan}P2: {p2}{reset}   {dim}P3: {p3}{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}╰──────────────────────────────────────────────────────────────────────────────╯{reset}"
+    );
+
+    if !report.projects.is_empty() {
+        let _ = writeln!(
+            out,
+            "{dim}┌─ WORKSPACE PACKAGES ({}) ─────────────────────────────────────────────────────┐{reset}",
+            report.projects.len()
+        );
+        for proj in &report.projects {
+            let caps: Vec<&str> = proj.capabilities.iter().copied().map(Capability::as_str).collect();
+            let caps_label = if caps.is_empty() {
+                "none".to_string()
+            } else {
+                caps.join(", ")
+            };
+            let _ = writeln!(
+                out,
+                "{dim}│{reset}  • {bold}{}{reset} ({caps_label})  score: {}/100 ({})  files: {}  findings: {}",
+                proj.name,
+                proj.health_score,
+                proj.score_label,
+                proj.analyzed_file_count,
+                proj.diagnostic_count
+            );
+        }
+        let _ = writeln!(
+            out,
+            "{dim}└──────────────────────────────────────────────────────────────────────────────┘{reset}"
+        );
+    }
+
+    if report.diagnostics.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n{green}╔══════════════════════════════════════════════════════════════════════════════╗{reset}"
+        );
+        let _ = writeln!(
+            out,
+            "{green}║  ✔  No unnecessary effects or state cascades detected.                       ║{reset}"
+        );
+        let _ = writeln!(
+            out,
+            "{green}╚══════════════════════════════════════════════════════════════════════════════╝{reset}\n"
+        );
+    } else {
+        let _ = writeln!(out);
         for diag in &report.diagnostics {
-            format_single_diagnostic(&mut out, diag);
+            format_single_diagnostic(&mut out, diag, color);
         }
     }
 
+    let _ = writeln!(
+        out,
+        "{cyan}╭─ SUMMARY ────────────────────────────────────────────────────────────────────╮{reset}"
+    );
     let _ = writeln!(
         out,
         "dotore  score: {}/100 ({})  files: {}  subjects: {}  effects: {}  findings: {} (autofix: {}, surgical: {}, refactor: {})",
@@ -372,6 +534,10 @@ pub fn format_terminal_report(report: &JsonReport) -> String {
             s.autofix_count
         );
     }
+    let _ = writeln!(
+        out,
+        "{cyan}╰──────────────────────────────────────────────────────────────────────────────╯{reset}"
+    );
 
     out
 }
@@ -379,14 +545,43 @@ pub fn format_terminal_report(report: &JsonReport) -> String {
 /// Formats the terminal output for `dotore design` (focused UI polish audit, omitting health score).
 #[must_use]
 pub fn format_design_report(report: &JsonReport) -> String {
+    format_design_report_pretty(report, false)
+}
+
+/// Formats the terminal output for `dotore design` with ASCII art header and optional ANSI colors.
+#[must_use]
+pub fn format_design_report_pretty(report: &JsonReport, color: bool) -> String {
     let mut out = String::new();
     let s = &report.summary;
+    let cyan = if color { "\x1b[36;1m" } else { "" };
+    let bold = if color { "\x1b[1m" } else { "" };
+    let reset = if color { "\x1b[0m" } else { "" };
+
+    let _ = writeln!(
+        out,
+        "{cyan}╭─ DOTORE DESIGN AUDIT ────────────────────────────────────────────────────────╮{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}│{reset}  {bold}UI POLISH{reset}      {} files · {} subjects · {} findings (autofix: {}, surgical: {}, refactor: {})",
+        s.files_scanned,
+        s.subjects_scanned,
+        s.total_diagnostics,
+        s.autofix_count,
+        s.surgical_count,
+        s.refactor_count
+    );
+    let _ = writeln!(
+        out,
+        "{cyan}╰──────────────────────────────────────────────────────────────────────────────╯{reset}"
+    );
 
     if report.diagnostics.is_empty() {
-        let _ = writeln!(out, "No UI design findings detected.\n");
+        let _ = writeln!(out, "\nNo UI design findings detected.\n");
     } else {
+        let _ = writeln!(out);
         for diag in &report.diagnostics {
-            format_single_diagnostic(&mut out, diag);
+            format_single_diagnostic(&mut out, diag, color);
         }
     }
 
@@ -401,6 +596,14 @@ pub fn format_design_report(report: &JsonReport) -> String {
         s.refactor_count
     );
     out
+}
+
+fn ascii_progress_bar(value: usize, max: usize, width: usize) -> String {
+    let clamped_max = max.max(1);
+    let filled = ((value.min(clamped_max) * width) + (clamped_max / 2)) / clamped_max;
+    let filled = filled.min(width);
+    let empty = width.saturating_sub(filled);
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
 }
 
 /// Formats the terminal output for `dotore fix` (and `dotore fix --dry-run`).
@@ -433,11 +636,23 @@ pub fn format_fix_report(results: &[FileFixResult], dry_run: bool) -> String {
     out
 }
 
-fn format_single_diagnostic(out: &mut String, diag: &Diagnostic) {
+fn format_single_diagnostic(out: &mut String, diag: &Diagnostic, color: bool) {
     let subject = diag.subject_name.as_deref().unwrap_or("<anonymous>");
+    let cyan = if color { "\x1b[36;1m" } else { "" };
+    let dim = if color { "\x1b[2m" } else { "" };
+    let green = if color { "\x1b[32;1m" } else { "" };
+    let yellow = if color { "\x1b[33;1m" } else { "" };
+    let red = if color { "\x1b[31;1m" } else { "" };
+    let reset = if color { "\x1b[0m" } else { "" };
+    let tier_color = match diag.tier {
+        PrescriptionTier::Autofix => green,
+        PrescriptionTier::Surgical => yellow,
+        PrescriptionTier::Refactor => red,
+    };
+
     let _ = writeln!(
         out,
-        "[{}] ({}) {}:{}:{} in `{}`",
+        "{dim}╭──{reset} {cyan}[{}]{reset} {tier_color}({}){reset} {}:{}:{} in `{}`",
         diag.rule.as_str(),
         diag.tier.as_str(),
         diag.file.display(),
@@ -445,9 +660,23 @@ fn format_single_diagnostic(out: &mut String, diag: &Diagnostic) {
         diag.loc.column,
         subject
     );
-    let _ = writeln!(out, "  {}", diag.message);
+    let _ = writeln!(out, "{dim}│{reset}  {}", diag.message);
     if !diag.cascade_steps.is_empty() {
-        let _ = writeln!(out, "  cascade: {}", diag.cascade_steps.join(" -> "));
+        let _ = writeln!(
+            out,
+            "{dim}│{reset}  cascade: {}",
+            diag.cascade_steps.join(" -> ")
+        );
+        let ascii_nodes: Vec<String> = diag
+            .cascade_steps
+            .iter()
+            .map(|step| format!("[{step}]"))
+            .collect();
+        let _ = writeln!(
+            out,
+            "{dim}│{reset}  flow:    ┌─► {} ──► ↻ re-render",
+            ascii_nodes.join(" ──► ")
+        );
     }
     for caller in &diag.caller_sites {
         let key_note = if caller.has_key {
@@ -458,7 +687,7 @@ fn format_single_diagnostic(out: &mut String, diag: &Diagnostic) {
         if let Some(parent) = &caller.parent_subject_name {
             let _ = writeln!(
                 out,
-                "  caller:  {}:{}:{} in `{parent}` (<{} /> {key_note})",
+                "{dim}│{reset}  caller:  {}:{}:{} in `{parent}` (<{} /> {key_note})",
                 caller.caller_file.display(),
                 caller.loc.line,
                 caller.loc.column,
@@ -467,7 +696,7 @@ fn format_single_diagnostic(out: &mut String, diag: &Diagnostic) {
         } else {
             let _ = writeln!(
                 out,
-                "  caller:  {}:{}:{} (<{} /> {key_note})",
+                "{dim}│{reset}  caller:  {}:{}:{} (<{} /> {key_note})",
                 caller.caller_file.display(),
                 caller.loc.line,
                 caller.loc.column,
@@ -476,9 +705,9 @@ fn format_single_diagnostic(out: &mut String, diag: &Diagnostic) {
         }
     }
     if let Some(fix) = &diag.autofix {
-        let _ = writeln!(out, "  autofix: {}", fix.description);
+        let _ = writeln!(out, "{dim}│{reset}  {green}autofix:{reset} {}", fix.description);
     }
-    let _ = writeln!(out, "  docs:    {}\n", diag.docs_url);
+    let _ = writeln!(out, "{dim}╰──{reset} docs:    {}\n", diag.docs_url);
 }
 
 const HTML_REPORT_STYLES: &str = r#"
