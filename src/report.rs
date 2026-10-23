@@ -17,31 +17,26 @@ pub use dotore_core::report::{
     format_terminal_report, format_why_report_text, install_dotore, parse_why_location,
     render_code_frame, render_html_report, write_and_open_html_report, write_json_report,
 };
-
-use crate::{
+use dotore_core::{
     config::{
-        CapabilityGate, IgnoreConfig, WorkspacePackage, discover_workspace_packages,
+        CapabilityGate, IgnoreConfig, WorkspacePackage, discover_workspace_packages_with_analyzers,
         load_config_from_dir, resolve_package_for_file,
     },
-    graph::ProjectGraph,
-    ir::{
-        FileIr, parse_file_ir,
-        types::{compute_line_starts, loc_from_line_starts},
-    },
-    load_disk_manifests,
-    planner::{
-        build_fix_capsule, build_root_cause_groups_and_capsules, enrich_cross_file_autofixes,
-    },
-    rules::{
-        Diagnostic, RuleId, evaluate_file_in_package, evaluate_project_graph_rules,
-        reduced_motion::evaluate_project_reduced_motion, rule_registry,
-    },
-    scanner::{collect_source_files, collect_style_files},
+    ir::{ExtractedFile, LanguageAnalyzer, SubjectEffectOwner, compute_line_starts, loc_from_line_starts},
+    planner::{build_fix_capsule, build_root_cause_groups_and_capsules},
+    rules::{Diagnostic, RuleId, rule_registry},
+    scanner::{collect_source_files_for_analyzers, collect_style_files},
 };
+use dotore_js::{
+    FileIr, JsLanguageAnalyzer, ProjectGraph, enrich_cross_file_autofixes,
+    evaluate_file_in_package, evaluate_project_graph_rules, evaluate_project_reduced_motion,
+};
+
+use crate::load_disk_manifests;
 
 /// Builds a [`JsonReport`] from a [`ProjectGraph`], its evaluated [`Diagnostic`]s, and file sources.
 #[must_use]
-pub(crate) fn build_report(
+pub fn build_report(
     graph: &ProjectGraph,
     diagnostics: Vec<Diagnostic>,
     sources: &HashMap<PathBuf, String>,
@@ -51,7 +46,7 @@ pub(crate) fn build_report(
 
 /// Builds a [`JsonReport`] including per-project coverage metadata for discovered [`WorkspacePackage`]s.
 #[must_use]
-pub(crate) fn build_report_with_packages(
+pub fn build_report_with_packages(
     graph: &ProjectGraph,
     mut diagnostics: Vec<Diagnostic>,
     sources: &HashMap<PathBuf, String>,
@@ -82,7 +77,7 @@ pub(crate) fn build_report_with_packages(
 }
 
 /// Explains why a diagnostic fired (or why a rule, inline suppression, config, or **Capability Gate**
-/// did or did not apply) at `location_arg` (`<file:line>`) under `cwd`, including its complete [` crate::FixCapsule`].
+/// did or did not apply) at `location_arg` (`<file:line>`) under `cwd`, including its complete [`crate::FixCapsule`].
 ///
 /// # Errors
 /// Returns an error string if `location_arg` is malformed or the target file cannot be read.
@@ -100,8 +95,10 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
         ));
     }
 
-    let packages = discover_workspace_packages(cwd);
-    let mut discovered_files = collect_source_files(&[cwd.to_path_buf()], true);
+    let js_analyzer = JsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let packages = discover_workspace_packages_with_analyzers(cwd, analyzers);
+    let mut discovered_files = collect_source_files_for_analyzers(&[cwd.to_path_buf()], true, analyzers);
     for style_path in collect_style_files(&[cwd.to_path_buf()]) {
         if !discovered_files.contains(&style_path) {
             discovered_files.push(style_path);
@@ -112,16 +109,16 @@ pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, Str
     }
 
     let mut sources: HashMap<PathBuf, String> = HashMap::new();
-    let mut file_irs: Vec<FileIr> = Vec::new();
+    let mut extracted_files: Vec<ExtractedFile> = Vec::new();
     for path in discovered_files {
         if let Ok(src) = fs::read_to_string(&path) {
-            file_irs.push(parse_file_ir(&path, &src));
+            extracted_files.push(js_analyzer.extract_file(&path, &src));
             sources.insert(path, src);
         }
     }
 
     let manifests = load_disk_manifests(cwd, &packages, &sources);
-    let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
+    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, manifests);
     let Some(target_file_ir) = graph.files.iter().find(|f| f.path == resolved_file) else {
         return Err(format!(
             "Failed to parse target file `{}`.",
@@ -359,15 +356,18 @@ fn diagnostic_matches_line(
         return true;
     }
     for subject in &file_ir.subjects {
-        for effect in &subject.effect_nodes {
-            if effect.call_span.start <= diag.span.start && diag.span.end <= effect.call_span.end {
-                let eff_start = loc_from_line_starts(line_starts, effect.call_span.start).line;
-                let eff_end =
-                    loc_from_line_starts(line_starts, effect.call_span.end.saturating_sub(1)).line;
+        let mut matched_eff = false;
+        subject.for_each_effect_span(&mut |eff_span, _eff_line| {
+            if !matched_eff && eff_span.start <= diag.span.start && diag.span.end <= eff_span.end {
+                let eff_start = loc_from_line_starts(line_starts, eff_span.start).line;
+                let eff_end = loc_from_line_starts(line_starts, eff_span.end.saturating_sub(1)).line;
                 if eff_start <= target_line && target_line <= eff_end {
-                    return true;
+                    matched_eff = true;
                 }
             }
+        });
+        if matched_eff {
+            return true;
         }
     }
     false
@@ -379,11 +379,11 @@ fn detect_mismatched_inline_suppression(file_ir: &FileIr, diag: &Diagnostic) -> 
         if subject.span.start <= diag.span.start && diag.span.end <= subject.span.end {
             candidate_lines.push(subject.loc.line);
         }
-        for effect in &subject.effect_nodes {
-            if effect.call_span.start <= diag.span.start && diag.span.end <= effect.call_span.end {
-                candidate_lines.push(effect.loc.line);
+        subject.for_each_effect_span(&mut |eff_span, eff_line| {
+            if eff_span.start <= diag.span.start && diag.span.end <= eff_span.end {
+                candidate_lines.push(eff_line);
             }
-        }
+        });
     }
     for dir in &file_ir.suppressions.line_directives {
         if candidate_lines.contains(&dir.target_line)

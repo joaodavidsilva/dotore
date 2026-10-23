@@ -290,14 +290,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dotore-core",
+ "dotore-js",
  "dotore-py",
- "ignore",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
  "rayon",
  "serde",
  "serde_json",
@@ -308,6 +302,22 @@ name = "dotore-core"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dotore-js"
+version = "0.1.0"
+dependencies = [
+ "dotore-core",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
  "rayon",
  "serde",
  "serde_json",

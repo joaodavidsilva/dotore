@@ -1,0 +1,25 @@
+[package]
+name = "dotore-js"
+version = "0.1.0"
+edition = "2024"
+description = "JavaScript, TypeScript, and React single-pass static analyzer for dotore."
+license = "MIT"
+
+[lib]
+name = "dotore_js"
+path = "src/lib.rs"
+
+[dependencies]
+dotore-core = { path = "../dotore-core" }
+oxc_allocator = "0.155.0"
+oxc_ast = "0.155.0"
+oxc_parser = "0.155.0"
+oxc_semantic = "0.155.0"
+oxc_span = "0.155.0"
+oxc_syntax = "0.155.0"
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true
