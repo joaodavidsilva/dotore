@@ -1,0 +1,15 @@
+[package]
+name = "dotore-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Single-pass Rust AST & scope analyzer, Cargo.toml capability gate inference, and Rust rule detectors for dotore."
+license = "MIT"
+
+[dependencies]
+dotore-core = { path = "../dotore-core" }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+syn = { version = "2.0.119", features = ["full", "visit", "extra-traits", "parsing", "printing"] }
+toml = "0.8.23"
+
+[lints]
+workspace = true

@@ -49,6 +49,7 @@ pub use diff::{
     validate_warning_exit_code,
 };
 pub use dotore_core::{CliOverrides, ScanOptions};
+pub use dotore_rs::{RsFileIr, RsLanguageAnalyzer, RsSubjectIr, RsSubjectKind};
 pub use fixer::{
     FileFixResult, apply_autofixes, apply_autofixes_with_analyzers, apply_autofixes_with_validator,
     apply_patches_to_source, apply_patches_to_source_with_analyzers,
@@ -129,6 +130,9 @@ pub fn analyze_source(
     source: &str,
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
+    if RsLanguageAnalyzer.supports_path(path) {
+        return dotore_rs::analyze_rs_source(path, source, enabled_rules);
+    }
     let file_ir = parse_file_ir(path, source);
     let graph = ProjectGraph::build(vec![file_ir]);
     evaluate_project(&graph, enabled_rules)
@@ -143,6 +147,9 @@ pub fn analyze_source_with_config(
     gate: &CapabilityGate,
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
+    if RsLanguageAnalyzer.supports_path(path) {
+        return dotore_rs::analyze_rs_source_with_config(path, source, config, gate, enabled_rules);
+    }
     let file_ir = parse_file_ir(path, source);
     let graph = ProjectGraph::build(vec![file_ir]);
     let mut diagnostics = Vec::new();
@@ -173,9 +180,13 @@ pub fn analyze_project_sources(
     files: Vec<(PathBuf, String)>,
     enabled_rules: Option<&[RuleId]>,
 ) -> JsonReport {
+    let has_rs_files = files
+        .iter()
+        .any(|(p, _)| RsLanguageAnalyzer.supports_path(p));
     let has_virtual_manifests = files.iter().any(|(p, _)| {
         p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
             name == "package.json"
+                || name == "Cargo.toml"
                 || name == "tsconfig.json"
                 || name == "jsconfig.json"
                 || name == "pnpm-workspace.yaml"
@@ -187,7 +198,7 @@ pub fn analyze_project_sources(
         })
     });
 
-    if !has_virtual_manifests {
+    if !has_virtual_manifests && !has_rs_files {
         let sources: HashMap<PathBuf, String> = files.iter().cloned().collect();
         let file_irs: Vec<_> = files
             .into_par_iter()
@@ -211,12 +222,55 @@ pub fn analyze_project_sources(
         .collect();
     let sources: HashMap<PathBuf, String> = filtered_sources.iter().cloned().collect();
 
-    let file_irs: Vec<_> = filtered_sources
+    let (rs_sources, js_sources): (Vec<_>, Vec<_>) = filtered_sources
+        .into_iter()
+        .partition(|(path, _)| RsLanguageAnalyzer.supports_path(path));
+
+    if js_sources.is_empty() && !rs_sources.is_empty() {
+        let extracted_rs: Vec<ExtractedFile> = rs_sources
+            .into_par_iter()
+            .map(|(path, source)| RsLanguageAnalyzer.extract_file(&path, &source))
+            .collect();
+        let mut diagnostics = Vec::new();
+        for extracted in &extracted_rs {
+            if let Some(pkg) = resolve_package_for_file(&extracted.path, &packages) {
+                dotore_rs::evaluate_rs_file(
+                    extracted,
+                    &pkg.root_dir,
+                    &pkg.capability_gate,
+                    &pkg.config,
+                    enabled_rules,
+                    &mut diagnostics,
+                );
+            }
+        }
+        return build_extracted_report_with_packages(&extracted_rs, diagnostics, &sources, &packages);
+    }
+
+    let file_irs: Vec<_> = js_sources
         .into_par_iter()
         .map(|(path, source)| parse_file_ir(&path, &source))
         .collect();
     let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
-    let diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
+    let mut diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
+    if !rs_sources.is_empty() {
+        let extracted_rs: Vec<ExtractedFile> = rs_sources
+            .into_par_iter()
+            .map(|(path, source)| RsLanguageAnalyzer.extract_file(&path, &source))
+            .collect();
+        for extracted in &extracted_rs {
+            if let Some(pkg) = resolve_package_for_file(&extracted.path, &packages) {
+                dotore_rs::evaluate_rs_file(
+                    extracted,
+                    &pkg.root_dir,
+                    &pkg.capability_gate,
+                    &pkg.config,
+                    enabled_rules,
+                    &mut diagnostics,
+                );
+            }
+        }
+    }
     build_report_with_packages(&graph, diagnostics, &sources, &packages)
 }
 
@@ -228,11 +282,11 @@ struct VirtualWorkspaceSplit {
 
 fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualWorkspaceSplit {
     let mut pkg_jsons: Vec<(PathBuf, String)> = Vec::new();
+    let mut cargo_tomls: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut compiler_configs: Vec<(PathBuf, String)> = Vec::new();
     let mut manifests: HashMap<PathBuf, String> = HashMap::new();
     let mut source_files: Vec<(PathBuf, String)> = Vec::new();
-
     for (path, content) in files {
         let file_name = path
             .file_name()
@@ -253,6 +307,9 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             if !is_in_node_modules {
                 pkg_jsons.push((parent_dir, content));
             }
+        } else if file_name == "Cargo.toml" {
+            manifests.insert(path.clone(), content.clone());
+            cargo_tomls.push((parent_dir, path, content));
         } else if is_non_js_manifest_filename(file_name) {
             if is_compiler_config_filename(file_name) {
                 compiler_configs.push((parent_dir, content.clone()));
@@ -314,12 +371,43 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             config: local_cfg,
         });
     }
+    for (dir, cargo_path, cargo_content) in &cargo_tomls {
+        let rs_gate = RsLanguageAnalyzer
+            .infer_capability_gate(dir, &[(cargo_path.clone(), cargo_content.as_str())]);
+        if let Some(existing) = packages.iter_mut().find(|p| &p.root_dir == dir) {
+            existing.capability_gate.merge(&rs_gate);
+        } else {
+            let local_cfg = config_files
+                .iter()
+                .find(|(c_dir, _, _)| c_dir == dir)
+                .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
+                .unwrap_or_else(|| root_config.clone());
+            let name = dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("root")
+                .to_string();
+            packages.push(WorkspacePackage {
+                name,
+                root_dir: dir.clone(),
+                capability_gate: rs_gate,
+                config: local_cfg,
+            });
+        }
+    }
 
     if packages.is_empty() {
+        let mut default_gate = CapabilityGate::default_react();
+        if source_files
+            .iter()
+            .any(|(p, _)| RsLanguageAnalyzer.supports_path(p))
+        {
+            default_gate.merge(&CapabilityGate::default_rust());
+        }
         packages.push(WorkspacePackage {
             name: "root".to_string(),
             root_dir: PathBuf::from("."),
-            capability_gate: CapabilityGate::default_react(),
+            capability_gate: default_gate,
             config: root_config,
         });
     }

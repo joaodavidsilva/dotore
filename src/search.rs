@@ -16,6 +16,12 @@ pub use dotore_core::search::{
 use crate::ir::{SymbolKind, SymbolOutline, parse_file_ir};
 
 fn extract_js_symbol_outlines(path: &Path, source: &str) -> Vec<SymbolOutline> {
+    use dotore_core::LanguageAnalyzer as _;
+    if dotore_rs::RsLanguageAnalyzer.supports_path(path) {
+        return dotore_rs::RsLanguageAnalyzer
+            .extract_file(path, source)
+            .symbol_outlines;
+    }
     parse_file_ir(path, source).symbol_outlines
 }
 
