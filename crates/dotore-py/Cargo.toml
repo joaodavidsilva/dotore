@@ -1,0 +1,16 @@
+[package]
+name = "dotore-py"
+version = "0.1.0"
+edition = "2024"
+description = "Single-pass Python static analyzer (PyLanguageAnalyzer), pyproject.toml capability gate inference, and Python safety rules for dotore."
+license = "MIT"
+
+[dependencies]
+dotore-core = { path = "../dotore-core" }
+ruff_python_ast = "0.0.19"
+ruff_python_parser = "0.0.19"
+ruff_text_size = "0.0.19"
+toml = "0.8.23"
+
+[lints]
+workspace = true
