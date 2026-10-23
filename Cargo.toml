@@ -1,3 +1,29 @@
+[workspace]
+members = ["crates/dotore-core"]
+resolver = "2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Correctness & safety
+unwrap_used = "deny"
+expect_used = "warn"
+wildcard_enum_match_arm = "warn"
+dbg_macro = "deny"
+todo = "warn"
+
+# Pragmatic size gates (favor readable, idiomatic Rust over artificial splitting)
+too_many_lines = "allow"
+cognitive_complexity = "allow"
+excessive_nesting = "warn"
+too_many_arguments = "warn"
+
+# Suppression hygiene: require #[expect(..., reason = "...")] over #[allow(...)]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
 [package]
 name = "dotore"
 version = "0.1.0"
@@ -15,6 +41,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+dotore-core = { path = "crates/dotore-core" }
 ignore = "0.4"
 oxc_allocator = "0.155.0"
 oxc_ast = "0.155.0"
@@ -26,24 +53,5 @@ rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-[lints.rust]
-unsafe_op_in_unsafe_fn = "deny"
-missing_docs = "warn"
-
-[lints.clippy]
-# Correctness & safety
-unwrap_used = "deny"
-expect_used = "warn"
-wildcard_enum_match_arm = "warn"
-dbg_macro = "deny"
-todo = "warn"
-
-# Pragmatic size gates (favor readable, idiomatic Rust over artificial splitting)
-too_many_lines = "allow"
-cognitive_complexity = "allow"
-excessive_nesting = "warn"
-too_many_arguments = "warn"
-
-# Suppression hygiene: require #[expect(..., reason = "...")] over #[allow(...)]
-allow_attributes = "deny"
-allow_attributes_without_reason = "deny"
+[lints]
+workspace = true

@@ -316,6 +316,7 @@ fn extract_contextual_owner_spans(semantic: &Semantic<'_>) -> ContextualOwnerSpa
     ContextualOwnerSpansIr {
         function_boundary_spans,
         related_hook_spans,
+        element_spans: Vec::new(),
     }
 }
 

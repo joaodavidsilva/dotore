@@ -18,24 +18,7 @@ use crate::{
     },
 };
 
-/// A resolved cross-file JSX **Caller Site** rendering a target **Subject**.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ResolvedCallerSite {
-    /// File containing the JSX element.
-    pub caller_file: PathBuf,
-    /// Enclosing parent **Subject** name, if any.
-    pub parent_subject_name: Option<String>,
-    /// Rendered component name.
-    pub component_name: String,
-    /// 1-based location of the JSX element.
-    pub loc: SourceLoc,
-    /// Byte span of the JSX opening element.
-    pub span: ByteSpan,
-    /// Whether `key={...}` is present on the JSX element.
-    pub has_key: bool,
-    /// Props passed at this **Caller Site**.
-    pub passed_props: Vec<String>,
-}
+pub use dotore_core::ir::ResolvedCallerSite;
 
 /// An unused value or type export detected in the module graph.
 #[derive(Debug, Clone, PartialEq, Eq)]

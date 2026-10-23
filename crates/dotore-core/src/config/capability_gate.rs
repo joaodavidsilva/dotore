@@ -1,5 +1,5 @@
-//! Project- and package-level **Capability Gate** inference from `package.json`
-//! dependencies, publish entrypoints, and React Compiler configuration.
+//! Project- and package-level **Capability Gate** inference across JavaScript/TypeScript,
+//! Angular, Python, and Rust manifests.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -191,6 +191,27 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("@base-ui-components/react", &[Capability::BaseUi]),
     ("react-aria-components", &[Capability::ReactAria]),
     ("styled-components", &[Capability::StyledComponents]),
+    (
+        "@angular/core",
+        &[Capability::Angular, Capability::TypeScript],
+    ),
+    (
+        "@angular/common",
+        &[Capability::Angular, Capability::TypeScript],
+    ),
+    (
+        "@angular/router",
+        &[Capability::Angular, Capability::TypeScript],
+    ),
+    (
+        "@angular/forms",
+        &[Capability::Angular, Capability::TypeScript],
+    ),
+    (
+        "@angular/platform-browser",
+        &[Capability::Angular, Capability::TypeScript],
+    ),
+    ("rxjs", &[Capability::Rxjs]),
 ];
 
 /// Technology capability token inferred for a project or workspace package.
@@ -271,6 +292,57 @@ pub enum Capability {
     Shadcn,
     /// styled-components CSS-in-JS library (`styled-components`).
     StyledComponents,
+    /// Angular framework (`@angular/core`, `angular.json`).
+    Angular,
+    /// RxJS reactive streams (`rxjs`).
+    Rxjs,
+    /// Python language runtime (`.py`, `.pyi`, `pyproject.toml`, `requirements.txt`).
+    Python,
+    /// FastAPI web framework (`fastapi`).
+    #[serde(rename = "fastapi", alias = "fast-api")]
+    FastApi,
+    /// Pydantic validation and settings library (`pydantic`).
+    Pydantic,
+    /// SQLAlchemy ORM (`sqlalchemy`).
+    #[serde(rename = "sqlalchemy", alias = "sql-alchemy")]
+    SqlAlchemy,
+    /// Django web framework and ORM (`django`).
+    Django,
+    /// Python `asyncio` runtime and async ecosystem (`asyncio`, `anyio`, `aiohttp`, `httpx`, `uvicorn`).
+    Asyncio,
+    /// Pytest testing framework (`pytest`).
+    Pytest,
+    /// Flask web framework (`flask`).
+    Flask,
+    /// Pandas data analysis library (`pandas`).
+    Pandas,
+    /// Celery distributed task queue (`celery`).
+    Celery,
+    /// PyTorch machine learning framework (`torch`, `pytorch`).
+    #[serde(rename = "pytorch", alias = "py-torch")]
+    PyTorch,
+    /// Rust language and Cargo crate (`Cargo.toml`, `.rs`).
+    Rust,
+    /// Tokio async runtime (`tokio`).
+    Tokio,
+    /// Axum web framework (`axum`).
+    Axum,
+    /// SQLx async SQL toolkit (`sqlx`).
+    Sqlx,
+    /// Serde serialization framework (`serde`, `serde_json`).
+    Serde,
+    /// Tracing structured instrumentation (`tracing`).
+    Tracing,
+    /// Leptos reactive Rust UI framework (`leptos`).
+    Leptos,
+    /// Dioxus reactive Rust UI framework (`dioxus`).
+    Dioxus,
+    /// Actix Web framework (`actix-web`).
+    ActixWeb,
+    /// Clap command-line parser (`clap`).
+    Clap,
+    /// Tauri desktop/mobile application framework (`tauri`).
+    Tauri,
 }
 
 impl Capability {
@@ -314,11 +386,35 @@ impl Capability {
             Self::ReactAria => "react-aria",
             Self::Shadcn => "shadcn",
             Self::StyledComponents => "styled-components",
+            Self::Angular => "angular",
+            Self::Rxjs => "rxjs",
+            Self::Python => "python",
+            Self::FastApi => "fastapi",
+            Self::Pydantic => "pydantic",
+            Self::SqlAlchemy => "sqlalchemy",
+            Self::Django => "django",
+            Self::Asyncio => "asyncio",
+            Self::Pytest => "pytest",
+            Self::Flask => "flask",
+            Self::Pandas => "pandas",
+            Self::Celery => "celery",
+            Self::PyTorch => "pytorch",
+            Self::Rust => "rust",
+            Self::Tokio => "tokio",
+            Self::Axum => "axum",
+            Self::Sqlx => "sqlx",
+            Self::Serde => "serde",
+            Self::Tracing => "tracing",
+            Self::Leptos => "leptos",
+            Self::Dioxus => "dioxus",
+            Self::ActixWeb => "actix-web",
+            Self::Clap => "clap",
+            Self::Tauri => "tauri",
         }
     }
 }
 
-/// Role of a package inferred from its `package.json` publish contract.
+/// Role of a package inferred from its manifest publish contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PackageRole {
@@ -349,7 +445,25 @@ impl CapabilityPredicate {
         disabled_when: &[],
         app_only: false,
     };
-    /// Predicate for universal JS/TS rules with no framework requirement.
+    /// Predicate for rules that require `Capability::Angular`.
+    pub const ANGULAR_ONLY: Self = Self {
+        requires: &[Capability::Angular],
+        disabled_when: &[],
+        app_only: false,
+    };
+    /// Predicate for rules that require `Capability::Python`.
+    pub const PYTHON_ONLY: Self = Self {
+        requires: &[Capability::Python],
+        disabled_when: &[],
+        app_only: false,
+    };
+    /// Predicate for rules that require `Capability::Rust`.
+    pub const RUST_ONLY: Self = Self {
+        requires: &[Capability::Rust],
+        disabled_when: &[],
+        app_only: false,
+    };
+    /// Predicate for universal rules with no framework requirement.
     pub const UNIVERSAL: Self = Self {
         requires: &[],
         disabled_when: &[],
@@ -389,6 +503,18 @@ impl Default for CapabilityGate {
 }
 
 impl CapabilityGate {
+    /// Empty [`CapabilityGate`] with no active capabilities.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            capabilities: HashSet::new(),
+            package_role: PackageRole::Unknown,
+            entrypoints: HashSet::new(),
+            dependencies: HashMap::new(),
+            has_react_compiler: false,
+        }
+    }
+
     /// Default capability gate for standalone React/TypeScript source analysis when no `package.json` is present.
     #[must_use]
     pub fn default_react() -> Self {
@@ -406,6 +532,45 @@ impl CapabilityGate {
         ])
     }
 
+    /// Default capability gate for standalone Angular/TypeScript source analysis.
+    #[must_use]
+    pub fn default_angular() -> Self {
+        Self::with_capabilities([
+            Capability::Angular,
+            Capability::Rxjs,
+            Capability::TypeScript,
+        ])
+    }
+
+    /// Default capability gate for standalone Python source analysis when no `pyproject.toml` or `requirements.txt` is present.
+    #[must_use]
+    pub fn default_python() -> Self {
+        Self::with_capabilities([
+            Capability::Python,
+            Capability::Asyncio,
+            Capability::FastApi,
+            Capability::Pydantic,
+            Capability::SqlAlchemy,
+            Capability::Django,
+            Capability::Pytest,
+        ])
+    }
+
+    /// Default capability gate for standalone Rust source analysis when no `Cargo.toml` is present.
+    #[must_use]
+    pub fn default_rust() -> Self {
+        Self::with_capabilities([
+            Capability::Rust,
+            Capability::Tokio,
+            Capability::Axum,
+            Capability::Sqlx,
+            Capability::Serde,
+            Capability::Tracing,
+            Capability::Leptos,
+            Capability::Dioxus,
+        ])
+    }
+
     /// Constructs a [`CapabilityGate`] from an explicit iterator of [`Capability`] tokens.
     #[must_use]
     pub fn with_capabilities<I: IntoIterator<Item = Capability>>(iter: I) -> Self {
@@ -417,6 +582,24 @@ impl CapabilityGate {
             entrypoints: HashSet::new(),
             dependencies: HashMap::new(),
             has_react_compiler,
+        }
+    }
+
+    /// Merges capabilities, entrypoints, dependencies, and package role from `other` into `self`.
+    pub fn merge(&mut self, other: &Self) {
+        self.capabilities.extend(other.capabilities.iter().copied());
+        self.entrypoints.extend(other.entrypoints.iter().cloned());
+        for (k, v) in &other.dependencies {
+            self.dependencies
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        if self.package_role == PackageRole::Unknown && other.package_role != PackageRole::Unknown {
+            self.package_role = other.package_role;
+        }
+        if other.has_react_compiler {
+            self.has_react_compiler = true;
+            self.capabilities.insert(Capability::ReactCompiler);
         }
     }
 
@@ -435,7 +618,7 @@ impl CapabilityGate {
         )
     }
 
-    /// Discovers a [`CapabilityGate`] for `package_dir` by reading its `package.json` and compiler configs.
+    /// Discovers a [`CapabilityGate`] for `package_dir` by reading its `package.json`, `angular.json`, and compiler configs.
     #[must_use]
     pub fn discover(package_dir: &Path) -> Self {
         let pkg_path = package_dir
@@ -450,6 +633,14 @@ impl CapabilityGate {
             .map_or_else(Self::default_react, |v| {
                 Self::from_package_json_value(&v, Some(package_dir))
             });
+
+        if package_dir.join("angular.json").is_file()
+            || find_nearest_ancestor_file(package_dir, "angular.json").is_some()
+        {
+            gate.capabilities.insert(Capability::Angular);
+            gate.capabilities.insert(Capability::Rxjs);
+            gate.capabilities.insert(Capability::TypeScript);
+        }
 
         if !gate.has_react_compiler && detect_react_compiler_in_dir(package_dir) {
             gate.has_react_compiler = true;
@@ -569,6 +760,10 @@ fn infer_capabilities_from_deps(deps: &HashMap<String, String>) -> HashSet<Capab
             caps.extend(mapped_caps.iter().copied());
         }
     }
+    if deps.keys().any(|k| k.starts_with("@angular/")) {
+        caps.insert(Capability::Angular);
+        caps.insert(Capability::TypeScript);
+    }
     if deps.contains_key("preact") && !deps.contains_key("react") {
         caps.insert(Capability::PurePreact);
     }
@@ -674,7 +869,7 @@ fn detect_react_compiler_in_dir(dir: &Path) -> bool {
 
 /// Checks whether a config file's text enables React Compiler (`reactCompiler: true`, `babel-plugin-react-compiler`).
 #[must_use]
-pub(crate) fn content_enables_react_compiler(content: &str) -> bool {
+pub fn content_enables_react_compiler(content: &str) -> bool {
     if content.contains("babel-plugin-react-compiler") || content.contains("react-compiler-runtime")
     {
         return true;

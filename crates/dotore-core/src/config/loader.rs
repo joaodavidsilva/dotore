@@ -1,9 +1,5 @@
 //! User configuration loader for `dotore.config.*` (TS, JS, MJS, CJS, JSON, JSONC)
 //! and the `"dotore"` key in `package.json`.
-#![expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "oxc_ast expression and statement enums have dozens of variants; config AST evaluation matches only literal/object/export forms"
-)]
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -11,17 +7,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::{
-    ArrayExpressionElement, AssignmentTarget, Declaration, ExportDefaultDeclarationKind,
-    Expression, ObjectExpression, ObjectPropertyKind, PropertyKey, Statement, UnaryOperator,
-};
-use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, Span};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::rules::{RuleCategory, RuleId, RuleSeverity, RuleSeverityOverride, RuleTag};
+use crate::{
+    ir::ByteSpan,
+    rules::{RuleCategory, RuleId, RuleSeverity, RuleSeverityOverride, RuleTag},
+};
 
 use super::{normalize_path_buf, relative_forward_slash, strip_jsonc};
 
@@ -303,7 +295,9 @@ pub fn load_config_from_dir(dir: &Path) -> DotoreConfig {
     DotoreConfig::default()
 }
 
-pub(crate) fn load_local_config_in_dir(dir: &Path) -> Option<DotoreConfig> {
+/// Loads [`DotoreConfig`] directly inside `dir` (without walking ancestors).
+#[must_use]
+pub fn load_local_config_in_dir(dir: &Path) -> Option<DotoreConfig> {
     for &ext in CONFIG_EXTENSIONS {
         let candidate = dir.join(format!("dotore.config.{ext}"));
         if let Ok(content) = fs::read_to_string(&candidate)
@@ -594,60 +588,27 @@ const fn mutation_managed_key(mutation: ConfigMutation) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ParsedObject {
+    span: ByteSpan,
+    properties: Vec<(String, ByteSpan, ByteSpan)>,
+    map: Map<String, Value>,
+}
+
 fn mutate_json_or_module_object(
     raw_source: &str,
     is_json_file: bool,
     mutation: ConfigMutation,
 ) -> Result<(String, bool), String> {
-    let (parse_input, byte_offset) = if is_json_file {
-        (format!("(\n{raw_source}\n)"), 2_u32)
+    let parsed_obj = if is_json_file {
+        let mut cursor = ConfigCursor::new(raw_source, HashMap::new());
+        cursor.skip_ws_and_comments();
+        cursor.parse_object()?
     } else {
-        (raw_source.to_string(), 0_u32)
+        parse_exported_module_object(raw_source)?
     };
 
-    let allocator = Allocator::default();
-    let source_type = SourceType::ts().with_module(true);
-    let parsed = Parser::new(&allocator, &parse_input, source_type).parse();
-
-    let mut bindings: HashMap<&str, &Expression<'_>> = HashMap::new();
-    for stmt in &parsed.program.body {
-        match stmt {
-            Statement::VariableDeclaration(v) => collect_var_decl_bindings(v, &mut bindings),
-            Statement::ExportDeclaration(exp) => {
-                if let Declaration::VariableDeclaration(v) = &exp.declaration {
-                    collect_var_decl_bindings(v, &mut bindings);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let target_obj = if is_json_file {
-        parsed.program.body.first().and_then(|stmt| {
-            if let Statement::ExpressionStatement(es) = stmt
-                && let Expression::ObjectExpression(obj) = unwrap_ts_expr(&es.expression)
-            {
-                Some(obj.as_ref())
-            } else {
-                None
-            }
-        })
-    } else {
-        find_exported_object_expr(&parsed.program.body, &bindings)
-    };
-
-    let Some(obj_expr) = target_obj else {
-        return Err(
-            "Could not statically edit configuration object (dynamic config export)".to_string(),
-        );
-    };
-
-    let Some(Value::Object(mut config_map)) = eval_object_expr(obj_expr, &bindings) else {
-        return Err(
-            "Could not evaluate static configuration properties for in-place edit".to_string(),
-        );
-    };
-
+    let mut config_map = parsed_obj.map.clone();
     let changed = apply_mutation_to_config_map(&mut config_map, mutation);
     if !changed {
         return Ok((raw_source.to_string(), false));
@@ -656,8 +617,7 @@ fn mutate_json_or_module_object(
     let managed_key = mutation_managed_key(mutation);
     let updated = splice_object_property_in_source(
         raw_source,
-        obj_expr,
-        byte_offset,
+        &parsed_obj,
         managed_key,
         config_map.get(managed_key),
     )?;
@@ -668,37 +628,25 @@ fn mutate_package_json_dotore(
     raw_source: &str,
     mutation: ConfigMutation,
 ) -> Result<(String, bool), String> {
-    let parse_input = format!("(\n{raw_source}\n)");
-    let byte_offset = 2_u32;
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, &parse_input, SourceType::ts()).parse();
+    let mut cursor = ConfigCursor::new(raw_source, HashMap::new());
+    cursor.skip_ws_and_comments();
+    let root_obj = cursor
+        .parse_object()
+        .map_err(|_| "package.json root is not a JSON object".to_string())?;
 
-    let Some(Statement::ExpressionStatement(es)) = parsed.program.body.first() else {
-        return Err("Invalid package.json structure".to_string());
-    };
-    let Expression::ObjectExpression(root_obj) = unwrap_ts_expr(&es.expression) else {
-        return Err("package.json root is not a JSON object".to_string());
-    };
-
-    let bindings = HashMap::new();
-    let mut dotore_obj_expr: Option<&ObjectExpression<'_>> = None;
-    for prop_kind in &root_obj.properties {
-        if let ObjectPropertyKind::ObjectProperty(prop) = prop_kind
-            && property_key_name(&prop.key).as_deref() == Some("dotore")
-            && let Expression::ObjectExpression(inner) = unwrap_ts_expr(&prop.value)
-        {
-            dotore_obj_expr = Some(inner.as_ref());
-            break;
-        }
-    }
-
-    let Some(obj_expr) = dotore_obj_expr else {
+    let Some((_, _, dotore_val_span)) = root_obj.properties.iter().find(|(k, _, _)| k == "dotore")
+    else {
         return Err("package.json does not contain a static \"dotore\" object".to_string());
     };
-    let Some(Value::Object(mut config_map)) = eval_object_expr(obj_expr, &bindings) else {
-        return Err("Failed to evaluate package.json#dotore object".to_string());
-    };
 
+    let mut inner_cursor =
+        ConfigCursor::with_pos(raw_source, dotore_val_span.start as usize, HashMap::new());
+    inner_cursor.skip_ws_and_comments();
+    let dotore_obj = inner_cursor
+        .parse_object()
+        .map_err(|_| "Failed to evaluate package.json#dotore object".to_string())?;
+
+    let mut config_map = dotore_obj.map.clone();
     let changed = apply_mutation_to_config_map(&mut config_map, mutation);
     if !changed {
         return Ok((raw_source.to_string(), false));
@@ -706,103 +654,22 @@ fn mutate_package_json_dotore(
     let managed_key = mutation_managed_key(mutation);
     let updated = splice_object_property_in_source(
         raw_source,
-        obj_expr,
-        byte_offset,
+        &dotore_obj,
         managed_key,
         config_map.get(managed_key),
     )?;
     Ok((updated, true))
 }
 
-fn find_exported_object_expr<'a>(
-    body: &'a [Statement<'a>],
-    bindings: &HashMap<&str, &'a Expression<'a>>,
-) -> Option<&'a ObjectExpression<'a>> {
-    for stmt in body {
-        match stmt {
-            Statement::ExportDefaultDeclaration(exp) => {
-                if let Some(expr) = exp.declaration.as_expression()
-                    && let Some(obj) = resolve_expr_to_object(expr, bindings)
-                {
-                    return Some(obj);
-                }
-            }
-            Statement::ExpressionStatement(expr_stmt) => {
-                if let Expression::AssignmentExpression(assign) =
-                    unwrap_ts_expr(&expr_stmt.expression)
-                    && is_module_exports_target(&assign.left)
-                    && let Some(obj) = resolve_expr_to_object(&assign.right, bindings)
-                {
-                    return Some(obj);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn resolve_expr_to_object<'a>(
-    expr: &'a Expression<'a>,
-    bindings: &HashMap<&str, &'a Expression<'a>>,
-) -> Option<&'a ObjectExpression<'a>> {
-    match unwrap_ts_expr(expr) {
-        Expression::ObjectExpression(obj) => Some(obj.as_ref()),
-        Expression::CallExpression(call) => {
-            resolve_expr_to_object(call.arguments.first()?.as_expression()?, bindings)
-        }
-        Expression::Identifier(ident) => {
-            resolve_expr_to_object(bindings.get(ident.name.as_str())?, bindings)
-        }
-        _ => None,
-    }
-}
-
-fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
-    match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str()?.to_string()),
-        _ => None,
-    }
-}
-
-fn eval_object_expr<'a>(
-    obj: &ObjectExpression<'a>,
-    bindings: &HashMap<&str, &Expression<'a>>,
-) -> Option<Value> {
-    let mut map = Map::new();
-    for prop_kind in &obj.properties {
-        if let ObjectPropertyKind::ObjectProperty(prop) = prop_kind {
-            let key = property_key_name(&prop.key)?;
-            map.insert(key, eval_config_expr(&prop.value, bindings)?);
-        }
-    }
-    Some(Value::Object(map))
-}
-
 fn splice_object_property_in_source(
     raw_source: &str,
-    obj_expr: &ObjectExpression<'_>,
-    byte_offset: u32,
+    obj: &ParsedObject,
     managed_key: &str,
     new_val: Option<&Value>,
 ) -> Result<String, String> {
-    let obj_start = (obj_expr.span.start - byte_offset) as usize;
-    let obj_end = (obj_expr.span.end - byte_offset) as usize;
-    let mut props: Vec<(String, Span, Span)> = Vec::new();
-    for prop_kind in &obj_expr.properties {
-        if let ObjectPropertyKind::ObjectProperty(prop) = prop_kind {
-            let Some(k) = property_key_name(&prop.key) else {
-                continue;
-            };
-            let p_span = Span::new(prop.span.start - byte_offset, prop.span.end - byte_offset);
-            let v_span = Span::new(
-                prop.value.span().start - byte_offset,
-                prop.value.span().end - byte_offset,
-            );
-            props.push((k, p_span, v_span));
-        }
-    }
+    let obj_start = obj.span.start as usize;
+    let obj_end = obj.span.end as usize;
+    let props = &obj.properties;
 
     if let Some((idx, (_, prop_span, val_span))) = props
         .iter()
@@ -908,150 +775,649 @@ fn format_value_with_indent(val: &Value, base_indent: &str) -> Result<String, St
 }
 
 fn extract_config_value_from_module(path: &Path, source: &str) -> Result<Value, String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
-    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let parsed_obj = parse_exported_module_object(source).map_err(|_| {
+        format!(
+            "No static configuration object export found in {}",
+            path.display()
+        )
+    })?;
+    Ok(Value::Object(parsed_obj.map))
+}
 
-    let mut bindings: HashMap<&str, &Expression<'_>> = HashMap::new();
-    for stmt in &parsed.program.body {
-        match stmt {
-            Statement::VariableDeclaration(v) => collect_var_decl_bindings(v, &mut bindings),
-            Statement::ExportDeclaration(exp) => {
-                if let Declaration::VariableDeclaration(v) = &exp.declaration {
-                    collect_var_decl_bindings(v, &mut bindings);
+fn parse_exported_module_object(source: &str) -> Result<ParsedObject, String> {
+    let mut bindings: HashMap<String, usize> = HashMap::new();
+    let mut export_expr_starts: Vec<usize> = Vec::new();
+
+    let mut scanner = ConfigCursor::new(source, HashMap::new());
+    while scanner.pos < source.len() {
+        scanner.skip_ws_and_comments();
+        if scanner.pos >= source.len() {
+            break;
+        }
+        if scanner.consume_keyword("import") {
+            scanner.skip_statement();
+            continue;
+        }
+        let is_export = scanner.consume_keyword("export");
+        scanner.skip_ws_and_comments();
+        if is_export && scanner.consume_keyword("default") {
+            scanner.skip_ws_and_comments();
+            if scanner.peek_keyword("function")
+                || scanner.peek_keyword("class")
+                || scanner.peek_keyword("interface")
+            {
+                return Err(
+                    "Could not statically edit configuration object (dynamic config export)"
+                        .to_string(),
+                );
+            }
+            export_expr_starts.push(scanner.pos);
+            scanner.skip_statement();
+            continue;
+        }
+        if scanner.consume_keyword("const")
+            || scanner.consume_keyword("let")
+            || scanner.consume_keyword("var")
+        {
+            scanner.skip_ws_and_comments();
+            if let Some(ident) = scanner.parse_identifier() {
+                scanner.skip_ws_and_comments();
+                if scanner.peek_byte() == Some(b':') {
+                    scanner.pos += 1;
+                    scanner.skip_type_annotation_before_eq();
+                }
+                scanner.skip_ws_and_comments();
+                if scanner.peek_byte() == Some(b'=') {
+                    scanner.pos += 1;
+                    scanner.skip_ws_and_comments();
+                    bindings.insert(ident, scanner.pos);
                 }
             }
-            _ => {}
+            scanner.skip_statement();
+            continue;
+        }
+        if let Some(rhs_pos) = scanner.try_consume_cjs_exports_assignment() {
+            export_expr_starts.push(rhs_pos);
+            scanner.skip_statement();
+            continue;
+        }
+        scanner.advance_token_or_char();
+    }
+
+    for start_pos in export_expr_starts {
+        let mut eval_cursor = ConfigCursor::with_pos(source, start_pos, bindings.clone());
+        if let Ok(obj) = eval_cursor.resolve_to_object(0) {
+            return Ok(obj);
         }
     }
-    for stmt in &parsed.program.body {
-        match stmt {
-            Statement::ExportDefaultDeclaration(exp) => match &exp.declaration {
-                ExportDefaultDeclarationKind::FunctionDeclaration(_)
-                | ExportDefaultDeclarationKind::ClassDeclaration(_)
-                | ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {}
-                expr_kind => {
-                    if let Some(expr) = expr_kind.as_expression()
-                        && let Some(val) = eval_config_expr(expr, &bindings)
-                    {
-                        return Ok(val);
+
+    Err("Could not statically edit configuration object (dynamic config export)".to_string())
+}
+
+struct ConfigCursor<'a> {
+    src: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+    bindings: HashMap<String, usize>,
+}
+
+impl<'a> ConfigCursor<'a> {
+    const fn new(src: &'a str, bindings: HashMap<String, usize>) -> Self {
+        Self {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+            bindings,
+        }
+    }
+
+    const fn with_pos(src: &'a str, pos: usize, bindings: HashMap<String, usize>) -> Self {
+        Self {
+            src,
+            bytes: src.as_bytes(),
+            pos,
+            bindings,
+        }
+    }
+
+    fn peek_byte(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn skip_ws_and_comments(&mut self) {
+        while self.pos < self.bytes.len() {
+            let b = self.bytes[self.pos];
+            if b.is_ascii_whitespace() {
+                self.pos += 1;
+                continue;
+            }
+            if b == b'/' && self.bytes.get(self.pos + 1) == Some(&b'/') {
+                self.pos += 2;
+                while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
+                continue;
+            }
+            if b == b'/' && self.bytes.get(self.pos + 1) == Some(&b'*') {
+                self.pos += 2;
+                while self.pos + 1 < self.bytes.len()
+                    && !(self.bytes[self.pos] == b'*' && self.bytes[self.pos + 1] == b'/')
+                {
+                    self.pos += 1;
+                }
+                self.pos = (self.pos + 2).min(self.bytes.len());
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn peek_keyword(&self, kw: &str) -> bool {
+        let kw_bytes = kw.as_bytes();
+        if self.pos + kw_bytes.len() > self.bytes.len() {
+            return false;
+        }
+        if &self.bytes[self.pos..self.pos + kw_bytes.len()] != kw_bytes {
+            return false;
+        }
+        let next = self.bytes.get(self.pos + kw_bytes.len()).copied();
+        !next.is_some_and(is_ident_continue)
+    }
+
+    fn consume_keyword(&mut self, kw: &str) -> bool {
+        if self.peek_keyword(kw) {
+            self.pos += kw.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_identifier(&mut self) -> Option<String> {
+        self.skip_ws_and_comments();
+        let first = self.peek_byte()?;
+        if !is_ident_start(first) {
+            return None;
+        }
+        let start = self.pos;
+        self.pos += 1;
+        while let Some(b) = self.peek_byte() {
+            if is_ident_continue(b) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        self.src.get(start..self.pos).map(str::to_string)
+    }
+
+    fn try_consume_cjs_exports_assignment(&mut self) -> Option<usize> {
+        let save = self.pos;
+        let first = self.parse_identifier()?;
+        self.skip_ws_and_comments();
+        if self.peek_byte() != Some(b'.') {
+            self.pos = save;
+            return None;
+        }
+        self.pos += 1;
+        let second = self.parse_identifier()?;
+        let valid_target = (first == "module" && second == "exports")
+            || (first == "exports" && second == "default");
+        if !valid_target {
+            self.pos = save;
+            return None;
+        }
+        self.skip_ws_and_comments();
+        if self.peek_byte() != Some(b'=') || self.bytes.get(self.pos + 1) == Some(&b'=') {
+            self.pos = save;
+            return None;
+        }
+        self.pos += 1;
+        self.skip_ws_and_comments();
+        Some(self.pos)
+    }
+
+    fn skip_type_annotation_before_eq(&mut self) {
+        let mut depth = 0_i32;
+        while self.pos < self.bytes.len() {
+            self.skip_ws_and_comments();
+            let Some(b) = self.peek_byte() else {
+                break;
+            };
+            if depth == 0 && b == b'=' {
+                break;
+            }
+            match b {
+                b'<' | b'(' | b'[' | b'{' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b'>' | b')' | b']' | b'}' => {
+                    depth = (depth - 1).max(0);
+                    self.pos += 1;
+                }
+                b'\'' | b'"' | b'`' => {
+                    let _ = self.parse_string_literal();
+                }
+                _ => {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    fn skip_statement(&mut self) {
+        let mut depth = 0_i32;
+        while self.pos < self.bytes.len() {
+            self.skip_ws_and_comments();
+            let Some(b) = self.peek_byte() else {
+                break;
+            };
+            match b {
+                b'{' | b'(' | b'[' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b'}' | b')' | b']' => {
+                    depth -= 1;
+                    self.pos += 1;
+                    if depth <= 0 && b == b'}' {
+                        self.consume_optional_semicolon();
+                        break;
                     }
                 }
-            },
-            Statement::ExpressionStatement(expr_stmt) => {
-                if let Expression::AssignmentExpression(assign) =
-                    unwrap_ts_expr(&expr_stmt.expression)
-                    && is_module_exports_target(&assign.left)
-                    && let Some(val) = eval_config_expr(&assign.right, &bindings)
-                {
-                    return Ok(val);
+                b';' if depth <= 0 => {
+                    self.pos += 1;
+                    break;
+                }
+                b'\'' | b'"' | b'`' => {
+                    let _ = self.parse_string_literal();
+                }
+                _ => {
+                    self.pos += 1;
                 }
             }
-            _ => {}
         }
     }
-    Err(format!(
-        "No static configuration object export found in {}",
-        path.display()
-    ))
-}
 
-fn collect_var_decl_bindings<'a>(
-    var_decl: &'a oxc_ast::ast::VariableDeclaration<'a>,
-    bindings: &mut HashMap<&'a str, &'a Expression<'a>>,
-) {
-    for decl in &var_decl.declarations {
-        if let Some(ident) = decl.id.get_binding_identifier()
-            && let Some(init) = &decl.init
-        {
-            bindings.insert(ident.name.as_str(), init);
+    fn consume_optional_semicolon(&mut self) {
+        self.skip_ws_and_comments();
+        if self.peek_byte() == Some(b';') {
+            self.pos += 1;
         }
     }
-}
 
-fn is_module_exports_target(target: &AssignmentTarget<'_>) -> bool {
-    let Some(member) = target.as_member_expression() else {
-        return false;
-    };
-    let Some(prop_name) = member.static_property_name() else {
-        return false;
-    };
-    matches!(
-        unwrap_ts_expr(member.object()),
-        Expression::Identifier(obj)
-            if (obj.name == "module" && prop_name == "exports")
-                || (obj.name == "exports" && prop_name == "default")
-    )
-}
-
-fn unwrap_ts_expr<'a, 'b>(mut expr: &'b Expression<'a>) -> &'b Expression<'a> {
-    loop {
-        match expr {
-            Expression::ParenthesizedExpression(p) => expr = &p.expression,
-            Expression::TSAsExpression(e) => expr = &e.expression,
-            Expression::TSSatisfiesExpression(e) => expr = &e.expression,
-            Expression::TSNonNullExpression(e) => expr = &e.expression,
-            Expression::TSTypeAssertion(e) => expr = &e.expression,
-            _ => return expr,
-        }
-    }
-}
-
-fn eval_config_expr<'a>(
-    expr: &Expression<'a>,
-    bindings: &HashMap<&str, &Expression<'a>>,
-) -> Option<Value> {
-    match unwrap_ts_expr(expr) {
-        Expression::ObjectExpression(obj) => {
-            let mut map = serde_json::Map::new();
-            for prop_kind in &obj.properties {
-                if let ObjectPropertyKind::ObjectProperty(prop) = prop_kind {
-                    let key = match &prop.key {
-                        PropertyKey::StaticIdentifier(id) => id.name.to_string(),
-                        PropertyKey::StringLiteral(s) => s.value.as_str()?.to_string(),
-                        _ => return None,
-                    };
-                    map.insert(key, eval_config_expr(&prop.value, bindings)?);
-                }
+    fn advance_token_or_char(&mut self) {
+        self.skip_ws_and_comments();
+        let Some(b) = self.peek_byte() else {
+            return;
+        };
+        if matches!(b, b'\'' | b'"' | b'`') {
+            if self.parse_string_literal().is_err() {
+                self.pos += 1;
             }
-            Some(Value::Object(map))
+            return;
         }
-        Expression::ArrayExpression(arr) => Some(Value::Array(
-            arr.elements
-                .iter()
-                .filter_map(|el| match el {
-                    ArrayExpressionElement::SpreadElement(_)
-                    | ArrayExpressionElement::Elision(_) => None,
-                    _ => eval_config_expr(el.as_expression()?, bindings),
-                })
-                .collect(),
-        )),
-        Expression::StringLiteral(s) => Some(Value::String(s.value.as_str()?.to_string())),
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => Some(Value::String(
-            tpl.quasis.iter().map(|q| q.value.raw.as_str()).collect(),
-        )),
-        Expression::BooleanLiteral(b) => Some(Value::Bool(b.value)),
-        Expression::NumericLiteral(n) => serde_json::Number::from_f64(n.value).map(Value::Number),
-        Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation => {
-            let Expression::NumericLiteral(n) = unwrap_ts_expr(&u.argument) else {
-                return None;
+        if let Some(ch) = self.src[self.pos..].chars().next() {
+            self.pos += ch.len_utf8();
+        } else {
+            self.pos += 1;
+        }
+    }
+
+    fn resolve_to_object(&mut self, depth: usize) -> Result<ParsedObject, String> {
+        if depth > 16 {
+            return Err("Config reference recursion limit exceeded".to_string());
+        }
+        self.skip_ws_and_comments();
+        if self.peek_byte() == Some(b'<') {
+            self.skip_angle_bracket_type_assertion();
+            self.skip_ws_and_comments();
+        }
+        match self.peek_byte() {
+            Some(b'(') => {
+                self.pos += 1;
+                let obj = self.resolve_to_object(depth + 1)?;
+                self.skip_ts_postfix_assertions();
+                if self.peek_byte() == Some(b')') {
+                    self.pos += 1;
+                }
+                self.skip_ts_postfix_assertions();
+                Ok(obj)
+            }
+            Some(b'{') => {
+                let obj = self.parse_object()?;
+                self.skip_ts_postfix_assertions();
+                Ok(obj)
+            }
+            _ => {
+                let ident = self
+                    .parse_identifier()
+                    .ok_or_else(|| "Expected object or config helper".to_string())?;
+                self.skip_ws_and_comments();
+                if self.peek_byte() == Some(b'<') {
+                    self.skip_angle_bracket_type_assertion();
+                    self.skip_ws_and_comments();
+                }
+                if self.peek_byte() == Some(b'(') {
+                    self.pos += 1;
+                    let obj = self.resolve_to_object(depth + 1)?;
+                    self.skip_ts_postfix_assertions();
+                    if self.peek_byte() == Some(b')') {
+                        self.pos += 1;
+                    }
+                    self.skip_ts_postfix_assertions();
+                    return Ok(obj);
+                }
+                let target_pos = *self
+                    .bindings
+                    .get(&ident)
+                    .ok_or_else(|| format!("Unresolved config identifier {ident}"))?;
+                let mut sub = ConfigCursor::with_pos(self.src, target_pos, self.bindings.clone());
+                sub.resolve_to_object(depth + 1)
+            }
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<ParsedObject, String> {
+        self.skip_ws_and_comments();
+        if self.peek_byte() != Some(b'{') {
+            return Err("Expected '{'".to_string());
+        }
+        let obj_start = u32::try_from(self.pos).unwrap_or(0);
+        self.pos += 1;
+
+        let mut properties = Vec::new();
+        let mut map = Map::new();
+
+        loop {
+            self.skip_ws_and_comments();
+            let Some(b) = self.peek_byte() else {
+                return Err("Unterminated object literal".to_string());
             };
-            serde_json::Number::from_f64(-n.value).map(Value::Number)
-        }
-        Expression::NullLiteral(_) => Some(Value::Null),
-        Expression::CallExpression(call) => {
-            eval_config_expr(call.arguments.first()?.as_expression()?, bindings)
-        }
-        Expression::Identifier(ident) => {
-            if ident.name == "undefined" {
-                return Some(Value::Null);
+            if b == b'}' {
+                self.pos += 1;
+                let obj_end = u32::try_from(self.pos).unwrap_or(obj_start);
+                return Ok(ParsedObject {
+                    span: ByteSpan {
+                        start: obj_start,
+                        end: obj_end,
+                    },
+                    properties,
+                    map,
+                });
             }
-            eval_config_expr(bindings.get(ident.name.as_str())?, bindings)
+            if b == b',' {
+                self.pos += 1;
+                continue;
+            }
+
+            let prop_start = u32::try_from(self.pos).unwrap_or(0);
+            let key = if b == b'\'' || b == b'"' {
+                self.parse_string_literal()?
+            } else {
+                self.parse_identifier()
+                    .ok_or_else(|| "Unsupported dynamic or spread object property".to_string())?
+            };
+
+            self.skip_ws_and_comments();
+            if self.peek_byte() != Some(b':') {
+                return Err("Expected ':' after object property key".to_string());
+            }
+            self.pos += 1;
+            self.skip_ws_and_comments();
+
+            let val_start = u32::try_from(self.pos).unwrap_or(0);
+            let val = self.parse_value_expr(0)?;
+            let val_end = u32::try_from(self.pos).unwrap_or(val_start);
+            self.skip_ts_postfix_assertions();
+            let prop_end = u32::try_from(self.pos).unwrap_or(val_end);
+
+            properties.push((
+                key.clone(),
+                ByteSpan {
+                    start: prop_start,
+                    end: prop_end,
+                },
+                ByteSpan {
+                    start: val_start,
+                    end: val_end,
+                },
+            ));
+            map.insert(key, val);
+
+            self.skip_ws_and_comments();
+            if self.peek_byte() == Some(b',') {
+                self.pos += 1;
+            }
         }
-        _ => None,
     }
+
+    fn parse_value_expr(&mut self, depth: usize) -> Result<Value, String> {
+        if depth > 24 {
+            return Err("Config expression nesting limit exceeded".to_string());
+        }
+        self.skip_ws_and_comments();
+        if self.peek_byte() == Some(b'<') {
+            self.skip_angle_bracket_type_assertion();
+            self.skip_ws_and_comments();
+        }
+        let Some(b) = self.peek_byte() else {
+            return Err("Unexpected end of config expression".to_string());
+        };
+        match b {
+            b'{' => {
+                let obj = self.parse_object()?;
+                Ok(Value::Object(obj.map))
+            }
+            b'[' => self.parse_array(depth + 1),
+            b'\'' | b'"' | b'`' => self.parse_string_literal().map(Value::String),
+            b'(' => {
+                self.pos += 1;
+                let v = self.parse_value_expr(depth + 1)?;
+                self.skip_ts_postfix_assertions();
+                if self.peek_byte() == Some(b')') {
+                    self.pos += 1;
+                }
+                Ok(v)
+            }
+            b'-' | b'0'..=b'9' => self.parse_number_literal(),
+            _ => self.parse_ident_or_call_expr(depth),
+        }
+    }
+
+    fn parse_ident_or_call_expr(&mut self, depth: usize) -> Result<Value, String> {
+        let ident = self
+            .parse_identifier()
+            .ok_or_else(|| "Unsupported config expression".to_string())?;
+        match ident.as_str() {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            "null" | "undefined" => Ok(Value::Null),
+            _ => {
+                self.skip_ws_and_comments();
+                if self.peek_byte() == Some(b'<') {
+                    self.skip_angle_bracket_type_assertion();
+                    self.skip_ws_and_comments();
+                }
+                if self.peek_byte() == Some(b'(') {
+                    self.pos += 1;
+                    let v = self.parse_value_expr(depth + 1)?;
+                    self.skip_ts_postfix_assertions();
+                    if self.peek_byte() == Some(b')') {
+                        self.pos += 1;
+                    }
+                    return Ok(v);
+                }
+                let target_pos = *self
+                    .bindings
+                    .get(&ident)
+                    .ok_or_else(|| format!("Unresolved identifier {ident}"))?;
+                let mut sub = ConfigCursor::with_pos(self.src, target_pos, self.bindings.clone());
+                sub.parse_value_expr(depth + 1)
+            }
+        }
+    }
+
+    fn parse_array(&mut self, depth: usize) -> Result<Value, String> {
+        self.pos += 1;
+        let mut items = Vec::new();
+        loop {
+            self.skip_ws_and_comments();
+            let Some(b) = self.peek_byte() else {
+                return Err("Unterminated array literal".to_string());
+            };
+            if b == b']' {
+                self.pos += 1;
+                return Ok(Value::Array(items));
+            }
+            if b == b',' {
+                self.pos += 1;
+                continue;
+            }
+            let item = self.parse_value_expr(depth)?;
+            self.skip_ts_postfix_assertions();
+            items.push(item);
+            self.skip_ws_and_comments();
+            if self.peek_byte() == Some(b',') {
+                self.pos += 1;
+            }
+        }
+    }
+
+    fn parse_string_literal(&mut self) -> Result<String, String> {
+        let quote = self.peek_byte().ok_or("Expected string quote")?;
+        self.pos += 1;
+        let mut out = String::new();
+        while self.pos < self.bytes.len() {
+            let b = self.bytes[self.pos];
+            if b == quote {
+                self.pos += 1;
+                return Ok(out);
+            }
+            if quote == b'`' && b == b'$' && self.bytes.get(self.pos + 1) == Some(&b'{') {
+                return Err("Dynamic template literal interpolation in config".to_string());
+            }
+            if b == b'\\' {
+                self.pos += 1;
+                let Some(esc) = self.peek_byte() else {
+                    break;
+                };
+                self.pos += 1;
+                match esc {
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'\\' => out.push('\\'),
+                    b'\'' => out.push('\''),
+                    b'"' => out.push('"'),
+                    b'`' => out.push('`'),
+                    other => out.push(other as char),
+                }
+                continue;
+            }
+            if let Some(ch) = self.src[self.pos..].chars().next() {
+                out.push(ch);
+                self.pos += ch.len_utf8();
+            } else {
+                self.pos += 1;
+            }
+        }
+        Err("Unterminated string literal".to_string())
+    }
+
+    fn parse_number_literal(&mut self) -> Result<Value, String> {
+        let start = self.pos;
+        if self.peek_byte() == Some(b'-') {
+            self.pos += 1;
+            self.skip_ws_and_comments();
+        }
+        let num_start = self.pos;
+        while let Some(b) = self.peek_byte() {
+            if b.is_ascii_digit() || b == b'.' || b == b'_' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if self.pos == num_start {
+            return Err("Invalid numeric literal".to_string());
+        }
+        let raw = self.src[start..self.pos].replace(['_', ' '], "");
+        let parsed = raw
+            .parse::<f64>()
+            .map_err(|e| format!("Invalid number {raw}: {e}"))?;
+        serde_json::Number::from_f64(parsed)
+            .map(Value::Number)
+            .ok_or_else(|| "Non-finite number in config".to_string())
+    }
+
+    fn skip_angle_bracket_type_assertion(&mut self) {
+        if self.peek_byte() != Some(b'<') {
+            return;
+        }
+        let mut depth = 0_i32;
+        while let Some(b) = self.peek_byte() {
+            self.pos += 1;
+            if b == b'<' {
+                depth += 1;
+            } else if b == b'>' {
+                depth -= 1;
+                if depth <= 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn skip_ts_postfix_assertions(&mut self) {
+        loop {
+            self.skip_ws_and_comments();
+            if self.peek_byte() == Some(b'!') {
+                self.pos += 1;
+                continue;
+            }
+            if self.consume_keyword("as") || self.consume_keyword("satisfies") {
+                self.skip_ts_type_until_delimiter();
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn skip_ts_type_until_delimiter(&mut self) {
+        let mut depth = 0_i32;
+        while self.pos < self.bytes.len() {
+            self.skip_ws_and_comments();
+            let Some(b) = self.peek_byte() else {
+                break;
+            };
+            if depth == 0 && matches!(b, b',' | b'}' | b']' | b')' | b';') {
+                break;
+            }
+            match b {
+                b'<' | b'(' | b'[' | b'{' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b'>' | b')' | b']' | b'}' => {
+                    depth = (depth - 1).max(0);
+                    self.pos += 1;
+                }
+                _ => {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+}
+
+const fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || b == b'$'
+}
+
+const fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 fn glob_matches(pattern: &str, candidate: &str) -> bool {

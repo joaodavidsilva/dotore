@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{Capability, CapabilityPredicate},
-    graph::ResolvedCallerSite,
-    ir::{ByteSpan, SourceLoc},
+    ir::{ByteSpan, ResolvedCallerSite, SourceLoc},
 };
 
 /// High-level category for a diagnostic rule.

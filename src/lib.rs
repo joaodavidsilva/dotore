@@ -36,29 +36,42 @@ pub(crate) mod search;
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
     DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
-    WorkspacePackage, discover_workspace_packages, load_config_from_dir, mutate_config_in_dir,
-    resolve_package_for_file,
+    WorkspacePackage, discover_workspace_packages, discover_workspace_packages_with_analyzers,
+    load_config_from_dir, mutate_config_in_dir, resolve_package_for_file,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
-    ChangedFileLineRanges, DiffScope, GitDiffInfo, ScanMode, compare_baseline_diagnostics,
-    compute_diagnostic_fingerprint, compute_diagnostic_id, compute_structural_fingerprint,
-    diagnostic_intersects_changed_lines, filter_diagnostics_by_scope, normalize_ast_tokens,
-    parse_baseline_report_str, parse_changed_line_ranges, resolve_scan_exit_code,
-    validate_git_revision, validate_warning_exit_code,
+    ChangedFileLineRanges, ContextualSpanProvider, DiffScope, GitDiffInfo, ScanMode,
+    compare_baseline_diagnostics, compute_diagnostic_fingerprint, compute_diagnostic_id,
+    compute_structural_fingerprint, diagnostic_intersects_changed_lines,
+    filter_diagnostics_by_scope, normalize_ast_tokens, parse_baseline_report_str,
+    parse_changed_line_ranges, resolve_scan_exit_code, validate_git_revision,
+    validate_warning_exit_code,
 };
-pub use fixer::{FileFixResult, apply_autofixes, apply_patches_to_source};
+pub use dotore_core::{CliOverrides, ScanOptions};
+pub use fixer::{
+    FileFixResult, apply_autofixes, apply_autofixes_with_analyzers, apply_autofixes_with_validator,
+    apply_patches_to_source, apply_patches_to_source_with_analyzers,
+    apply_patches_to_source_with_validator,
+};
 pub use graph::ResolvedCallerSite;
 pub use ir::{
-    ByteSpan, FileIr, SecuritySinkKind, SourceLoc, SymbolKind, SymbolOutline,
-    inspect_file_semantic, parse_file_ir,
+    BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext, FileIr,
+    FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
+    PackageAnalysisResult, RelatedHookOwnerSpanIr, SecuritySinkKind, SourceLoc, SubjectEffectOwner,
+    SymbolKind, SymbolOutline, classify_file_context, compute_line_starts, inspect_file_semantic,
+    loc_from_line_starts, parse_file_ir,
 };
-pub use planner::{PlanResult, compute_root_cause_group_id, format_plan_report, plan_project};
+pub use planner::{
+    PlanResult, PlannerContext, build_fix_capsule, build_root_cause_groups_and_capsules,
+    compute_root_cause_group_id, format_plan_report, plan_project,
+};
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
     JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
-    RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_rule_catalog,
-    ci_config, ci_install, ci_upgrade, explain_location, explain_rule, format_design_report,
+    RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
+    build_extracted_report_with_packages, build_rule_catalog, ci_config, ci_install, ci_upgrade,
+    explain_location, explain_location_with_analyzers, explain_rule, format_design_report,
     format_fix_report, format_install_report, format_rule_catalog_text,
     format_rule_explanation_text, format_terminal_report, format_why_report_text, install_dotore,
     parse_why_location, render_html_report, write_and_open_html_report, write_json_report,
@@ -95,8 +108,10 @@ pub use runtime_scan::{
 pub use score::{HealthScore, compute_local_health_score, score_label};
 pub use search::{
     SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
-    format_search_json, format_search_text, score_fuzzy, search_project_sources, search_symbols,
-    should_highlight_search, should_highlight_stdout,
+    format_search_json, format_search_text, score_fuzzy, search_extracted_files,
+    search_project_sources, search_project_sources_with, search_project_sources_with_analyzers,
+    search_symbols, search_symbols_with, search_symbols_with_analyzers, should_highlight_search,
+    should_highlight_stdout,
 };
 
 use config::content_enables_react_compiler;
@@ -106,40 +121,6 @@ use planner::enrich_cross_file_autofixes;
 use report::{build_report, build_report_with_packages};
 use rules::{evaluate_file_in_package, evaluate_project, evaluate_project_with_packages};
 use scanner::{collect_source_files, collect_style_files};
-
-/// Options for scanning a project or file list.
-#[derive(Debug, Clone, Default)]
-pub struct ScanOptions {
-    /// Paths (files or directories) to analyze. Empty defaults to `"."`.
-    pub paths: Vec<PathBuf>,
-    /// Whether to include `.test.*` / `.spec.*` files when walking directories.
-    pub include_tests: bool,
-    /// Optional filter of enabled [`RuleId`]s (`None` enables all rules matching the **Capability Gate** and config).
-    pub rules: Option<Vec<RuleId>>,
-    /// Optional filter of [`PrescriptionTier`]s (`None` includes all tiers).
-    pub tiers: Option<Vec<PrescriptionTier>>,
-}
-
-/// CLI-level configuration overrides that take precedence over `dotore.config.*` and `package.json#dotore`.
-#[derive(Debug, Clone, Default)]
-pub struct CliOverrides {
-    /// Bypass inline suppression comments (`--no-inline-disables`).
-    pub no_inline_disables: bool,
-    /// Disable rules originally ported from external plugins unless explicitly enabled (`--custom-rules-only`).
-    pub custom_rules_only: bool,
-    /// Additional rule tags to ignore (`--ignore-tag`).
-    pub ignore_tags: Vec<String>,
-    /// Optional explicit path to a `dotore.config.*` file (`--config`).
-    pub config_path: Option<PathBuf>,
-    /// Git diff scan scope (`--scope full|changed|contextual|lines`).
-    pub scope: DiffScope,
-    /// Optional git base revision or range (`--base <ref>`).
-    pub base_ref: Option<String>,
-    /// Scan staged git index changes (`--staged`).
-    pub staged: bool,
-    /// Optional path to a baseline JSON report or git revision (`--baseline <report.json>`).
-    pub baseline_path: Option<PathBuf>,
-}
 
 /// Analyzes a single in-memory source file and returns its [`Diagnostic`]s.
 #[must_use]

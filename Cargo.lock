@@ -216,6 +216,7 @@ name = "dotore"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dotore-core",
  "ignore",
  "oxc_allocator",
  "oxc_ast",
@@ -223,6 +224,16 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_syntax",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dotore-core"
+version = "0.1.0"
+dependencies = [
+ "ignore",
  "rayon",
  "serde",
  "serde_json",

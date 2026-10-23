@@ -27,14 +27,12 @@ pub(crate) mod state_and_effects;
 pub(crate) mod stores;
 pub(crate) mod supply_chain;
 pub(crate) mod tanstack;
-pub(crate) mod types;
-
-pub use supply_chain::supply_chain_purl_hash;
-pub use types::{
+pub use dotore_core::rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
     FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
-    RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
+    RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry, types,
 };
+pub use supply_chain::supply_chain_purl_hash;
 
 use std::path::Path;
 

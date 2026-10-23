@@ -2,124 +2,18 @@
 //! **Caller Sites**, JSX elements, module imports/exports, **Symbol Outlines**, mutations,
 //! async flows, security sinks, and inline suppressions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use dotore_core::ir::{
+    BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
+    FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
+    PackageAnalysisResult, RelatedHookOwnerSpanIr, SourceLoc, SubjectEffectOwner, SymbolKind,
+    SymbolOutline, classify_file_context, compute_line_starts, loc_from_line_starts,
+};
+
 use crate::rules::{AutofixPatch, RuleId};
-
-/// 1-based line and column in a source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceLoc {
-    /// 1-based line number.
-    pub line: u32,
-    /// 1-based column number (UTF-8 byte offset on line + 1).
-    pub column: u32,
-}
-
-/// 0-based byte span `[start, end)` in a source file.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ByteSpan {
-    /// Inclusive start byte offset.
-    pub start: u32,
-    /// Exclusive end byte offset.
-    pub end: u32,
-}
-
-/// Classification of a source file relative to production code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FileContext {
-    /// Production application or library code.
-    Production,
-    /// Test or fixture file (`.test.*`, `.spec.*`, `__tests__/`).
-    Test,
-    /// Storybook story file (`.stories.*`, `.story.*`).
-    Story,
-}
-
-/// Classifies a file path into [`FileContext::Production`], [`FileContext::Test`], or [`FileContext::Story`].
-#[must_use]
-pub fn classify_file_context(path: &Path) -> FileContext {
-    let raw = path.to_string_lossy().replace('\\', "/");
-    let file_name = raw.rsplit('/').next().unwrap_or(raw.as_str());
-
-    if is_story_file_name(file_name) {
-        return FileContext::Story;
-    }
-    if is_test_file_name(file_name) {
-        return FileContext::Test;
-    }
-
-    // Strip above fixture roots (`/fixtures/` or `/__fixtures__/`) so fixture app files
-    // inside a test harness directory are classified by their inner path.
-    let scoped = strip_above_fixture_root(&raw);
-    for seg in scoped
-        .split('/')
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .skip(1)
-    {
-        if matches!(
-            seg,
-            "__tests__"
-                | "__test__"
-                | "tests"
-                | "test"
-                | "__mocks__"
-                | "cypress"
-                | "e2e"
-                | "playwright"
-        ) {
-            return FileContext::Test;
-        }
-    }
-
-    FileContext::Production
-}
-
-fn is_story_file_name(file_name: &str) -> bool {
-    let Some(stem) = strip_js_ts_ext(file_name) else {
-        return false;
-    };
-    stem.ends_with(".stories") || stem.ends_with(".story")
-}
-
-fn is_test_file_name(file_name: &str) -> bool {
-    let Some(stem) = strip_js_ts_ext(file_name) else {
-        return false;
-    };
-    stem.ends_with(".test")
-        || stem.ends_with(".spec")
-        || stem.ends_with(".fixture")
-        || stem.ends_with(".fixtures")
-}
-
-fn strip_js_ts_ext(file_name: &str) -> Option<&str> {
-    for ext in [".tsx", ".ts", ".jsx", ".js", ".mts", ".mjs", ".cts", ".cjs"] {
-        if let Some(stem) = file_name.strip_suffix(ext) {
-            return Some(stem);
-        }
-    }
-    None
-}
-
-fn strip_above_fixture_root(forward_slashed: &str) -> &str {
-    for marker in ["/fixtures/", "/__fixtures__/"] {
-        if let Some(pos) = forward_slashed.rfind(marker) {
-            let after = &forward_slashed[pos + marker.len()..];
-            for src_root in ["/src/", "/app/", "/lib/", "/packages/", "/apps/"] {
-                if let Some(src_pos) = after.rfind(src_root) {
-                    return &after[src_pos + 1..];
-                }
-            }
-            return after;
-        }
-    }
-    forward_slashed
-}
-
 /// Whether a **Subject** is a functional component or a custom hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -504,129 +398,30 @@ pub struct ModuleIr {
     pub component_children_targets: Vec<(String, String)>,
 }
 
-/// Kind of **Symbol Outline** extracted for fuzzy symbol search (`dotore search`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SymbolKind {
-    /// Function or React **Subject** declaration.
-    Function,
-    /// Class declaration.
-    Class,
-    /// TypeScript interface declaration.
-    Interface,
-    /// TypeScript type alias declaration.
-    Type,
-    /// TypeScript enum declaration.
-    Enum,
-    /// TypeScript enum member.
-    EnumMember,
-    /// `const` declaration.
-    Constant,
-    /// `let` or `var` declaration.
-    Variable,
-    /// Class or object method.
-    Method,
-    /// Class or interface property.
-    Property,
-    /// Module export entry.
-    Export,
-    /// Module import binding.
-    Import,
-}
-
-impl SymbolKind {
-    /// All 12 supported symbol kinds in canonical alphabetical order.
-    pub const ALL: &'static [Self] = &[
-        Self::Class,
-        Self::Constant,
-        Self::Enum,
-        Self::EnumMember,
-        Self::Export,
-        Self::Function,
-        Self::Import,
-        Self::Interface,
-        Self::Method,
-        Self::Property,
-        Self::Type,
-        Self::Variable,
-    ];
-
-    /// Default symbol kinds queried by `dotore search` when `--kind` is omitted.
-    pub const DEFAULT_SEARCH_KINDS: &'static [Self] = &[
-        Self::Class,
-        Self::Enum,
-        Self::Function,
-        Self::Interface,
-        Self::Method,
-        Self::Property,
-        Self::Type,
-    ];
-
-    /// Parses a kebab-case symbol kind identifier.
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "class" => Some(Self::Class),
-            "constant" => Some(Self::Constant),
-            "enum" => Some(Self::Enum),
-            "enum-member" => Some(Self::EnumMember),
-            "export" => Some(Self::Export),
-            "function" => Some(Self::Function),
-            "import" => Some(Self::Import),
-            "interface" => Some(Self::Interface),
-            "method" => Some(Self::Method),
-            "property" => Some(Self::Property),
-            "type" => Some(Self::Type),
-            "variable" => Some(Self::Variable),
-            _ => None,
-        }
+impl OpenerLineRange for JsxElementIr {
+    fn opener_start_line(&self) -> u32 {
+        self.opener_start_line
     }
 
-    /// Returns the canonical kebab-case string for this symbol kind.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Class => "class",
-            Self::Constant => "constant",
-            Self::Enum => "enum",
-            Self::EnumMember => "enum-member",
-            Self::Export => "export",
-            Self::Function => "function",
-            Self::Import => "import",
-            Self::Interface => "interface",
-            Self::Method => "method",
-            Self::Property => "property",
-            Self::Type => "type",
-            Self::Variable => "variable",
-        }
+    fn opener_end_line(&self) -> u32 {
+        self.opener_end_line
     }
 }
 
-/// A declared symbol extracted with its signature and adjacent doc comment (see `GLOSSARY.md`: **Symbol Outline**).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SymbolOutline {
-    /// Symbol identifier name.
-    pub name: String,
-    /// Symbol kind (`Function`, `Class`, `Interface`, `Type`, `Enum`, `Constant`, etc.).
-    pub kind: SymbolKind,
-    /// Compact declaration signature header.
-    pub signature: String,
-    /// Adjacent leading comment text, if any.
-    pub doc_comment: Option<String>,
-    /// 1-based start line of the adjacent leading comment block, if any.
-    pub comment_start_line: Option<u32>,
-    /// Enclosing class, interface, enum, function, or object container name for members/nested symbols.
-    pub parent_name: Option<String>,
-    /// Whether the symbol is exported from the module.
-    pub exported: bool,
-    /// Byte span of the declaration.
-    pub span: ByteSpan,
-    /// 1-based line where the declaration signature header ends.
-    pub signature_end_line: u32,
-    /// 1-based start line and column of the symbol identifier.
-    pub loc: SourceLoc,
-    /// 1-based inclusive end line of the declaration.
-    pub end_line: u32,
+impl SubjectEffectOwner for SubjectIr {
+    fn subject_span(&self) -> ByteSpan {
+        self.span
+    }
+
+    fn subject_line(&self) -> u32 {
+        self.loc.line
+    }
+
+    fn for_each_effect_span(&self, f: &mut dyn FnMut(ByteSpan, u32)) {
+        for eff in &self.effect_nodes {
+            f(eff.call_span, eff.loc.line);
+        }
+    }
 }
 
 /// A direct property or array mutation site (`state.foo = 1`, `items.push(x)`).
@@ -690,105 +485,6 @@ pub struct SecuritySinkIr {
     pub span: ByteSpan,
     /// 1-based source location.
     pub loc: SourceLoc,
-}
-
-/// A single-line inline suppression directive (`// dotore-disable-next-line`, `// eslint-disable-line`, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LineDisableDirective {
-    /// 1-based source line number suppressed by this directive.
-    pub target_line: u32,
-    /// Rule keys listed on the directive (empty suppresses all rules on `target_line`).
-    pub rules: Vec<String>,
-}
-
-/// A file-level or block-range disable directive (`/* dotore-disable ... */` ... `/* dotore-enable ... */`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BlockDisableRange {
-    /// 1-based inclusive start line of the suppression range.
-    pub start_line: u32,
-    /// 1-based inclusive end line of the suppression range (`u32::MAX` through end of file).
-    pub end_line: u32,
-    /// Rule keys listed on the directive (empty suppresses all rules in the range).
-    pub rules: Vec<String>,
-}
-
-/// Parsed inline suppression directives (`dotore-disable*`, `eslint-disable*`, `oxlint-disable*`) for a file.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct FileSuppressions {
-    /// Line-targeted disable directives (`*-disable-next-line` and `*-disable-line`).
-    pub line_directives: Vec<LineDisableDirective>,
-    /// File-wide or block-range disable directives (`/* *-disable */`).
-    pub block_ranges: Vec<BlockDisableRange>,
-}
-
-impl FileSuppressions {
-    /// Returns `true` if `rule` is suppressed at 1-based `line` or `span` (including via an enclosing
-    /// `EffectNode`, `SubjectIr`, or multi-line JSX opening element).
-    #[must_use]
-    pub fn is_suppressed(
-        &self,
-        rule: RuleId,
-        line: u32,
-        span: ByteSpan,
-        jsx_elements: &[JsxElementIr],
-        subjects: &[SubjectIr],
-    ) -> bool {
-        if self.matches_line(rule, line) {
-            return true;
-        }
-
-        // Check if `line` sits inside a multi-line JSX opening element whose opener start line is suppressed
-        for el in jsx_elements {
-            if el.opener_start_line < line
-                && line <= el.opener_end_line
-                && self.matches_line(rule, el.opener_start_line)
-            {
-                return true;
-            }
-        }
-
-        // Check if `span` sits inside an EffectNode or SubjectIr whose header line is suppressed
-        for subject in subjects {
-            if subject.span.start <= span.start
-                && span.end <= subject.span.end
-                && self.matches_line(rule, subject.loc.line)
-            {
-                return true;
-            }
-            for effect in &subject.effect_nodes {
-                if effect.call_span.start <= span.start
-                    && span.end <= effect.call_span.end
-                    && self.matches_line(rule, effect.loc.line)
-                {
-                    return true;
-                }
-            }
-        }
-
-        for range in &self.block_ranges {
-            if range.start_line <= line
-                && line <= range.end_line
-                && rule_list_matches(&range.rules, rule)
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn matches_line(&self, rule: RuleId, target_line: u32) -> bool {
-        self.line_directives
-            .iter()
-            .any(|d| d.target_line == target_line && rule_list_matches(&d.rules, rule))
-    }
-}
-
-fn rule_list_matches(rules: &[String], target: RuleId) -> bool {
-    if rules.is_empty() {
-        return true;
-    }
-    rules.iter().any(|token| target.matches_key(token))
 }
 
 /// Ecosystem or semantic rule site detected directly on `oxc_semantic::Semantic` during the single-pass parse.
@@ -1035,24 +731,6 @@ pub(crate) struct ContextConsumerSiteIr {
     pub(crate) span: ByteSpan,
 }
 
-/// Related AST spans for a hook or frame-loop call expression (`useEffect`, `useMemo`, `useCallback`, `useFrame`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct RelatedHookOwnerSpanIr {
-    /// Byte span of the hook/frame `CallExpression`.
-    pub(crate) call_span: ByteSpan,
-    /// Byte spans of local function/arrow-function declarations referenced inside the hook call.
-    pub(crate) referenced_decl_spans: Vec<ByteSpan>,
-}
-
-/// Single-pass AST owner spans extracted for `--scope contextual` diff filtering.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct ContextualOwnerSpansIr {
-    /// Non-hook function and arrow-function boundary spans (including outer `const`/`export` wrapper spans).
-    pub(crate) function_boundary_spans: Vec<ByteSpan>,
-    /// Hook and frame-loop call spans paired with their referenced local callback/function declaration spans.
-    pub(crate) related_hook_spans: Vec<RelatedHookOwnerSpanIr>,
-}
-
 /// Complete single-pass intermediate representation for a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileIr {
@@ -1100,31 +778,4 @@ pub struct FileIr {
     pub(crate) context_consumers: Vec<ContextConsumerSiteIr>,
     /// Single-pass AST owner spans for `--scope contextual` diff filtering.
     pub(crate) contextual_owner_spans: ContextualOwnerSpansIr,
-}
-
-/// Computes 0-based line start byte offsets for `source`.
-#[must_use]
-pub(crate) fn compute_line_starts(source: &str) -> Vec<u32> {
-    let mut starts = vec![0];
-    for (idx, byte) in source.bytes().enumerate() {
-        if byte == b'\n'
-            && let Ok(next_pos) = u32::try_from(idx + 1)
-        {
-            starts.push(next_pos);
-        }
-    }
-    starts
-}
-
-/// Converts a 0-based byte offset into a 1-based [`SourceLoc`].
-#[must_use]
-pub(crate) fn loc_from_line_starts(line_starts: &[u32], byte_offset: u32) -> SourceLoc {
-    let line_idx = match line_starts.binary_search(&byte_offset) {
-        Ok(exact) => exact,
-        Err(insert) => insert.saturating_sub(1),
-    };
-    let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
-    let line = u32::try_from(line_idx + 1).unwrap_or(1);
-    let column = byte_offset.saturating_sub(line_start) + 1;
-    SourceLoc { line, column }
 }
