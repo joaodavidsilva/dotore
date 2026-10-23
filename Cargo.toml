@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dotore-core", "crates/dotore-js"]
+members = ["crates/dotore-core", "crates/dotore-js", "crates/dotore-py", "crates/dotore-rs"]
 resolver = "2"
 
 [workspace.lints.rust]
@@ -43,6 +43,8 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 dotore-core = { path = "crates/dotore-core" }
 dotore-js = { path = "crates/dotore-js" }
+dotore-py = { path = "crates/dotore-py" }
+dotore-rs = { path = "crates/dotore-rs" }
 rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

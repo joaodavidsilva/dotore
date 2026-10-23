@@ -10,6 +10,8 @@ pub use dotore_core::search::{
     search_symbols_with_analyzers, should_highlight_search, should_highlight_stdout,
 };
 use dotore_js::JsLanguageAnalyzer;
+use dotore_py::PyLanguageAnalyzer;
+use dotore_rs::RsLanguageAnalyzer;
 
 /// Searches in-memory `(PathBuf, String)` files for **Symbol Outlines** matching `query`.
 #[must_use]
@@ -21,7 +23,9 @@ pub fn search_project_sources(
 ) -> Vec<SymbolSearchResult> {
     JsLanguageAnalyzer::register_core_hooks();
     let js_analyzer = JsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let py_analyzer = PyLanguageAnalyzer::new();
+    let rs_analyzer = RsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &py_analyzer, &rs_analyzer];
     search_project_sources_with_analyzers(query, files, kinds, limit, analyzers)
 }
 
@@ -35,6 +39,8 @@ pub fn search_symbols(
 ) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
     JsLanguageAnalyzer::register_core_hooks();
     let js_analyzer = JsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let py_analyzer = PyLanguageAnalyzer::new();
+    let rs_analyzer = RsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &py_analyzer, &rs_analyzer];
     search_symbols_with_analyzers(query, options, analyzers)
 }

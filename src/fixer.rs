@@ -1,5 +1,6 @@
 //! Surgical source auto-fixer applying single-file and cross-file `Autofix`-tier byte-range
-//! edits in reverse offset order with [`dotore_js::JsLanguageAnalyzer`] syntax verification.
+//! edits in reverse offset order with [`dotore_js::JsLanguageAnalyzer`] and
+//! [`dotore_py::PyLanguageAnalyzer`] syntax verification.
 
 use std::{collections::HashMap, io, path::PathBuf};
 
@@ -9,9 +10,10 @@ pub use dotore_core::fixer::{
 };
 use dotore_core::{ir::LanguageAnalyzer, rules::Diagnostic};
 use dotore_js::JsLanguageAnalyzer;
+use dotore_py::PyLanguageAnalyzer;
 
 /// Applies all non-overlapping single-file and cross-file `Autofix` patches across the workspace,
-/// validating rewritten JS/TS files with [`JsLanguageAnalyzer`].
+/// validating rewritten files with [`JsLanguageAnalyzer`] and [`PyLanguageAnalyzer`].
 ///
 /// # Errors
 /// Returns an `io::Error` if writing a modified file fails.
@@ -22,16 +24,21 @@ pub fn apply_autofixes(
 ) -> io::Result<Vec<FileFixResult>> {
     JsLanguageAnalyzer::register_core_hooks();
     let js_analyzer = JsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let py_analyzer = PyLanguageAnalyzer::new();
+    let rs_analyzer = dotore_rs::RsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &py_analyzer, &rs_analyzer];
     apply_autofixes_with_analyzers(diagnostics, sources, dry_run, analyzers)
 }
 
 /// Applies non-overlapping `Autofix` patches to an in-memory source string,
-/// validating candidate rewrites with [`JsLanguageAnalyzer`] and returning `(new_source, applied_descriptions)`.
+/// validating candidate rewrites with [`JsLanguageAnalyzer`] and [`PyLanguageAnalyzer`]
+/// and returning `(new_source, applied_descriptions)`.
 #[must_use]
 pub fn apply_patches_to_source(source: &str, diagnostics: &[Diagnostic]) -> (String, Vec<String>) {
     JsLanguageAnalyzer::register_core_hooks();
     let js_analyzer = JsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let py_analyzer = PyLanguageAnalyzer::new();
+    let rs_analyzer = dotore_rs::RsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &py_analyzer, &rs_analyzer];
     apply_patches_to_source_with_analyzers(source, diagnostics, analyzers)
 }
