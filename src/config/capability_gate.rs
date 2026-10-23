@@ -141,9 +141,51 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("eslint-plugin-react-compiler", &[Capability::ReactCompiler]),
     ("typescript", &[Capability::TypeScript]),
     ("tailwindcss", &[Capability::Tailwind]),
-    ("react-router", &[Capability::ReactRouter]),
-    ("react-router-dom", &[Capability::ReactRouter]),
-    ("@react-router/dev", &[Capability::ReactRouter]),
+    (
+        "react-router",
+        &[Capability::React, Capability::ReactRouter],
+    ),
+    (
+        "react-router-dom",
+        &[Capability::React, Capability::ReactRouter],
+    ),
+    (
+        "@react-router/dev",
+        &[Capability::React, Capability::ReactRouter],
+    ),
+    (
+        "@react-router/node",
+        &[Capability::React, Capability::ReactRouter],
+    ),
+    (
+        "@react-router/serve",
+        &[Capability::React, Capability::ReactRouter],
+    ),
+    ("remotion", &[Capability::React, Capability::Remotion]),
+    ("@remotion/cli", &[Capability::React, Capability::Remotion]),
+    (
+        "@remotion/player",
+        &[Capability::React, Capability::Remotion],
+    ),
+    (
+        "@remotion/renderer",
+        &[Capability::React, Capability::Remotion],
+    ),
+    ("react-redux", &[Capability::React, Capability::Redux]),
+    ("@reduxjs/toolkit", &[Capability::Redux]),
+    ("redux", &[Capability::Redux]),
+    (
+        "@tanstack/react-form",
+        &[Capability::React, Capability::TanstackForm],
+    ),
+    (
+        "@tanstack/react-table",
+        &[Capability::React, Capability::TanstackTable],
+    ),
+    (
+        "@tanstack/react-virtual",
+        &[Capability::React, Capability::TanstackVirtual],
+    ),
     ("radix-ui", &[Capability::RadixUi]),
     ("@base-ui/react", &[Capability::BaseUi]),
     ("@base-ui-components/react", &[Capability::BaseUi]),
@@ -201,8 +243,18 @@ pub enum Capability {
     TypeScript,
     /// Tailwind CSS (`tailwindcss`).
     Tailwind,
-    /// React Router (`react-router`, `react-router-dom`, `@react-router/dev`).
+    /// React Router (`react-router`, `react-router-dom`, `@react-router/*`).
     ReactRouter,
+    /// Remotion video framework (`remotion`, `@remotion/*`).
+    Remotion,
+    /// Redux state management (`react-redux`, `@reduxjs/toolkit`, `redux`).
+    Redux,
+    /// TanStack Form (`@tanstack/react-form`).
+    TanstackForm,
+    /// TanStack Table (`@tanstack/react-table`).
+    TanstackTable,
+    /// TanStack Virtual (`@tanstack/react-virtual`).
+    TanstackVirtual,
     /// Tailwind CSS v3.4+ (`tailwindcss` >= 3.4).
     #[serde(rename = "tailwind:3.4")]
     Tailwind34,
@@ -250,6 +302,11 @@ impl Capability {
             Self::TypeScript => "typescript",
             Self::Tailwind => "tailwind",
             Self::ReactRouter => "react-router",
+            Self::Remotion => "remotion",
+            Self::Redux => "redux",
+            Self::TanstackForm => "tanstack-form",
+            Self::TanstackTable => "tanstack-table",
+            Self::TanstackVirtual => "tanstack-virtual",
             Self::Tailwind34 => "tailwind:3.4",
             Self::Tailwind4 => "tailwind:4",
             Self::RadixUi => "radix-ui",
@@ -525,6 +582,20 @@ fn infer_capabilities_from_deps(deps: &HashMap<String, String>) -> HashSet<Capab
         || deps.contains_key("class-variance-authority")
     {
         caps.insert(Capability::Shadcn);
+    }
+    if deps
+        .keys()
+        .any(|k| k == "react-router" || k == "react-router-dom" || k.starts_with("@react-router/"))
+    {
+        caps.insert(Capability::React);
+        caps.insert(Capability::ReactRouter);
+    }
+    if deps
+        .keys()
+        .any(|k| k == "remotion" || k.starts_with("@remotion/"))
+    {
+        caps.insert(Capability::React);
+        caps.insert(Capability::Remotion);
     }
     if let Some(tw_ver) = deps.get("tailwindcss") {
         let parsed = parse_major_minor_spec(tw_ver);
