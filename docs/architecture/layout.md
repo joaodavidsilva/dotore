@@ -1,10 +1,29 @@
-# Layout: Single-Crate Rust CLI and Library
+# Layout: Multi-Crate Cargo Workspace and CLI Facade
 
 Basis: Cargo Book ("Package Layout") and Rust API Guidelines.
 
 ## Folder tree
 
 ```
+crates/
+  dotore-core/
+    src/
+      lib.rs              # language-agnostic core crate root and re-exports
+      ir.rs               # SourceLoc, ByteSpan, SymbolOutline, ExtractedFile, LanguageAnalyzer
+      config.rs           # workspace package discovery and config utilities
+      config/
+        capability_gate.rs # Capability, CapabilityPredicate, CapabilityGate across JS/Angular/Python/Rust
+        loader.rs         # DotoreConfig loader and in-place mutator
+      rules.rs            # unified rule registry module root
+      rules/
+        types.rs          # RuleId, RuleMetadata, PrescriptionTier, Diagnostic, AutofixPatch, FixCapsule
+      scanner.rs          # parallel gitignore-aware file discovery
+      fixer.rs            # surgical single- and cross-file byte-range auto-fixer with syntax validation
+      diff.rs             # git diff, Contextual Owner filtering, and baseline multiset comparison
+      planner.rs          # Root-Cause Grouping, Blast Radius, Exemplar lookup, Fix Capsules (dotore plan)
+      score.rs            # deterministic local 0-100 health score and P0-P3 tier calculation
+      search.rs           # native fuzzy Symbol Outline search (dotore search)
+      report.rs           # terminal, JSON, why/explain, CI, install, and HTML reporters
 src/
   main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
   lib.rs                  # crate root: narrow public surface, wires internal modules
