@@ -11,7 +11,7 @@ use std::{
 };
 
 use dotore_core::{
-    BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
+    AutofixPatch, BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
     FileSuppressions, LanguageId, LineDisableDirective, RuleId, SourceLoc, SymbolKind,
     SymbolOutline, classify_file_context, compute_line_starts, loc_from_line_starts,
 };
@@ -69,6 +69,8 @@ pub struct RsCandidateFinding {
     pub loc: SourceLoc,
     /// 0-based byte span of the finding.
     pub span: ByteSpan,
+    /// Optional deterministic autofix patch for this candidate finding.
+    pub autofix: Option<AutofixPatch>,
 }
 
 /// Single-pass intermediate representation for a Rust source file (`.rs`).
@@ -90,6 +92,8 @@ pub struct RsFileIr {
     pub suppressions: FileSuppressions,
     /// Candidate rule findings collected during the single-pass AST walk.
     pub findings: Vec<RsCandidateFinding>,
+    /// Per-file crate graph metadata (`pub(crate)` items and referenced identifiers).
+    pub graph_ir: crate::graph::RsFileGraphIr,
 }
 
 /// Parses a Rust source file once with `syn::parse_file` and extracts its [`ExtractedFile`] and [`RsFileIr`].
@@ -122,9 +126,18 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
         block_guards: Vec::new(),
     };
 
-    if let Ok(ast) = &parsed {
+    let graph_ir = if let Ok(ast) = &parsed {
         visitor.extract_crate_file(ast);
-    }
+        crate::axum_sqlx_ui_arch::extract_axum_sqlx_ui_arch_findings(
+            ast,
+            source,
+            &line_starts,
+            &mut visitor.findings,
+        );
+        crate::graph::extract_file_graph_ir(path, ast, source, &line_starts)
+    } else {
+        crate::graph::RsFileGraphIr::default()
+    };
 
     let subjects = visitor.subjects;
     let symbol_outlines = visitor.symbol_outlines;
@@ -146,6 +159,7 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
         contextual_owner_spans: contextual_owner_spans.clone(),
         suppressions: suppressions.clone(),
         findings,
+        graph_ir,
     };
 
     let mut extracted = ExtractedFile::new(path.to_path_buf(), source.to_string(), LanguageId::Rust);
@@ -895,6 +909,7 @@ impl<'ast> Visit<'ast> for RsAstExtractor<'_> {
                     ),
                     loc: unsafe_loc,
                     span,
+                    autofix: None,
                 });
             }
         }
@@ -1062,6 +1077,7 @@ impl<'ast> Visit<'ast> for RsAstExtractor<'_> {
                     ),
                     loc,
                     span: full_span,
+                    autofix: None,
                 });
             }
         }
@@ -1089,6 +1105,7 @@ impl<'ast> Visit<'ast> for RsAstExtractor<'_> {
                 ),
                 loc,
                 span,
+                autofix: None,
             });
         }
         visit::visit_expr_index(self, node);
@@ -1113,6 +1130,7 @@ impl<'ast> Visit<'ast> for RsAstExtractor<'_> {
                     ),
                     loc,
                     span,
+                    autofix: None,
                 });
             }
         }
@@ -1137,6 +1155,7 @@ impl<'ast> Visit<'ast> for RsAstExtractor<'_> {
                     message: "`unsafe` block is missing a preceding `// SAFETY:` invariant comment explaining why all unsafe preconditions hold.".to_string(),
                     loc,
                     span,
+                    autofix: None,
                 });
             }
         }
@@ -1158,6 +1177,7 @@ impl<'ast> Visit<'ast> for RsAstExtractor<'_> {
                 message: "Avoid `mem::forget(...)`, which leaks resources and skips `Drop` destructors; use `std::mem::ManuallyDrop` if ownership transfer requires suppressing drop.".to_string(),
                 loc,
                 span,
+                autofix: None,
             });
         }
         visit::visit_expr_call(self, node);
@@ -1261,9 +1281,10 @@ fn map_rust_lint_to_rule_keys(lint: &str) -> Vec<String> {
             vec!["rs-no-mem-forget".to_string()]
         }
         other => {
-            let kebab = other.replace('_', "-");
-            if RuleId::parse(&kebab).is_some() {
-                vec![kebab]
+            if let Some(rule_id) =
+                RuleId::parse(other).or_else(|| RuleId::parse(&other.replace('_', "-")))
+            {
+                vec![rule_id.as_str().to_string()]
             } else {
                 Vec::new()
             }

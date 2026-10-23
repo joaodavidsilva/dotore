@@ -237,16 +237,18 @@ pub fn analyze_project_sources(
             .map(|(path, source)| RsLanguageAnalyzer.extract_file(&path, &source))
             .collect();
         let mut diagnostics = Vec::new();
-        for extracted in &extracted_rs {
-            if let Some(pkg) = resolve_package_for_file(&extracted.path, &packages) {
-                dotore_rs::evaluate_rs_file(
-                    extracted,
-                    &pkg.root_dir,
-                    &pkg.capability_gate,
-                    &pkg.config,
-                    enabled_rules,
-                    &mut diagnostics,
-                );
+        for pkg in &packages {
+            let pkg_files: Vec<ExtractedFile> = extracted_rs
+                .iter()
+                .filter(|f| {
+                    resolve_package_for_file(&f.path, &packages)
+                        .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
+                })
+                .map(|f| RsLanguageAnalyzer.extract_file(&f.path, &f.source))
+                .collect();
+            if !pkg_files.is_empty() {
+                let res = RsLanguageAnalyzer.analyze_package(pkg, &pkg_files, enabled_rules);
+                diagnostics.extend(res.diagnostics);
             }
         }
         return build_extracted_report_with_packages(&extracted_rs, diagnostics, &sources, &packages);
@@ -259,20 +261,18 @@ pub fn analyze_project_sources(
     let graph = js_analyzer.build_graph_from_extracted(&extracted_files, manifests);
     let mut diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
     if !rs_sources.is_empty() {
-        let extracted_rs: Vec<ExtractedFile> = rs_sources
-            .into_par_iter()
-            .map(|(path, source)| RsLanguageAnalyzer.extract_file(&path, &source))
-            .collect();
-        for extracted in &extracted_rs {
-            if let Some(pkg) = resolve_package_for_file(&extracted.path, &packages) {
-                dotore_rs::evaluate_rs_file(
-                    extracted,
-                    &pkg.root_dir,
-                    &pkg.capability_gate,
-                    &pkg.config,
-                    enabled_rules,
-                    &mut diagnostics,
-                );
+        for pkg in &packages {
+            let pkg_files: Vec<ExtractedFile> = rs_sources
+                .iter()
+                .filter(|(path, _)| {
+                    resolve_package_for_file(path, &packages)
+                        .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
+                })
+                .map(|(path, source)| RsLanguageAnalyzer.extract_file(path, source))
+                .collect();
+            if !pkg_files.is_empty() {
+                let res = RsLanguageAnalyzer.analyze_package(pkg, &pkg_files, enabled_rules);
+                diagnostics.extend(res.diagnostics);
             }
         }
     }
