@@ -77,7 +77,7 @@ pub(crate) fn extract_remotion_and_ecosystem_sites(
     let styled_intrinsics = collect_styled_intrinsic_components(semantic);
 
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        let (subj_id, subject_name) = find_enclosing_react_fn_scope(semantic, node_id);
+        let (subj_id, subject_name) = find_enclosing_subject(semantic, node_id);
 
         match node.kind() {
             AstKind::JSXElement(jsx_el) => {
@@ -929,19 +929,19 @@ fn check_motion_call_expression(
     }
 }
 
-fn find_enclosing_react_fn_scope(
+fn find_enclosing_subject(
     semantic: &Semantic<'_>,
     node_id: NodeId,
 ) -> (Option<NodeId>, Option<String>) {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
-        if let Some(name) = react_fn_scope_name(semantic, anc_id) {
+        if let Some(name) = subject_name(semantic, anc_id) {
             return (Some(anc_id), Some(name));
         }
     }
     (None, None)
 }
 
-fn react_fn_scope_name(semantic: &Semantic<'_>, node_id: NodeId) -> Option<String> {
+fn subject_name(semantic: &Semantic<'_>, node_id: NodeId) -> Option<String> {
     match semantic.nodes().kind(node_id) {
         AstKind::Function(func) => {
             if let Some(id) = &func.id
@@ -1139,7 +1139,7 @@ fn is_inside_iteration_without_dynamic_layout_group(
     node_id: NodeId,
 ) -> bool {
     let mut saw_dynamic_layout_group = false;
-    for anc_id in semantic.nodes().ancestor_ids(node_id).skip(1) {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
         match semantic.nodes().kind(anc_id) {
             AstKind::JSXElement(el) => {
                 let tag = get_jsx_element_name(&el.opening_element.name);

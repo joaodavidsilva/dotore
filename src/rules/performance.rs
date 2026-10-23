@@ -2944,12 +2944,7 @@ fn check_rendering_usetransition_loading(
                 || lower == "isloading"
                 || lower == "ispending"
                 || lower.ends_with("loading");
-            let is_bool_init = call
-                .arguments
-                .first()
-                .and_then(Argument::as_expression)
-                .is_some_and(|e| matches!(unwrap_expr(e), Expression::BooleanLiteral(_)));
-            if is_loading_name && (has_transition || is_bool_init) {
+            if is_loading_name && has_transition {
                 out.push(SemanticRuleSite {
                     rule: RuleId::RenderingUsetransitionLoading,
                     subject_name: subject_name.clone(),

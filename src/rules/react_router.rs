@@ -100,7 +100,7 @@ pub(crate) fn extract_react_router_sites(
 
     // Precompute component info: which components render <Routes> or <Outlet>
     let (components_with_routes, components_with_outlet) =
-        collect_component_router_traits(semantic);
+        collect_subject_router_traits(semantic);
 
     // Track per-component useBlocker count
     let mut blocker_calls_by_subject: HashMap<NodeId, Vec<(Span, Option<String>)>> = HashMap::new();
@@ -321,8 +321,8 @@ fn is_client_module_specifier(spec: &str) -> bool {
         || spec.ends_with("/client")
 }
 
-/// Collects components in the file that render `<Routes>` or `<Outlet>` / `useOutlet`.
-fn collect_component_router_traits(
+/// Collects **Subjects** in the file that render `<Routes>` or `<Outlet>` / `useOutlet`.
+fn collect_subject_router_traits(
     semantic: &Semantic<'_>,
 ) -> (HashSet<String>, HashSet<String>) {
     let mut with_routes = HashSet::new();
@@ -971,8 +971,30 @@ fn check_jsx_element_rules(
     // 1. `<Routes>` tree inspection for JSX `<Route>` elements
     if tag == "Routes" {
         let mut seen_ids = HashSet::new();
+        let mut root_route_checked = false;
         for child in &jsx_el.children {
             if let JSXChild::Element(child_el) = child {
+                if jsx_element_tag_name(&child_el.opening_element.name).as_deref() == Some("Route")
+                    && !root_route_checked
+                {
+                    root_route_checked = true;
+                    let child_opening = &child_el.opening_element;
+                    let has_err = has_jsx_attr(child_opening, "errorElement")
+                        || has_jsx_attr(child_opening, "ErrorBoundary");
+                    if !has_err && jsx_route_subtree_has_loader_or_action(child_el) {
+                        push_site(
+                            sites,
+                            line_starts,
+                            RuleId::ReactRouterRequireRootErrorBoundary,
+                            None,
+                            "reactRouterRequireRootErrorBoundary",
+                            "Route",
+                            "Root `<Route>` is missing `ErrorBoundary` or `errorElement`; define a root error boundary so unhandled loader or action errors have a fallback UI.",
+                            child_opening.span,
+                            None,
+                        );
+                    }
+                }
                 check_jsx_route_element_recursive(
                     child_el,
                     None,
@@ -1193,6 +1215,31 @@ fn check_jsx_route_element_recursive(
         );
     }
 
+    // Invalid lazy route properties on JSX `<Route>`
+    if let Some(lazy_expr) = get_jsx_attr_expr(opening, "lazy") {
+        check_lazy_route_expression(lazy_expr, line_starts, sites);
+    }
+    if has_lazy
+        && (has_element
+            || has_component
+            || has_jsx_attr(opening, "ErrorBoundary")
+            || has_jsx_attr(opening, "errorElement")
+            || has_jsx_attr(opening, "hydrateFallbackElement")
+            || has_jsx_attr(opening, "HydrateFallback"))
+    {
+        push_site(
+            sites,
+            line_starts,
+            RuleId::ReactRouterNoInvalidLazyRouteProperties,
+            None,
+            "reactRouterNoInvalidLazyRouteProperties",
+            "Route",
+            "JSX `<Route>` with `lazy` should not also define static `Component`, `element`, `ErrorBoundary`, `errorElement`, or `hydrateFallbackElement` props.",
+            opening.span,
+            None,
+        );
+    }
+
     let rendered_comp = get_jsx_route_rendered_component(opening);
 
     // Descendant routes require splat
@@ -1216,22 +1263,40 @@ fn check_jsx_route_element_recursive(
     }
 
     // Nested route requires Outlet
-    if has_child_routes
-        && let Some(comp_name) = &rendered_comp
-        && !components_with_outlet.contains(comp_name)
-        && is_component_defined_in_file(semantic, comp_name)
-    {
-        push_site(
-            sites,
-            line_starts,
-            RuleId::ReactRouterNestedRouteRequiresOutlet,
-            Some(comp_name.clone()),
-            "reactRouterNestedRouteRequiresOutlet",
-            comp_name,
-            &format!("Parent `<Route>` component `{comp_name}` has nested routes but does not render `<Outlet />`."),
-            opening.span,
-            None,
-        );
+    if has_child_routes {
+        if let Some(comp_name) = &rendered_comp
+            && !components_with_outlet.contains(comp_name)
+            && is_component_defined_in_file(semantic, comp_name)
+        {
+            push_site(
+                sites,
+                line_starts,
+                RuleId::ReactRouterNestedRouteRequiresOutlet,
+                Some(comp_name.clone()),
+                "reactRouterNestedRouteRequiresOutlet",
+                comp_name,
+                &format!("Parent `<Route>` component `{comp_name}` has nested routes but does not render `<Outlet />`."),
+                opening.span,
+                None,
+            );
+        } else if let Some(el_expr) = get_jsx_attr_expr(opening, "element")
+            && let Expression::JSXElement(inline_jsx) = el_expr.without_parentheses()
+            && let Some(tag) = jsx_element_tag_name(&inline_jsx.opening_element.name)
+            && tag.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && !jsx_subtree_contains_outlet(inline_jsx)
+        {
+            push_site(
+                sites,
+                line_starts,
+                RuleId::ReactRouterNestedRouteRequiresOutlet,
+                None,
+                "reactRouterNestedRouteRequiresOutlet",
+                &tag,
+                "Parent `<Route>` `element` has nested routes but does not render `<Outlet />`.",
+                inline_jsx.span,
+                None,
+            );
+        }
     }
 
     // Empty leaf route
@@ -2162,6 +2227,47 @@ fn has_jsx_attr(opening: &JSXOpeningElement<'_>, attr_name: &str) -> bool {
             false
         }
     })
+}
+
+fn get_jsx_attr_expr<'a>(
+    opening: &'a JSXOpeningElement<'a>,
+    attr_name: &str,
+) -> Option<&'a Expression<'a>> {
+    for item in &opening.attributes {
+        let JSXAttributeItem::Attribute(attr) = item else {
+            continue;
+        };
+        let JSXAttributeName::Identifier(id) = &attr.name else {
+            continue;
+        };
+        if id.name != attr_name {
+            continue;
+        }
+        if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value {
+            return c.expression.as_expression();
+        }
+    }
+    None
+}
+
+fn jsx_route_subtree_has_loader_or_action(jsx_el: &JSXElement<'_>) -> bool {
+    let opening = &jsx_el.opening_element;
+    if has_jsx_attr(opening, "loader")
+        || has_jsx_attr(opening, "action")
+        || has_jsx_attr(opening, "clientLoader")
+        || has_jsx_attr(opening, "clientAction")
+    {
+        return true;
+    }
+    for child in &jsx_el.children {
+        if let JSXChild::Element(child_el) = child
+            && jsx_element_tag_name(&child_el.opening_element.name).as_deref() == Some("Route")
+            && jsx_route_subtree_has_loader_or_action(child_el)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_jsx_truthy_attr(opening: &JSXOpeningElement<'_>, attr_name: &str) -> bool {

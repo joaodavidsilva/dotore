@@ -29,7 +29,8 @@ use crate::{
         ByteSpan, FileIr, JsxElementIr, SemanticRuleSite,
         react_ast::{
             classify_jsx_element_name, find_enclosing_react_node, get_subject_body_statements,
-            get_subject_name, is_component_name, is_custom_hook_name, is_react_hook_callee,
+            get_subject_name, is_component_name, is_custom_hook_name, is_react_component_class,
+            is_react_hook_callee,
         },
         types::loc_from_line_starts,
     },
@@ -44,6 +45,8 @@ const DEPS_HOOK_NAMES: &[&str] = &[
     "useImperativeHandle",
     "useInsertionEffect",
 ];
+
+const MAX_JSX_DEPTH: usize = 4;
 
 const UNKNOWN_DOM_PROP_FIXES: &[(&str, &str)] = &[
     ("class", "className"),
@@ -664,12 +667,18 @@ fn check_jsx_builtin_rules_in_file(
 ) {
     for (node_id, node) in semantic.nodes().iter_enumerated() {
         let AstKind::JSXElement(jsx_el) = node.kind() else {
-        if let AstKind::JSXFragment(jsx_frag) = node.kind() {
-            let subj_name = find_enclosing_react_node(semantic, node_id)
-                .and_then(|subj_id| get_subject_name(semantic, subj_id));
-            check_jsx_no_useless_fragment_short(jsx_frag, &subj_name, semantic, line_starts, sites);
-            continue;
-        }
+            if let AstKind::JSXFragment(jsx_frag) = node.kind() {
+                let subj_name = find_enclosing_react_node(semantic, node_id)
+                    .and_then(|subj_id| get_subject_name(semantic, subj_id));
+                check_jsx_no_useless_fragment_short(
+                    node_id,
+                    jsx_frag,
+                    &subj_name,
+                    semantic,
+                    line_starts,
+                    sites,
+                );
+            }
             continue;
         };
         let opening = &jsx_el.opening_element;
@@ -708,6 +717,7 @@ fn check_jsx_builtin_rules_in_file(
             sites,
         );
         check_jsx_fragments_and_useless_fragment_element(
+            node_id,
             jsx_el,
             &tag_name,
             &subj_name,
@@ -1656,7 +1666,57 @@ fn push_inline_prop_diag(
     });
 }
 
+fn build_useless_fragment_autofix(
+    semantic: &Semantic<'_>,
+    frag_node_id: NodeId,
+    frag_span: Span,
+    meaningful: &[&oxc_ast::ast::JSXChild<'_>],
+    description: String,
+) -> Option<AutofixPatch> {
+    let in_jsx_parent = matches!(
+        semantic.nodes().parent_kind(frag_node_id),
+        AstKind::JSXElement(_) | AstKind::JSXFragment(_)
+    );
+    let replacement = if meaningful.is_empty() {
+        if in_jsx_parent {
+            Some(String::new())
+        } else {
+            None
+        }
+    } else if meaningful.len() == 1 {
+        match meaningful[0] {
+            oxc_ast::ast::JSXChild::Element(child_el) => {
+                Some(child_el.span.source_text(semantic.source_text()).to_string())
+            }
+            oxc_ast::ast::JSXChild::Fragment(child_frag) => {
+                Some(child_frag.span.source_text(semantic.source_text()).to_string())
+            }
+            oxc_ast::ast::JSXChild::Text(child_text) if in_jsx_parent => {
+                Some(child_text.span.source_text(semantic.source_text()).to_string())
+            }
+            oxc_ast::ast::JSXChild::ExpressionContainer(child_expr) if in_jsx_parent => {
+                Some(child_expr.span.source_text(semantic.source_text()).to_string())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    replacement.map(|rep| AutofixPatch {
+        description,
+        edits: vec![ByteEdit {
+            file: None,
+            span: ByteSpan {
+                start: frag_span.start,
+                end: frag_span.end,
+            },
+            replacement: rep,
+        }],
+    })
+}
+
 fn check_jsx_no_useless_fragment_short(
+    frag_node_id: NodeId,
     jsx_frag: &oxc_ast::ast::JSXFragment<'_>,
     subj_name: &Option<String>,
     semantic: &Semantic<'_>,
@@ -1667,24 +1727,13 @@ fn check_jsx_no_useless_fragment_short(
     if meaningful.len() > 1 {
         return;
     }
-    let autofix = if meaningful.len() == 1
-        && let oxc_ast::ast::JSXChild::Element(child_el) = meaningful[0]
-    {
-        let child_text = child_el.span.source_text(semantic.source_text());
-        Some(AutofixPatch {
-            description: "Remove redundant `<>...</>` fragment wrapper".to_string(),
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: jsx_frag.span.start,
-                    end: jsx_frag.span.end,
-                },
-                replacement: child_text.to_string(),
-            }],
-        })
-    } else {
-        None
-    };
+    let autofix = build_useless_fragment_autofix(
+        semantic,
+        frag_node_id,
+        jsx_frag.span,
+        &meaningful,
+        "Remove redundant `<>...</>` fragment wrapper".to_string(),
+    );
     sites.push(SemanticRuleSite {
         rule: RuleId::JsxNoUselessFragment,
         subject_name: subj_name.clone(),
@@ -1701,6 +1750,7 @@ fn check_jsx_no_useless_fragment_short(
 }
 
 fn check_jsx_fragments_and_useless_fragment_element(
+    frag_node_id: NodeId,
     jsx_el: &JSXElement<'_>,
     tag_name: &str,
     subj_name: &Option<String>,
@@ -1755,24 +1805,13 @@ fn check_jsx_fragments_and_useless_fragment_element(
     // 2. `jsx-no-useless-fragment` on `<Fragment>` / `<React.Fragment>` with <= 1 meaningful child
     let meaningful = collect_meaningful_jsx_children(&jsx_el.children);
     if meaningful.len() <= 1 {
-        let autofix = if meaningful.len() == 1
-            && let oxc_ast::ast::JSXChild::Element(child_el) = meaningful[0]
-        {
-            let child_text = child_el.span.source_text(semantic.source_text());
-            Some(AutofixPatch {
-                description: format!("Remove redundant `<{tag_name}>` wrapper"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: jsx_el.span.start,
-                        end: jsx_el.span.end,
-                    },
-                    replacement: child_text.to_string(),
-                }],
-            })
-        } else {
-            None
-        };
+        let autofix = build_useless_fragment_autofix(
+            semantic,
+            frag_node_id,
+            jsx_el.span,
+            &meaningful,
+            format!("Remove redundant `<{tag_name}>` wrapper"),
+        );
         sites.push(SemanticRuleSite {
             rule: RuleId::JsxNoUselessFragment,
             subject_name: subj_name.clone(),
@@ -1869,14 +1908,14 @@ fn check_jsx_pascal_case_and_max_depth(
                 _ => {}
             }
         }
-        if depth > 4 {
+        if depth > MAX_JSX_DEPTH {
             sites.push(SemanticRuleSite {
                 rule: RuleId::JsxMaxDepth,
                 subject_name: subj_name.clone(),
                 message_id: "jsxMaxDepth",
                 target_name: tag_name.to_string(),
                 message: format!(
-                    "JSX nesting depth of {depth} exceeds the maximum depth of 4; extract a child component."
+                    "JSX nesting depth of {depth} exceeds the maximum depth of {MAX_JSX_DEPTH}; extract a child component."
                 ),
                 loc: loc_from_line_starts(line_starts, opening.span.start),
                 span: ByteSpan {
@@ -2190,29 +2229,21 @@ fn check_display_name_and_create_class(
     {
         return;
     }
-    if assigned_var_name.is_none() {
-        sites.push(SemanticRuleSite {
-            rule: RuleId::DisplayName,
-            subject_name: subj_name.clone(),
-            message_id: "displayName",
-            target_name: c_name.to_string(),
-            message: format!(
-                "Component wrapped in `{c_name}(...)` is anonymous and has no `displayName`; pass a named function `function MyComponent(...)`."
-            ),
-            loc: loc_from_line_starts(line_starts, call.span.start),
-            span: ByteSpan {
-                start: call.span.start,
-                end: call.span.end,
-            },
-            autofix: None,
-        });
-    }
-}
-
-fn is_react_component_class(cls: &oxc_ast::ast::Class<'_>, source: &str) -> bool {
-    let header = Span::new(cls.span.start, cls.body.span.start).source_text(source);
-    header.contains("extends ")
-        && (header.contains("Component") || header.contains("PureComponent"))
+    sites.push(SemanticRuleSite {
+        rule: RuleId::DisplayName,
+        subject_name: subj_name.clone(),
+        message_id: "displayName",
+        target_name: c_name.to_string(),
+        message: format!(
+            "Component wrapped in `{c_name}(...)` is anonymous and has no `displayName`; pass a named function `function MyComponent(...)`."
+        ),
+        loc: loc_from_line_starts(line_starts, call.span.start),
+        span: ByteSpan {
+            start: call.span.start,
+            end: call.span.end,
+        },
+        autofix: None,
+    });
 }
 
 fn check_react_class_component_rules(

@@ -869,7 +869,7 @@ fn check_floating_then_in_jsx_handler(
 }
 
 fn is_then_chain_handled(semantic: &Semantic<'_>, then_call_node_id: NodeId) -> bool {
-    for anc_id in semantic.nodes().ancestor_ids(then_call_node_id).skip(1) {
+    for anc_id in semantic.nodes().ancestor_ids(then_call_node_id) {
         match semantic.nodes().kind(anc_id) {
             AstKind::CallExpression(outer_call) => {
                 if let Expression::StaticMemberExpression(outer_mem) =
@@ -1198,31 +1198,23 @@ fn build_keycode_autofix(
         }
     }
 
-    Some(AutofixPatch {
-        description: format!("Replace `.{}` with `.key`", mem.property.name),
-        edits: vec![ByteEdit {
-            file: None,
-            span: ByteSpan {
-                start: mem.property.span.start,
-                end: mem.property.span.end,
-            },
-            replacement: "key".to_string(),
-        }],
-    })
+    None
 }
 
-fn keycode_number_to_key_name(code: u32) -> Option<&'static str> {
+fn keycode_number_to_key_name(code: u32) -> Option<String> {
     match code {
-        8 => Some("Backspace"),
-        9 => Some("Tab"),
-        13 => Some("Enter"),
-        27 => Some("Escape"),
-        32 => Some(" "),
-        37 => Some("ArrowLeft"),
-        38 => Some("ArrowUp"),
-        39 => Some("ArrowRight"),
-        40 => Some("ArrowDown"),
-        46 => Some("Delete"),
+        8 => Some("Backspace".to_string()),
+        9 => Some("Tab".to_string()),
+        13 => Some("Enter".to_string()),
+        27 => Some("Escape".to_string()),
+        32 => Some(" ".to_string()),
+        37 => Some("ArrowLeft".to_string()),
+        38 => Some("ArrowUp".to_string()),
+        39 => Some("ArrowRight".to_string()),
+        40 => Some("ArrowDown".to_string()),
+        46 => Some("Delete".to_string()),
+        48..=57 => char::from_u32(code).map(|c| c.to_string()),
+        65..=90 => char::from_u32(code).map(|c| c.to_ascii_lowercase().to_string()),
         _ => None,
     }
 }
@@ -2275,7 +2267,7 @@ fn get_var_declarator_init<'a>(
 }
 
 fn is_inside_optional_chain_parent(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
-    for anc_id in semantic.nodes().ancestor_ids(node_id).skip(1) {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
         let kind = semantic.nodes().kind(anc_id);
         if matches!(kind, AstKind::ChainExpression(_)) {
             return true;

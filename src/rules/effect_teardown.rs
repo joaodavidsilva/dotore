@@ -30,7 +30,7 @@ use crate::{
             classify_jsx_element_name, find_enclosing_react_node, get_effect_cleanup_span,
             get_effect_fn_node, get_subject_name, is_component_name, is_custom_hook,
             is_custom_hook_name, is_direct_render_phase_node, is_functional_component,
-            is_inside_use_effect, is_react_hook_callee,
+            is_inside_use_effect, is_react_component_class, is_react_hook_callee,
         },
         types::loc_from_line_starts,
     },
@@ -618,19 +618,15 @@ fn is_react_class_component(
     semantic: &Semantic<'_>,
     cls: &oxc_ast::ast::Class<'_>,
 ) -> Option<ReactClassKind> {
-    let header =
-        Span::new(cls.span.start, cls.body.span.start).source_text(semantic.source_text());
-    let ext_idx = header.find("extends ")?;
-    let after_extends = header[ext_idx + "extends ".len()..].trim();
-    let base_name = after_extends
-        .split(['<', '{', ' ', '\n', '\r', '\t'])
-        .next()
-        .unwrap_or_default()
-        .trim();
-    match base_name {
-        "Component" | "React.Component" => Some(ReactClassKind::Component),
-        "PureComponent" | "React.PureComponent" => Some(ReactClassKind::PureComponent),
-        _ => None,
+    let source = semantic.source_text();
+    if !is_react_component_class(cls, source) {
+        return None;
+    }
+    let header = Span::new(cls.span.start, cls.body.span.start).source_text(source);
+    if header.contains("PureComponent") {
+        Some(ReactClassKind::PureComponent)
+    } else {
+        Some(ReactClassKind::Component)
     }
 }
 
@@ -2499,25 +2495,44 @@ fn check_global_call_rules(
     if is_react_hook_callee(semantic, callee, "forwardRef")
         && let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression())
     {
-        let param_count = match first_arg.without_parentheses() {
-            Expression::ArrowFunctionExpression(arr) => Some(arr.params.items.len()),
-            Expression::FunctionExpression(f) => Some(f.params.items.len()),
+        let params = match first_arg.without_parentheses() {
+            Expression::ArrowFunctionExpression(arr) => Some(&arr.params),
+            Expression::FunctionExpression(f) => Some(&f.params),
             _ => None,
         };
-        if let Some(count) = param_count
-            && count < 2
-        {
-            push_site(
-                sites,
-                RuleId::ForwardRefUsesRef,
-                subj_name.clone(),
-                "forwardRefUsesRef",
-                "forwardRef",
-                "`forwardRef` render function does not accept the second `ref` parameter.".to_string(),
-                call.span,
-                line_starts,
-                None,
-            );
+        if let Some(p) = params {
+            if p.items.len() < 2 {
+                push_site(
+                    sites,
+                    RuleId::ForwardRefUsesRef,
+                    subj_name.clone(),
+                    "forwardRefUsesRef",
+                    "forwardRef",
+                    "`forwardRef` render function does not accept the second `ref` parameter.".to_string(),
+                    call.span,
+                    line_starts,
+                    None,
+                );
+            } else if let Some(second_param) = p.items.get(1)
+                && let BindingPattern::BindingIdentifier(ref_ident) = &second_param.pattern
+                && let Some(sym_id) = ref_ident.symbol_id.get()
+                && semantic.scoping().get_resolved_references(sym_id).count() == 0
+            {
+                push_site(
+                    sites,
+                    RuleId::ForwardRefUsesRef,
+                    subj_name.clone(),
+                    "forwardRefUsesRef",
+                    "forwardRef",
+                    format!(
+                        "`forwardRef` render function accepts `{}` but never uses it.",
+                        ref_ident.name
+                    ),
+                    call.span,
+                    line_starts,
+                    None,
+                );
+            }
         }
     }
 

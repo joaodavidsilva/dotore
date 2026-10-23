@@ -30,7 +30,7 @@ use crate::{
         SubjectIr,
         react_ast::{
             classify_jsx_element_name, find_enclosing_react_node, get_subject_body_statements,
-            get_subject_name, is_component_name, is_react_hook_callee,
+            get_subject_name, is_component_name, is_react_component_class, is_react_hook_callee,
         },
         types::loc_from_line_starts,
     },
@@ -64,6 +64,10 @@ const MUTATING_METHODS: &[&str] = &[
     "clear",
 ];
 
+
+const MAX_COMPONENT_LINES: u32 = 180;
+const MAX_CYCLOMATIC_COMPLEXITY: usize = 12;
+const MAX_BOOLEAN_PROPS: usize = 4;
 /// Extracts single-pass `architecture` semantic rule sites, hoisting autofixes,
 /// and `Context.Provider` / `useContext` IR records.
 pub(crate) fn extract_architecture_sites(
@@ -662,6 +666,9 @@ fn check_module_and_expr_architecture_rules(
                     });
                 }
                 check_no_react19_deprecated_apis(call, &subj_name, line_starts, sites);
+            }
+            AstKind::ExportDefaultDeclaration(export_default) => {
+                check_export_default_inline_hoc(export_default, line_starts, sites);
             }
             AstKind::Class(cls) => {
                 check_no_legacy_class_lifecycles(semantic, cls, line_starts, sites);
@@ -1304,14 +1311,14 @@ fn check_subject_size_complexity_and_props(
     };
 
     // 1. `no-giant-component`
-    if line_count > 180 {
+    if line_count > MAX_COMPONENT_LINES {
         sites.push(SemanticRuleSite {
             rule: RuleId::NoGiantComponent,
             subject_name: Some(subj_name.to_string()),
             message_id: "noGiantComponent",
             target_name: subj_name.to_string(),
             message: format!(
-                "Component `{subj_name}` spans {line_count} lines (exceeding 180 lines); split it into smaller focused components or custom hooks."
+                "Component `{subj_name}` spans {line_count} lines (exceeding {MAX_COMPONENT_LINES} lines); split it into smaller focused components or custom hooks."
             ),
             loc: start_loc,
             span,
@@ -1341,14 +1348,14 @@ fn check_subject_size_complexity_and_props(
             _ => {}
         }
     }
-    if branch_points > 12 {
+    if branch_points > MAX_CYCLOMATIC_COMPLEXITY {
         sites.push(SemanticRuleSite {
             rule: RuleId::NoHighComplexityReactFunction,
             subject_name: Some(subj_name.to_string()),
             message_id: "noHighComplexityReactFunction",
             target_name: subj_name.to_string(),
             message: format!(
-                "`{subj_name}` has a cyclomatic complexity of {branch_points} (exceeding 12); extract complex branching logic into helper functions or child components."
+                "`{subj_name}` has a cyclomatic complexity of {branch_points} (exceeding {MAX_CYCLOMATIC_COMPLEXITY}); extract complex branching logic into helper functions or child components."
             ),
             loc: start_loc,
             span,
@@ -1357,14 +1364,14 @@ fn check_subject_size_complexity_and_props(
     }
 
     // 3. `no-many-boolean-props`
-    if count_boolean_props_on_subject(semantic, subject_node_id) >= 4 {
+    if count_boolean_props_on_subject(semantic, subject_node_id) >= MAX_BOOLEAN_PROPS {
         sites.push(SemanticRuleSite {
             rule: RuleId::NoManyBooleanProps,
             subject_name: Some(subj_name.to_string()),
             message_id: "noManyBooleanProps",
             target_name: subj_name.to_string(),
             message: format!(
-                "Component `{subj_name}` accepts 4 or more boolean flag props; consolidate mutually exclusive or related flags into an explicit `variant` union prop."
+                "Component `{subj_name}` accepts {MAX_BOOLEAN_PROPS} or more boolean flag props; consolidate mutually exclusive or related flags into an explicit `variant` union prop."
             ),
             loc: start_loc,
             span,
@@ -1407,7 +1414,7 @@ fn count_boolean_props_on_subject(semantic: &Semantic<'_>, subject_node_id: Node
         }
     }
     let param_src = first_param.span.source_text(semantic.source_text());
-    let ts_bool_hits = param_src.matches(": boolean").count() + param_src.matches("?: boolean").count();
+    let ts_bool_hits = param_src.matches(": boolean").count();
     bool_names.len().max(ts_bool_hits)
 }
 
@@ -1568,6 +1575,54 @@ fn check_inline_hoc_and_render_in_render(
     }
 }
 
+fn check_export_default_inline_hoc(
+    export_default: &oxc_ast::ast::ExportDefaultDeclaration<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(expr) = export_default.declaration.as_expression() else {
+        return;
+    };
+    let Expression::CallExpression(call) = expr.without_parentheses() else {
+        return;
+    };
+    let Expression::Identifier(callee_id) = call.callee.without_parentheses() else {
+        return;
+    };
+    let c_name = callee_id.name.as_str();
+    if !c_name.starts_with("with")
+        || !c_name.chars().nth(4).is_some_and(|c| c.is_ascii_uppercase())
+    {
+        return;
+    }
+    let is_component_arg = call
+        .arguments
+        .first()
+        .and_then(|a| a.as_expression())
+        .is_some_and(|arg| match arg.without_parentheses() {
+            Expression::Identifier(id) => is_component_name(&id.name),
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => true,
+            _ => false,
+        });
+    if is_component_arg {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoInlineHocOnComponent,
+            subject_name: None,
+            message_id: "noInlineHocOnComponent",
+            target_name: c_name.to_string(),
+            message: format!(
+                "Higher-order component `{c_name}(...)` is called inline in `export default`; assign the wrapped component to a named `const` before exporting."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
 fn find_call_node_id(semantic: &Semantic<'_>, fallback: NodeId, target_span: Span) -> NodeId {
     for (node_id, node) in semantic.nodes().iter_enumerated() {
         if matches!(node.kind(), AstKind::CallExpression(_)) && node.span() == target_span {
@@ -1647,11 +1702,7 @@ fn check_no_legacy_class_lifecycles(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let header =
-        Span::new(cls.span.start, cls.body.span.start).source_text(semantic.source_text());
-    if !header.contains("extends ")
-        || (!header.contains("Component") && !header.contains("PureComponent"))
-    {
+    if !is_react_component_class(cls, semantic.source_text()) {
         return;
     }
     let cls_name = cls

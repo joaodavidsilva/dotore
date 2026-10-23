@@ -185,6 +185,24 @@ pub(crate) fn is_custom_hook_name(name: &str) -> bool {
     name.starts_with("use") && name.as_bytes().get(3).is_some_and(u8::is_ascii_uppercase)
 }
 
+/// Checks if an ES6 `class` extends `Component` or `PureComponent` (`React.Component` / `React.PureComponent`).
+pub(crate) fn is_react_component_class(cls: &oxc_ast::ast::Class<'_>, source: &str) -> bool {
+    let header = Span::new(cls.span.start, cls.body.span.start).source_text(source);
+    let Some(ext_idx) = header.find("extends ") else {
+        return false;
+    };
+    let after_extends = header[ext_idx + "extends ".len()..].trim();
+    let base_name = after_extends
+        .split(['<', '{', ' ', '\n', '\r', '\t'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    matches!(
+        base_name,
+        "Component" | "React.Component" | "PureComponent" | "React.PureComponent"
+    )
+}
+
 /// Checks if `node_id` declares a functional React component.
 pub(crate) fn is_functional_component(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
     match semantic.nodes().kind(node_id) {
