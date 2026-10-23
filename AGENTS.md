@@ -4,7 +4,7 @@ Before creating or moving files, read docs/architecture/layout.md.
 
 ### Issue tracker
 
-Local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+GitHub Issues (`joaodavidsilva/dotore`) via `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
