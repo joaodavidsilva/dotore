@@ -74,6 +74,7 @@ pub(crate) fn extract_react_builtins_sites(
     check_rules_of_hooks_in_file(semantic, line_starts, sites);
     check_jsx_builtin_rules_in_file(semantic, line_starts, sites);
     check_only_export_components_in_file(semantic, path, line_starts, sites);
+    check_class_and_component_builtin_rules_in_file(semantic, line_starts, sites);
 }
 
 fn check_exhaustive_deps_in_file(
@@ -663,6 +664,12 @@ fn check_jsx_builtin_rules_in_file(
 ) {
     for (node_id, node) in semantic.nodes().iter_enumerated() {
         let AstKind::JSXElement(jsx_el) = node.kind() else {
+        if let AstKind::JSXFragment(jsx_frag) = node.kind() {
+            let subj_name = find_enclosing_react_node(semantic, node_id)
+                .and_then(|subj_id| get_subject_name(semantic, subj_id));
+            check_jsx_no_useless_fragment_short(jsx_frag, &subj_name, semantic, line_starts, sites);
+            continue;
+        }
             continue;
         };
         let opening = &jsx_el.opening_element;
@@ -693,6 +700,24 @@ fn check_jsx_builtin_rules_in_file(
         // 5. Attribute-level built-in checks (`jsx-no-script-url`, `style-prop-object`, `no-unknown-property`, `no-string-refs`, `jsx-boolean-value`, `jsx-curly-brace-presence`)
         check_jsx_attributes_builtin(
             semantic,
+            opening,
+            &tag_name,
+            is_comp,
+            &subj_name,
+            line_starts,
+            sites,
+        );
+        check_jsx_fragments_and_useless_fragment_element(
+            jsx_el,
+            &tag_name,
+            &subj_name,
+            semantic,
+            line_starts,
+            sites,
+        );
+        check_jsx_pascal_case_and_max_depth(
+            semantic,
+            node_id,
             opening,
             &tag_name,
             is_comp,
@@ -1150,6 +1175,24 @@ fn check_jsx_attributes_builtin(
 ) {
     for item in &opening.attributes {
         let JSXAttributeItem::Attribute(attr) = item else {
+        if let JSXAttributeItem::SpreadAttribute(spread) = item {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::JsxPropsNoSpreading,
+                subject_name: subj_name.clone(),
+                message_id: "jsxPropsNoSpreading",
+                target_name: tag_name.to_string(),
+                message: format!(
+                    "Avoid spreading arbitrary props (`{{...}}`) onto `<{tag_name}>`; pass explicit props instead."
+                ),
+                loc: loc_from_line_starts(line_starts, spread.span.start),
+                span: ByteSpan {
+                    start: spread.span.start,
+                    end: spread.span.end,
+                },
+                autofix: None,
+            });
+            continue;
+        }
             continue;
         };
         let Some(ident) = attr.name.as_identifier() else {
@@ -1611,4 +1654,752 @@ fn push_inline_prop_diag(
         caller_sites: Vec::new(),
         autofix: None,
     });
+}
+
+fn check_jsx_no_useless_fragment_short(
+    jsx_frag: &oxc_ast::ast::JSXFragment<'_>,
+    subj_name: &Option<String>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let meaningful = collect_meaningful_jsx_children(&jsx_frag.children);
+    if meaningful.len() > 1 {
+        return;
+    }
+    let autofix = if meaningful.len() == 1
+        && let oxc_ast::ast::JSXChild::Element(child_el) = meaningful[0]
+    {
+        let child_text = child_el.span.source_text(semantic.source_text());
+        Some(AutofixPatch {
+            description: "Remove redundant `<>...</>` fragment wrapper".to_string(),
+            edits: vec![ByteEdit {
+                file: None,
+                span: ByteSpan {
+                    start: jsx_frag.span.start,
+                    end: jsx_frag.span.end,
+                },
+                replacement: child_text.to_string(),
+            }],
+        })
+    } else {
+        None
+    };
+    sites.push(SemanticRuleSite {
+        rule: RuleId::JsxNoUselessFragment,
+        subject_name: subj_name.clone(),
+        message_id: "jsxNoUselessFragment",
+        target_name: "Fragment".to_string(),
+        message: "Fragments with a single child or empty content are redundant.".to_string(),
+        loc: loc_from_line_starts(line_starts, jsx_frag.span.start),
+        span: ByteSpan {
+            start: jsx_frag.span.start,
+            end: jsx_frag.span.end,
+        },
+        autofix,
+    });
+}
+
+fn check_jsx_fragments_and_useless_fragment_element(
+    jsx_el: &JSXElement<'_>,
+    tag_name: &str,
+    subj_name: &Option<String>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !matches!(tag_name, "Fragment" | "React.Fragment") {
+        return;
+    }
+    let opening = &jsx_el.opening_element;
+    if !opening.attributes.is_empty() {
+        return;
+    }
+
+    // 1. `jsx-fragments`: `<React.Fragment>` or `<Fragment>` with no attributes -> `<>...</>`
+    let frag_autofix = jsx_el.closing_element.as_ref().map(|closing| AutofixPatch {
+        description: format!("Replace `<{tag_name}>` with shorthand `<>...</>`"),
+        edits: vec![
+            ByteEdit {
+                file: None,
+                span: ByteSpan {
+                    start: opening.span.start,
+                    end: opening.span.end,
+                },
+                replacement: "<>".to_string(),
+            },
+            ByteEdit {
+                file: None,
+                span: ByteSpan {
+                    start: closing.span.start,
+                    end: closing.span.end,
+                },
+                replacement: "</>".to_string(),
+            },
+        ],
+    });
+    sites.push(SemanticRuleSite {
+        rule: RuleId::JsxFragments,
+        subject_name: subj_name.clone(),
+        message_id: "jsxFragments",
+        target_name: tag_name.to_string(),
+        message: format!("Prefer shorthand `<>...</>` over `<{tag_name}>` when no `key` is needed."),
+        loc: loc_from_line_starts(line_starts, jsx_el.span.start),
+        span: ByteSpan {
+            start: jsx_el.span.start,
+            end: jsx_el.span.end,
+        },
+        autofix: frag_autofix,
+    });
+
+    // 2. `jsx-no-useless-fragment` on `<Fragment>` / `<React.Fragment>` with <= 1 meaningful child
+    let meaningful = collect_meaningful_jsx_children(&jsx_el.children);
+    if meaningful.len() <= 1 {
+        let autofix = if meaningful.len() == 1
+            && let oxc_ast::ast::JSXChild::Element(child_el) = meaningful[0]
+        {
+            let child_text = child_el.span.source_text(semantic.source_text());
+            Some(AutofixPatch {
+                description: format!("Remove redundant `<{tag_name}>` wrapper"),
+                edits: vec![ByteEdit {
+                    file: None,
+                    span: ByteSpan {
+                        start: jsx_el.span.start,
+                        end: jsx_el.span.end,
+                    },
+                    replacement: child_text.to_string(),
+                }],
+            })
+        } else {
+            None
+        };
+        sites.push(SemanticRuleSite {
+            rule: RuleId::JsxNoUselessFragment,
+            subject_name: subj_name.clone(),
+            message_id: "jsxNoUselessFragment",
+            target_name: tag_name.to_string(),
+            message: "Fragments with a single child or empty content are redundant.".to_string(),
+            loc: loc_from_line_starts(line_starts, jsx_el.span.start),
+            span: ByteSpan {
+                start: jsx_el.span.start,
+                end: jsx_el.span.end,
+            },
+            autofix,
+        });
+    }
+}
+
+fn collect_meaningful_jsx_children<'a, 'b>(
+    children: &'a [oxc_ast::ast::JSXChild<'b>],
+) -> Vec<&'a oxc_ast::ast::JSXChild<'b>> {
+    children
+        .iter()
+        .filter(|c| match c {
+            oxc_ast::ast::JSXChild::Text(t) => !t.value.trim().is_empty(),
+            oxc_ast::ast::JSXChild::ExpressionContainer(ec) => {
+                !matches!(ec.expression, oxc_ast::ast::JSXExpression::EmptyExpression(_))
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Evaluates both jsx-pascal-case and jsx-max-depth on a JSXElement node"
+)]
+fn check_jsx_pascal_case_and_max_depth(
+    semantic: &Semantic<'_>,
+    jsx_node_id: NodeId,
+    opening: &JSXOpeningElement<'_>,
+    tag_name: &str,
+    is_comp: bool,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    // 1. `jsx-pascal-case`: component name is ALL_CAPS_WITH_UNDERSCORE or starts with `_` or contains `_`
+    let check_seg = tag_name.rsplit('.').next().unwrap_or(tag_name);
+    let is_bad_pascal = if is_comp {
+        check_seg.contains('_')
+            || (check_seg.len() > 1
+                && check_seg
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+    } else {
+        check_seg.starts_with('_')
+            && check_seg
+                .chars()
+                .nth(1)
+                .is_some_and(|c| c.is_ascii_uppercase())
+    };
+    if is_bad_pascal {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::JsxPascalCase,
+            subject_name: subj_name.clone(),
+            message_id: "jsxPascalCase",
+            target_name: tag_name.to_string(),
+            message: format!("Component `<{tag_name}>` must use PascalCase naming."),
+            loc: loc_from_line_starts(line_starts, opening.name.span().start),
+            span: ByteSpan {
+                start: opening.name.span().start,
+                end: opening.name.span().end,
+            },
+            autofix: None,
+        });
+    }
+
+    // 2. `jsx-max-depth`: flag leaf JSX element at depth > 4
+    let has_jsx_el_children =
+        if let AstKind::JSXElement(el) = semantic.nodes().kind(jsx_node_id) {
+            el.children
+                .iter()
+                .any(|c| matches!(c, oxc_ast::ast::JSXChild::Element(_)))
+        } else {
+            false
+        };
+    if !has_jsx_el_children {
+        let mut depth = 0_usize;
+        for anc_id in semantic.nodes().ancestor_ids(jsx_node_id) {
+            match semantic.nodes().kind(anc_id) {
+                AstKind::JSXElement(_) | AstKind::JSXFragment(_) => {
+                    depth += 1;
+                }
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => break,
+                _ => {}
+            }
+        }
+        if depth > 4 {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::JsxMaxDepth,
+                subject_name: subj_name.clone(),
+                message_id: "jsxMaxDepth",
+                target_name: tag_name.to_string(),
+                message: format!(
+                    "JSX nesting depth of {depth} exceeds the maximum depth of 4; extract a child component."
+                ),
+                loc: loc_from_line_starts(line_starts, opening.span.start),
+                span: ByteSpan {
+                    start: opening.span.start,
+                    end: opening.span.end,
+                },
+                autofix: None,
+            });
+        }
+    }
+}
+
+fn check_class_and_component_builtin_rules_in_file(
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        let subj_name = find_enclosing_react_node(semantic, node_id)
+            .and_then(|subj_id| get_subject_name(semantic, subj_id));
+
+        match node.kind() {
+            AstKind::VariableDeclarator(decl) => {
+                check_hook_use_state_symmetry(semantic, decl, &subj_name, line_starts, sites);
+                check_nested_component_declarator(semantic, node_id, decl, &subj_name, line_starts, sites);
+            }
+            AstKind::Function(func) => {
+                check_nested_component_function(semantic, node_id, func, &subj_name, line_starts, sites);
+            }
+            AstKind::JSXAttribute(attr) => {
+                check_unstable_nested_component_prop(semantic, attr, &subj_name, line_starts, sites);
+            }
+            AstKind::CallExpression(call) => {
+                check_display_name_and_create_class(semantic, node_id, call, &subj_name, line_starts, sites);
+            }
+            AstKind::Class(cls) => {
+                check_react_class_component_rules(semantic, cls, line_starts, sites);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn check_hook_use_state_symmetry(
+    semantic: &Semantic<'_>,
+    decl: &oxc_ast::ast::VariableDeclarator<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(Expression::CallExpression(call)) =
+        decl.init.as_ref().map(Expression::without_parentheses)
+    else {
+        return;
+    };
+    if !is_react_hook_callee(semantic, &call.callee, "useState") {
+        return;
+    }
+    let BindingPattern::ArrayPattern(arr) = &decl.id else {
+        return;
+    };
+    let Some(Some(first_pat)) = arr.elements.first() else {
+        return;
+    };
+    let Some(Some(second_pat)) = arr.elements.get(1) else {
+        return;
+    };
+    let Some(state_id) = first_pat.get_binding_identifier() else {
+        return;
+    };
+    let Some(setter_id) = second_pat.get_binding_identifier() else {
+        return;
+    };
+    let state_clean = state_id.name.trim_matches('_');
+    let setter_clean = setter_id.name.trim_matches('_');
+    if state_clean.is_empty() || setter_clean.is_empty() {
+        return;
+    }
+    let expected_setter = {
+        let mut s = String::from("set");
+        let mut chars = state_clean.chars();
+        if let Some(first) = chars.next() {
+            s.push(first.to_ascii_uppercase());
+            s.push_str(chars.as_str());
+        }
+        s
+    };
+    if !setter_clean.eq_ignore_ascii_case(&expected_setter) {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::HookUseState,
+            subject_name: subj_name.clone(),
+            message_id: "hookUseState",
+            target_name: setter_id.name.to_string(),
+            message: format!(
+                "`useState` destructuring `[{}, {}]` is asymmetric; name the setter `{expected_setter}`.",
+                state_id.name, setter_id.name
+            ),
+            loc: loc_from_line_starts(line_starts, arr.span.start),
+            span: ByteSpan {
+                start: arr.span.start,
+                end: arr.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_nested_component_declarator(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    decl: &oxc_ast::ast::VariableDeclarator<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let parent_id = semantic.nodes().parent_id(node_id);
+    let Some(enclosing_id) = find_enclosing_react_node(semantic, parent_id) else {
+        return;
+    };
+    let enclosing_subj_name = get_subject_name(semantic, enclosing_id).or_else(|| subj_name.clone());
+    let Some(id) = decl.id.get_binding_identifier() else {
+        return;
+    };
+    if !is_component_name(id.name.as_str()) {
+        return;
+    }
+    let Some(init) = &decl.init else {
+        return;
+    };
+    if matches!(
+        init.without_parentheses(),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    ) && span_contains_jsx(semantic, init.span())
+    {
+        let _ = node_id;
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoUnstableNestedComponents,
+            subject_name: enclosing_subj_name,
+            message_id: "noUnstableNestedComponents",
+            target_name: id.name.to_string(),
+            message: format!(
+                "Do not declare component `{}` inside another component; React will recreate its type and reset its state on every render.",
+                id.name
+            ),
+            loc: loc_from_line_starts(line_starts, decl.span.start),
+            span: ByteSpan {
+                start: decl.span.start,
+                end: decl.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_nested_component_function(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    func: &oxc_ast::ast::Function<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let parent_id = semantic.nodes().parent_id(node_id);
+    let Some(enclosing_id) = find_enclosing_react_node(semantic, parent_id) else {
+        return;
+    };
+    let enclosing_subj_name = get_subject_name(semantic, enclosing_id).or_else(|| subj_name.clone());
+    let Some(id) = &func.id else {
+        return;
+    };
+    if !is_component_name(id.name.as_str()) || !span_contains_jsx(semantic, func.span) {
+        return;
+    }
+    sites.push(SemanticRuleSite {
+        rule: RuleId::NoUnstableNestedComponents,
+        subject_name: enclosing_subj_name,
+        message_id: "noUnstableNestedComponents",
+        target_name: id.name.to_string(),
+        message: format!(
+            "Do not declare component `{}` inside another component; React will recreate its type and reset its state on every render.",
+            id.name
+        ),
+        loc: loc_from_line_starts(line_starts, func.span.start),
+        span: ByteSpan {
+            start: func.span.start,
+            end: func.span.end,
+        },
+        autofix: None,
+    });
+}
+
+fn check_unstable_nested_component_prop(
+    semantic: &Semantic<'_>,
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(ident) = attr.name.as_identifier() else {
+        return;
+    };
+    if ident.name.starts_with("on") || ident.name.starts_with("render") {
+        return;
+    }
+    let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value else {
+        return;
+    };
+    let Some(expr) = c.expression.as_expression() else {
+        return;
+    };
+    if matches!(
+        expr.without_parentheses(),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    ) && span_contains_jsx(semantic, expr.span())
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoUnstableNestedComponents,
+            subject_name: subj_name.clone(),
+            message_id: "noUnstableNestedComponents",
+            target_name: ident.name.to_string(),
+            message: format!(
+                "Inline function prop `{}` returns JSX and creates an unstable component on every render.",
+                ident.name
+            ),
+            loc: loc_from_line_starts(line_starts, expr.span().start),
+            span: ByteSpan {
+                start: expr.span().start,
+                end: expr.span().end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn span_contains_jsx(semantic: &Semantic<'_>, span: Span) -> bool {
+    semantic.nodes().iter_enumerated().any(|(_, n)| {
+        span.contains_inclusive(n.span())
+            && matches!(n.kind(), AstKind::JSXElement(_) | AstKind::JSXFragment(_))
+    })
+}
+
+fn check_display_name_and_create_class(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let callee_name = match call.callee.without_parentheses() {
+        Expression::Identifier(id) => Some(id.name.as_str()),
+        Expression::StaticMemberExpression(mem) => {
+            if matches!(mem.object.without_parentheses(), Expression::Identifier(obj) if obj.name == "React")
+            {
+                Some(mem.property.name.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let Some(c_name) = callee_name else {
+        return;
+    };
+
+    // 1. `prefer-es6-class`: `createReactClass({...})` or `React.createClass({...})`
+    if matches!(c_name, "createReactClass" | "createClass") {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::PreferEs6Class,
+            subject_name: subj_name.clone(),
+            message_id: "preferEs6Class",
+            target_name: c_name.to_string(),
+            message: format!(
+                "`{c_name}({{...}})` is a legacy React class factory; use a function component or an ES6 `class` extending `React.Component`."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+        return;
+    }
+
+    // 2. `display-name`: `forwardRef((props, ref) => ...)` or `memo((props) => ...)` without a named function or variable binding + displayName
+    if !matches!(c_name, "forwardRef" | "memo") {
+        return;
+    }
+    let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
+        return;
+    };
+    let is_anonymous_fn = match first_arg.without_parentheses() {
+        Expression::ArrowFunctionExpression(_) => true,
+        Expression::FunctionExpression(f) => f.id.is_none(),
+        _ => false,
+    };
+    if !is_anonymous_fn {
+        return;
+    }
+    let parent_kind = semantic.nodes().parent_kind(node_id);
+    let assigned_var_name = if let AstKind::VariableDeclarator(decl) = parent_kind {
+        decl.id.get_binding_identifier().map(|id| id.name.as_str())
+    } else {
+        None
+    };
+    if let Some(v_name) = assigned_var_name
+        && semantic
+            .source_text()
+            .contains(&format!("{v_name}.displayName"))
+    {
+        return;
+    }
+    if assigned_var_name.is_none() {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::DisplayName,
+            subject_name: subj_name.clone(),
+            message_id: "displayName",
+            target_name: c_name.to_string(),
+            message: format!(
+                "Component wrapped in `{c_name}(...)` is anonymous and has no `displayName`; pass a named function `function MyComponent(...)`."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn is_react_component_class(cls: &oxc_ast::ast::Class<'_>, source: &str) -> bool {
+    let header = Span::new(cls.span.start, cls.body.span.start).source_text(source);
+    header.contains("extends ")
+        && (header.contains("Component") || header.contains("PureComponent"))
+}
+
+fn check_react_class_component_rules(
+    semantic: &Semantic<'_>,
+    cls: &oxc_ast::ast::Class<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !is_react_component_class(cls, semantic.source_text()) {
+        return;
+    }
+    let cls_name = cls
+        .id
+        .as_ref()
+        .map_or_else(|| "Component".to_string(), |id| id.name.to_string());
+
+    let mut has_state_or_lifecycle = false;
+
+    for elem in &cls.body.body {
+        match elem {
+            oxc_ast::ast::ClassElement::PropertyDefinition(prop) if !prop.r#static => {
+                if prop.key.static_name().as_ref().and_then(|n| n.as_str()) == Some("state") {
+                    has_state_or_lifecycle = true;
+                    sites.push(SemanticRuleSite {
+                        rule: RuleId::StateInConstructor,
+                        subject_name: Some(cls_name.clone()),
+                        message_id: "stateInConstructor",
+                        target_name: "state".to_string(),
+                        message: format!(
+                            "Initialize `this.state` inside the constructor of `{cls_name}` instead of a class property."
+                        ),
+                        loc: loc_from_line_starts(line_starts, prop.span.start),
+                        span: ByteSpan {
+                            start: prop.span.start,
+                            end: prop.span.end,
+                        },
+                        autofix: None,
+                    });
+                }
+            }
+            oxc_ast::ast::ClassElement::MethodDefinition(method) if !method.r#static => {
+                let Some(m_name) = method
+                    .key
+                    .static_name()
+                    .and_then(|n| n.as_str().map(str::to_string))
+                else {
+                    continue;
+                };
+                if m_name != "render" {
+                    has_state_or_lifecycle = true;
+                }
+                if matches!(
+                    m_name.as_str(),
+                    "UNSAFE_componentWillMount"
+                        | "UNSAFE_componentWillReceiveProps"
+                        | "UNSAFE_componentWillUpdate"
+                ) {
+                    sites.push(SemanticRuleSite {
+                        rule: RuleId::NoUnsafe,
+                        subject_name: Some(cls_name.clone()),
+                        message_id: "noUnsafe",
+                        target_name: m_name.clone(),
+                        message: format!(
+                            "Legacy lifecycle method `{m_name}` in `{cls_name}` is unsafe for concurrent rendering."
+                        ),
+                        loc: loc_from_line_starts(line_starts, method.key.span().start),
+                        span: ByteSpan {
+                            start: method.key.span().start,
+                            end: method.key.span().end,
+                        },
+                        autofix: None,
+                    });
+                }
+
+                if let Some(body) = &method.value.body {
+                    check_lifecycle_set_state_calls(
+                        semantic,
+                        &cls_name,
+                        &m_name,
+                        body.span,
+                        line_starts,
+                        sites,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !has_state_or_lifecycle {
+        let cls_src = cls.body.span.source_text(semantic.source_text());
+        if !cls_src.contains("this.state")
+            && !cls_src.contains("this.setState")
+            && !cls_src.contains("this.refs")
+        {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::PreferFunctionComponent,
+                subject_name: Some(cls_name.clone()),
+                message_id: "preferFunctionComponent",
+                target_name: cls_name.clone(),
+                message: format!(
+                    "Stateless class component `{cls_name}` has no state or lifecycle methods; convert it to a function component."
+                ),
+                loc: loc_from_line_starts(line_starts, cls.span.start),
+                span: ByteSpan {
+                    start: cls.span.start,
+                    end: cls.span.end,
+                },
+                autofix: None,
+            });
+        }
+    }
+}
+
+fn check_lifecycle_set_state_calls(
+    semantic: &Semantic<'_>,
+    cls_name: &str,
+    method_name: &str,
+    body_span: Span,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let target_rule = match method_name {
+        "componentDidMount" => Some((
+            RuleId::NoDidMountSetState,
+            "noDidMountSetState",
+            false,
+        )),
+        "componentDidUpdate" => Some((
+            RuleId::NoDidUpdateSetState,
+            "noDidUpdateSetState",
+            true,
+        )),
+        "componentWillUpdate" | "UNSAFE_componentWillUpdate" => Some((
+            RuleId::NoWillUpdateSetState,
+            "noWillUpdateSetState",
+            false,
+        )),
+        _ => None,
+    };
+    let Some((rule, message_id, allow_if_guarded)) = target_rule else {
+        return;
+    };
+
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        if !body_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+            continue;
+        };
+        if mem.property.name != "setState"
+            || !matches!(
+                mem.object.without_parentheses(),
+                Expression::ThisExpression(_)
+            )
+        {
+            continue;
+        }
+        if allow_if_guarded
+            && semantic
+                .nodes()
+                .ancestor_ids(node_id)
+                .take_while(|&anc_id| {
+                    body_span.contains_inclusive(semantic.nodes().get_node(anc_id).span())
+                })
+                .any(|anc_id| matches!(semantic.nodes().kind(anc_id), AstKind::IfStatement(_)))
+        {
+            continue;
+        }
+        sites.push(SemanticRuleSite {
+            rule,
+            subject_name: Some(cls_name.to_string()),
+            message_id,
+            target_name: method_name.to_string(),
+            message: format!(
+                "Do not call `this.setState` inside `{method_name}` in `{cls_name}`."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
 }
