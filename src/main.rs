@@ -45,6 +45,8 @@ enum Commands {
     Fix(FixArgs),
     /// Generate deterministic `NNN-<slug>.md` execution plans and a prioritized `README.md` index.
     Plan(PlanArgs),
+    /// Compute and print the local `0..=100` Health Score across files or directories.
+    Score(CheckArgs),
     /// Generate a self-contained visual HTML report with Render Cascade diagrams.
     Report(ReportArgs),
     /// Fuzzy-search declared Symbol Outlines across files or directories.
@@ -500,6 +502,10 @@ fn main() -> ExitCode {
         Some(Commands::Check(args)) => run_check(&args),
         Some(Commands::Fix(args)) => run_fix(&args),
         Some(Commands::Plan(args)) => run_plan(&args),
+        Some(Commands::Score(mut args)) => {
+            args.score = true;
+            run_check(&args)
+        }
         Some(Commands::Report(args)) => run_report(&args),
         Some(Commands::Search(args)) => run_search(&args),
         Some(Commands::Scan(args)) => run_scan(&args),

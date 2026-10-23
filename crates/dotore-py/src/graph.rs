@@ -17,7 +17,7 @@ use crate::{PyFileIr, callee_qualified_name, text_range_to_byte_span};
 
 /// Single-file module import/export and reference summary extracted during `extract_file`.
 #[derive(Debug, Clone, Default)]
-pub struct PyModuleGraphInfo {
+pub(crate) struct PyModuleGraphInfo {
     /// Exported top-level `async def` function names defined in this module.
     pub exported_async_functions: HashSet<String>,
     /// Runtime imports outside `if TYPE_CHECKING:` blocks (`py-arch-no-circular-imports`).
@@ -36,7 +36,7 @@ pub struct PyModuleGraphInfo {
 
 /// An `import ...` or `from ... import ...` statement in a Python module.
 #[derive(Debug, Clone)]
-pub struct PyImportEdge {
+pub(crate) struct PyImportEdge {
     /// Relative import dot level (`0` for absolute, `1` for `.`, `2` for `..`, etc.).
     pub level: u32,
     /// Optional dotted module path (`from <module> import ...` or `import <module>`).
@@ -51,7 +51,7 @@ pub struct PyImportEdge {
 
 /// A top-level public symbol defined in a Python module.
 #[derive(Debug, Clone)]
-pub struct PyExportSymbol {
+pub(crate) struct PyExportSymbol {
     /// Symbol name.
     pub name: String,
     /// Byte span of the symbol declaration or identifier.
@@ -66,7 +66,7 @@ pub struct PyExportSymbol {
 
 /// An unawaited call expression that could refer to an imported `async def` function.
 #[derive(Debug, Clone)]
-pub struct PyUnawaitedCallCandidate {
+pub(crate) struct PyUnawaitedCallCandidate {
     /// Callee expression name (`fn_name` or `mod_alias.fn_name`).
     pub callee: String,
     /// Enclosing subject name.

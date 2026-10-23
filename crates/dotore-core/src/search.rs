@@ -90,7 +90,7 @@ pub struct SearchJsonReport {
     pub root: String,
     /// Number of returned results.
     pub count: usize,
-    /// Ranked symbol search hits.
+    /// Ranked Symbol Outline results.
     pub results: Vec<SearchJsonResult>,
 }
 

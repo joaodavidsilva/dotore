@@ -110,7 +110,7 @@ pub fn process_order(raw: Option<Order>) -> Order {
 }
 
 pub mod internal {
-    #[allow(clippy::unwrap_used)]
+    #[allow(unwrap_used)]
     pub fn allowed_unwrap(opt: Option<i32>) -> i32 {
         opt.unwrap()
     }
@@ -206,7 +206,7 @@ pub mod internal {
         unwrap_line
     ));
 
-    // Attribute suppression `#[allow(clippy::unwrap_used)]` on `allowed_unwrap`
+    // Attribute suppression `#[allow(unwrap_used)]` on `allowed_unwrap`
     let attr_unwrap_line = source
         .lines()
         .enumerate()

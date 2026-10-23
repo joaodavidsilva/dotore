@@ -93,7 +93,7 @@ pub struct RsFileIr {
     /// Candidate rule findings collected during the single-pass AST walk.
     pub findings: Vec<RsCandidateFinding>,
     /// Per-file crate graph metadata (`pub(crate)` items and referenced identifiers).
-    pub graph_ir: crate::graph::RsFileGraphIr,
+    pub(crate) graph_ir: crate::graph::RsFileGraphIr,
 }
 
 /// Parses a Rust source file once with `syn::parse_file` and extracts its [`ExtractedFile`] and [`RsFileIr`].
@@ -140,7 +140,7 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
             &line_starts,
             &mut visitor.findings,
         );
-        crate::graph::extract_file_graph_ir(path, ast, source, &line_starts)
+        crate::graph::extract_file_graph_ir(ast, source, &line_starts)
     } else {
         crate::graph::RsFileGraphIr::default()
     };
@@ -306,10 +306,7 @@ impl<'a> RsAstExtractor<'a> {
     }
 
     fn span_to_bytes(&self, span: proc_macro2::Span) -> ByteSpan {
-        let range = span.byte_range();
-        let start = u32::try_from(range.start).unwrap_or(0);
-        let end = u32::try_from(range.end).unwrap_or(start);
-        ByteSpan { start, end }
+        span_to_bytes(span)
     }
 
     fn loc_at(&self, byte_offset: u32) -> SourceLoc {
@@ -1194,7 +1191,14 @@ fn is_pub(vis: &Visibility) -> bool {
     matches!(vis, Visibility::Public(_))
 }
 
-fn attrs_indicate_test_context(attrs: &[Attribute]) -> bool {
+pub(crate) fn span_to_bytes(span: proc_macro2::Span) -> ByteSpan {
+    let range = span.byte_range();
+    let start = u32::try_from(range.start).unwrap_or(0);
+    let end = u32::try_from(range.end).unwrap_or(start);
+    ByteSpan { start, end }
+}
+
+pub(crate) fn attrs_indicate_test_context(attrs: &[Attribute]) -> bool {
     for attr in attrs {
         let path_str = attr
             .path()
@@ -1257,38 +1261,35 @@ fn map_rust_lint_to_rule_keys(lint: &str) -> Vec<String> {
     let stripped = lint
         .strip_prefix("dotore::")
         .or_else(|| lint.strip_prefix("dotore/"))
+        .or_else(|| {
+            lint.split_once("::")
+                .map(|(_, after)| after)
+                .filter(|after| !after.is_empty())
+        })
         .unwrap_or(lint);
     match stripped {
         "rs_no_unwrap_in_production"
         | "rs-no-unwrap-in-production"
-        | "clippy::unwrap_used"
-        | "clippy::expect_used"
         | "unwrap_used"
         | "expect_used" => vec!["rs-no-unwrap-in-production".to_string()],
         "rs_no_unguarded_slice_index"
         | "rs-no-unguarded-slice-index"
-        | "clippy::indexing_slicing"
         | "indexing_slicing" => vec!["rs-no-unguarded-slice-index".to_string()],
         "rs_no_lossy_numeric_as_cast"
         | "rs-no-lossy-numeric-as-cast"
-        | "clippy::cast_possible_truncation"
-        | "clippy::cast_sign_loss"
-        | "clippy::cast_possible_wrap"
-        | "clippy::as_conversions"
         | "cast_possible_truncation"
         | "cast_sign_loss"
-        | "cast_possible_wrap" => vec!["rs-no-lossy-numeric-as-cast".to_string()],
+        | "cast_possible_wrap"
+        | "as_conversions" => vec!["rs-no-lossy-numeric-as-cast".to_string()],
         "rs_require_safety_comment_on_unsafe"
         | "rs-require-safety-comment-on-unsafe"
-        | "clippy::undocumented_unsafe_blocks"
         | "undocumented_unsafe_blocks"
         | "unsafe_code" => vec!["rs-require-safety-comment-on-unsafe".to_string()],
-        "rs_no_mem_forget" | "rs-no-mem-forget" | "clippy::mem_forget" | "mem_forget" => {
+        "rs_no_mem_forget" | "rs-no-mem-forget" | "mem_forget" => {
             vec!["rs-no-mem-forget".to_string()]
         }
         "rs_tokio_no_std_lock_across_await"
         | "rs-tokio-no-std-lock-across-await"
-        | "clippy::await_holding_lock"
         | "await_holding_lock" => vec!["rs-tokio-no-std-lock-across-await".to_string()],
         "rs_tokio_no_blocking_in_async" | "rs-tokio-no-blocking-in-async" => {
             vec!["rs-tokio-no-blocking-in-async".to_string()]
@@ -1307,8 +1308,13 @@ fn map_rust_lint_to_rule_keys(lint: &str) -> Vec<String> {
         }
         "rs_perf_no_unnecessary_format"
         | "rs-perf-no-unnecessary-format"
-        | "clippy::useless_format"
         | "useless_format" => vec!["rs-perf-no-unnecessary-format".to_string()],
+        "rs_arch_no_many_boolean_params"
+        | "rs-arch-no-many-boolean-params"
+        | "fn_params_excessive_bools" => vec!["rs-arch-no-many-boolean-params".to_string()],
+        "rs_arch_no_unused_pub_crate_items"
+        | "rs-arch-no-unused-pub-crate-items"
+        | "redundant_pub_crate" => vec!["rs-arch-no-unused-pub-crate-items".to_string()],
         other => {
             if let Some(rule_id) =
                 RuleId::parse(other).or_else(|| RuleId::parse(&other.replace('_', "-")))
@@ -1393,15 +1399,16 @@ fn extract_numeric_type(ty: &Type) -> Option<NumericType> {
     NumericType::from_type_name(&name)
 }
 
-fn extract_pat_ident(pat: &Pat) -> Option<String> {
+pub(crate) fn extract_pat_ident(pat: &Pat) -> Option<String> {
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "syn::Pat has many variants; only ident, type, and reference patterns bind a single local name"
+        reason = "syn::Pat has many variants; ident, type, reference, and single-element tuple struct patterns bind local names"
     )]
     match pat {
         Pat::Ident(pat_ident) => Some(pat_ident.ident.to_string()),
         Pat::Type(pat_type) => extract_pat_ident(&pat_type.pat),
         Pat::Reference(pat_ref) => extract_pat_ident(&pat_ref.pat),
+        Pat::TupleStruct(ts) if ts.elems.len() == 1 => ts.elems.first().and_then(extract_pat_ident),
         _ => None,
     }
 }

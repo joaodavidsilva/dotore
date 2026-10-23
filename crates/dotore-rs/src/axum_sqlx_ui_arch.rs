@@ -5,17 +5,19 @@ use std::collections::{HashMap, HashSet};
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc, loc_from_line_starts};
 use syn::{
-    Attribute, BinOp, Expr, ExprAssign, ExprCall, ExprForLoop, ExprLoop, ExprMacro,
-    ExprMethodCall, ExprWhile, File, FnArg, GenericArgument, ImplItemFn, ItemFn, ItemImpl,
-    ItemMod, ItemStruct, Local, Macro, PathArguments, Signature, TraitItemFn, Type,
+    BinOp, Expr, ExprAssign, ExprCall, ExprForLoop, ExprLoop, ExprMacro, ExprMethodCall, ExprWhile,
+    File, FnArg, GenericArgument, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemStruct, Local, Macro,
+    PathArguments, Signature, TraitItemFn, Type,
     spanned::Spanned,
     visit::{self, Visit},
 };
 
-use crate::ir::RsCandidateFinding;
+use crate::ir::{
+    RsCandidateFinding, attrs_indicate_test_context, extract_pat_ident, span_to_bytes,
+};
 
 /// Extracts candidate findings for Axum, SQLx, Leptos/Dioxus UI, and architecture rules from `ast`.
-pub fn extract_axum_sqlx_ui_arch_findings(
+pub(crate) fn extract_axum_sqlx_ui_arch_findings(
     ast: &File,
     source: &str,
     line_starts: &[u32],
@@ -80,10 +82,7 @@ struct AxumSqlxUiArchVisitor<'a> {
 
 impl AxumSqlxUiArchVisitor<'_> {
     fn span_to_bytes(&self, span: proc_macro2::Span) -> ByteSpan {
-        let range = span.byte_range();
-        let start = u32::try_from(range.start).unwrap_or(0);
-        let end = u32::try_from(range.end).unwrap_or(start);
-        ByteSpan { start, end }
+        span_to_bytes(span)
     }
 
     fn loc_at(&self, byte_offset: u32) -> SourceLoc {
@@ -276,7 +275,7 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
     fn visit_item_mod(&mut self, i: &'ast ItemMod) {
         let prev_test = self.in_test_context;
         self.in_test_context =
-            prev_test || attrs_indicate_test(&i.attrs) || i.ident == "tests";
+            prev_test || attrs_indicate_test_context(&i.attrs) || i.ident == "tests";
         let prev_subj = self.current_subject_name.replace(i.ident.to_string());
         visit::visit_item_mod(self, i);
         self.current_subject_name = prev_subj;
@@ -285,7 +284,7 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
 
     fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
         let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test(&i.attrs);
+        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
         let self_ty = extract_simple_type_name(&i.self_ty).unwrap_or_else(|| "Impl".to_string());
         let prev_parent = self.current_parent_type.replace(self_ty.clone());
         let prev_subj = self.current_subject_name.replace(self_ty);
@@ -297,7 +296,7 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test(&i.attrs);
+        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
         let fn_name = i.sig.ident.to_string();
         let prev_subj = self.current_subject_name.replace(fn_name);
         let prev_loop = std::mem::replace(&mut self.loop_depth, 0);
@@ -317,7 +316,7 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
 
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
         let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test(&i.attrs);
+        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
         let method_name = i.sig.ident.to_string();
         let qualified = if let Some(parent) = &self.current_parent_type {
             format!("{parent}::{method_name}")
@@ -348,7 +347,7 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
-        if let Some(ident) = extract_pat_ident_name(&node.pat)
+        if let Some(ident) = extract_pat_ident(&node.pat)
             && let Some(init) = &node.init
         {
             if self.expr_is_formatted_sql(&init.expr) {
@@ -580,18 +579,6 @@ fn is_string_lit_or_to_string(expr: &Expr) -> bool {
     }
 }
 
-fn extract_pat_ident_name(pat: &syn::Pat) -> Option<String> {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Pat has many variants; local binding extraction matches Ident and Type patterns"
-    )]
-    match pat {
-        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
-        syn::Pat::Type(pt) => extract_pat_ident_name(&pt.pat),
-        _ => None,
-    }
-}
-
 fn extract_simple_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(tp) = ty {
         tp.path.segments.last().map(|s| s.ident.to_string())
@@ -656,7 +643,7 @@ fn extract_state_binding_ident(pat: &syn::Pat) -> Option<String> {
         reason = "Matches `State(ident)` tuple-struct destructuring or direct `ident: State<...>`"
     )]
     match pat {
-        syn::Pat::TupleStruct(ts) => ts.elems.first().and_then(extract_pat_ident_name),
+        syn::Pat::TupleStruct(ts) => ts.elems.first().and_then(extract_pat_ident),
         syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
         _ => None,
     }
@@ -833,32 +820,3 @@ fn is_bool_type(ty: &Type) -> bool {
     }
 }
 
-fn attrs_indicate_test(attrs: &[Attribute]) -> bool {
-    for attr in attrs {
-        let path_str = attr
-            .path()
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if matches!(
-            path_str.as_str(),
-            "test" | "tokio::test" | "sqlx::test" | "actix_rt::test" | "rstest" | "bench"
-        ) || path_str.ends_with("::test")
-        {
-            return true;
-        }
-        if path_str == "cfg"
-            && let Ok(tokens) = attr.meta.require_list()
-            && tokens
-                .tokens
-                .to_string()
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|tok| tok == "test")
-        {
-            return true;
-        }
-    }
-    false
-}

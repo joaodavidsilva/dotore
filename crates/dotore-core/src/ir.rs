@@ -287,7 +287,7 @@ pub struct BlockDisableRange {
     pub rules: Vec<String>,
 }
 
-/// Parsed inline suppression directives (`dotore-disable*`, `eslint-disable*`, `oxlint-disable*`, `noqa`) for a file.
+/// Parsed inline suppression directives (`dotore-disable*`, `# noqa`, `#[allow]` / `#[expect]`) for a file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct FileSuppressions {
     /// Line-targeted disable directives (`*-disable-next-line` and `*-disable-line`).
@@ -585,7 +585,7 @@ pub struct ExtractedFile {
     pub symbol_outlines: Vec<SymbolOutline>,
     /// Single-pass AST owner spans for `--scope contextual` diff filtering.
     pub contextual_owner_spans: ContextualOwnerSpansIr,
-    /// Inline suppression directives (`dotore-disable*`, `eslint-disable*`, `oxlint-disable*`, `noqa`).
+    /// Inline suppression directives (`dotore-disable*`, `# noqa`, `#[allow]` / `#[expect]`).
     pub suppressions: FileSuppressions,
     /// Total **Subjects** (components, hooks, functions, handlers, or items) extracted in this file.
     pub subjects_count: usize,

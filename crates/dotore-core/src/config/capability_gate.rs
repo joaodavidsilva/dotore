@@ -312,15 +312,6 @@ pub enum Capability {
     Asyncio,
     /// Pytest testing framework (`pytest`).
     Pytest,
-    /// Flask web framework (`flask`).
-    Flask,
-    /// Pandas data analysis library (`pandas`).
-    Pandas,
-    /// Celery distributed task queue (`celery`).
-    Celery,
-    /// PyTorch machine learning framework (`torch`, `pytorch`).
-    #[serde(rename = "pytorch", alias = "py-torch")]
-    PyTorch,
     /// Rust language and Cargo crate (`Cargo.toml`, `.rs`).
     Rust,
     /// Tokio async runtime (`tokio`).
@@ -337,12 +328,6 @@ pub enum Capability {
     Leptos,
     /// Dioxus reactive Rust UI framework (`dioxus`).
     Dioxus,
-    /// Actix Web framework (`actix-web`).
-    ActixWeb,
-    /// Clap command-line parser (`clap`).
-    Clap,
-    /// Tauri desktop/mobile application framework (`tauri`).
-    Tauri,
 }
 
 impl Capability {
@@ -395,10 +380,6 @@ impl Capability {
             Self::Django => "django",
             Self::Asyncio => "asyncio",
             Self::Pytest => "pytest",
-            Self::Flask => "flask",
-            Self::Pandas => "pandas",
-            Self::Celery => "celery",
-            Self::PyTorch => "pytorch",
             Self::Rust => "rust",
             Self::Tokio => "tokio",
             Self::Axum => "axum",
@@ -407,9 +388,6 @@ impl Capability {
             Self::Tracing => "tracing",
             Self::Leptos => "leptos",
             Self::Dioxus => "dioxus",
-            Self::ActixWeb => "actix-web",
-            Self::Clap => "clap",
-            Self::Tauri => "tauri",
         }
     }
 }
@@ -713,9 +691,6 @@ impl CapabilityGate {
                         | Capability::Tracing
                         | Capability::Leptos
                         | Capability::Dioxus
-                        | Capability::ActixWeb
-                        | Capability::Clap
-                        | Capability::Tauri
                 )
             });
         let requires_ok = pred.requires.iter().all(|req| {

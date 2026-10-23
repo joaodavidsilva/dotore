@@ -7,7 +7,6 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Command,
-    sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1460,29 +1459,12 @@ pub fn parse_why_location(input: &str) -> Result<WhyLocation, String> {
     })
 }
 
-type ExplainLocationHandlerFn = fn(&str, &Path) -> Result<WhyReport, String>;
-
-static DEFAULT_EXPLAIN_LOCATION_HANDLER: RwLock<Option<ExplainLocationHandlerFn>> =
-    RwLock::new(None);
-
-/// Registers the default process-wide handler used by [`explain_location`].
-pub fn register_default_explain_location_handler(handler: ExplainLocationHandlerFn) {
-    if let Ok(mut guard) = DEFAULT_EXPLAIN_LOCATION_HANDLER.write() {
-        *guard = Some(handler);
-    }
-}
-
 /// Explains why a diagnostic fired (or why a rule, inline suppression, config, or **Capability Gate**
 /// did or did not apply) at `location_arg` (`<file:line>`) under `cwd`, including its complete [`FixCapsule`].
 ///
 /// # Errors
 /// Returns an error string if `location_arg` is malformed or the target file cannot be read.
 pub fn explain_location(location_arg: &str, cwd: &Path) -> Result<WhyReport, String> {
-    if let Ok(guard) = DEFAULT_EXPLAIN_LOCATION_HANDLER.read()
-        && let Some(handler) = *guard
-    {
-        return handler(location_arg, cwd);
-    }
     explain_location_with_analyzers(location_arg, cwd, &[])
 }
 

@@ -923,31 +923,95 @@ fn collect_class_teardown_identifiers(
         let AstKind::Class(cls) = node.kind() else {
             continue;
         };
+        // Collect method definitions by name inside `cls`
+        let mut method_spans: HashMap<String, Span> = HashMap::new();
+        for elem in &cls.body.body {
+            if let ClassElement::MethodDefinition(method_def) = elem
+                && let Some(name) = prop_key_str(&method_def.key)
+            {
+                method_spans.insert(name.to_string(), method_def.span);
+            }
+        }
+        let Some(&ng_on_destroy_span) = method_spans.get("ngOnDestroy") else {
+            map.insert(node_id, HashSet::new());
+            continue;
+        };
+
+        // Collect `ngOnDestroy` span and any class helper methods invoked inside `ngOnDestroy`
+        let mut teardown_method_spans = vec![ng_on_destroy_span];
+        for (_inner_id, inner_node) in semantic.nodes().iter_enumerated() {
+            let AstKind::CallExpression(call) = inner_node.kind() else {
+                continue;
+            };
+            if call.span.start < ng_on_destroy_span.start || call.span.end > ng_on_destroy_span.end
+            {
+                continue;
+            }
+            if let Some(helper_name) = extract_this_method_call_name(&call.callee)
+                && let Some(&helper_span) = method_spans.get(helper_name)
+            {
+                teardown_method_spans.push(helper_span);
+            }
+        }
+
         let mut torn_down = HashSet::new();
         for (_inner_id, inner_node) in semantic.nodes().iter_enumerated() {
             let AstKind::CallExpression(call) = inner_node.kind() else {
                 continue;
             };
-            if call.span.start < cls.span.start || call.span.end > cls.span.end {
+            let in_teardown_method = teardown_method_spans
+                .iter()
+                .any(|sp| call.span.start >= sp.start && call.span.end <= sp.end);
+            if !in_teardown_method {
                 continue;
             }
-            let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+            let Some(unsub_obj) = extract_unsubscribe_receiver(&call.callee) else {
                 continue;
             };
-            if mem.property.name == "unsubscribe" {
-                if let Some(name) = extract_signal_receiver_name(&mem.object) {
-                    torn_down.insert(name);
-                }
-                let recv_text = source
-                    .get(mem.object.span().start as usize..mem.object.span().end as usize)
-                    .unwrap_or_default()
-                    .trim();
-                torn_down.insert(recv_text.to_string());
+            if let Some(name) = extract_signal_receiver_name(unsub_obj) {
+                torn_down.insert(name);
             }
+            let recv_text = source
+                .get(unsub_obj.span().start as usize..unsub_obj.span().end as usize)
+                .unwrap_or_default()
+                .trim();
+            torn_down.insert(recv_text.to_string());
         }
         map.insert(node_id, torn_down);
     }
     map
+}
+
+fn extract_this_method_call_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
+    match callee.without_parentheses() {
+        Expression::StaticMemberExpression(mem)
+            if matches!(
+                mem.object.without_parentheses(),
+                Expression::ThisExpression(_)
+            ) =>
+        {
+            Some(mem.property.name.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn extract_unsubscribe_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    match callee.without_parentheses() {
+        Expression::StaticMemberExpression(mem) if mem.property.name == "unsubscribe" => {
+            Some(&mem.object)
+        }
+        Expression::ChainExpression(chain) => {
+            if let oxc_ast::ast::ChainElement::StaticMemberExpression(mem) = &chain.expression
+                && mem.property.name == "unsubscribe"
+            {
+                Some(&mem.object)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn check_subscribe_teardown_and_nesting(
@@ -996,12 +1060,22 @@ fn check_subscribe_teardown_and_nesting(
     }
 
     // 2. Check `angular-rxjs-subscribe-requires-teardown`
+    if let Some(enclosing_cls) = semantic
+        .nodes()
+        .ancestor_ids(call_node_id)
+        .find_map(|anc_id| match semantic.nodes().kind(anc_id) {
+            AstKind::Class(cls) => Some(cls),
+            _ => None,
+        })
+        && angular_class_decorator_kind(enclosing_cls).is_none()
+    {
+        return;
+    }
     if has_pipe_teardown(&mem.object, source)
         || is_subscription_stored_and_torn_down(semantic, call_node_id, class_teardowns)
     {
         return;
     }
-
     push_angular_site(
         sites,
         RuleId::AngularRxjsSubscribeRequiresTeardown,

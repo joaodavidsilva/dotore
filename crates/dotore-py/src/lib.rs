@@ -35,7 +35,7 @@ pub struct PyFileIr {
     /// Pre-evaluated candidate rule diagnostics for all 5 core Python safety rules.
     pub candidate_diagnostics: Vec<Diagnostic>,
     /// Cross-file module import/export graph metadata for `py-arch-*` rules.
-    pub module_graph: graph::PyModuleGraphInfo,
+    pub(crate) module_graph: graph::PyModuleGraphInfo,
 }
 
 /// Python [`LanguageAnalyzer`] powered by `ruff_python_parser`.
@@ -561,18 +561,6 @@ fn apply_python_dependency_capabilities(
         "asyncio" | "aiohttp" | "httpx" | "uvicorn" | "starlette" | "anyio" | "trio" | "quart"
         | "sanic" | "litestar" | "motor" => {
             gate.capabilities.insert(Capability::Asyncio);
-        }
-        "flask" => {
-            gate.capabilities.insert(Capability::Flask);
-        }
-        "pandas" => {
-            gate.capabilities.insert(Capability::Pandas);
-        }
-        "celery" => {
-            gate.capabilities.insert(Capability::Celery);
-        }
-        "torch" | "pytorch" | "torchvision" => {
-            gate.capabilities.insert(Capability::PyTorch);
         }
         _ => {}
     }
@@ -1901,7 +1889,7 @@ fn is_mutable_default_expr(expr: &Expr) -> bool {
     clippy::wildcard_enum_match_arm,
     reason = "Only Name and Attribute expressions form dotted callee names"
 )]
-fn callee_qualified_name(func: &Expr) -> String {
+pub(crate) fn callee_qualified_name(func: &Expr) -> String {
     match func {
         Expr::Name(n) => n.id.to_string(),
         Expr::Attribute(attr) => {
@@ -1916,7 +1904,7 @@ fn callee_qualified_name(func: &Expr) -> String {
     }
 }
 
-fn slice_source(source: &str, span: ByteSpan) -> &str {
+pub(crate) fn slice_source(source: &str, span: ByteSpan) -> &str {
     let start = (span.start as usize).min(source.len());
     let end = (span.end as usize).min(source.len());
     if start <= end && source.is_char_boundary(start) && source.is_char_boundary(end) {
@@ -2000,7 +1988,7 @@ fn build_mutable_default_autofix(
     })
 }
 
-fn text_range_to_byte_span(range: ruff_text_size::TextRange) -> ByteSpan {
+pub(crate) fn text_range_to_byte_span(range: ruff_text_size::TextRange) -> ByteSpan {
     ByteSpan {
         start: range.start().to_u32(),
         end: range.end().to_u32(),
@@ -2223,12 +2211,14 @@ fn parse_python_disable_comment(body: &str) -> Option<(PyDirectiveKind, Vec<Stri
         }
     }
 
-    // `# ruff: noqa` or `# flake8: noqa` (file-wide suppression)
-    for file_prefix in ["ruff: noqa", "flake8: noqa"] {
-        if let Some(after) = trimmed.strip_prefix(file_prefix) {
-            let cleaned = after.trim().strip_prefix(':').unwrap_or(after);
-            return Some((PyDirectiveKind::BlockDisable, tokenize_rule_list(cleaned)));
-        }
+    // File-wide `# ...: noqa` suppression directive
+    if let Some((prefix, rest)) = trimmed.split_once(':')
+        && !prefix.trim().is_empty()
+        && prefix.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && let Some(after) = rest.trim().strip_prefix("noqa")
+    {
+        let cleaned = after.trim().strip_prefix(':').unwrap_or(after);
+        return Some((PyDirectiveKind::BlockDisable, tokenize_rule_list(cleaned)));
     }
 
     // `# noqa` or `# noqa: B006, E722`

@@ -127,7 +127,7 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             return false;
         };
-        if !JS_SOURCE_EXTENSIONS.contains(&ext) {
+        if !JS_SOURCE_EXTENSIONS.contains(&ext) && !matches!(ext, "html" | "htm") {
             return false;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -241,6 +241,12 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
 /// Returns `true` if `source` at `path` parses with zero syntax diagnostics under `oxc_parser`.
 #[must_use]
 pub fn source_parses_cleanly(path: &Path, source: &str) -> bool {
+    if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("html" | "htm" | "css" | "scss")
+    ) {
+        return true;
+    }
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
         .unwrap_or_default()

@@ -68,7 +68,7 @@ pub use report::{
     explain_location_with_analyzers, explain_rule, format_design_report, format_fix_report,
     format_install_report, format_rule_catalog_text, format_rule_explanation_text,
     format_terminal_report, format_why_report_text, install_dotore, parse_why_location,
-    register_default_explain_location_handler, render_code_frame, render_html_report,
+    render_code_frame, render_html_report,
     write_and_open_html_report, write_json_report,
 };
 pub use rules::{

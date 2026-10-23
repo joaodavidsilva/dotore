@@ -14,7 +14,7 @@ pub const JS_SOURCE_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "mt
 
 /// All polyglot source extensions supported across `dotore-js`, `dotore-py`, and `dotore-rs`.
 pub const POLYGLOT_SOURCE_EXTENSIONS: &[&str] = &[
-    "js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts", "py", "pyi", "rs",
+    "js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts", "html", "htm", "py", "pyi", "rs",
 ];
 
 const STYLE_EXTENSIONS: &[&str] = &["css", "scss"];

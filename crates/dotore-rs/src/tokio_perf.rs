@@ -13,17 +13,18 @@ use std::collections::{HashMap, HashSet};
 
 use dotore_core::{AutofixPatch, ByteEdit, ByteSpan, RuleId, SourceLoc, loc_from_line_starts};
 use syn::{
-    Attribute, Block, Expr, ExprAsync, ExprAwait, ExprCall, ExprClosure, ExprForLoop, ExprIf,
-    ExprLoop, ExprMethodCall, ExprWhile, File, FnArg, ImplItemFn, Item, ItemConst, ItemFn,
-    ItemImpl, ItemMod, ItemStatic, Lit, Macro, Pat, ReturnType, Signature, Stmt, Token,
-    TraitItemFn, Type, UseTree,
+    Block, Expr, ExprAsync, ExprAwait, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLoop,
+    ExprMethodCall, ExprWhile, File, FnArg, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod,
+    ItemStatic, Lit, Macro, Pat, ReturnType, Signature, Stmt, Token, TraitItemFn, Type, UseTree,
     parse::Parser,
     punctuated::Punctuated,
     spanned::Spanned,
     visit::{self, Visit},
 };
 
-use crate::ir::RsCandidateFinding;
+use crate::ir::{
+    RsCandidateFinding, attrs_indicate_test_context, extract_pat_ident, span_to_bytes,
+};
 
 /// All 7 Tokio async hazard and Rust allocation performance rules implemented in this module.
 pub const TOKIO_AND_PERF_RULES: &[RuleId] = &[
@@ -37,7 +38,7 @@ pub const TOKIO_AND_PERF_RULES: &[RuleId] = &[
 ];
 
 /// Runs single-pass Tokio async and Rust performance detectors on the parsed [`syn::File`].
-pub fn extract_tokio_perf_findings(
+pub(crate) fn extract_tokio_perf_findings(
     file: &File,
     source: &str,
     line_starts: &[u32],
@@ -112,10 +113,7 @@ struct TokioPerfVisitor<'a> {
 
 impl TokioPerfVisitor<'_> {
     fn span_to_bytes(&self, span: proc_macro2::Span) -> ByteSpan {
-        let range = span.byte_range();
-        let start = u32::try_from(range.start).unwrap_or(0);
-        let end = u32::try_from(range.end).unwrap_or(start);
-        ByteSpan { start, end }
+        span_to_bytes(span)
     }
 
     fn loc_at(&self, byte_offset: u32) -> SourceLoc {
@@ -939,51 +937,12 @@ impl<'ast> Visit<'ast> for TokioPerfVisitor<'_> {
     }
 }
 
-fn attrs_indicate_test_context(attrs: &[Attribute]) -> bool {
-    for attr in attrs {
-        let path_str = path_to_string(attr.path());
-        if matches!(
-            path_str.as_str(),
-            "test" | "tokio::test" | "sqlx::test" | "actix_rt::test" | "rstest" | "bench"
-        ) || path_str.ends_with("::test")
-        {
-            return true;
-        }
-        if path_str == "cfg"
-            && let Ok(tokens) = attr.meta.require_list()
-        {
-            let token_str = tokens.tokens.to_string();
-            if token_str
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|tok| tok == "test")
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn path_to_string(path: &syn::Path) -> String {
     path.segments
         .iter()
         .map(|s| s.ident.to_string())
         .collect::<Vec<_>>()
         .join("::")
-}
-
-fn extract_pat_ident(pat: &Pat) -> Option<String> {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Pat has many variants; ident, type, reference, and single-element tuple struct patterns bind local names"
-    )]
-    match pat {
-        Pat::Ident(pat_ident) => Some(pat_ident.ident.to_string()),
-        Pat::Type(pat_type) => extract_pat_ident(&pat_type.pat),
-        Pat::Reference(pat_ref) => extract_pat_ident(&pat_ref.pat),
-        Pat::TupleStruct(ts) if ts.elems.len() == 1 => ts.elems.first().and_then(extract_pat_ident),
-        _ => None,
-    }
 }
 
 fn extract_expr_ident(expr: &Expr) -> Option<String> {
@@ -1089,16 +1048,53 @@ fn is_tokio_sync_ctor(expr: &Expr, tokio_sync_type_names: &HashSet<String>) -> b
 fn is_cheap_clone_type(ty: &Type) -> bool {
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "syn::Type has many variants; checks path and reference types for cheap reference-counted handles"
+        reason = "syn::Type has many variants; checks path, reference, pointer, and tuple types for Copy primitives and cheap reference-counted handles"
     )]
     match ty {
-        Type::Reference(tr) => is_cheap_clone_type(&tr.elem),
+        Type::Reference(tr) => tr.mutability.is_none() || is_cheap_clone_type(&tr.elem),
+        Type::Ptr(_) => true,
         Type::Paren(p) => is_cheap_clone_type(&p.elem),
         Type::Group(g) => is_cheap_clone_type(&g.elem),
+        Type::Tuple(t) => t.elems.iter().all(is_cheap_clone_type),
         Type::Path(tp) => tp.path.segments.iter().any(|seg| {
             matches!(
                 seg.ident.to_string().as_str(),
-                "Arc"
+                "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "f32"
+                    | "f64"
+                    | "bool"
+                    | "char"
+                    | "Duration"
+                    | "Instant"
+                    | "Uuid"
+                    | "IpAddr"
+                    | "Ipv4Addr"
+                    | "Ipv6Addr"
+                    | "SocketAddr"
+                    | "NonZeroU8"
+                    | "NonZeroU16"
+                    | "NonZeroU32"
+                    | "NonZeroU64"
+                    | "NonZeroU128"
+                    | "NonZeroUsize"
+                    | "NonZeroI8"
+                    | "NonZeroI16"
+                    | "NonZeroI32"
+                    | "NonZeroI64"
+                    | "NonZeroI128"
+                    | "NonZeroIsize"
+                    | "Arc"
                     | "Rc"
                     | "Weak"
                     | "Sender"
@@ -1120,18 +1116,36 @@ fn is_cheap_clone_type(ty: &Type) -> bool {
 }
 
 fn is_cheap_clone_ctor(expr: &Expr) -> bool {
-    if let Expr::Call(call) = expr
-        && let Expr::Path(ep) = call.func.as_ref()
-    {
-        let full = path_to_string(&ep.path);
-        return full.ends_with("Arc::new")
-            || full.ends_with("Arc::clone")
-            || full.ends_with("Rc::new")
-            || full.ends_with("Rc::clone")
-            || full.ends_with("Client::new");
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Checks primitive Copy literals, shared references, casts to Copy types, and Arc/Rc/Client constructors"
+    )]
+    match expr {
+        Expr::Lit(expr_lit) => matches!(
+            expr_lit.lit,
+            Lit::Int(_) | Lit::Float(_) | Lit::Bool(_) | Lit::Char(_) | Lit::Byte(_)
+        ),
+        Expr::Reference(r) => r.mutability.is_none(),
+        Expr::Cast(c) => is_cheap_clone_type(&c.ty),
+        Expr::Unary(u) => is_cheap_clone_ctor(&u.expr),
+        Expr::Binary(b) => is_cheap_clone_ctor(&b.left) && is_cheap_clone_ctor(&b.right),
+        Expr::Paren(p) => is_cheap_clone_ctor(&p.expr),
+        Expr::Call(call) => {
+            if let Expr::Path(ep) = call.func.as_ref() {
+                let full = path_to_string(&ep.path);
+                return full.ends_with("Arc::new")
+                    || full.ends_with("Arc::clone")
+                    || full.ends_with("Rc::new")
+                    || full.ends_with("Rc::clone")
+                    || full.ends_with("Client::new")
+                    || full.starts_with("Duration::");
+            }
+            false
+        }
+        _ => false,
     }
-    false
 }
+
 
 fn is_cheap_handle_ident(ident: &str) -> bool {
     let lower = ident.to_ascii_lowercase();

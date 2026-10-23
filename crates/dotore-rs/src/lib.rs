@@ -13,15 +13,15 @@ use dotore_core::{
 use toml::Value;
 
 /// Single-pass `syn` AST and scope extraction for `.rs` files.
-pub mod ir;
+pub(crate) mod ir;
 /// Rule activation and evaluation for Rust rules.
-pub mod rules;
+pub(crate) mod rules;
 /// Single-pass detectors for Axum, SQLx, Leptos/Dioxus UI signals, and boolean parameter architecture rules.
-pub mod axum_sqlx_ui_arch;
+pub(crate) mod axum_sqlx_ui_arch;
 /// Crate-level `ProjectGraph` analysis for `dotore-rs` (`rs-arch-no-unused-pub-crate-items`).
-pub mod graph;
+pub(crate) mod graph;
 /// Single-pass Tokio async hazard and Rust allocation performance detectors.
-pub mod tokio_perf;
+pub(crate) mod tokio_perf;
 
 pub use ir::{RsCandidateFinding, RsFileIr, RsSubjectIr, RsSubjectKind, extract_rs_file};
 pub use rules::{CORE_RUST_SAFETY_RULES, evaluate_rs_file, evaluate_rs_package};
@@ -259,9 +259,6 @@ fn record_rust_dep_and_capabilities(gate: &mut CapabilityGate, raw_name: &str, v
         "dioxus" | "dioxus-hooks" | "dioxus-web" | "dioxus-desktop" | "dioxus-fullstack" => {
             &[Capability::Dioxus]
         }
-        "actix-web" => &[Capability::ActixWeb],
-        "clap" => &[Capability::Clap],
-        "tauri" => &[Capability::Tauri],
         _ => &[],
     };
 
