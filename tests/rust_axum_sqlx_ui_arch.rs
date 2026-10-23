@@ -426,7 +426,7 @@ pub async fn suppressed_examples(pool: &sqlx::PgPool, filter: &str) {
         .await;
 }
 
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(fn_params_excessive_bools)]
 pub fn legacy_flags(a: bool, b: bool, c: bool, d: bool) -> bool {
     a && b && c && d
 }
@@ -435,5 +435,51 @@ pub fn legacy_flags(a: bool, b: bool, c: bool, d: bool) -> bool {
     assert!(
         diags.is_empty(),
         "Expected inline and attribute suppressions to silence diagnostics, got: {diags:#?}"
+    );
+}
+
+#[test]
+fn unused_pub_crate_items_in_inline_module_used_in_same_file_is_not_flagged_in_multi_file_crate() {
+    let lib_rs = r#"mod other;
+
+mod internal_inline {
+    pub(crate) fn used_by_parent_module() -> u32 {
+        42
+    }
+
+    pub(crate) fn truly_unused_in_inline() -> u32 {
+        0
+    }
+}
+
+pub fn public_entrypoint() -> u32 {
+    internal_inline::used_by_parent_module() + other::step()
+}
+"#;
+    let other_rs = r#"pub(crate) fn step() -> u32 { 1 }
+"#;
+
+    let report = analyze_project_sources(
+        vec![
+            (
+                PathBuf::from("Cargo.toml"),
+                "[package]\nname = \"inline-mod-crate\"\nversion = \"0.1.0\"\n".to_string(),
+            ),
+            (PathBuf::from("src/lib.rs"), lib_rs.to_string()),
+            (PathBuf::from("src/other.rs"), other_rs.to_string()),
+        ],
+        Some(&[RuleId::RsArchNoUnusedPubCrateItems]),
+    );
+
+    let targets: Vec<&str> = report
+        .diagnostics
+        .iter()
+        .map(|d| d.target_name.as_str())
+        .collect();
+    assert_eq!(
+        targets,
+        vec!["truly_unused_in_inline"],
+        "Expected `used_by_parent_module` in inline module not to be flagged even in multi-file crate, got: {:#?}",
+        report.diagnostics
     );
 }

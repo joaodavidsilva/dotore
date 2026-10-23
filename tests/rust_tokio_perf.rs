@@ -404,6 +404,41 @@ pub fn safe_perf_patterns(
 }
 
 #[test]
+fn rs_perf_no_clone_in_loop_ignores_copy_primitives_and_flags_heap_types() {
+    let src = r#"
+pub fn clone_precision_check(count: usize, flag: bool, ratio: f64, shared_slice: &[u8], text: String) {
+    let local_idx: u32 = 7;
+    let local_char: char = 'x';
+    let inferred_num = 42usize;
+    let mut total = 0usize;
+    for _ in 0..10 {
+        let _a = count.clone();
+        let _b = flag.clone();
+        let _c = ratio.clone();
+        let _d = shared_slice.clone();
+        let _e = local_idx.clone();
+        let _f = local_char.clone();
+        let _g = inferred_num.clone();
+        let _heap = text.clone();
+        total += _a;
+    }
+    let _ = total;
+}
+"#;
+    let diags = analyze_source(
+        Path::new("src/clone_precision.rs"),
+        src,
+        Some(&[RuleId::RsPerfNoCloneInLoop]),
+    );
+    assert_eq!(
+        diags.len(),
+        1,
+        "Expected only heap `text.clone()` to be flagged, not Copy primitives or shared references, got: {diags:#?}"
+    );
+    assert_eq!(diags[0].target_name, "text.clone()");
+}
+
+#[test]
 fn autofix_rewrites_std_thread_sleep_to_tokio_time_sleep_await() {
     let source = r#"use std::time::Duration;
 

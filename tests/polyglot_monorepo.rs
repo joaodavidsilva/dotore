@@ -879,7 +879,7 @@ pub fn execute_order_match(id: u64) -> bool {
         );
         assert!(
             filtered.iter().any(|e| e.id == expected_rule_id),
-            "Expected framework filter `{fw}` to include `{expected_rule_id}`, got: {:?}",
+            "Expected Capability Gate catalog filter `{fw}` to include `{expected_rule_id}`, got: {:?}",
             filtered.iter().map(|e| &e.id).collect::<Vec<_>>()
         );
         let explained = explain_rule(expected_rule_id, &cfg).unwrap();
@@ -1087,6 +1087,46 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
             meta.canonical_id
         );
     }
+}
+
+#[test]
+fn spec_8_new_rules_contain_no_external_competitor_linter_names_and_cli_supports_score_subcommand() {
+    let registry = rule_registry();
+    for meta in registry.iter().filter(|m| {
+        m.canonical_id.starts_with("angular-")
+            || m.canonical_id.starts_with("py-")
+            || m.canonical_id.starts_with("rs-")
+    }) {
+        for &alias in meta.legacy_aliases {
+            assert!(
+                !alias.contains("angular-eslint")
+                    && !alias.contains("flake8")
+                    && !alias.contains("pylint")
+                    && !alias.contains("bandit")
+                    && !alias.contains("vulture")
+                    && !alias.contains("clippy::"),
+                "Rule `{}` contains external competitor tool name in legacy_aliases: `{alias}`",
+                meta.canonical_id
+            );
+        }
+        assert!(
+            !meta.docs_url.contains("rust-clippy"),
+            "Rule `{}` docs_url references external linter: `{}`",
+            meta.canonical_id,
+            meta.docs_url
+        );
+    }
+
+    let bin = env!("CARGO_BIN_EXE_dotore");
+    let output = std::process::Command::new(bin)
+        .args(["score", "--help"])
+        .output()
+        .expect("Failed to run `dotore score --help`");
+    assert!(
+        output.status.success(),
+        "Expected `dotore score --help` subcommand to succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn append_rs_sources_recursively(dir: &Path, out: &mut String) {

@@ -428,6 +428,58 @@ def fetch_users_batched(session, user_ids: list[int]):
 }
 
 #[test]
+fn py_orm_no_query_in_loop_flags_lazy_relationship_access_unless_eager_loaded() {
+    let invalid_lazy_src = r#"from sqlalchemy import select
+
+def render_user_orders_and_posts(session):
+    for user in session.scalars(select(User)):
+        print(user.id, user.name)
+        for order in user.orders:
+            print(order)
+        bio = user.profile.bio
+
+    posts = Post.objects.all()
+    for post in posts:
+        comments = post.comments.all()
+        author_org = post.author.organization
+        print(post.title, comments, author_org)
+"#;
+    let diags = analyze_source(
+        Path::new("app/lazy_n_plus_one.py"),
+        invalid_lazy_src,
+        Some(&[RuleId::PyOrmNoQueryInLoop]),
+    );
+    assert!(
+        diags.len() >= 3,
+        "Expected lazy relationship accesses (`user.orders`, `user.profile.bio`, `post.comments.all()`, `post.author.organization`) to be flagged, got: {diags:#?}"
+    );
+    assert!(diags.iter().all(|d| d.rule == RuleId::PyOrmNoQueryInLoop));
+
+    let valid_eager_src = r#"from sqlalchemy import select
+from sqlalchemy.orm import selectinload, joinedload
+
+def render_eager_loaded(session):
+    stmt = select(User).options(selectinload(User.orders), joinedload(User.profile))
+    for user in session.scalars(stmt):
+        for order in user.orders:
+            print(order)
+        print(user.profile.bio)
+
+    for post in Post.objects.select_related("author").prefetch_related("comments"):
+        print(post.comments.all(), post.author.organization)
+"#;
+    let valid_diags = analyze_source(
+        Path::new("app/eager_loaded.py"),
+        valid_eager_src,
+        Some(&[RuleId::PyOrmNoQueryInLoop]),
+    );
+    assert!(
+        valid_diags.is_empty(),
+        "Expected 0 diagnostics when relationships are eager-loaded with selectinload/joinedload/select_related/prefetch_related, got: {valid_diags:#?}"
+    );
+}
+
+#[test]
 fn py_security_no_raw_sql_interpolation_flags_interpolated_sql_and_allows_parameterized() {
     let invalid_src = r#"from sqlalchemy import text
 from django.db.models.expressions import RawSQL

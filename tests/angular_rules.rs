@@ -778,3 +778,123 @@ export class DashboardComponent {
     assert!(ng_json_rules.contains(&RuleId::AngularForTrackNoIndex));
     assert!(ng_json_rules.contains(&RuleId::AngularNoSignalWriteInEffect));
 }
+
+#[test]
+fn angular_external_html_templates_are_discovered_and_validated_without_syntax_errors() {
+    assert!(JsLanguageAnalyzer.supports_path(Path::new("src/app/todo.component.html")));
+    assert!(JsLanguageAnalyzer.supports_path(Path::new("src/app/todo.html")));
+    assert!(JsLanguageAnalyzer.validate_syntax(
+        Path::new("src/app/todo.component.html"),
+        "<section>@for (todo of todos(); track $index) { <li>{{ todo.title }}</li> }</section>",
+    ));
+
+    let tmp = std::env::temp_dir().join(format!(
+        "dotore-ng-html-scan-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(tmp.join("src")).unwrap();
+    std::fs::write(
+        tmp.join("package.json"),
+        r#"{ "name": "ng-html-app", "dependencies": { "@angular/core": "^19.0.0" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.join("src/todo-list.component.html"),
+        "<section>\n  @for (todo of todos(); track $index) {\n    <li>{{ todo.title }}</li>\n  }\n</section>\n",
+    )
+    .unwrap();
+
+    let (report, _) = dotore::scan_workspace(&dotore::ScanOptions {
+        paths: vec![tmp.clone()],
+        include_tests: false,
+        rules: Some(vec![RuleId::AngularForTrackNoIndex]),
+        tiers: None,
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert_eq!(
+        report.diagnostics.len(),
+        1,
+        "Expected external .html Angular template to be discovered and evaluated by scan_workspace, got: {:#?}",
+        report.diagnostics
+    );
+    assert_eq!(report.diagnostics[0].rule, RuleId::AngularForTrackNoIndex);
+}
+
+#[test]
+fn angular_rxjs_subscribe_teardown_requires_ng_on_destroy_and_angular_class_context() {
+    // 1. `.unsubscribe()` in a non-lifecycle method (`reset()`) must NOT count as `ngOnDestroy` teardown!
+    //    Meanwhile, `.unsubscribe()` inside a helper method called from `ngOnDestroy()` (`this.cleanupSubs()`) IS valid.
+    // 2. A plain non-Angular class in the same file should NOT have its `.subscribe()` flagged by `angular-rxjs-subscribe-requires-teardown`.
+    let src = r#"
+import { Component, ChangeDetectionStrategy, OnInit, OnDestroy } from '@angular/core';
+import { Subject, Subscription } from 'rxjs';
+
+export class PlainEventBus {
+  stream$ = new Subject<number>();
+  start(): void {
+    this.stream$.subscribe(v => console.log(v));
+  }
+}
+
+@Component({
+  selector: 'app-NonLifecycleUnsub',
+  template: `<p>test</p>`,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class NonLifecycleUnsubComponent implements OnInit {
+  private sub?: Subscription;
+  stream$ = new Subject<string>();
+
+  ngOnInit(): void {
+    this.sub = this.stream$.subscribe(v => console.log(v));
+  }
+
+  resetManually(): void {
+    this.sub?.unsubscribe();
+  }
+}
+
+@Component({
+  selector: 'app-helper-destroy',
+  template: `<p>ok</p>`,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class HelperDestroyComponent implements OnInit, OnDestroy {
+  private sub?: Subscription;
+  stream$ = new Subject<string>();
+
+  ngOnInit(): void {
+    this.sub = this.stream$.subscribe(v => console.log(v));
+  }
+
+  ngOnDestroy(): void {
+    this.cleanupSubscriptions();
+  }
+
+  private cleanupSubscriptions(): void {
+    this.sub?.unsubscribe();
+  }
+}
+"#;
+
+    let diags = analyze_source(
+        Path::new("src/teardown-precision.component.ts"),
+        src,
+        Some(&[RuleId::AngularRxjsSubscribeRequiresTeardown]),
+    );
+    assert_eq!(
+        diags.len(),
+        1,
+        "Expected only NonLifecycleUnsubComponent to be flagged (not PlainEventBus or HelperDestroyComponent), got: {diags:#?}"
+    );
+    assert_eq!(
+        diags[0].subject_name.as_deref(),
+        Some("NonLifecycleUnsubComponent")
+    );
+}
