@@ -16,9 +16,12 @@ use toml::Value;
 pub mod ir;
 /// Rule activation and evaluation for Rust rules.
 pub mod rules;
+/// Single-pass Tokio async hazard and Rust allocation performance detectors.
+pub mod tokio_perf;
 
 pub use ir::{RsCandidateFinding, RsFileIr, RsSubjectIr, RsSubjectKind, extract_rs_file};
 pub use rules::{CORE_RUST_SAFETY_RULES, evaluate_rs_file, evaluate_rs_package};
+pub use tokio_perf::TOKIO_AND_PERF_RULES;
 
 /// Rust language analyzer implementing [`LanguageAnalyzer`] for `.rs` files and `Cargo.toml` manifests.
 #[derive(Debug, Clone, Copy, Default)]
@@ -109,7 +112,6 @@ pub fn infer_cargo_toml_capability_gate(
     package_dir: &Path,
     manifest_sources: &[(PathBuf, &str)],
 ) -> CapabilityGate {
-    let mut gate = CapabilityGate::default_rust();
     let mut loaded_from_disk = Vec::new();
 
     let has_cargo_manifest = manifest_sources.iter().any(|(p, _)| {
@@ -125,21 +127,28 @@ pub fn infer_cargo_toml_capability_gate(
     }
 
     // Check ancestor directories on disk for workspace root `[workspace.dependencies]`
-    let mut ancestor_opt = package_dir.parent();
-    while let Some(anc) = ancestor_opt {
-        if anc.as_os_str().is_empty() {
-            break;
+    if !has_cargo_manifest || package_dir.is_absolute() {
+        let mut ancestor_opt = package_dir.parent();
+        while let Some(anc) = ancestor_opt {
+            if anc.as_os_str().is_empty() {
+                break;
+            }
+            let anc_cargo = anc.join("Cargo.toml");
+            if anc_cargo.is_file()
+                && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
+                && let Ok(content) = fs::read_to_string(&anc_cargo)
+            {
+                loaded_from_disk.push((anc_cargo, content));
+            }
+            ancestor_opt = anc.parent();
         }
-        let anc_cargo = anc.join("Cargo.toml");
-        if anc_cargo.is_file()
-            && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
-            && let Ok(content) = fs::read_to_string(&anc_cargo)
-        {
-            loaded_from_disk.push((anc_cargo, content));
-        }
-        ancestor_opt = anc.parent();
     }
 
+    let mut gate = if has_cargo_manifest || !loaded_from_disk.is_empty() {
+        CapabilityGate::with_capabilities([Capability::Rust])
+    } else {
+        CapabilityGate::default_rust()
+    };
     for (path, src) in manifest_sources {
         if path
             .file_name()

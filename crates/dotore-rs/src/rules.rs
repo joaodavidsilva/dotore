@@ -66,7 +66,7 @@ pub fn evaluate_rs_file(
     };
 
     for finding in &rs_ir.findings {
-        if !is_core_rust_safety_rule(finding.rule) {
+        if !is_supported_rust_rule(finding.rule) {
             continue;
         }
         let Some(severity) = resolve_rs_rule_activation(
@@ -91,7 +91,7 @@ pub fn evaluate_rs_file(
     }
 }
 
-const fn is_core_rust_safety_rule(rule: RuleId) -> bool {
+const fn is_supported_rust_rule(rule: RuleId) -> bool {
     matches!(
         rule,
         RuleId::RsNoUnwrapInProduction
@@ -99,6 +99,13 @@ const fn is_core_rust_safety_rule(rule: RuleId) -> bool {
             | RuleId::RsNoLossyNumericAsCast
             | RuleId::RsRequireSafetyCommentOnUnsafe
             | RuleId::RsNoMemForget
+            | RuleId::RsTokioNoStdLockAcrossAwait
+            | RuleId::RsTokioNoBlockingInAsync
+            | RuleId::RsTokioPreferBoundedChannel
+            | RuleId::RsPerfNoCloneInLoop
+            | RuleId::RsPerfHoistRegexToLazylock
+            | RuleId::RsPerfPreferVecWithCapacity
+            | RuleId::RsPerfNoUnnecessaryFormat
     )
 }
 
@@ -123,7 +130,7 @@ fn candidate_to_diagnostic(
         span: finding.span,
         cascade_steps: Vec::new(),
         caller_sites: Vec::new(),
-        autofix: None,
+        autofix: finding.autofix.clone(),
     }
 }
 
