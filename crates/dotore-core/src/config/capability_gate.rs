@@ -193,7 +193,7 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("styled-components", &[Capability::StyledComponents]),
     (
         "@angular/core",
-        &[Capability::Angular, Capability::TypeScript],
+        &[Capability::Angular, Capability::Rxjs, Capability::TypeScript],
     ),
     (
         "@angular/common",
@@ -621,6 +621,8 @@ impl CapabilityGate {
     /// Discovers a [`CapabilityGate`] for `package_dir` by reading its `package.json`, `angular.json`, and compiler configs.
     #[must_use]
     pub fn discover(package_dir: &Path) -> Self {
+        let has_angular_json = package_dir.join("angular.json").is_file()
+            || find_nearest_ancestor_file(package_dir, "angular.json").is_some();
         let pkg_path = package_dir
             .join("package.json")
             .is_file()
@@ -630,18 +632,22 @@ impl CapabilityGate {
         let mut gate = pkg_path
             .and_then(|p| fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<Value>(&strip_jsonc(&s)).ok())
-            .map_or_else(Self::default_react, |v| {
-                Self::from_package_json_value(&v, Some(package_dir))
-            });
+            .map_or_else(
+                || {
+                    if has_angular_json {
+                        Self::default_angular()
+                    } else {
+                        Self::default_react()
+                    }
+                },
+                |v| Self::from_package_json_value(&v, Some(package_dir)),
+            );
 
-        if package_dir.join("angular.json").is_file()
-            || find_nearest_ancestor_file(package_dir, "angular.json").is_some()
-        {
+        if has_angular_json {
             gate.capabilities.insert(Capability::Angular);
             gate.capabilities.insert(Capability::Rxjs);
             gate.capabilities.insert(Capability::TypeScript);
         }
-
         if !gate.has_react_compiler && detect_react_compiler_in_dir(package_dir) {
             gate.has_react_compiler = true;
             gate.capabilities.insert(Capability::ReactCompiler);
@@ -692,9 +698,35 @@ impl CapabilityGate {
     #[must_use]
     pub fn allows_rule(&self, meta: &RuleMetadata) -> bool {
         let pred = &meta.capability_gate;
-        pred.requires
-            .iter()
-            .all(|req| self.capabilities.contains(req))
+        let has_rust_ui_or = pred.requires.contains(&Capability::Leptos)
+            && pred.requires.contains(&Capability::Dioxus);
+        let has_any_rust_cap = self.capabilities.contains(&Capability::Rust)
+            || self.capabilities.iter().any(|c| {
+                matches!(
+                    c,
+                    Capability::Tokio
+                        | Capability::Axum
+                        | Capability::Sqlx
+                        | Capability::Serde
+                        | Capability::Tracing
+                        | Capability::Leptos
+                        | Capability::Dioxus
+                        | Capability::ActixWeb
+                        | Capability::Clap
+                        | Capability::Tauri
+                )
+            });
+        let requires_ok = pred.requires.iter().all(|req| {
+            if has_rust_ui_or && matches!(req, Capability::Leptos | Capability::Dioxus) {
+                self.capabilities.contains(&Capability::Leptos)
+                    || self.capabilities.contains(&Capability::Dioxus)
+            } else if *req == Capability::Rust {
+                has_any_rust_cap
+            } else {
+                self.capabilities.contains(req)
+            }
+        });
+        requires_ok
             && (!meta.tags.contains(&RuleTag::ReactJsxOnly)
                 || self.capabilities.contains(&Capability::React))
             && pred

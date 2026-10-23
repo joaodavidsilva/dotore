@@ -76,9 +76,9 @@ pub fn discover_workspace_packages_with_analyzers(
     analyzers: &[&dyn LanguageAnalyzer],
 ) -> Vec<WorkspacePackage> {
     let manifest_names: Vec<&str> = if analyzers.is_empty() {
-        vec!["package.json"]
+        vec!["package.json", "angular.json"]
     } else {
-        let mut names = vec!["package.json"];
+        let mut names = vec!["package.json", "angular.json"];
         for analyzer in analyzers {
             for &m in analyzer.manifest_filenames() {
                 if !names.contains(&m) {
@@ -106,7 +106,9 @@ pub fn discover_workspace_packages_with_analyzers(
                 .and_then(|s| s.to_str())
                 .unwrap_or("root")
                 .to_string();
-            let mut capability_gate = if analyzers.is_empty() || dir.join("package.json").is_file()
+            let mut capability_gate = if analyzers.is_empty()
+                || dir.join("package.json").is_file()
+                || dir.join("angular.json").is_file()
             {
                 CapabilityGate::discover(&dir)
             } else {

@@ -2,6 +2,7 @@
 //! file context (`test-noise` / `migration-hint`), library role, and inline suppression directives.
 
 pub(crate) mod a11y;
+pub(crate) mod angular;
 pub(crate) mod architecture;
 pub(crate) mod bundle_size;
 pub(crate) mod correctness;
