@@ -42,6 +42,7 @@ crates/
         parent_flow.rs    # event-handler effects and upward parent callback notifications
         external_sync.rs  # external store subscriptions and effect data fetching
         a11y.rs           # WCAG and ARIA accessibility rules
+        angular.rs        # Angular Signals, RxJS teardown, OnPush autofix, @for track, lifecycle, and DOM rules
         architecture.rs   # Subject size/complexity, props, inline HOCs, hoisting, and context/boundary rules
         bundle_size.rs    # barrel imports, heavy packages, and dynamic import rules
         correctness.rs    # unstable keys, numeric && render, DOM nesting, and input rules
