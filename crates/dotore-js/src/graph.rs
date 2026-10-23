@@ -327,7 +327,7 @@ const MAX_TOTAL_CYCLES: usize = 200;
 
 /// Whole-project graph wrapping parsed [`FileIr`]s.
 #[derive(Debug, Default)]
-pub(crate) struct ProjectGraph {
+pub struct ProjectGraph {
     /// Parsed IR for every file in scope.
     pub files: Vec<FileIr>,
     /// Raw manifest contents (`package.json`, `tsconfig.json`, `pnpm-workspace.yaml`, lockfiles, etc.).
@@ -340,29 +340,29 @@ pub(crate) struct ProjectGraph {
     /// Whether any `package.json` or `tsconfig.json` manifests were supplied.
     pub has_manifests: bool,
     /// Indices into `files` that are unreachable orphan files (`unused-file`).
-    pub unused_file_indices: Vec<usize>,
+    pub(crate) unused_file_indices: Vec<usize>,
     /// Unused value and type exports (`unused-export`, `unused-type`).
-    pub unused_exports: Vec<UnusedExportFinding>,
+    pub(crate) unused_exports: Vec<UnusedExportFinding>,
     /// Unused dependencies and devDependencies (`unused-dependency`, `unused-dev-dependency`).
-    pub unused_dependencies: Vec<UnusedDependencyFinding>,
+    pub(crate) unused_dependencies: Vec<UnusedDependencyFinding>,
     /// Canonicalized runtime import cycles (`circular-dependency`).
-    pub circular_dependencies: Vec<CircularDependencyFinding>,
+    pub(crate) circular_dependencies: Vec<CircularDependencyFinding>,
     /// Maximal duplicated JSX subtree families (`duplicate-jsx-subtree`).
-    pub duplicate_jsx_families: Vec<DuplicateJsxFamilyFinding>,
+    pub(crate) duplicate_jsx_families: Vec<DuplicateJsxFamilyFinding>,
     /// Cross-file 60fps `useFrame` and `requestAnimationFrame` helper call-graph findings.
-    pub frame_loop_findings: Vec<CrossFileFrameLoopFinding>,
+    pub(crate) frame_loop_findings: Vec<CrossFileFrameLoopFinding>,
 }
 
 impl ProjectGraph {
     /// Builds a [`ProjectGraph`] from a list of parsed [`FileIr`]s.
     #[must_use]
-    pub(crate) fn build(files: Vec<FileIr>) -> Self {
+    pub fn build(files: Vec<FileIr>) -> Self {
         Self::build_with_manifests(files, HashMap::new())
     }
 
     /// Builds a [`ProjectGraph`] from parsed [`FileIr`]s and raw manifest contents (`package.json`, `tsconfig.json`, etc.).
     #[must_use]
-    pub(crate) fn build_with_manifests(
+    pub fn build_with_manifests(
         mut files: Vec<FileIr>,
         manifests: HashMap<PathBuf, String>,
     ) -> Self {
@@ -487,7 +487,7 @@ impl ProjectGraph {
 
     /// Returns all resolved JSX **Caller Sites** rendering `component_name` declared in `target_file`.
     #[must_use]
-    pub(crate) fn callers_of(
+    pub fn callers_of(
         &self,
         target_file: &Path,
         component_name: &str,

@@ -134,6 +134,9 @@ pub fn discover_workspace_packages_with_analyzers(
                         capability_gate.merge(&inferred);
                     }
                 }
+                if capability_gate.capabilities.is_empty() {
+                    capability_gate = CapabilityGate::discover(&dir);
+                }
             }
             let config = if dir == root_dir {
                 root_config.clone()

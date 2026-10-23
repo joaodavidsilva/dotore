@@ -15,16 +15,10 @@ pub(crate) mod config;
 pub(crate) mod diff;
 /// Surgical auto-fixer for `Autofix`-tier diagnostics.
 pub(crate) mod fixer;
-/// Cross-file JSX caller index and multi-effect **Render Cascade** solver.
-pub(crate) mod graph;
-/// React **Subject**, **State Slot**, **Effect Node**, and **Caller Site** IR.
-pub(crate) mod ir;
 /// Deterministic **Root-Cause Grouping**, **Blast Radius**, **Fix Capsules**, and `dotore plan` generator.
 pub(crate) mod planner;
 /// Terminal and JSON reporters.
 pub(crate) mod report;
-/// Diagnostic rules engine over `SubjectIr` and `ProjectGraph`.
-pub(crate) mod rules;
 /// Native Chrome DevTools Protocol (CDP) runtime profiler (`dotore scan`).
 pub(crate) mod runtime_scan;
 /// Parallel gitignore-aware file discovery.
@@ -33,6 +27,7 @@ pub(crate) mod scanner;
 pub(crate) mod score;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
+
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
     DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
@@ -48,20 +43,30 @@ pub use diff::{
     parse_changed_line_ranges, resolve_scan_exit_code, validate_git_revision,
     validate_warning_exit_code,
 };
-pub use dotore_core::{CliOverrides, ScanOptions};
+pub use dotore_core::{
+    CliOverrides, ScanOptions,
+    ir::{
+        BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
+        FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
+        PackageAnalysisResult, RelatedHookOwnerSpanIr, SourceLoc, SubjectEffectOwner, SymbolKind,
+        SymbolOutline, classify_file_context, compute_line_starts, loc_from_line_starts,
+    },
+    rules::{
+        AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
+        FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
+        RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
+    },
+};
+pub use dotore_js::{
+    CallerSite, DepRef, DepsSpec, EffectNode, FileIr, JsLanguageAnalyzer, JsxElementIr,
+    ProjectGraph, ResolvedCallerSite, SecuritySinkKind, SetterCallSite, SubjectIr, SubjectKind,
+    inspect_file_semantic, is_compiler_config_filename, parse_file_ir, supply_chain_purl_hash,
+};
 pub use dotore_rs::{RsFileIr, RsLanguageAnalyzer, RsSubjectIr, RsSubjectKind};
 pub use fixer::{
     FileFixResult, apply_autofixes, apply_autofixes_with_analyzers, apply_autofixes_with_validator,
     apply_patches_to_source, apply_patches_to_source_with_analyzers,
     apply_patches_to_source_with_validator,
-};
-pub use graph::ResolvedCallerSite;
-pub use ir::{
-    BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext, FileIr,
-    FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
-    PackageAnalysisResult, RelatedHookOwnerSpanIr, SecuritySinkKind, SourceLoc, SubjectEffectOwner,
-    SymbolKind, SymbolOutline, classify_file_context, compute_line_starts, inspect_file_semantic,
-    loc_from_line_starts, parse_file_ir,
 };
 pub use planner::{
     PlanResult, PlannerContext, build_fix_capsule, build_root_cause_groups_and_capsules,
@@ -71,17 +76,12 @@ pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
     JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
-    build_extracted_report_with_packages, build_rule_catalog, ci_config, ci_install, ci_upgrade,
-    explain_location, explain_location_with_analyzers, explain_rule, format_design_report,
-    format_fix_report, format_install_report, format_rule_catalog_text,
-    format_rule_explanation_text, format_terminal_report, format_why_report_text, install_dotore,
-    parse_why_location, render_html_report, write_and_open_html_report, write_json_report,
-};
-pub use rules::{
-    AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
-    FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
-    RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
-    supply_chain_purl_hash,
+    build_extracted_report_with_packages, build_report, build_report_with_packages,
+    build_rule_catalog, ci_config, ci_install, ci_upgrade, explain_location,
+    explain_location_with_analyzers, explain_rule, format_design_report, format_fix_report,
+    format_install_report, format_rule_catalog_text, format_rule_explanation_text,
+    format_terminal_report, format_why_report_text, install_dotore, parse_why_location,
+    render_html_report, write_and_open_html_report, write_json_report,
 };
 pub use runtime_scan::{
     BuildRuntimeScanReportInput, ComponentEventSource, LocalUrlSuggestion,
@@ -115,15 +115,14 @@ pub use search::{
     should_highlight_stdout,
 };
 
-use config::content_enables_react_compiler;
 use diff::{collect_git_diff, load_baseline_entries};
-use graph::ProjectGraph;
-use planner::enrich_cross_file_autofixes;
-use report::{build_report, build_report_with_packages};
-use rules::{evaluate_file_in_package, evaluate_project, evaluate_project_with_packages};
-use scanner::{collect_source_files, collect_style_files};
+use dotore_core::scanner::collect_source_files_for_analyzers;
+use dotore_js::{
+    enrich_cross_file_autofixes, evaluate_file_in_package, evaluate_project_with_packages,
+};
+use scanner::collect_style_files;
 
-/// Analyzes a single in-memory source file and returns its [`Diagnostic`]s.
+/// Analyzes a single in-memory source file through [`JsLanguageAnalyzer`] and returns its [`Diagnostic`]s.
 #[must_use]
 pub fn analyze_source(
     path: &Path,
@@ -133,12 +132,21 @@ pub fn analyze_source(
     if RsLanguageAnalyzer.supports_path(path) {
         return dotore_rs::analyze_rs_source(path, source, enabled_rules);
     }
-    let file_ir = parse_file_ir(path, source);
-    let graph = ProjectGraph::build(vec![file_ir]);
-    evaluate_project(&graph, enabled_rules)
+    let analyzer = JsLanguageAnalyzer;
+    let extracted = analyzer.extract_file(path, source);
+    let default_pkg = WorkspacePackage {
+        name: "default".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    };
+    analyzer
+        .analyze_package(&default_pkg, &[extracted], enabled_rules)
+        .diagnostics
 }
 
-/// Analyzes a single in-memory source file under an explicit [`DotoreConfig`] and [`CapabilityGate`].
+/// Analyzes a single in-memory source file under an explicit [`DotoreConfig`] and [`CapabilityGate`]
+/// through [`JsLanguageAnalyzer`].
 #[must_use]
 pub fn analyze_source_with_config(
     path: &Path,
@@ -150,28 +158,17 @@ pub fn analyze_source_with_config(
     if RsLanguageAnalyzer.supports_path(path) {
         return dotore_rs::analyze_rs_source_with_config(path, source, config, gate, enabled_rules);
     }
-    let file_ir = parse_file_ir(path, source);
-    let graph = ProjectGraph::build(vec![file_ir]);
-    let mut diagnostics = Vec::new();
+    let analyzer = JsLanguageAnalyzer;
+    let extracted = analyzer.extract_file(path, source);
     let pkg_root = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    if let Some(first_file) = graph.files.first() {
-        evaluate_file_in_package(
-            &graph,
-            first_file,
-            pkg_root,
-            gate,
-            config,
-            enabled_rules,
-            &mut diagnostics,
-        );
-    }
-    diagnostics
+    analyzer.analyze_single_file(&extracted, pkg_root, gate, config, enabled_rules)
 }
 
-/// Analyzes multiple in-memory `(PathBuf, String)` files with full cross-file [`ProjectGraph`] resolution.
+/// Analyzes multiple in-memory `(PathBuf, String)` files with full cross-file [`ProjectGraph`] resolution
+/// dispatched through [`JsLanguageAnalyzer`].
 ///
 /// If `files` includes virtual `package.json` or `dotore.config.*` entries, nested packages,
 /// per-package **Capability Gates**, and user configuration are automatically inferred in memory.
@@ -180,6 +177,7 @@ pub fn analyze_project_sources(
     files: Vec<(PathBuf, String)>,
     enabled_rules: Option<&[RuleId]>,
 ) -> JsonReport {
+    let js_analyzer = JsLanguageAnalyzer;
     let has_rs_files = files
         .iter()
         .any(|(p, _)| RsLanguageAnalyzer.supports_path(p));
@@ -200,16 +198,23 @@ pub fn analyze_project_sources(
 
     if !has_virtual_manifests && !has_rs_files {
         let sources: HashMap<PathBuf, String> = files.iter().cloned().collect();
-        let file_irs: Vec<_> = files
+        let extracted_files: Vec<ExtractedFile> = files
             .into_par_iter()
-            .map(|(path, source)| parse_file_ir(&path, &source))
+            .map(|(path, source)| js_analyzer.extract_file(&path, &source))
             .collect();
-        let graph = ProjectGraph::build(file_irs);
-        let diagnostics = evaluate_project(&graph, enabled_rules);
-        return build_report(&graph, diagnostics, &sources);
+        let default_pkg = WorkspacePackage {
+            name: "default".to_string(),
+            root_dir: PathBuf::from("."),
+            capability_gate: CapabilityGate::default_react(),
+            config: DotoreConfig::default(),
+        };
+        let pkg_result =
+            js_analyzer.analyze_package(&default_pkg, &extracted_files, enabled_rules);
+        let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
+        return build_report(&graph, pkg_result.diagnostics, &sources);
     }
 
-    let split = extract_virtual_workspace_packages(files);
+    let split = extract_virtual_workspace_packages(&js_analyzer, files);
     let packages = split.packages;
     let manifests = split.manifests;
     let filtered_sources: Vec<(PathBuf, String)> = split
@@ -247,11 +252,11 @@ pub fn analyze_project_sources(
         return build_extracted_report_with_packages(&extracted_rs, diagnostics, &sources, &packages);
     }
 
-    let file_irs: Vec<_> = js_sources
+    let extracted_files: Vec<ExtractedFile> = js_sources
         .into_par_iter()
-        .map(|(path, source)| parse_file_ir(&path, &source))
+        .map(|(path, source)| js_analyzer.extract_file(&path, &source))
         .collect();
-    let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
+    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, manifests);
     let mut diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
     if !rs_sources.is_empty() {
         let extracted_rs: Vec<ExtractedFile> = rs_sources
@@ -280,11 +285,14 @@ struct VirtualWorkspaceSplit {
     source_files: Vec<(PathBuf, String)>,
 }
 
-fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualWorkspaceSplit {
+fn extract_virtual_workspace_packages(
+    js_analyzer: &JsLanguageAnalyzer,
+    files: Vec<(PathBuf, String)>,
+) -> VirtualWorkspaceSplit {
     let mut pkg_jsons: Vec<(PathBuf, String)> = Vec::new();
     let mut cargo_tomls: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
-    let mut compiler_configs: Vec<(PathBuf, String)> = Vec::new();
+    let mut compiler_configs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut manifests: HashMap<PathBuf, String> = HashMap::new();
     let mut source_files: Vec<(PathBuf, String)> = Vec::new();
     for (path, content) in files {
@@ -312,14 +320,14 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             cargo_tomls.push((parent_dir, path, content));
         } else if is_non_js_manifest_filename(file_name) {
             if is_compiler_config_filename(file_name) {
-                compiler_configs.push((parent_dir, content.clone()));
+                compiler_configs.push((parent_dir, path.clone(), content.clone()));
             }
             manifests.insert(path, content);
         } else if file_name.starts_with("dotore.config.") {
             config_files.push((parent_dir, path, content));
         } else {
             if is_compiler_config_filename(file_name) {
-                compiler_configs.push((parent_dir, content.clone()));
+                compiler_configs.push((parent_dir, path.clone(), content.clone()));
             }
             manifests.insert(path.clone(), content.clone());
             source_files.push((path, content));
@@ -344,14 +352,14 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
 
     let mut packages = Vec::new();
     for (dir, pkg_content) in &pkg_jsons {
-        let mut gate = CapabilityGate::from_package_json_str(pkg_content);
-        if compiler_configs
-            .iter()
-            .any(|(c_dir, c_text)| c_dir == dir && content_enables_react_compiler(c_text))
-        {
-            gate.has_react_compiler = true;
-            gate.capabilities.insert(Capability::ReactCompiler);
+        let mut dir_manifest_sources: Vec<(PathBuf, &str)> =
+            vec![(dir.join("package.json"), pkg_content.as_str())];
+        for (c_dir, c_path, c_text) in &compiler_configs {
+            if c_dir == dir {
+                dir_manifest_sources.push((c_path.clone(), c_text.as_str()));
+            }
         }
+        let gate = js_analyzer.infer_capability_gate(dir, &dir_manifest_sources);
         let local_cfg = config_files
             .iter()
             .find(|(c_dir, _, _)| c_dir == dir)
@@ -419,15 +427,6 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     }
 }
 
-fn is_compiler_config_filename(file_name: &str) -> bool {
-    file_name.starts_with("next.config.")
-        || file_name.starts_with("babel.config.")
-        || file_name.starts_with(".babelrc")
-        || file_name.starts_with("vite.config.")
-        || file_name == "app.json"
-        || file_name.starts_with("app.config.")
-}
-
 fn is_non_js_manifest_filename(file_name: &str) -> bool {
     file_name == "tsconfig.json"
         || file_name == "jsconfig.json"
@@ -457,7 +456,8 @@ pub fn scan_workspace(options: &ScanOptions) -> io::Result<(JsonReport, HashMap<
     scan_workspace_with_overrides(options, &CliOverrides::default())
 }
 
-/// Scans the filesystem according to [`ScanOptions`] and [`CliOverrides`], returning the [`JsonReport`] and source map.
+/// Scans the filesystem according to [`ScanOptions`] and [`CliOverrides`] through [`JsLanguageAnalyzer`],
+/// returning the [`JsonReport`] and source map.
 ///
 /// # Errors
 /// Returns an `io::Error` if reading discovered files or an explicit `--config` file fails.
@@ -465,8 +465,10 @@ pub fn scan_workspace_with_overrides(
     options: &ScanOptions,
     overrides: &CliOverrides,
 ) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
+    let js_analyzer = JsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
     let workspace_root = determine_workspace_root(&options.paths);
-    let mut packages = discover_workspace_packages(&workspace_root);
+    let mut packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
 
     let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
         let content = fs::read_to_string(cfg_path)?;
@@ -485,7 +487,8 @@ pub fn scan_workspace_with_overrides(
         apply_cli_overrides_to_config(&mut pkg.config, overrides);
     }
 
-    let raw_paths = collect_source_files(&options.paths, options.include_tests);
+    let raw_paths =
+        collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
     let paths: Vec<PathBuf> = raw_paths
         .into_iter()
         .filter(|p| {
@@ -517,13 +520,14 @@ pub fn scan_workspace_with_overrides(
             }
         }
     }
-    let file_irs: Vec<_> = pairs
+
+    let extracted_files: Vec<ExtractedFile> = pairs
         .into_par_iter()
-        .map(|(path, source)| parse_file_ir(&path, &source))
+        .map(|(path, source)| js_analyzer.extract_file(&path, &source))
         .collect();
 
     let manifests = load_disk_manifests(&workspace_root, &packages, &sources);
-    let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
+    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, manifests);
     let mut diagnostics =
         evaluate_project_with_packages(&graph, &packages, options.rules.as_deref());
     enrich_cross_file_autofixes(&graph, &mut diagnostics, &sources);
@@ -556,7 +560,7 @@ pub fn scan_workspace_with_overrides(
             &diff_snap.repo_root,
             &diff_snap.changed_files,
             &diff_snap.line_ranges,
-            &graph.files,
+            &extracted_files,
             &sources,
         );
         diff_info = Some(diff_snap.info);
@@ -596,7 +600,7 @@ pub fn scan_workspace_with_overrides(
                         &diff_snap.repo_root,
                         &diff_snap.changed_files,
                         &diff_snap.line_ranges,
-                        &graph.files,
+                        &extracted_files,
                         &sources,
                     );
                     diff_info = Some(diff_snap.info);
@@ -640,8 +644,10 @@ pub fn scan_design(
         design_rules.retain(|r| explicit_rules.contains(r));
     }
 
+    let js_analyzer = JsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
     let workspace_root = determine_workspace_root(&options.paths);
-    let mut packages = discover_workspace_packages(&workspace_root);
+    let mut packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
 
     let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
         let content = fs::read_to_string(cfg_path)?;
@@ -660,7 +666,8 @@ pub fn scan_design(
         apply_cli_overrides_to_config(&mut pkg.config, overrides);
     }
 
-    let raw_paths = collect_source_files(&options.paths, options.include_tests);
+    let raw_paths =
+        collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
     let paths: Vec<PathBuf> = raw_paths
         .into_iter()
         .filter(|p| {
@@ -678,13 +685,13 @@ pub fn scan_design(
         }
     }
 
-    let file_irs: Vec<_> = pairs
+    let extracted_files: Vec<ExtractedFile> = pairs
         .into_par_iter()
-        .map(|(path, source)| parse_file_ir(&path, &source))
+        .map(|(path, source)| js_analyzer.extract_file(&path, &source))
         .collect();
 
     // Build a lightweight ProjectGraph without manifests to skip supply-chain, dead-code, and cycle passes
-    let graph = ProjectGraph::build(file_irs);
+    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
 
     let mut diagnostics = Vec::new();
     for file in &graph.files {
@@ -695,7 +702,7 @@ pub fn scan_design(
         for &rule in &design_rules {
             if design_cfg.explicit_rule_override(rule).is_none() {
                 let meta = rule.metadata();
-                if file.file_context != crate::ir::FileContext::Production
+                if file.file_context != FileContext::Production
                     && meta.tags.contains(&RuleTag::TestNoise)
                     && !meta.tags.contains(&RuleTag::MigrationHint)
                     && options.rules.is_none()
@@ -711,8 +718,6 @@ pub fn scan_design(
                     .insert(rule.as_str().to_string(), default_ov);
             }
         }
-        // Evaluate with `enabled_rules: None` so CapabilityGate, `test-noise`, and `ignore.*` config apply normally,
-        // then retain only `design_rules`.
         let mut file_diags = Vec::new();
         evaluate_file_in_package(
             &graph,
@@ -732,7 +737,6 @@ pub fn scan_design(
     }
 
     let mut report = build_report_with_packages(&graph, diagnostics, &sources, &packages);
-    // Omit health-score pass on focused design audits
     report.summary.health_score = 100;
     report.summary.score_label = "Excellent".to_string();
     for proj in &mut report.projects {

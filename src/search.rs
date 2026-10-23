@@ -1,29 +1,16 @@
 //! Native fuzzy **Symbol Outline** search (`dotore search`).
 
-use std::{
-    collections::HashMap,
-    io,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io, path::PathBuf};
 
+use dotore_core::ir::{LanguageAnalyzer, SymbolKind};
 pub use dotore_core::search::{
     SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
     format_search_json, format_search_text, score_fuzzy, search_extracted_files,
     search_project_sources_with, search_project_sources_with_analyzers, search_symbols_with,
     search_symbols_with_analyzers, should_highlight_search, should_highlight_stdout,
 };
-
-use crate::ir::{SymbolKind, SymbolOutline, parse_file_ir};
-
-fn extract_js_symbol_outlines(path: &Path, source: &str) -> Vec<SymbolOutline> {
-    use dotore_core::LanguageAnalyzer as _;
-    if dotore_rs::RsLanguageAnalyzer.supports_path(path) {
-        return dotore_rs::RsLanguageAnalyzer
-            .extract_file(path, source)
-            .symbol_outlines;
-    }
-    parse_file_ir(path, source).symbol_outlines
-}
+use dotore_js::JsLanguageAnalyzer;
+use dotore_rs::RsLanguageAnalyzer;
 
 /// Searches in-memory `(PathBuf, String)` files for **Symbol Outlines** matching `query`.
 #[must_use]
@@ -33,7 +20,11 @@ pub fn search_project_sources(
     kinds: Option<&[SymbolKind]>,
     limit: usize,
 ) -> Vec<SymbolSearchResult> {
-    search_project_sources_with(query, files, kinds, limit, extract_js_symbol_outlines)
+    JsLanguageAnalyzer::register_core_hooks();
+    let js_analyzer = JsLanguageAnalyzer;
+    let rs_analyzer = RsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &rs_analyzer];
+    search_project_sources_with_analyzers(query, files, kinds, limit, analyzers)
 }
 
 /// Discovers source files under `options.paths` and fuzzy-searches their **Symbol Outlines**.
@@ -44,5 +35,9 @@ pub fn search_symbols(
     query: &str,
     options: &SearchOptions,
 ) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
-    search_symbols_with(query, options, extract_js_symbol_outlines)
+    JsLanguageAnalyzer::register_core_hooks();
+    let js_analyzer = JsLanguageAnalyzer;
+    let rs_analyzer = RsLanguageAnalyzer;
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer, &rs_analyzer];
+    search_symbols_with_analyzers(query, options, analyzers)
 }
