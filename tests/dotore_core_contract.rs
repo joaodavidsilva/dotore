@@ -120,7 +120,7 @@ fn root_dotore_facade_dispatches_js_ts_entrypoints_through_js_language_analyzer(
     assert!(js.supports_path(Path::new("src/App.tsx")));
     assert!(js.supports_path(Path::new("src/index.mjs")));
     assert!(js.supports_path(Path::new("src/index.cjs")));
-    assert_eq!(js.manifest_filenames(), &["package.json"]);
+    assert_eq!(js.manifest_filenames(), &["package.json", "angular.json"]);
 
     let bad_src = r#"import { useState, useEffect } from 'react';
 export function Form({ first, last }: { first: string; last: string }) {
