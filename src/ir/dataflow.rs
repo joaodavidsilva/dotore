@@ -817,6 +817,12 @@ pub(crate) fn extract_semantic_rule_sites(
         line_starts,
         &mut sites,
     );
+    crate::rules::remotion::extract_remotion_and_ecosystem_sites(
+        program,
+        semantic,
+        line_starts,
+        &mut sites,
+    );
 
     sites
 }

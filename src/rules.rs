@@ -17,6 +17,7 @@ pub(crate) mod r3f;
 pub(crate) mod react_builtins;
 pub(crate) mod react_native;
 pub(crate) mod reduced_motion;
+pub(crate) mod remotion;
 pub(crate) mod security;
 pub(crate) mod server_nextjs;
 pub(crate) mod state_and_effects;
