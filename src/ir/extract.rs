@@ -223,6 +223,13 @@ where
         &mut context_providers,
         &mut context_consumers,
     );
+    crate::rules::effect_teardown::extract_effect_teardown_sites(
+        path,
+        &semantic,
+        &subjects,
+        &line_starts,
+        &mut semantic_sites,
+    );
     let contextual_owner_spans = extract_contextual_owner_spans(&semantic);
 
     let file_ir = FileIr {

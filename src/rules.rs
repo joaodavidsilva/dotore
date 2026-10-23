@@ -8,6 +8,7 @@ pub(crate) mod correctness;
 pub(crate) mod derived_state;
 pub(crate) mod design;
 pub(crate) mod ecosystem_ui;
+pub(crate) mod effect_teardown;
 pub(crate) mod external_sync;
 pub(crate) mod js_performance;
 pub(crate) mod parent_flow;
@@ -574,6 +575,15 @@ fn resolve_rule_activation(
 
     // 4. Capability Gate check (unless explicitly forced via CLI `--rule`)
     if !has_explicit_cli_rule && !gate.allows_rule(meta) {
+        return None;
+    }
+    if !has_explicit_cli_rule
+        && rule == RuleId::NoRefCallbackCleanupBeforeReact19
+        && gate
+            .dependencies
+            .get("react")
+            .is_some_and(|ver| ver.contains("19"))
+    {
         return None;
     }
 
