@@ -24,6 +24,11 @@ crates/
       score.rs            # deterministic local 0-100 health score and P0-P3 tier calculation
       search.rs           # native fuzzy Symbol Outline search (dotore search)
       report.rs           # terminal, JSON, why/explain, CI, install, and HTML reporters
+  dotore-rs/
+    src/
+      lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
+      ir.rs               # single-pass syn AST, Subject, SymbolOutline, and suppression extraction
+      rules.rs            # Rust rule activation gating and core safety rule evaluation
 src/
   main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
   lib.rs                  # crate root: narrow public surface, wires internal modules
