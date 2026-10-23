@@ -20,9 +20,12 @@ pub mod rules;
 pub mod axum_sqlx_ui_arch;
 /// Crate-level `ProjectGraph` analysis for `dotore-rs` (`rs-arch-no-unused-pub-crate-items`).
 pub mod graph;
+/// Single-pass Tokio async hazard and Rust allocation performance detectors.
+pub mod tokio_perf;
 
 pub use ir::{RsCandidateFinding, RsFileIr, RsSubjectIr, RsSubjectKind, extract_rs_file};
 pub use rules::{CORE_RUST_SAFETY_RULES, evaluate_rs_file, evaluate_rs_package};
+pub use tokio_perf::TOKIO_AND_PERF_RULES;
 
 /// Rust language analyzer implementing [`LanguageAnalyzer`] for `.rs` files and `Cargo.toml` manifests.
 #[derive(Debug, Clone, Copy, Default)]
@@ -147,7 +150,6 @@ pub fn infer_cargo_toml_capability_gate(
     }
 
     let mut gate = CapabilityGate::with_capabilities([Capability::Rust]);
-
     for (path, src) in manifest_sources {
         if path
             .file_name()

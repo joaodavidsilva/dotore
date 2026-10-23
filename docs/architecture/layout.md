@@ -74,6 +74,7 @@ crates/
       rules.rs            # Rust rule activation gating and core safety rule evaluation
       axum_sqlx_ui_arch.rs# single-pass detectors for Axum, SQLx, Leptos/Dioxus UI signals, and boolean params
       graph.rs            # Rust crate ProjectGraph analysis (rs-arch-no-unused-pub-crate-items)
+      tokio_perf.rs       # single-pass Tokio async hazard and Rust allocation performance detectors
 src/
   main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API

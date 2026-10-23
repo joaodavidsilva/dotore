@@ -69,7 +69,7 @@ pub struct RsCandidateFinding {
     pub loc: SourceLoc,
     /// 0-based byte span of the finding.
     pub span: ByteSpan,
-    /// Optional deterministic autofix patch for this candidate finding.
+    /// Optional deterministic [`AutofixPatch`] attached to this finding.
     pub autofix: Option<AutofixPatch>,
 }
 
@@ -129,6 +129,12 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
     let graph_ir = if let Ok(ast) = &parsed {
         visitor.extract_crate_file(ast);
         crate::axum_sqlx_ui_arch::extract_axum_sqlx_ui_arch_findings(
+            ast,
+            source,
+            &line_starts,
+            &mut visitor.findings,
+        );
+        crate::tokio_perf::extract_tokio_perf_findings(
             ast,
             source,
             &line_starts,
@@ -1280,6 +1286,29 @@ fn map_rust_lint_to_rule_keys(lint: &str) -> Vec<String> {
         "rs_no_mem_forget" | "rs-no-mem-forget" | "clippy::mem_forget" | "mem_forget" => {
             vec!["rs-no-mem-forget".to_string()]
         }
+        "rs_tokio_no_std_lock_across_await"
+        | "rs-tokio-no-std-lock-across-await"
+        | "clippy::await_holding_lock"
+        | "await_holding_lock" => vec!["rs-tokio-no-std-lock-across-await".to_string()],
+        "rs_tokio_no_blocking_in_async" | "rs-tokio-no-blocking-in-async" => {
+            vec!["rs-tokio-no-blocking-in-async".to_string()]
+        }
+        "rs_tokio_prefer_bounded_channel" | "rs-tokio-prefer-bounded-channel" => {
+            vec!["rs-tokio-prefer-bounded-channel".to_string()]
+        }
+        "rs_perf_no_clone_in_loop" | "rs-perf-no-clone-in-loop" => {
+            vec!["rs-perf-no-clone-in-loop".to_string()]
+        }
+        "rs_perf_hoist_regex_to_lazylock" | "rs-perf-hoist-regex-to-lazylock" => {
+            vec!["rs-perf-hoist-regex-to-lazylock".to_string()]
+        }
+        "rs_perf_prefer_vec_with_capacity" | "rs-perf-prefer-vec-with-capacity" => {
+            vec!["rs-perf-prefer-vec-with-capacity".to_string()]
+        }
+        "rs_perf_no_unnecessary_format"
+        | "rs-perf-no-unnecessary-format"
+        | "clippy::useless_format"
+        | "useless_format" => vec!["rs-perf-no-unnecessary-format".to_string()],
         other => {
             if let Some(rule_id) =
                 RuleId::parse(other).or_else(|| RuleId::parse(&other.replace('_', "-")))
