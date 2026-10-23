@@ -68,6 +68,8 @@ crates/
     src/
       lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer), pyproject.toml capability gate, and Python safety rules
       web_orm_security.rs # Pydantic, FastAPI, SQLAlchemy/Django ORM N+1, and SQL/shell/deserialization security rules
+      async_perf_arch.rs  # asyncio concurrency hazards, regex hoisting autofix, and loop membership performance rules
+      graph.rs            # Python package ProjectGraph analysis (circular imports, unused exports, unawaited coroutines)
   dotore-rs/
     src/
       lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery

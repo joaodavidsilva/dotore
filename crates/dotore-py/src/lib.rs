@@ -22,6 +22,8 @@ use ruff_python_parser::{Parsed, parse_unchecked_source};
 use ruff_text_size::Ranged;
 
 mod web_orm_security;
+pub(crate) mod async_perf_arch;
+pub(crate) mod graph;
 
 /// Single-pass intermediate representation for a Python source file (`.py` or `.pyi`).
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ pub struct PyFileIr {
     pub line_starts: Vec<u32>,
     /// Pre-evaluated candidate rule diagnostics for all 5 core Python safety rules.
     pub candidate_diagnostics: Vec<Diagnostic>,
+    /// Cross-file module import/export graph metadata for `py-arch-*` rules.
+    pub module_graph: graph::PyModuleGraphInfo,
 }
 
 /// Python [`LanguageAnalyzer`] powered by `ruff_python_parser`.
@@ -135,16 +139,35 @@ impl LanguageAnalyzer for PyLanguageAnalyzer {
             parsed.suite(),
             &mut extractor.candidate_diagnostics,
         );
+        let mut potential_unawaited_calls = Vec::new();
+        async_perf_arch::extract_async_and_perf_diagnostics(
+            path,
+            source,
+            &line_starts,
+            is_stub_file,
+            parsed.suite(),
+            &mut extractor.candidate_diagnostics,
+            &mut potential_unawaited_calls,
+        );
         let subjects_count = extractor.subject_spans.len();
         let symbol_outlines = extractor.symbol_outlines;
         let subject_spans = extractor.subject_spans;
         let contextual_owner_spans = extractor.contextual_owner_spans;
         let candidate_diagnostics = extractor.candidate_diagnostics;
-
+        let mut module_graph = graph::extract_module_graph_info(
+            path,
+            source,
+            &line_starts,
+            is_stub_file,
+            parsed.suite(),
+            &symbol_outlines,
+        );
+        module_graph.potential_unawaited_calls = potential_unawaited_calls;
         let ir = PyFileIr {
             valid_syntax,
             line_starts,
             candidate_diagnostics,
+            module_graph,
         };
 
         let mut extracted =
@@ -191,7 +214,7 @@ impl LanguageAnalyzer for PyLanguageAnalyzer {
                     continue;
                 }
                 let meta = candidate.rule.metadata();
-                if !package.capability_gate.allows_rule(meta) {
+                if !graph::gate_allows_py_rule(package, candidate.rule) {
                     continue;
                 }
                 if enabled_rules.is_none()
@@ -215,6 +238,7 @@ impl LanguageAnalyzer for PyLanguageAnalyzer {
                 diagnostics.push(diag);
             }
         }
+        graph::evaluate_package_graph_rules(package, files, enabled_rules, &mut diagnostics);
 
         PackageAnalysisResult {
             diagnostics,
