@@ -5,6 +5,7 @@ pub(crate) mod a11y;
 pub(crate) mod architecture;
 pub(crate) mod bundle_size;
 pub(crate) mod correctness;
+pub(crate) mod defensive_js;
 pub(crate) mod derived_state;
 pub(crate) mod design;
 pub(crate) mod ecosystem_ui;

@@ -230,6 +230,12 @@ where
         &line_starts,
         &mut semantic_sites,
     );
+    crate::rules::defensive_js::extract_defensive_js_sites(
+        &semantic,
+        &subjects,
+        &line_starts,
+        &mut semantic_sites,
+    );
     let contextual_owner_spans = extract_contextual_owner_spans(&semantic);
 
     let file_ir = FileIr {

@@ -28,14 +28,18 @@ src/
     architecture.rs       # nested components, module-scope hoisting, context fan-out, and boundaries
     bundle_size.rs        # barrel imports, heavy packages, and dynamic import rules
     correctness.rs        # unstable keys, numeric && render, DOM nesting, and input rules
+    defensive_js.rs       # defensive JS/TS/DOM runtime safety, optional chaining, and parse guards
     design.rs             # opt-in UI design and Tailwind layout rules
     ecosystem_ui.rs       # Preact, Ink terminal UI, and Zod v4 rules
+    effect_teardown.rs    # Effect Node teardown and React component/hook/JSX correctness rules
     js_performance.rs     # loop and hot-path JavaScript allocation/iteration rules
     performance.rs        # React re-render, hydration, and CSS motion performance rules
     r3f.rs                # Three.js, WebGL, and React Three Fiber 60fps frame-loop rules
     react_native.rs       # React Native and Expo AST and project configuration rules
     react_builtins.rs     # exhaustive-deps, rules-of-hooks, JSX built-in rules, and inline prop gating
+    react_router.rs       # React Router v7/v8 route tree, loader/action/middleware, and navigation rules
     reduced_motion.rs     # cross-file motion library and CSS prefers-reduced-motion rules
+    remotion.rs           # Motion, Remotion, TanStack Form/Table/Virtual, Redux, and UI primitive rules
     security.rs           # XSS, eval, SSRF, and trust-boundary security rules
     server_nextjs.rs      # Server Actions, RSC, and Next.js App Router rules
     state_and_effects.rs  # state/effect loop, render setState, ref/callback purity, and lazy init rules
