@@ -42,6 +42,7 @@ crates/
         parent_flow.rs    # event-handler effects and upward parent callback notifications
         external_sync.rs  # external store subscriptions and effect data fetching
         a11y.rs           # WCAG and ARIA accessibility rules
+        angular.rs        # Angular Signals, RxJS teardown, OnPush autofix, @for track, lifecycle, and DOM rules
         architecture.rs   # Subject size/complexity, props, inline HOCs, hoisting, and context/boundary rules
         bundle_size.rs    # barrel imports, heavy packages, and dynamic import rules
         correctness.rs    # unstable keys, numeric && render, DOM nesting, and input rules
@@ -63,6 +64,9 @@ crates/
         stores.rs         # Zustand, Jotai, MobX, and Valtio state-store rules
         supply_chain.rs   # pnpm hardening, RSC advisory, and Socket supply-chain rules
         tanstack.rs       # TanStack Query and TanStack Start loader/query rules
+  dotore-py/
+    src/
+      lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer), pyproject.toml capability gate, and Python safety rules
   dotore-rs/
     src/
       lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery

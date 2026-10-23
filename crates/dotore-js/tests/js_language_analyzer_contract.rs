@@ -19,7 +19,7 @@ fn js_language_analyzer_supports_all_js_ts_extensions_and_manifest_filenames() {
     let analyzer = JsLanguageAnalyzer::new();
     assert_eq!(analyzer.language_id(), LanguageId::JavaScript);
     assert_eq!(analyzer.language_id(), LanguageId::Js);
-    assert_eq!(analyzer.manifest_filenames(), &["package.json"]);
+    assert_eq!(analyzer.manifest_filenames(), &["package.json", "angular.json"]);
 
     for supported in [
         "src/index.js",
