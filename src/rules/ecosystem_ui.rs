@@ -872,6 +872,44 @@ fn check_ink_jsx_opening(
             autofix: None,
         });
     }
+    // 3b. `ink-newline-inside-text`: `<Newline>` outside `<Text>`
+    if ink_el == Some("Newline") && !has_ink_text_ancestor(semantic, node_id, ink_imports, source)
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::InkNewlineInsideText,
+            subject_name: subject_name.clone(),
+            message_id: "inkNewlineInsideText",
+            target_name: "Newline".to_string(),
+            message: "Ink `<Newline>` must be rendered inside a `<Text>` component.".to_string(),
+            loc: loc_from_line_starts(line_starts, opening.span.start),
+            span: ByteSpan {
+                start: opening.span.start,
+                end: opening.span.end,
+            },
+            autofix: None,
+        });
+    }
+
+    // 3c. `ink-suspense-requires-concurrent`: `<Suspense>` in Ink without `concurrent: true`
+    if matches!(raw_name, "Suspense" | "React.Suspense")
+        && !source.contains("concurrent: true")
+        && !source.contains("concurrent:true")
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::InkSuspenseRequiresConcurrent,
+            subject_name: subject_name.clone(),
+            message_id: "inkSuspenseRequiresConcurrent",
+            target_name: "Suspense".to_string(),
+            message: "Using `<Suspense>` in Ink requires `render(<App />, { concurrent: true })`."
+                .to_string(),
+            loc: loc_from_line_starts(line_starts, opening.span.start),
+            span: ByteSpan {
+                start: opening.span.start,
+                end: opening.span.end,
+            },
+            autofix: None,
+        });
+    }
 
     // 4. `ink-static-is-append-only` & `ink-no-multiple-static`
     if ink_el == Some("Static") {

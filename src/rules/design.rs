@@ -2683,6 +2683,165 @@ fn check_extended_design_patterns(
             );
         }
     }
+    // `no-pure-black-background`
+    let has_pure_black_bg = unvariant_tokens
+        .iter()
+        .any(|u| matches!(*u, "bg-black" | "bg-[#000]" | "bg-[#000000]"))
+        || ["backgroundColor", "background"].iter().any(|prop| {
+            get_style_prop_str(opening, prop, semantic, const_strings).is_some_and(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "#000" | "#000000" | "black" | "rgb(0, 0, 0)" | "rgb(0,0,0)"
+                )
+            })
+        });
+    if has_pure_black_bg {
+        push_design_site(
+            sites,
+            RuleId::NoPureBlackBackground,
+            subject_name.clone(),
+            "noPureBlackBackground",
+            tag,
+            "Surface uses a pure-black background; prefer a tinted dark neutral token.".to_string(),
+            loc,
+            span,
+            None,
+        );
+    }
+
+    // `no-italic-serif-display-heading`
+    if matches!(tag, "h1" | "h2") {
+        let is_serif = unvariant_tokens.contains(&"font-serif")
+            || get_style_prop_str(opening, "fontFamily", semantic, const_strings)
+                .is_some_and(|ff| ff.to_ascii_lowercase().contains("serif") && !ff.to_ascii_lowercase().contains("sans-serif"));
+        let is_italic = unvariant_tokens.contains(&"italic")
+            || get_style_prop_str(opening, "fontStyle", semantic, const_strings).as_deref()
+                == Some("italic")
+            || subtree_has_tag_matching(jsx_el, |t| matches!(t, "em" | "i"));
+        if is_serif && is_italic {
+            push_design_site(
+                sites,
+                RuleId::NoItalicSerifDisplayHeading,
+                subject_name.clone(),
+                "noItalicSerifDisplayHeading",
+                tag,
+                "Display heading combines italic and serif styling.".to_string(),
+                loc,
+                span,
+                None,
+            );
+        }
+    }
+
+    // `no-full-viewport-centered-hero`
+    if matches!(tag, "section" | "header" | "div")
+        && unvariant_tokens.iter().any(|u| {
+            matches!(
+                *u,
+                "min-h-screen" | "h-screen" | "min-h-dvh" | "h-dvh" | "min-h-[100vh]" | "h-[100vh]"
+            )
+        })
+        && unvariant_tokens.contains(&"items-center")
+        && unvariant_tokens.contains(&"justify-center")
+        && (unvariant_tokens.contains(&"text-center") || has_descendant_text_center(jsx_el, semantic, const_strings))
+        && subtree_has_tag_matching(jsx_el, |t| t == "h1")
+    {
+        push_design_site(
+            sites,
+            RuleId::NoFullViewportCenteredHero,
+            subject_name.clone(),
+            "noFullViewportCenteredHero",
+            tag,
+            "Hero uses a full-viewport centered template.".to_string(),
+            loc,
+            span,
+            None,
+        );
+    }
+
+    // `no-hero-eyebrow-chip` & `no-numbered-section-markers` & `no-icon-tile-heading-stack`
+    let direct_el_children: Vec<&JSXElement<'_>> = jsx_el
+        .children
+        .iter()
+        .filter_map(|c| {
+            if let JSXChild::Element(el) = c {
+                Some(el.as_ref())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if direct_el_children.len() >= 2 {
+        let first_el = direct_el_children[0];
+        let second_el = direct_el_children[1];
+        let first_tag = get_jsx_tag_name(&first_el.opening_element.name);
+        let second_tag = get_jsx_tag_name(&second_el.opening_element.name);
+        let first_cls =
+            get_class_name_str(&first_el.opening_element, semantic, const_strings).unwrap_or_default();
+        let first_toks: Vec<&str> = first_cls
+            .split_whitespace()
+            .map(|t| t.rsplit(':').next().unwrap_or(t).trim_start_matches('!'))
+            .collect();
+        let first_txt = collect_all_static_text(first_el);
+        let first_trimmed = first_txt.trim();
+
+        if second_tag == "h1"
+            && !first_trimmed.is_empty()
+            && first_trimmed.len() <= 40
+            && (first_toks.contains(&"rounded-full")
+                || (first_toks.contains(&"uppercase")
+                    && first_toks.iter().any(|u| u.starts_with("border") || u.starts_with("bg-"))))
+        {
+            push_design_site(
+                sites,
+                RuleId::NoHeroEyebrowChip,
+                subject_name.clone(),
+                "noHeroEyebrowChip",
+                &first_tag,
+                "Hero places a decorative eyebrow chip above its primary heading.".to_string(),
+                loc_from_line_starts(line_starts, first_el.opening_element.span.start),
+                ByteSpan {
+                    start: first_el.opening_element.span.start,
+                    end: first_el.opening_element.span.end,
+                },
+                None,
+            );
+        }
+
+        if matches!(second_tag.as_str(), "h2" | "h3") && is_numbered_section_marker_text(first_trimmed) {
+            push_design_site(
+                sites,
+                RuleId::NoNumberedSectionMarkers,
+                subject_name.clone(),
+                "noNumberedSectionMarkers",
+                &first_tag,
+                "Section uses a decorative numeric marker before its heading.".to_string(),
+                loc_from_line_starts(line_starts, first_el.opening_element.span.start),
+                ByteSpan {
+                    start: first_el.opening_element.span.start,
+                    end: first_el.opening_element.span.end,
+                },
+                None,
+            );
+        }
+
+        if is_tailwind_card_tokens(unvariant_tokens)
+            && matches!(second_tag.as_str(), "h2" | "h3" | "h4")
+            && is_icon_tile_element(first_el, &first_toks)
+        {
+            push_design_site(
+                sites,
+                RuleId::NoIconTileHeadingStack,
+                subject_name.clone(),
+                "noIconTileHeadingStack",
+                tag,
+                "Card stacks a boxed icon tile above its heading.".to_string(),
+                loc,
+                span,
+                None,
+            );
+        }
+    }
 
     // Page-root checks on `<main>` or `<article>`
     if matches!(tag, "main" | "article") {
@@ -2718,6 +2877,123 @@ fn check_page_root_design_rules(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     let lower_text = trimmed_text.to_ascii_lowercase();
+    let root_opening = &jsx_el.opening_element;
+    let root_cls = get_class_name_str(root_opening, semantic, const_strings).unwrap_or_default();
+    let root_toks: Vec<&str> = root_cls
+        .split_whitespace()
+        .map(|t| t.rsplit(':').next().unwrap_or(t).trim_start_matches('!'))
+        .collect();
+
+    // `no-common-root-font`
+    let has_common_font = root_toks.contains(&"font-sans")
+        || get_style_prop_str(root_opening, "fontFamily", semantic, const_strings).is_some_and(
+            |ff| {
+                let primary = ff
+                    .split(',')
+                    .next()
+                    .unwrap_or(&ff)
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .to_ascii_lowercase();
+                matches!(
+                    primary.as_str(),
+                    "inter"
+                        | "roboto"
+                        | "arial"
+                        | "helvetica"
+                        | "system-ui"
+                        | "sans-serif"
+                        | "open sans"
+                        | "segoe ui"
+                )
+            },
+        );
+    if has_common_font {
+        push_design_site(
+            sites,
+            RuleId::NoCommonRootFont,
+            subject_name.clone(),
+            "noCommonRootFont",
+            tag,
+            "Page root uses a generic default font choice.".to_string(),
+            loc,
+            span,
+            None,
+        );
+    }
+
+    // `no-default-purple-page-gradient`
+    let has_purple_page_gradient = (root_toks
+        .iter()
+        .any(|u| u.starts_with("bg-gradient-") || u.starts_with("bg-linear-"))
+        && root_toks.iter().any(|u| {
+            u.starts_with("from-purple-")
+                || u.starts_with("from-violet-")
+                || u.starts_with("from-indigo-")
+                || u.starts_with("via-purple-")
+                || u.starts_with("to-purple-")
+                || u.starts_with("to-violet-")
+                || u.starts_with("to-indigo-")
+        }))
+        || ["background", "backgroundImage"].iter().any(|p| {
+            get_style_prop_str(root_opening, p, semantic, const_strings).is_some_and(|v| {
+                let lower = v.to_ascii_lowercase();
+                lower.contains("gradient(")
+                    && (lower.contains("purple")
+                        || lower.contains("violet")
+                        || lower.contains("indigo")
+                        || lower.contains("#7c3aed")
+                        || lower.contains("#6366f1")
+                        || lower.contains("#8b5cf6"))
+            })
+        });
+    if has_purple_page_gradient {
+        push_design_site(
+            sites,
+            RuleId::NoDefaultPurplePageGradient,
+            subject_name.clone(),
+            "noDefaultPurplePageGradient",
+            tag,
+            "Page root uses a default purple-spectrum gradient.".to_string(),
+            loc,
+            span,
+            None,
+        );
+    }
+
+    // `no-default-warm-page-surface`
+    let has_warm_page_surface = root_toks.iter().any(|u| {
+        matches!(
+            *u,
+            "bg-amber-50"
+                | "bg-orange-50"
+                | "bg-yellow-50"
+                | "bg-stone-50"
+                | "bg-[#faf8f5]"
+                | "bg-[#fdfbf7]"
+                | "bg-[#f9f6f0]"
+        )
+    }) || ["backgroundColor", "background"].iter().any(|p| {
+        get_style_prop_str(root_opening, p, semantic, const_strings).is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "#faf8f5" | "#fdfbf7" | "#f9f6f0" | "#fffbeb" | "#fefce8" | "#fafaf9"
+            )
+        })
+    });
+    if has_warm_page_surface {
+        push_design_site(
+            sites,
+            RuleId::NoDefaultWarmPageSurface,
+            subject_name.clone(),
+            "noDefaultWarmPageSurface",
+            tag,
+            "Page defaults to a warm off-white surface.".to_string(),
+            loc,
+            span,
+            None,
+        );
+    }
 
     if GENERIC_MARKETING_PHRASES
         .iter()
@@ -2874,6 +3150,23 @@ fn check_page_root_design_rules(
             "noRepeatedSectionShells",
             tag,
             "Page repeats the same large-padding centered max-width section shell.".to_string(),
+            loc,
+            span,
+            None,
+        );
+    }
+    if stats
+        .section_py_counts
+        .values()
+        .any(|&count| count >= 4 && stats.section_py_counts.len() == 1)
+    {
+        push_design_site(
+            sites,
+            RuleId::NoMonotonousPageSpacing,
+            subject_name.clone(),
+            "noMonotonousPageSpacing",
+            tag,
+            "Page repeats one vertical spacing value across all sections.".to_string(),
             loc,
             span,
             None,
@@ -3497,6 +3790,7 @@ struct PageSubtreeStats {
     glass_surface_count: usize,
     hover_scale_sites: Vec<(SourceLoc, ByteSpan)>,
     section_shell_count: usize,
+    section_py_counts: HashMap<String, usize>,
 }
 
 fn collect_page_subtree_stats(
@@ -3572,10 +3866,63 @@ fn collect_page_subtree_stats(
     {
         stats.section_shell_count += 1;
     }
+    if tag == "section" {
+        for &t in &toks {
+            let u = t.rsplit(':').next().unwrap_or(t).trim_start_matches('!');
+            if u.starts_with("py-") {
+                *stats.section_py_counts.entry(u.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
 
     for child in &jsx_el.children {
         if let JSXChild::Element(child_el) = child {
             collect_page_subtree_stats(child_el, semantic, const_strings, line_starts, stats);
         }
     }
+}
+
+fn has_descendant_text_center(
+    jsx_el: &JSXElement<'_>,
+    semantic: &Semantic<'_>,
+    const_strings: &HashMap<SymbolId, String>,
+) -> bool {
+    for child in &jsx_el.children {
+        if let JSXChild::Element(el) = child {
+            if get_class_name_str(&el.opening_element, semantic, const_strings)
+                .is_some_and(|cls| cls.split_whitespace().any(|t| t.ends_with("text-center")))
+            {
+                return true;
+            }
+            if has_descendant_text_center(el, semantic, const_strings) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_numbered_section_marker_text(s: &str) -> bool {
+    let trimmed = s
+        .trim()
+        .trim_start_matches(['0', '#'])
+        .trim_end_matches(['.', '/', '—', '-']);
+    !s.is_empty()
+        && s.len() <= 4
+        && (s.starts_with('0') || s.starts_with('#') || s.ends_with('.'))
+        && !trimmed.is_empty()
+        && trimmed.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_icon_tile_element(el: &JSXElement<'_>, unvariant_tokens: &[&str]) -> bool {
+    let has_box = unvariant_tokens
+        .iter()
+        .any(|u| u.starts_with("rounded") || u.starts_with("bg-") || u.starts_with("border"));
+    let has_compact_size = unvariant_tokens
+        .iter()
+        .any(|u| parse_tailwind_size_px(u).is_some_and(|px| px <= 64.0));
+    let has_icon = subtree_has_tag_matching(el, |t| {
+        t == "svg" || t.ends_with("Icon") || t.starts_with("Icon")
+    });
+    has_box && (has_compact_size || has_icon)
 }

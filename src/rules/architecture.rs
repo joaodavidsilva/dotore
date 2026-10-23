@@ -104,10 +104,11 @@ fn check_subject_architecture_rules(
         return;
     };
     let top_insert_offset = find_top_level_statement_start(semantic, subject_node_id);
+    check_subject_size_complexity_and_props(semantic, subject_node_id, &subj_name, line_starts, sites);
 
     // Collect rendered PascalCase JSX elements or attribute references inside `subj_span`
     let mut rendered_pascal_names: HashSet<String> = HashSet::new();
-    for (_, node) in semantic.nodes().iter_enumerated() {
+    for (inner_node_id, node) in semantic.nodes().iter_enumerated() {
         if !subj_span.contains_inclusive(node.span()) {
             continue;
         }
@@ -128,6 +129,7 @@ fn check_subject_architecture_rules(
                 {
                     rendered_pascal_names.insert(id.name.to_string());
                 }
+                check_generic_handler_name_attr(attr, &subj_name, line_starts, sites);
             }
             AstKind::CallExpression(call)
                 if is_react_hook_callee(semantic, &call.callee, "useMemo")
@@ -146,6 +148,17 @@ fn check_subject_architecture_rules(
                     },
                     autofix: None,
                 });
+            }
+            AstKind::CallExpression(call) => {
+                check_inline_hoc_and_render_in_render(
+                    semantic,
+                    subject_node_id,
+                    inner_node_id,
+                    call,
+                    &subj_name,
+                    line_starts,
+                    sites,
+                );
             }
             _ => {}
         }
@@ -648,6 +661,10 @@ fn check_module_and_expr_architecture_rules(
                         autofix: None,
                     });
                 }
+                check_no_react19_deprecated_apis(call, &subj_name, line_starts, sites);
+            }
+            AstKind::Class(cls) => {
+                check_no_legacy_class_lifecycles(semantic, cls, line_starts, sites);
             }
             _ => {}
         }
@@ -1268,4 +1285,418 @@ fn caller_site_has_ancestral_boundary(
     parent_callers.iter().all(|p_caller| {
         caller_site_has_ancestral_boundary(graph, p_caller, rem_suspense, rem_error, visited)
     })
+}
+
+fn check_subject_size_complexity_and_props(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+    subj_name: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let subj_span = semantic.nodes().get_node(subject_node_id).span();
+    let start_loc = loc_from_line_starts(line_starts, subj_span.start);
+    let end_loc = loc_from_line_starts(line_starts, subj_span.end);
+    let line_count = end_loc.line.saturating_sub(start_loc.line) + 1;
+    let span = ByteSpan {
+        start: subj_span.start,
+        end: subj_span.end,
+    };
+
+    // 1. `no-giant-component`
+    if line_count > 180 {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoGiantComponent,
+            subject_name: Some(subj_name.to_string()),
+            message_id: "noGiantComponent",
+            target_name: subj_name.to_string(),
+            message: format!(
+                "Component `{subj_name}` spans {line_count} lines (exceeding 180 lines); split it into smaller focused components or custom hooks."
+            ),
+            loc: start_loc,
+            span,
+            autofix: None,
+        });
+    }
+
+    // 2. `no-high-complexity-react-function`
+    let mut branch_points = 1_usize;
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !subj_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        match node.kind() {
+            AstKind::IfStatement(_)
+            | AstKind::ConditionalExpression(_)
+            | AstKind::LogicalExpression(_)
+            | AstKind::SwitchCase(_)
+            | AstKind::ForStatement(_)
+            | AstKind::ForOfStatement(_)
+            | AstKind::ForInStatement(_)
+            | AstKind::WhileStatement(_)
+            | AstKind::DoWhileStatement(_)
+            | AstKind::CatchClause(_) => {
+                branch_points += 1;
+            }
+            _ => {}
+        }
+    }
+    if branch_points > 12 {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoHighComplexityReactFunction,
+            subject_name: Some(subj_name.to_string()),
+            message_id: "noHighComplexityReactFunction",
+            target_name: subj_name.to_string(),
+            message: format!(
+                "`{subj_name}` has a cyclomatic complexity of {branch_points} (exceeding 12); extract complex branching logic into helper functions or child components."
+            ),
+            loc: start_loc,
+            span,
+            autofix: None,
+        });
+    }
+
+    // 3. `no-many-boolean-props`
+    if count_boolean_props_on_subject(semantic, subject_node_id) >= 4 {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoManyBooleanProps,
+            subject_name: Some(subj_name.to_string()),
+            message_id: "noManyBooleanProps",
+            target_name: subj_name.to_string(),
+            message: format!(
+                "Component `{subj_name}` accepts 4 or more boolean flag props; consolidate mutually exclusive or related flags into an explicit `variant` union prop."
+            ),
+            loc: start_loc,
+            span,
+            autofix: None,
+        });
+    }
+}
+
+fn count_boolean_props_on_subject(semantic: &Semantic<'_>, subject_node_id: NodeId) -> usize {
+    let params = match semantic.nodes().kind(subject_node_id) {
+        AstKind::Function(f) => Some(&f.params.items),
+        AstKind::ArrowFunctionExpression(a) => Some(&a.params.items),
+        AstKind::VariableDeclarator(decl) => match decl.init.as_ref().map(Expression::without_parentheses) {
+            Some(Expression::ArrowFunctionExpression(a)) => Some(&a.params.items),
+            Some(Expression::FunctionExpression(f)) => Some(&f.params.items),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(items) = params else {
+        return 0;
+    };
+    let Some(first_param) = items.first() else {
+        return 0;
+    };
+    let mut bool_names: HashSet<String> = HashSet::new();
+    if let BindingPattern::ObjectPattern(obj_pat) = &first_param.pattern {
+        for prop in &obj_pat.properties {
+            let key_opt = prop.key.static_name().and_then(|n| n.as_str().map(str::to_string));
+            let is_bool_default = matches!(
+                &prop.value,
+                BindingPattern::AssignmentPattern(assign)
+                    if matches!(assign.right.without_parentheses(), Expression::BooleanLiteral(_))
+            );
+            if let Some(k) = key_opt
+                && (is_bool_default || has_boolean_prop_prefix(&k))
+            {
+                bool_names.insert(k);
+            }
+        }
+    }
+    let param_src = first_param.span.source_text(semantic.source_text());
+    let ts_bool_hits = param_src.matches(": boolean").count() + param_src.matches("?: boolean").count();
+    bool_names.len().max(ts_bool_hits)
+}
+
+fn has_boolean_prop_prefix(name: &str) -> bool {
+    for prefix in ["is", "has", "can", "should", "with"] {
+        if let Some(rest) = name.strip_prefix(prefix)
+            && rest.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_generic_handler_name_attr(
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    subj_name: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    const GENERIC_HANDLER_NAMES: &[&str] = &[
+        "handleClick",
+        "handleChange",
+        "handleSubmit",
+        "handleInput",
+        "handlePress",
+        "handleEvent",
+        "onClickHandler",
+        "onChangeHandler",
+        "onSubmitHandler",
+    ];
+    let Some(attr_id) = attr.name.as_identifier() else {
+        return;
+    };
+    if !attr_id.name.starts_with("on") {
+        return;
+    }
+    let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value else {
+        return;
+    };
+    let Some(Expression::Identifier(handler_id)) = c
+        .expression
+        .as_expression()
+        .map(Expression::without_parentheses)
+    else {
+        return;
+    };
+    if GENERIC_HANDLER_NAMES.contains(&handler_id.name.as_str()) {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoGenericHandlerNames,
+            subject_name: Some(subj_name.to_string()),
+            message_id: "noGenericHandlerNames",
+            target_name: handler_id.name.to_string(),
+            message: format!(
+                "Event handler `{}` has a generic name; name it after its domain action (e.g. `handleSaveProfile`).",
+                handler_id.name
+            ),
+            loc: loc_from_line_starts(line_starts, handler_id.span.start),
+            span: ByteSpan {
+                start: handler_id.span.start,
+                end: handler_id.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_inline_hoc_and_render_in_render(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+    call_node_id: NodeId,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    subj_name: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    // Must belong to `subject_node_id` (not an unrelated outer subject when `subject_node_id` is a module-level VariableDeclarator)
+    let enclosing_fn_subject = semantic
+        .nodes()
+        .ancestor_ids(call_node_id)
+        .find(|&anc_id| {
+            matches!(
+                semantic.nodes().kind(anc_id),
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+            ) && find_enclosing_react_node(semantic, anc_id).is_some()
+        })
+        .and_then(|anc_id| find_enclosing_react_node(semantic, anc_id));
+    if enclosing_fn_subject != Some(subject_node_id) {
+        return;
+    }
+    let callee_name = match call.callee.without_parentheses() {
+        Expression::Identifier(id) => Some(id.name.as_str()),
+        Expression::StaticMemberExpression(mem) => {
+            if matches!(mem.object.without_parentheses(), Expression::Identifier(obj) if obj.name == "React")
+            {
+                Some(mem.property.name.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let Some(c_name) = callee_name else {
+        return;
+    };
+
+    // 1. `no-inline-hoc-on-component`: `with*(Comp)`, `memo(Comp)`, `forwardRef(...)`, `observer(Comp)`, `lazy(...)` called inside a component/hook render body
+    let is_hoc_factory = matches!(c_name, "memo" | "forwardRef" | "observer" | "lazy")
+        || (c_name.starts_with("with")
+            && c_name.chars().nth(4).is_some_and(|c| c.is_ascii_uppercase())
+            && call.arguments.first().and_then(|a| a.as_expression()).is_some_and(|arg| {
+                match arg.without_parentheses() {
+                    Expression::Identifier(id) => is_component_name(&id.name),
+                    Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => true,
+                    _ => false,
+                }
+            }));
+    if is_hoc_factory {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoInlineHocOnComponent,
+            subject_name: Some(subj_name.to_string()),
+            message_id: "noInlineHocOnComponent",
+            target_name: c_name.to_string(),
+            message: format!(
+                "Higher-order component `{c_name}(...)` is called inside `{subj_name}`, creating a new component identity on every render; hoist it to module scope."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+
+    // 2. `no-render-in-render`: `renderFoo()` helper returning JSX called inside JSX
+    if c_name.starts_with("render")
+        && c_name.chars().nth(6).is_some_and(|c| c.is_ascii_uppercase())
+        && let Expression::Identifier(ident) = call.callee.without_parentheses()
+        && is_reference_in_jsx(semantic, find_call_node_id(semantic, subject_node_id, call.span))
+        && render_helper_returns_jsx(semantic, ident)
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoRenderInRender,
+            subject_name: Some(subj_name.to_string()),
+            message_id: "noRenderInRender",
+            target_name: c_name.to_string(),
+            message: format!(
+                "Calling `{c_name}()` inline in JSX bypasses React component boundaries; extract it as a standalone `<Component />`."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn find_call_node_id(semantic: &Semantic<'_>, fallback: NodeId, target_span: Span) -> NodeId {
+    for (node_id, node) in semantic.nodes().iter_enumerated() {
+        if matches!(node.kind(), AstKind::CallExpression(_)) && node.span() == target_span {
+            return node_id;
+        }
+    }
+    fallback
+}
+
+fn render_helper_returns_jsx(
+    semantic: &Semantic<'_>,
+    ident: &oxc_ast::ast::IdentifierReference<'_>,
+) -> bool {
+    let Some(ref_id) = ident.reference_id.get() else {
+        return true;
+    };
+    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+        return true;
+    };
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    let decl_span = semantic.nodes().get_node(decl_id).span();
+    semantic.nodes().iter_enumerated().any(|(_, n)| {
+        decl_span.contains_inclusive(n.span())
+            && matches!(n.kind(), AstKind::JSXElement(_) | AstKind::JSXFragment(_))
+    })
+}
+
+fn check_no_react19_deprecated_apis(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let deprecated = match call.callee.without_parentheses() {
+        Expression::Identifier(id) => match id.name.as_str() {
+            "createFactory" | "findDOMNode" | "unmountComponentAtNode" => Some(id.name.to_string()),
+            _ => None,
+        },
+        Expression::StaticMemberExpression(mem) => {
+            if let Expression::Identifier(obj) = mem.object.without_parentheses() {
+                match (obj.name.as_str(), mem.property.name.as_str()) {
+                    ("React", "createFactory") => Some("React.createFactory".to_string()),
+                    (
+                        "ReactDOM",
+                        "render" | "hydrate" | "findDOMNode" | "unmountComponentAtNode",
+                    ) => Some(format!("ReactDOM.{}", mem.property.name)),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    if let Some(api_name) = deprecated {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoReact19DeprecatedApis,
+            subject_name: subj_name.clone(),
+            message_id: "noReact19DeprecatedApis",
+            target_name: api_name.clone(),
+            message: format!(
+                "`{api_name}` is deprecated or removed in React 19; migrate to modern React 19 APIs."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_no_legacy_class_lifecycles(
+    semantic: &Semantic<'_>,
+    cls: &oxc_ast::ast::Class<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let header =
+        Span::new(cls.span.start, cls.body.span.start).source_text(semantic.source_text());
+    if !header.contains("extends ")
+        || (!header.contains("Component") && !header.contains("PureComponent"))
+    {
+        return;
+    }
+    let cls_name = cls
+        .id
+        .as_ref()
+        .map_or_else(|| "Component".to_string(), |id| id.name.to_string());
+
+    for elem in &cls.body.body {
+        let oxc_ast::ast::ClassElement::MethodDefinition(method) = elem else {
+            continue;
+        };
+        if method.r#static {
+            continue;
+        }
+        let Some(m_name) = method
+            .key
+            .static_name()
+            .and_then(|n| n.as_str().map(str::to_string))
+        else {
+            continue;
+        };
+        if matches!(
+            m_name.as_str(),
+            "componentWillMount"
+                | "componentWillReceiveProps"
+                | "componentWillUpdate"
+                | "UNSAFE_componentWillMount"
+                | "UNSAFE_componentWillReceiveProps"
+                | "UNSAFE_componentWillUpdate"
+        ) {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::NoLegacyClassLifecycles,
+                subject_name: Some(cls_name.clone()),
+                message_id: "noLegacyClassLifecycles",
+                target_name: m_name.clone(),
+                message: format!(
+                    "Legacy class lifecycle `{m_name}` in `{cls_name}` is unsafe in concurrent React; replace it with `componentDidMount`, `componentDidUpdate`, or hooks."
+                ),
+                loc: loc_from_line_starts(line_starts, method.key.span().start),
+                span: ByteSpan {
+                    start: method.key.span().start,
+                    end: method.key.span().end,
+                },
+                autofix: None,
+            });
+        }
+    }
 }

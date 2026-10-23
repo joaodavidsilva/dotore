@@ -15,7 +15,7 @@ use oxc_ast::{
     },
 };
 use oxc_semantic::{NodeId, Semantic, SymbolFlags};
-use oxc_span::GetSpan;
+use oxc_span::{GetSpan, Span};
 
 use crate::{
     ir::{
@@ -73,6 +73,15 @@ pub(crate) fn extract_correctness_sites(
             AstKind::CallExpression(call) => {
                 check_mutating_array_method_on_prop(semantic, call, &subj_name, line_starts, sites);
                 check_web_animation_offsets(call, &subj_name, line_starts, sites);
+                check_no_prevent_default(semantic, node_id, call, &subj_name, line_starts, sites);
+                check_no_fetch_response_used_without_status_check(
+                    semantic,
+                    node_id,
+                    call,
+                    &subj_name,
+                    line_starts,
+                    sites,
+                );
             }
             _ => {}
         }
@@ -725,5 +734,170 @@ fn check_web_animation_offsets(
                 prev_offset = Some(val);
             }
         }
+    }
+}
+
+fn check_no_prevent_default(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+        return;
+    };
+    if mem.property.name != "preventDefault" {
+        return;
+    }
+
+    let mut should_flag = false;
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        match semantic.nodes().kind(anc_id) {
+            AstKind::JSXAttribute(attr) => {
+                let attr_name = attr.name.as_identifier().map(|id| id.name.as_str());
+                if matches!(attr_name, Some("onWheel" | "onTouchStart" | "onTouchMove")) {
+                    should_flag = true;
+                    break;
+                }
+                let parent_id = semantic.nodes().parent_id(anc_id);
+                if let AstKind::JSXOpeningElement(opening) = semantic.nodes().kind(parent_id) {
+                    let (tag_name, _, _, _) = classify_jsx_element_name(semantic, &opening.name);
+                    if matches!(tag_name.as_str(), "Link" | "NavLink" | "Form") {
+                        should_flag = true;
+                        break;
+                    }
+                }
+            }
+            AstKind::CallExpression(outer_call) if outer_call.span != call.span => {
+                if let Expression::StaticMemberExpression(outer_mem) =
+                    outer_call.callee.without_parentheses()
+                    && outer_mem.property.name == "addEventListener"
+                    && let Some(first_arg) =
+                        outer_call.arguments.first().and_then(|a| a.as_expression())
+                    && let Expression::StringLiteral(s) = first_arg.without_parentheses()
+                    && matches!(
+                        s.value.as_str(),
+                        Some("wheel" | "mousewheel" | "touchstart" | "touchmove")
+                    )
+                {
+                    let opts_text = outer_call
+                        .arguments
+                        .get(2)
+                        .map(|a| a.span().source_text(semantic.source_text()))
+                        .unwrap_or_default();
+                    if !opts_text.contains("passive: false") && !opts_text.contains("passive:false")
+                    {
+                        should_flag = true;
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if should_flag {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoPreventDefault,
+            subject_name: subj_name.clone(),
+            message_id: "noPreventDefault",
+            target_name: "preventDefault".to_string(),
+            message: "Avoid calling `preventDefault()` on framework navigation components or inside passive scroll/touch listeners.".to_string(),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_no_fetch_response_used_without_status_check(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+        return;
+    };
+    let method = mem.property.name.as_str();
+    if !matches!(method, "json" | "text" | "blob" | "arrayBuffer" | "formData") {
+        return;
+    }
+
+    let is_unguarded_fetch_res = match mem.object.without_parentheses() {
+        Expression::AwaitExpression(aw) => {
+            matches!(
+                aw.argument.without_parentheses(),
+                Expression::CallExpression(c)
+                    if matches!(c.callee.without_parentheses(), Expression::Identifier(id) if id.name == "fetch")
+            )
+        }
+        Expression::Identifier(res_ident) => {
+            let Some(ref_id) = res_ident.reference_id.get() else {
+                return;
+            };
+            let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+                return;
+            };
+            let decl_id = semantic.scoping().symbol_declaration(sym_id);
+            let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(decl_id) else {
+                return;
+            };
+            let is_fetch_init = decl.init.as_ref().is_some_and(|init| {
+                if let Expression::AwaitExpression(aw) = init.without_parentheses()
+                    && let Expression::CallExpression(c) = aw.argument.without_parentheses()
+                {
+                    matches!(c.callee.without_parentheses(), Expression::Identifier(id) if id.name == "fetch")
+                } else {
+                    false
+                }
+            });
+            if !is_fetch_init {
+                return;
+            }
+            // Check if any enclosing function/block checks `res.ok` or `res.status` before `call.span.start`
+            let scope_span = semantic
+                .nodes()
+                .ancestor_ids(node_id)
+                .find_map(|anc_id| match semantic.nodes().kind(anc_id) {
+                    AstKind::Function(f) => f.body.as_ref().map(|b| b.span),
+                    AstKind::ArrowFunctionExpression(a) => Some(a.body.span()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Span::new(0, call.span.start));
+            let prefix_src = semantic
+                .source_text()
+                .get(scope_span.start as usize..call.span.start as usize)
+                .unwrap_or_default();
+            let name = res_ident.name.as_str();
+            !prefix_src.contains(&format!("{name}.ok"))
+                && !prefix_src.contains(&format!("{name}.status"))
+        }
+        _ => false,
+    };
+
+    if is_unguarded_fetch_res {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoFetchResponseUsedWithoutStatusCheck,
+            subject_name: subj_name.clone(),
+            message_id: "noFetchResponseUsedWithoutStatusCheck",
+            target_name: method.to_string(),
+            message: format!(
+                "`fetch()` response body is consumed via `.{method}()` without checking `response.ok` or `response.status` first."
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
     }
 }

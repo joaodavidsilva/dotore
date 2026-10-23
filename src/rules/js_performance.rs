@@ -489,6 +489,8 @@ pub(crate) fn extract_js_performance_sites(
                     line_starts,
                     out,
                 );
+                check_js_tosorted_immutable(node_id, call, semantic, line_starts, out);
+                check_client_localstorage_no_version(node_id, call, semantic, line_starts, out);
             }
             AstKind::NewExpression(new_expr) => {
                 check_js_hoist_intl(node_id, new_expr, semantic, line_starts, out);
@@ -501,6 +503,9 @@ pub(crate) fn extract_js_performance_sites(
                     line_starts,
                     out,
                 );
+            }
+            AstKind::IfStatement(if_stmt) => {
+                check_js_early_exit(node_id, if_stmt, semantic, line_starts, out);
             }
             _ => {}
         }
@@ -3362,4 +3367,212 @@ fn is_style_write_stmt(stmt: &Statement<'_>, source: &str) -> bool {
     };
     let lhs = assign.left.span().source_text(source);
     lhs.contains(".style.")
+}
+
+fn check_js_tosorted_immutable(
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
+        return;
+    };
+    let method = mem.property.name.as_str();
+    let immutable_method = match method {
+        "sort" => "toSorted",
+        "reverse" => "toReversed",
+        _ => return,
+    };
+
+    let receiver_expr: Option<&Expression<'_>> = match unwrap_expr(&mem.object) {
+        Expression::ArrayExpression(arr) if arr.elements.len() == 1 => {
+            if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) = &arr.elements[0] {
+                Some(&spread.argument)
+            } else {
+                None
+            }
+        }
+        Expression::CallExpression(inner_call) if inner_call.arguments.is_empty() => {
+            match unwrap_expr(&inner_call.callee) {
+                Expression::StaticMemberExpression(inner_mem)
+                    if matches!(inner_mem.property.name.as_str(), "slice" | "concat") =>
+                {
+                    Some(&inner_mem.object)
+                }
+                _ => None,
+            }
+        }
+        Expression::CallExpression(inner_call) if inner_call.arguments.len() == 1 => {
+            if let Expression::StaticMemberExpression(inner_mem) = unwrap_expr(&inner_call.callee)
+                && inner_mem.property.name == "from"
+                && matches!(unwrap_expr(&inner_mem.object), Expression::Identifier(id) if id.name == "Array")
+            {
+                inner_call.arguments[0].as_expression()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    let Some(recv) = receiver_expr else {
+        return;
+    };
+    let source = semantic.source_text();
+    let recv_text = recv.span().source_text(source).trim();
+    let args_text = source
+        .get(mem.property.span.end as usize..call.span.end as usize)
+        .unwrap_or("()");
+    let replacement = format!("{recv_text}.{immutable_method}{args_text}");
+    let patch = AutofixPatch {
+        description: format!("Replace copy + `.{method}()` with `.{immutable_method}()`"),
+        edits: vec![ByteEdit {
+            file: None,
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            replacement,
+        }],
+    };
+    let subject_name =
+        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
+    out.push(SemanticRuleSite {
+        rule: RuleId::JsTosortedImmutable,
+        subject_name,
+        message_id: "jsTosortedImmutable",
+        target_name: immutable_method.to_string(),
+        message: format!(
+            "Prefer `{recv_text}.{immutable_method}(...)` over copying the array before `.{method}()`."
+        ),
+        loc: loc_from_line_starts(line_starts, call.span.start),
+        span: ByteSpan {
+            start: call.span.start,
+            end: call.span.end,
+        },
+        autofix: Some(patch),
+    });
+}
+
+fn check_js_early_exit(
+    node_id: NodeId,
+    if_stmt: &oxc_ast::ast::IfStatement<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    // Only report on the outermost `IfStatement` that contains >= 3 nested `if` levels
+    if semantic
+        .nodes()
+        .ancestor_ids(node_id)
+        .skip(1)
+        .any(|anc_id| matches!(semantic.nodes().kind(anc_id), AstKind::IfStatement(_)))
+    {
+        return;
+    }
+    if nested_if_depth(if_stmt) < 3 {
+        return;
+    }
+    let subject_name =
+        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
+    out.push(SemanticRuleSite {
+        rule: RuleId::JsEarlyExit,
+        subject_name,
+        message_id: "jsEarlyExit",
+        target_name: "if".to_string(),
+        message: "Deeply nested `if` statements can be flattened with guard clauses and early returns.".to_string(),
+        loc: loc_from_line_starts(line_starts, if_stmt.span.start),
+        span: ByteSpan {
+            start: if_stmt.span.start,
+            end: if_stmt.span.end,
+        },
+        autofix: None,
+    });
+}
+
+fn nested_if_depth(if_stmt: &oxc_ast::ast::IfStatement<'_>) -> usize {
+    1 + statement_max_if_depth(&if_stmt.consequent)
+}
+
+fn statement_max_if_depth(stmt: &Statement<'_>) -> usize {
+    match stmt {
+        Statement::IfStatement(inner) => nested_if_depth(inner),
+        Statement::BlockStatement(blk) => blk
+            .body
+            .iter()
+            .map(statement_max_if_depth)
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn check_client_localstorage_no_version(
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
+        return;
+    };
+    if !matches!(mem.property.name.as_str(), "getItem" | "setItem") {
+        return;
+    }
+    let is_local_storage = match unwrap_expr(&mem.object) {
+        Expression::Identifier(id) => id.name == "localStorage" && is_global_ident(semantic, id),
+        Expression::StaticMemberExpression(inner) => {
+            inner.property.name == "localStorage"
+                && matches!(unwrap_expr(&inner.object), Expression::Identifier(id) if matches!(id.name.as_str(), "window" | "globalThis"))
+        }
+        _ => false,
+    };
+    if !is_local_storage {
+        return;
+    }
+    let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression) else {
+        return;
+    };
+    let Expression::StringLiteral(key_lit) = unwrap_expr(first_arg) else {
+        return;
+    };
+    let Some(key_str) = key_lit.value.as_str() else {
+        return;
+    };
+    if has_storage_version_suffix(key_str) {
+        return;
+    }
+    let subject_name =
+        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
+    out.push(SemanticRuleSite {
+        rule: RuleId::ClientLocalstorageNoVersion,
+        subject_name,
+        message_id: "clientLocalstorageNoVersion",
+        target_name: key_str.to_string(),
+        message: format!(
+            "`localStorage` key \"{key_str}\" has no schema version suffix (such as `{key_str}:v1`), so schema changes can crash on stale stored payloads."
+        ),
+        loc: loc_from_line_starts(line_starts, key_lit.span.start),
+        span: ByteSpan {
+            start: key_lit.span.start,
+            end: key_lit.span.end,
+        },
+        autofix: None,
+    });
+}
+
+fn has_storage_version_suffix(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    for sep in [":v", "_v", "-v", ".v"] {
+        if let Some((_, after)) = lower.rsplit_once(sep)
+            && !after.is_empty()
+            && after.bytes().all(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
 }
