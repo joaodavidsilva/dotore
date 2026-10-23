@@ -66,6 +66,7 @@ crates/
   dotore-py/
     src/
       lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer), pyproject.toml capability gate, and Python safety rules
+      web_orm_security.rs # Pydantic, FastAPI, SQLAlchemy/Django ORM N+1, and SQL/shell/deserialization security rules
   dotore-rs/
     src/
       lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
