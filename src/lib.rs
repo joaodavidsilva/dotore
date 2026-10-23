@@ -49,6 +49,7 @@ pub use diff::{
     validate_warning_exit_code,
 };
 pub use dotore_core::{CliOverrides, ScanOptions};
+pub use dotore_py::{PyFileIr, PyLanguageAnalyzer};
 pub use fixer::{
     FileFixResult, apply_autofixes, apply_autofixes_with_analyzers, apply_autofixes_with_validator,
     apply_patches_to_source, apply_patches_to_source_with_analyzers,
@@ -129,6 +130,23 @@ pub fn analyze_source(
     source: &str,
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
+    let py = PyLanguageAnalyzer::new();
+    if py.supports_path(path) {
+        let pkg_root = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let pkg = WorkspacePackage {
+            name: "root".to_string(),
+            root_dir: pkg_root.to_path_buf(),
+            capability_gate: CapabilityGate::default_python(),
+            config: DotoreConfig::default(),
+        };
+        let extracted = py.extract_file(path, source);
+        return py
+            .analyze_package(&pkg, &[extracted], enabled_rules)
+            .diagnostics;
+    }
     let file_ir = parse_file_ir(path, source);
     let graph = ProjectGraph::build(vec![file_ir]);
     evaluate_project(&graph, enabled_rules)
@@ -143,6 +161,23 @@ pub fn analyze_source_with_config(
     gate: &CapabilityGate,
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
+    let py = PyLanguageAnalyzer::new();
+    if py.supports_path(path) {
+        let pkg_root = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let pkg = WorkspacePackage {
+            name: "root".to_string(),
+            root_dir: pkg_root.to_path_buf(),
+            capability_gate: gate.clone(),
+            config: config.clone(),
+        };
+        let extracted = py.extract_file(path, source);
+        return py
+            .analyze_package(&pkg, &[extracted], enabled_rules)
+            .diagnostics;
+    }
     let file_ir = parse_file_ir(path, source);
     let graph = ProjectGraph::build(vec![file_ir]);
     let mut diagnostics = Vec::new();
@@ -173,6 +208,17 @@ pub fn analyze_project_sources(
     files: Vec<(PathBuf, String)>,
     enabled_rules: Option<&[RuleId]>,
 ) -> JsonReport {
+    let py = PyLanguageAnalyzer::new();
+    let has_python_inputs = files.iter().any(|(p, _)| {
+        py.supports_path(p)
+            || p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "pyproject.toml" || n == "requirements.txt")
+    });
+    if has_python_inputs {
+        return analyze_project_sources_with_python(files, enabled_rules);
+    }
+
     let has_virtual_manifests = files.iter().any(|(p, _)| {
         p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
             name == "package.json"
@@ -218,6 +264,198 @@ pub fn analyze_project_sources(
     let graph = ProjectGraph::build_with_manifests(file_irs, manifests);
     let diagnostics = evaluate_project_with_packages(&graph, &packages, enabled_rules);
     build_report_with_packages(&graph, diagnostics, &sources, &packages)
+}
+
+fn analyze_project_sources_with_python(
+    files: Vec<(PathBuf, String)>,
+    enabled_rules: Option<&[RuleId]>,
+) -> JsonReport {
+    let py = PyLanguageAnalyzer::new();
+    let mut py_manifests: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    let mut remaining_files: Vec<(PathBuf, String)> = Vec::new();
+
+    for (path, content) in files {
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if file_name == "pyproject.toml" || file_name == "requirements.txt" {
+            let parent_dir = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            py_manifests.push((parent_dir, path, content));
+        } else {
+            remaining_files.push((path, content));
+        }
+    }
+
+    let mut split = extract_virtual_workspace_packages(remaining_files);
+    if py_manifests.is_empty() {
+        for pkg in &mut split.packages {
+            let py_default = CapabilityGate::default_python();
+            pkg.capability_gate.merge(&py_default);
+        }
+    } else {
+        // Group Python manifests by package directory
+        let mut py_dirs: Vec<PathBuf> = Vec::new();
+        for (dir, _, _) in &py_manifests {
+            if !py_dirs.contains(dir) {
+                py_dirs.push(dir.clone());
+            }
+        }
+        // If split only created a synthetic default_react root package and no package.json existed, replace or update it
+        let had_real_js_pkg = split.manifests.keys().any(|k| {
+            k.file_name().and_then(|n| n.to_str()) == Some("package.json")
+        });
+        if !had_real_js_pkg {
+            let default_cfg = split
+                .packages
+                .first()
+                .map(|p| p.config.clone())
+                .unwrap_or_default();
+            split.packages.clear();
+            for dir in py_dirs {
+                let dir_manifests: Vec<(PathBuf, &str)> = py_manifests
+                    .iter()
+                    .filter(|(d, _, _)| d == &dir)
+                    .map(|(_, p, c)| (p.clone(), c.as_str()))
+                    .collect();
+                let gate = py.infer_capability_gate(&dir, &dir_manifests);
+                let name = dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("root")
+                    .to_string();
+                split.packages.push(WorkspacePackage {
+                    name,
+                    root_dir: dir,
+                    capability_gate: gate,
+                    config: default_cfg.clone(),
+                });
+            }
+        } else {
+            for dir in py_dirs {
+                let dir_manifests: Vec<(PathBuf, &str)> = py_manifests
+                    .iter()
+                    .filter(|(d, _, _)| d == &dir)
+                    .map(|(_, p, c)| (p.clone(), c.as_str()))
+                    .collect();
+                let py_gate = py.infer_capability_gate(&dir, &dir_manifests);
+                if let Some(existing) = split.packages.iter_mut().find(|p| p.root_dir == dir) {
+                    existing.capability_gate.merge(&py_gate);
+                } else {
+                    let name = dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("root")
+                        .to_string();
+                    split.packages.push(WorkspacePackage {
+                        name,
+                        root_dir: dir,
+                        capability_gate: py_gate,
+                        config: DotoreConfig::default(),
+                    });
+                }
+            }
+        }
+    }
+
+    let packages = split.packages;
+    let filtered_sources: Vec<(PathBuf, String)> = split
+        .source_files
+        .into_iter()
+        .filter(|(path, _)| {
+            resolve_package_for_file(path, &packages)
+                .is_none_or(|pkg| !pkg.config.is_file_ignored(path, &pkg.root_dir))
+        })
+        .collect();
+    let sources: HashMap<PathBuf, String> = filtered_sources.iter().cloned().collect();
+
+    let (py_pairs, js_pairs): (Vec<_>, Vec<_>) = filtered_sources
+        .into_iter()
+        .partition(|(path, _)| py.supports_path(path));
+
+    let py_extracted: Vec<ExtractedFile> = py_pairs
+        .into_par_iter()
+        .map(|(path, source)| py.extract_file(&path, &source))
+        .collect();
+
+    let mut diagnostics = Vec::new();
+    for pkg in &packages {
+        let pkg_files: Vec<ExtractedFile> = py_extracted
+            .iter()
+            .filter(|f| {
+                resolve_package_for_file(&f.path, &packages)
+                    .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
+            })
+            .map(clone_extracted_file_with_py_ir)
+            .collect();
+        if !pkg_files.is_empty() {
+            let res = py.analyze_package(pkg, &pkg_files, enabled_rules);
+            diagnostics.extend(res.diagnostics);
+        }
+    }
+
+    if js_pairs.is_empty() {
+        return build_extracted_report_with_packages(
+            &py_extracted,
+            diagnostics,
+            &sources,
+            &packages,
+        );
+    }
+
+    let file_irs: Vec<_> = js_pairs
+        .into_par_iter()
+        .map(|(path, source)| parse_file_ir(&path, &source))
+        .collect();
+    let graph = ProjectGraph::build_with_manifests(file_irs, split.manifests);
+    let js_diags = evaluate_project_with_packages(&graph, &packages, enabled_rules);
+    diagnostics.extend(js_diags);
+
+    let mut all_extracted: Vec<ExtractedFile> =
+        graph.files.iter().map(file_ir_to_extracted_file).collect();
+    all_extracted.extend(py_extracted);
+    build_extracted_report_with_packages(&all_extracted, diagnostics, &sources, &packages)
+}
+
+fn clone_extracted_file_with_py_ir(file: &ExtractedFile) -> ExtractedFile {
+    let mut cloned =
+        ExtractedFile::new(file.path.clone(), file.source.clone(), file.language_id);
+    cloned.file_context = file.file_context;
+    cloned.symbol_outlines.clone_from(&file.symbol_outlines);
+    cloned
+        .contextual_owner_spans
+        .clone_from(&file.contextual_owner_spans);
+    cloned.suppressions.clone_from(&file.suppressions);
+    cloned.subjects_count = file.subjects_count;
+    cloned.effects_count = file.effects_count;
+    cloned.subject_spans.clone_from(&file.subject_spans);
+    if let Some(ir) = file.downcast_payload::<PyFileIr>() {
+        cloned = cloned.with_payload(ir.clone());
+    }
+    cloned
+}
+
+fn file_ir_to_extracted_file(file: &FileIr) -> ExtractedFile {
+    let lang = LanguageId::from_path(&file.path).unwrap_or(LanguageId::TypeScript);
+    let mut extracted = ExtractedFile::new(file.path.clone(), file.source.clone(), lang);
+    extracted.file_context = file.file_context;
+    extracted.symbol_outlines.clone_from(&file.symbol_outlines);
+    extracted
+        .contextual_owner_spans
+        .clone_from(&file.contextual_owner_spans);
+    extracted.suppressions.clone_from(&file.suppressions);
+    extracted.subjects_count = file.subjects.len();
+    extracted.effects_count = file.subjects.iter().map(|s| s.effect_nodes.len()).sum();
+    extracted.subject_spans = file
+        .subjects
+        .iter()
+        .map(|s| (s.name.clone(), s.span, s.loc))
+        .collect();
+    extracted
 }
 
 struct VirtualWorkspaceSplit {

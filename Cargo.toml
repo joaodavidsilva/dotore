@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dotore-core"]
+members = ["crates/dotore-core", "crates/dotore-py"]
 resolver = "2"
 
 [workspace.lints.rust]
@@ -42,6 +42,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 dotore-core = { path = "crates/dotore-core" }
+dotore-py = { path = "crates/dotore-py" }
 ignore = "0.4"
 oxc_allocator = "0.155.0"
 oxc_ast = "0.155.0"

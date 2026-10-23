@@ -38,6 +38,11 @@ pub fn apply_patches_to_source(source: &str, diagnostics: &[Diagnostic]) -> (Str
 }
 
 pub(crate) fn source_parses_cleanly(path: &Path, source: &str) -> bool {
+    use dotore_core::LanguageAnalyzer as _;
+    let py = dotore_py::PyLanguageAnalyzer::new();
+    if py.supports_path(path) {
+        return py.validate_syntax(path, source);
+    }
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
         .unwrap_or_default()
