@@ -25,27 +25,27 @@ src/
     parent_flow.rs        # event-handler effects and upward parent callback notifications
     external_sync.rs      # external store subscriptions and effect data fetching
     a11y.rs               # WCAG and ARIA accessibility rules
-    architecture.rs       # nested components, module-scope hoisting, context fan-out, and boundaries
+    architecture.rs       # Subject size/complexity, props, inline HOCs, hoisting, and context/boundary rules
     bundle_size.rs        # barrel imports, heavy packages, and dynamic import rules
     correctness.rs        # unstable keys, numeric && render, DOM nesting, and input rules
     defensive_js.rs       # defensive JS/TS/DOM runtime safety, optional chaining, and parse guards
-    design.rs             # opt-in UI design and Tailwind layout rules
+    design.rs             # opt-in UI design, aesthetic heuristics, and Tailwind layout rules
     ecosystem_ui.rs       # Preact, Ink terminal UI, and Zod v4 rules
-    effect_teardown.rs    # Effect Node teardown and React component/hook/JSX correctness rules
-    js_performance.rs     # loop and hot-path JavaScript allocation/iteration rules
-    performance.rs        # React re-render, hydration, and CSS motion performance rules
+    effect_teardown.rs    # Effect Node listener/observer/RAF/timer teardown and React correctness rules
+    js_performance.rs     # loop, hot-path JavaScript allocation, and immutable sort/early-exit rules
+    performance.rs        # React re-render, transition loading, hydration, and CSS/SVG motion performance rules
     r3f.rs                # Three.js, WebGL, and React Three Fiber 60fps frame-loop rules
-    react_native.rs       # React Native and Expo AST and project configuration rules
-    react_builtins.rs     # exhaustive-deps, rules-of-hooks, JSX built-in rules, and inline prop gating
+    react_native.rs       # React Native and Expo AST, animation/style, and project configuration rules
+    react_builtins.rs     # exhaustive-deps, rules-of-hooks, JSX/fragment built-ins, class lifecycles, and inline prop gating
     react_router.rs       # React Router v7/v8 route tree, loader/action/middleware, and navigation rules
     reduced_motion.rs     # cross-file motion library and CSS prefers-reduced-motion rules
     remotion.rs           # Motion, Remotion, TanStack Form/Table/Virtual, Redux, and UI primitive rules
     security.rs           # XSS, eval, SSRF, and trust-boundary security rules
     server_nextjs.rs      # Server Actions, RSC, and Next.js App Router rules
-    state_and_effects.rs  # state/effect loop, render setState, ref/callback purity, and lazy init rules
+    state_and_effects.rs  # state/effect loop, render setState, async/timer refs, and lazy init rules
     stores.rs             # Zustand, Jotai, MobX, and Valtio state-store rules
     supply_chain.rs       # pnpm hardening, RSC advisory, and Socket supply-chain rules
-    tanstack.rs           # TanStack Query and TanStack Start rules
+    tanstack.rs           # TanStack Query and TanStack Start loader/query rules
   fixer.rs                # surgical single- and cross-file byte-range auto-fixer (dotore fix)
   planner.rs              # Root-Cause Grouping, Blast Radius, Exemplar lookup, Fix Capsules (dotore plan)
   search.rs               # native fuzzy AST Symbol Outline search (dotore search)
