@@ -114,6 +114,17 @@ fn group_b_performance_and_js_performance_rules_and_tosorted_autofix() {
         )
         .is_empty()
     );
+    assert!(
+        RuleId::NoScaleFromZero
+            .metadata()
+            .tags
+            .contains(&dotore::RuleTag::Design)
+    );
+    assert_eq!(
+        RuleId::parse("design/no-scale-from-zero"),
+        Some(RuleId::NoScaleFromZero)
+    );
+    assert!(dotore::design_rule_ids().contains(&RuleId::NoScaleFromZero));
 
     // 2. rendering-animate-svg-wrapper
     assert_eq!(
@@ -165,11 +176,29 @@ fn group_b_performance_and_js_performance_rules_and_tosorted_autofix() {
         )
         .is_empty()
     );
+    assert!(
+        run_rule(
+            "src/Search.tsx",
+            r#"
+            import { useState } from "react";
+            export function OrdinaryFetchComponent() {
+                const [isLoading, setIsLoading] = useState(false);
+                return <button onClick={() => setIsLoading(true)}>{isLoading ? "Loading" : "Ready"}</button>;
+            }
+            "#,
+            RuleId::RenderingUsetransitionLoading,
+        )
+        .is_empty()
+    );
 
     // 4. js-tosorted-immutable with deterministic Autofix round-trip
     let tosorted_src = "export const sortItems = (items: number[], names: string[]) => {\n  const a = [...items].sort((x, y) => x - y);\n  const b = names.slice().reverse();\n  return { a, b };\n};\n";
     let tosorted_diags = run_rule("src/sort.ts", tosorted_src, RuleId::JsTosortedImmutable);
     assert_eq!(tosorted_diags.len(), 2);
+    assert_eq!(
+        RuleId::JsTosortedImmutable.metadata().default_tier,
+        PrescriptionTier::Autofix
+    );
     assert!(
         tosorted_diags
             .iter()
@@ -586,11 +615,38 @@ fn group_e_react_builtins_jsx_and_class_lifecycle_rules_and_autofixes() {
         RuleId::JsxNoUselessFragment,
     );
     assert_eq!(uf_diags.len(), 1);
+    assert_eq!(
+        RuleId::JsxNoUselessFragment.metadata().default_tier,
+        PrescriptionTier::Autofix
+    );
     assert_eq!(uf_diags[0].tier, PrescriptionTier::Autofix);
     let (uf_fixed, uf_descs) = apply_patches_to_source(useless_frag_src, &uf_diags);
     assert_eq!(uf_descs.len(), 1);
     assert_eq!(uf_fixed, "export const Comp = () => <span>Hello</span>;\n");
     assert!(run_rule("src/Comp.tsx", &uf_fixed, RuleId::JsxNoUselessFragment).is_empty());
+    // Empty fragment inside JSX parent -> replaced with ""
+    let nested_empty_frag = "export const Comp = () => <div><></><span>Hi</span></div>;\n";
+    let nef_diags = run_rule(
+        "src/Comp.tsx",
+        nested_empty_frag,
+        RuleId::JsxNoUselessFragment,
+    );
+    assert_eq!(nef_diags.len(), 1);
+    let (nef_fixed, _) = apply_patches_to_source(nested_empty_frag, &nef_diags);
+    assert_eq!(
+        nef_fixed,
+        "export const Comp = () => <div><span>Hi</span></div>;\n"
+    );
+    // Single text child inside JSX parent -> replaced with text child
+    let nested_text_frag = "export const Comp = () => <div><>Hello</></div>;\n";
+    let ntf_diags = run_rule(
+        "src/Comp.tsx",
+        nested_text_frag,
+        RuleId::JsxNoUselessFragment,
+    );
+    assert_eq!(ntf_diags.len(), 1);
+    let (ntf_fixed, _) = apply_patches_to_source(nested_text_frag, &ntf_diags);
+    assert_eq!(ntf_fixed, "export const Comp = () => <div>Hello</div>;\n");
 
     // Valid fragment with 2 children or keyed Fragment
     assert!(
@@ -607,6 +663,10 @@ fn group_e_react_builtins_jsx_and_class_lifecycle_rules_and_autofixes() {
         "import React from 'react';\nexport const Comp = () => <React.Fragment><span>A</span><span>B</span></React.Fragment>;\n";
     let frag_diags = run_rule("src/Comp.tsx", frag_src, RuleId::JsxFragments);
     assert_eq!(frag_diags.len(), 1);
+    assert_eq!(
+        RuleId::JsxFragments.metadata().default_tier,
+        PrescriptionTier::Autofix
+    );
     assert_eq!(frag_diags[0].tier, PrescriptionTier::Autofix);
     let (frag_fixed, frag_descs) = apply_patches_to_source(frag_src, &frag_diags);
     assert_eq!(frag_descs.len(), 1);
@@ -737,6 +797,23 @@ fn group_e_react_builtins_jsx_and_class_lifecycle_rules_and_autofixes() {
         )
         .len(),
         1
+    );
+    assert_eq!(
+        run_rule(
+            "src/AnonVar.tsx",
+            "import { memo } from 'react'; export const Comp = memo(() => <div />);",
+            RuleId::DisplayName,
+        )
+        .len(),
+        1
+    );
+    assert!(
+        run_rule(
+            "src/WithDisplayName.tsx",
+            "import { memo } from 'react'; export const Comp = memo(() => <div />); Comp.displayName = 'Comp';",
+            RuleId::DisplayName,
+        )
+        .is_empty()
     );
     assert!(
         run_rule(
@@ -920,6 +997,18 @@ fn group_f_and_g_correctness_and_architecture_rules() {
         .len(),
         1
     );
+    assert_eq!(
+        run_rule(
+            "src/HocExport.tsx",
+            r#"
+            function ProfileCard() { return <div />; }
+            export default withAuth(ProfileCard);
+            "#,
+            RuleId::NoInlineHocOnComponent,
+        )
+        .len(),
+        1
+    );
     assert!(
         run_rule(
             "src/Hoc.tsx",
@@ -1015,6 +1104,27 @@ fn group_f_and_g_correctness_and_architecture_rules() {
             r#"
             export function Button({ variant = "primary", isDisabled = false }: { variant?: string; isDisabled?: boolean }) {
                 return <button disabled={isDisabled}>{variant}</button>;
+            }
+            "#,
+            RuleId::NoManyBooleanProps,
+        )
+        .is_empty()
+    );
+    // 3 optional boolean props with neither prefix nor boolean default should NOT be double-counted to 6
+    assert!(
+        run_rule(
+            "src/Button3Bool.tsx",
+            r#"
+            export function Button3Bool({
+                primary,
+                secondary,
+                danger,
+            }: {
+                primary?: boolean;
+                secondary?: boolean;
+                danger?: boolean;
+            }) {
+                return <button />;
             }
             "#,
             RuleId::NoManyBooleanProps,

@@ -1554,6 +1554,23 @@ fn react_component_hook_and_jsx_correctness_54_rules_invalid_and_adversarial_val
     for case in &cases {
         assert_rule_invalid_and_valid(case);
     }
+
+    assert_rule_invalid_and_valid(&RuleTestCase {
+        rule: RuleId::ForwardRefUsesRef,
+        file_name: "src/UnusedRefInput.tsx",
+        invalid_code: r#"
+            import { forwardRef } from 'react';
+            export const UnusedRefInput = forwardRef((props, ref) => {
+                return <input {...props} />;
+            });
+        "#,
+        valid_code: r#"
+            import { forwardRef } from 'react';
+            export const UsedRefInput = forwardRef((props, ref) => {
+                return <input ref={ref} {...props} />;
+            });
+        "#,
+    });
 }
 
 #[test]

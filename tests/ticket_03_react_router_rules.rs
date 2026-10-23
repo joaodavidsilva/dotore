@@ -489,6 +489,66 @@ fn route_tree_configuration_rules_suite() {
         )
         .is_empty()
     );
+
+    // 10. JSX <Route> parity for nested-route-requires-outlet (inline JSX element), no-invalid-lazy-route-properties, and require-root-error-boundary
+    assert_eq!(
+        run_rule(
+            "src/JsxRoutes.tsx",
+            r#"
+            import { Routes, Route } from "react-router";
+            export function AppRoutes() {
+                return (
+                    <Routes>
+                        <Route path="/dashboard" element={<div><h1>Dashboard</h1></div>}>
+                            <Route path="stats" element={<div>Stats</div>} />
+                        </Route>
+                    </Routes>
+                );
+            }
+            "#,
+            RuleId::ReactRouterNestedRouteRequiresOutlet,
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        run_rule(
+            "src/JsxRoutesLazy.tsx",
+            r#"
+            import { Routes, Route } from "react-router";
+            export function AppRoutes({ Home }: any) {
+                return (
+                    <Routes>
+                        <Route path="/home" lazy={() => import("./home")} Component={Home} />
+                    </Routes>
+                );
+            }
+            "#,
+            RuleId::ReactRouterNoInvalidLazyRouteProperties,
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        run_rule(
+            "src/JsxRoutesRootErr.tsx",
+            r#"
+            import { Routes, Route, Outlet } from "react-router";
+            export function AppRoutes({ rootLoader }: any) {
+                return (
+                    <Routes>
+                        <Route path="/" loader={rootLoader} element={<div><Outlet /></div>}>
+                            <Route index element={<div>Home</div>} />
+                        </Route>
+                    </Routes>
+                );
+            }
+            "#,
+            RuleId::ReactRouterRequireRootErrorBoundary,
+        )
+        .len(),
+        1
+    );
 }
 
 #[test]

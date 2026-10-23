@@ -630,6 +630,37 @@ fn deprecated_keyboard_event_keycode_which_autofix_round_trip() {
         reanalyzed.is_empty(),
         "Expected 0 diagnostics after autofix, got: {reanalyzed:#?}"
     );
+
+    // ASCII letter keyCode (65 -> 'a') is safely rewritten, while non-equality or unknown keyCode has no unsafe autofix
+    let ascii_src = "export function KeyA() { return <input onKeyDown={(e) => { if (e.keyCode === 65) {} }} />; }\n";
+    let ascii_diags = analyze_source(
+        Path::new("src/KeyA.tsx"),
+        ascii_src,
+        Some(&[RuleId::NoDeprecatedKeyboardEventKeycodeWhich]),
+    );
+    assert_eq!(ascii_diags.len(), 1);
+    let (ascii_rewritten, _) = apply_patches_to_source(ascii_src, &ascii_diags);
+    assert!(ascii_rewritten.contains("e.key === 'a'"));
+
+    let unknown_src = "export function KeyUnknown() { return <input onKeyDown={(e) => { if (e.keyCode === 999) {} }} />; }\n";
+    let unknown_diags = analyze_source(
+        Path::new("src/KeyUnknown.tsx"),
+        unknown_src,
+        Some(&[RuleId::NoDeprecatedKeyboardEventKeycodeWhich]),
+    );
+    assert_eq!(unknown_diags.len(), 1);
+    assert!(unknown_diags[0].autofix.is_none());
+
+    // Direct `await fetch(...).then(...)` in JSX handler is handled by `AwaitExpression` immediate parent
+    let awaited_then_src = "export function Btn() { return <button onClick={async () => { await fetch('/api').then((r) => r.json()); }} />; }\n";
+    assert!(
+        analyze_source(
+            Path::new("src/Btn.tsx"),
+            awaited_then_src,
+            Some(&[RuleId::NoFloatingThenInJsxHandler]),
+        )
+        .is_empty()
+    );
 }
 
 #[test]

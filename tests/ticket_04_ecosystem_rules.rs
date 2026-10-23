@@ -355,6 +355,26 @@ export function List({ items }: { items: { id: string }[] }) {
     );
     assert!(valid_layout_id.is_empty());
 
+    let valid_layout_group_parent = run_rule(
+        "src/List.tsx",
+        r#"
+import { LayoutGroup, motion } from "framer-motion";
+export function List({ items }: { items: { id: string }[] }) {
+    return (
+        <ul>
+            {items.map((item) => (
+                <LayoutGroup key={item.id} id={item.id}>
+                    <motion.li layoutId="card" />
+                </LayoutGroup>
+            ))}
+        </ul>
+    );
+}
+"#,
+        RuleId::MotionUnstableLayoutIdInIteration,
+    );
+    assert!(valid_layout_group_parent.is_empty());
+
     // 10. motion-use-transform-range-length
     let invalid_transform = run_rule(
         "src/Parallax.tsx",
