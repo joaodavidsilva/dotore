@@ -42,6 +42,7 @@ crates/
         parent_flow.rs    # event-handler effects and upward parent callback notifications
         external_sync.rs  # external store subscriptions and effect data fetching
         a11y.rs           # WCAG and ARIA accessibility rules
+        angular.rs        # Angular Signals, RxJS teardown, OnPush autofix, @for track, lifecycle, and DOM rules
         architecture.rs   # Subject size/complexity, props, inline HOCs, hoisting, and context/boundary rules
         bundle_size.rs    # barrel imports, heavy packages, and dynamic import rules
         correctness.rs    # unstable keys, numeric && render, DOM nesting, and input rules
@@ -72,6 +73,9 @@ crates/
       lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
       ir.rs               # single-pass syn AST, Subject, SymbolOutline, and suppression extraction
       rules.rs            # Rust rule activation gating and core safety rule evaluation
+      axum_sqlx_ui_arch.rs# single-pass detectors for Axum, SQLx, Leptos/Dioxus UI signals, and boolean params
+      graph.rs            # Rust crate ProjectGraph analysis (rs-arch-no-unused-pub-crate-items)
+      tokio_perf.rs       # single-pass Tokio async hazard and Rust allocation performance detectors
 src/
   main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API

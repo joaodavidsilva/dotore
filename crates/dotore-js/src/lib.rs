@@ -78,7 +78,7 @@ impl JsLanguageAnalyzer {
             } else if self.supports_path(&file.path)
                 || matches!(
                     file.path.extension().and_then(|e| e.to_str()),
-                    Some("css" | "scss")
+                    Some("css" | "scss" | "html" | "htm")
                 )
             {
                 file_irs.push(parse_file_ir(&file.path, &file.source));
@@ -140,7 +140,7 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
     }
 
     fn manifest_filenames(&self) -> &'static [&'static str] {
-        &["package.json"]
+        &["package.json", "angular.json"]
     }
 
     fn infer_capability_gate(
@@ -148,12 +148,18 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
         package_dir: &Path,
         manifest_sources: &[(PathBuf, &str)],
     ) -> CapabilityGate {
+        let has_angular_json = package_dir.join("angular.json").is_file()
+            || manifest_sources
+                .iter()
+                .any(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some("angular.json"));
         let pkg_json_source = manifest_sources.iter().find_map(|(path, src)| {
             let name = path.file_name().and_then(|n| n.to_str())?;
             (name == "package.json").then_some(*src)
         });
         let mut gate = if let Some(json) = pkg_json_source {
             CapabilityGate::from_package_json_str(json)
+        } else if has_angular_json && !package_dir.join("package.json").is_file() {
+            CapabilityGate::default_angular()
         } else {
             CapabilityGate::discover(package_dir)
         };
@@ -165,11 +171,7 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
         {
             gate.capabilities.insert(Capability::TypeScript);
         }
-        if package_dir.join("angular.json").is_file()
-            || manifest_sources
-                .iter()
-                .any(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some("angular.json"))
-        {
+        if has_angular_json {
             gate.capabilities.insert(Capability::Angular);
             gate.capabilities.insert(Capability::Rxjs);
             gate.capabilities.insert(Capability::TypeScript);
@@ -205,7 +207,7 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
             } else if self.supports_path(&file.path)
                 || matches!(
                     file.path.extension().and_then(|e| e.to_str()),
-                    Some("css" | "scss")
+                    Some("css" | "scss" | "html" | "htm")
                 )
             {
                 file_irs.push(parse_file_ir(&file.path, &file.source));

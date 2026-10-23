@@ -4,7 +4,7 @@ use std::path::Path;
 
 use dotore_core::{
     CapabilityGate, Diagnostic, DotoreConfig, ExtractedFile, FileContext, PackageAnalysisResult,
-    RuleId, RuleSeverity, RuleTag, WorkspacePackage,
+    PrescriptionTier, RuleId, RuleSeverity, RuleTag, WorkspacePackage,
 };
 
 use crate::ir::{RsCandidateFinding, RsFileIr};
@@ -42,6 +42,8 @@ pub fn evaluate_rs_package(
         );
     }
 
+    evaluate_rs_package_graph_rules(package, files, enabled_rules, &mut diagnostics);
+
     PackageAnalysisResult {
         diagnostics,
         subjects_scanned,
@@ -66,7 +68,7 @@ pub fn evaluate_rs_file(
     };
 
     for finding in &rs_ir.findings {
-        if !is_core_rust_safety_rule(finding.rule) {
+        if !is_evaluated_rust_rule(finding.rule) {
             continue;
         }
         let Some(severity) = resolve_rs_rule_activation(
@@ -91,7 +93,67 @@ pub fn evaluate_rs_file(
     }
 }
 
-const fn is_core_rust_safety_rule(rule: RuleId) -> bool {
+fn evaluate_rs_package_graph_rules(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    if files.is_empty() {
+        return;
+    }
+    let graph_findings = crate::graph::collect_unused_pub_crate_findings_for_package(files);
+    for (file_path, finding) in &graph_findings {
+        let Some(file) = files.iter().find(|f| &f.path == file_path) else {
+            continue;
+        };
+        if package.config.is_file_ignored(&file.path, &package.root_dir) {
+            continue;
+        }
+        emit_rs_finding_if_active(
+            file,
+            finding,
+            &package.root_dir,
+            &package.capability_gate,
+            &package.config,
+            enabled_rules,
+            out,
+        );
+    }
+}
+
+fn emit_rs_finding_if_active(
+    file: &ExtractedFile,
+    finding: &RsCandidateFinding,
+    package_root: &Path,
+    gate: &CapabilityGate,
+    config: &DotoreConfig,
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(severity) =
+        resolve_rs_rule_activation(finding.rule, file, package_root, gate, config, enabled_rules)
+    else {
+        return;
+    };
+    if config.respect_inline_disables
+        && (file.is_suppressed(finding.rule, finding.loc.line, finding.span)
+            || file
+                .suppressions
+                .matches_line_or_block(finding.rule, finding.loc.line))
+    {
+        return;
+    }
+    if out
+        .iter()
+        .any(|d| d.file == file.path && d.rule == finding.rule && d.span == finding.span)
+    {
+        return;
+    }
+    out.push(candidate_to_diagnostic(&file.path, finding, severity));
+}
+
+const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
     matches!(
         rule,
         RuleId::RsNoUnwrapInProduction
@@ -99,6 +161,19 @@ const fn is_core_rust_safety_rule(rule: RuleId) -> bool {
             | RuleId::RsNoLossyNumericAsCast
             | RuleId::RsRequireSafetyCommentOnUnsafe
             | RuleId::RsNoMemForget
+            | RuleId::RsSqlxNoFormattedQueryString
+            | RuleId::RsSqlxNoQueryInLoop
+            | RuleId::RsAxumNoContendedMutexState
+            | RuleId::RsUiNoDerivedSignalInEffect
+            | RuleId::RsArchNoManyBooleanParams
+            | RuleId::RsArchNoUnusedPubCrateItems
+            | RuleId::RsTokioNoStdLockAcrossAwait
+            | RuleId::RsTokioNoBlockingInAsync
+            | RuleId::RsTokioPreferBoundedChannel
+            | RuleId::RsPerfNoCloneInLoop
+            | RuleId::RsPerfHoistRegexToLazylock
+            | RuleId::RsPerfPreferVecWithCapacity
+            | RuleId::RsPerfNoUnnecessaryFormat
     )
 }
 
@@ -115,7 +190,11 @@ fn candidate_to_diagnostic(
         category: meta.category,
         severity,
         message_id: finding.message_id,
-        tier: meta.default_tier,
+        tier: if finding.autofix.is_some() {
+            PrescriptionTier::Autofix
+        } else {
+            meta.default_tier
+        },
         target_name: finding.target_name.clone(),
         message: finding.message.clone(),
         docs_url: meta.docs_url,
@@ -123,7 +202,7 @@ fn candidate_to_diagnostic(
         span: finding.span,
         cascade_steps: Vec::new(),
         caller_sites: Vec::new(),
-        autofix: None,
+        autofix: finding.autofix.clone(),
     }
 }
 
