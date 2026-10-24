@@ -789,7 +789,7 @@ fn build_scan_options(
 ) -> Result<ScanOptions, String> {
     let rules = resolve_enabled_rules(rule_strs, category_strs, only_strs)?;
 
-    let mut tiers = Vec::new();
+    let mut tiers = Vec::with_capacity(tier_strs.len());
     for t in tier_strs {
         let Some(parsed) = PrescriptionTier::parse(t) else {
             return Err(format!(

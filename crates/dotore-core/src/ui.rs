@@ -1011,7 +1011,7 @@ impl FilterTabItem {
 /// Builds the ordered list of [`FilterTabItem`]s for a [`JsonReport`].
 #[must_use]
 pub fn build_filter_tabs(report: &JsonReport) -> Vec<FilterTabItem> {
-    let mut tabs = Vec::new();
+    let mut tabs = Vec::with_capacity(14 + report.diagnostics.len().min(32));
     tabs.push(FilterTabItem {
         label: "ALL".to_string(),
         badge_ansi: "\x1b[38;5;51;1m",

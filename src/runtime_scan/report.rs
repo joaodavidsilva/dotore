@@ -159,7 +159,12 @@ fn format_text_report(report: &RuntimeScanReport) -> String {
 }
 
 fn format_jsonl_report(report: &RuntimeScanReport) -> String {
-    let mut records: Vec<RuntimeScanJsonlRecord> = Vec::new();
+    let mut records: Vec<RuntimeScanJsonlRecord> = Vec::with_capacity(
+        2 + report.script_hotspots.len()
+            + report.component_hotspots.len()
+            + report.long_animation_frames.len()
+            + report.interactions.len(),
+    );
     records.push(RuntimeScanJsonlRecord {
         schema_version: report.schema_version,
         kind: "metadata".to_string(),
