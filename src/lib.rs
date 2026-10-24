@@ -104,18 +104,20 @@ pub use progress::{
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
-    JSON_REPORT_SCHEMA_VERSION, JsonReport, PR_COMMENT_MARKER, PrCommentEnv, PrCommentRepoContext,
-    ProjectCoverageMetadata, ReportSummary, RuleCatalogEntry, RulesListOptions, WhyEntry,
+    JSON_REPORT_SCHEMA_VERSION, JsonReport, MAX_SCAN_CACHE_ENTRIES, PR_COMMENT_MARKER,
+    PrCommentEnv, PrCommentRepoContext, ProjectCoverageMetadata, ReportSummary, RuleCatalogEntry,
+    RulesListOptions, SCAN_CACHE_SCHEMA_VERSION, ScanCacheEntry, ScanResultCacheFile, WhyEntry,
     WhyLocation, WhyReport, build_extracted_report, build_extracted_report_with_packages,
     build_rule_catalog, ci_config, ci_install, ci_upgrade, explain_location,
     explain_location_with_analyzers, explain_rule, format_architecture_signal_explanation,
     format_design_report, format_design_report_pretty, format_fix_report, format_install_report,
     format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
     format_terminal_report_pretty, format_why_report_text, generate_ci_comment, install_dotore,
-    parse_why_location, read_json_report, render_ci_workflow, render_github_actions_workflow,
-    render_github_pr_comment, render_github_pr_comment_from_env, render_gitlab_ci_snippet,
-    render_html_report, render_pr_comment_markdown, render_pr_comment_markdown_with_env,
-    write_and_open_html_report, write_github_pr_comment, write_json_report,
+    load_scan_result_cache, lookup_scan_cache, parse_why_location, read_json_report,
+    render_ci_workflow, render_github_actions_workflow, render_github_pr_comment,
+    render_github_pr_comment_from_env, render_gitlab_ci_snippet, render_html_report,
+    render_pr_comment_markdown, render_pr_comment_markdown_with_env, resolve_scan_cache_path,
+    store_scan_cache, write_and_open_html_report, write_github_pr_comment, write_json_report,
 };
 #[cfg(feature = "js")]
 pub use report::{build_report, build_report_with_packages};
@@ -1136,6 +1138,24 @@ pub fn scan_workspace_with_overrides(
     }
 
     let manifests = load_disk_manifests(&workspace_root, &packages, &sources);
+    let cache_context = if !is_cache_disabled(overrides.no_cache)
+        && let Some(cache_path) = resolve_scan_cache_path()
+    {
+        let (cache_key, canonical_root, head_sha) = compute_scan_cache_meta_and_key(
+            &workspace_root,
+            options,
+            overrides,
+            &packages,
+            &pairs,
+            &manifests,
+        );
+        if let Some(cached_report) = lookup_scan_cache(&cache_path, &cache_key) {
+            return Ok((cached_report, sources));
+        }
+        Some((cache_path, cache_key, canonical_root, head_sha))
+    } else {
+        None
+    };
     let (all_extracted, js_graph_opt, mut diagnostics) = analyze_polyglot_sources(
         &packages,
         manifests,
@@ -1232,7 +1252,233 @@ pub fn scan_workspace_with_overrides(
     report.baseline = baseline_summary;
     report.baseline_degraded = baseline_degraded;
 
+    if let Some((cache_path, cache_key, canonical_root, head_sha)) = cache_context {
+        let updated_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_millis()).ok())
+            .unwrap_or(0);
+        let _ = store_scan_cache(
+            &cache_path,
+            ScanCacheEntry {
+                key: cache_key,
+                workspace_root: canonical_root,
+                head_sha,
+                tool_version: env!("CARGO_PKG_VERSION").to_string(),
+                updated_at_ms,
+                report: report.clone(),
+            },
+        );
+    }
     Ok((report, sources))
+}
+
+fn run_git_capture(workspace_root: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+fn compute_scan_cache_meta_and_key(
+    workspace_root: &Path,
+    options: &ScanOptions,
+    overrides: &CliOverrides,
+    packages: &[WorkspacePackage],
+    pairs: &[(PathBuf, String)],
+    manifests: &HashMap<PathBuf, String>,
+) -> (String, String, String) {
+    use dotore_core::ir::{FNV1A_64_OFFSET_BASIS, fnv1a_64_step, fnv1a_64_str};
+
+    let canonical_root = fs::canonicalize(workspace_root)
+        .unwrap_or_else(|_| dotore_core::config::normalize_path_buf(workspace_root));
+    let canonical_root_str = canonical_root.to_string_lossy().to_string();
+
+    let head_sha = if let Some(sha) = run_git_capture(workspace_root, &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        sha
+    } else if workspace_root.join(".git").exists()
+        || run_git_capture(workspace_root, &["rev-parse", "--is-inside-work-tree"]).is_some()
+    {
+        "uncommitted".to_string()
+    } else {
+        "no-git".to_string()
+    };
+
+    let mut hash = FNV1A_64_OFFSET_BASIS;
+    fnv1a_64_str(&mut hash, env!("CARGO_PKG_VERSION"));
+    fnv1a_64_str(&mut hash, &JSON_REPORT_SCHEMA_VERSION.to_string());
+    fnv1a_64_str(&mut hash, &SCAN_CACHE_SCHEMA_VERSION.to_string());
+    fnv1a_64_str(&mut hash, &canonical_root_str);
+
+    fnv1a_64_str(&mut hash, &options.paths.len().to_string());
+    for p in &options.paths {
+        fnv1a_64_str(&mut hash, &p.to_string_lossy());
+    }
+    fnv1a_64_str(
+        &mut hash,
+        if options.include_tests {
+            "tests:1"
+        } else {
+            "tests:0"
+        },
+    );
+    if let Some(rules) = &options.rules {
+        fnv1a_64_str(&mut hash, &format!("rules:{}", rules.len()));
+        for r in rules {
+            fnv1a_64_str(&mut hash, r.as_str());
+        }
+    } else {
+        fnv1a_64_str(&mut hash, "rules:all");
+    }
+    if let Some(tiers) = &options.tiers {
+        fnv1a_64_str(&mut hash, &format!("tiers:{}", tiers.len()));
+        for t in tiers {
+            fnv1a_64_str(&mut hash, t.as_str());
+        }
+    } else {
+        fnv1a_64_str(&mut hash, "tiers:all");
+    }
+
+    fnv1a_64_str(
+        &mut hash,
+        if overrides.no_inline_disables {
+            "nid:1"
+        } else {
+            "nid:0"
+        },
+    );
+    fnv1a_64_str(
+        &mut hash,
+        if overrides.custom_rules_only {
+            "cro:1"
+        } else {
+            "cro:0"
+        },
+    );
+    fnv1a_64_str(&mut hash, &format!("tags:{}", overrides.ignore_tags.len()));
+    for tag in &overrides.ignore_tags {
+        fnv1a_64_str(&mut hash, tag);
+    }
+    fnv1a_64_str(&mut hash, &format!("projects:{}", overrides.projects.len()));
+    for proj in &overrides.projects {
+        fnv1a_64_str(&mut hash, proj);
+    }
+    fnv1a_64_str(&mut hash, overrides.scope.as_str());
+    fnv1a_64_str(&mut hash, overrides.base_ref.as_deref().unwrap_or(""));
+    fnv1a_64_str(
+        &mut hash,
+        if overrides.staged {
+            "staged:1"
+        } else {
+            "staged:0"
+        },
+    );
+    if let Some(cfg_path) = &overrides.config_path {
+        fnv1a_64_str(&mut hash, &cfg_path.to_string_lossy());
+        if let Ok(cfg_bytes) = fs::read_to_string(cfg_path) {
+            fnv1a_64_str(&mut hash, &cfg_bytes);
+        }
+    }
+    if let Some(base_path) = &overrides.baseline_path {
+        fnv1a_64_str(&mut hash, &base_path.to_string_lossy());
+        let resolved_base = if base_path.is_file() {
+            Some(base_path.clone())
+        } else {
+            let cand = workspace_root.join(base_path);
+            cand.is_file().then_some(cand)
+        };
+        if let Some(rp) = resolved_base
+            && let Ok(base_bytes) = fs::read_to_string(&rp)
+        {
+            fnv1a_64_str(&mut hash, &base_bytes);
+        } else if let Some(rev_out) =
+            run_git_capture(workspace_root, &["rev-parse", &base_path.to_string_lossy()])
+        {
+            fnv1a_64_str(&mut hash, &rev_out);
+        }
+    }
+
+    fnv1a_64_str(&mut hash, &head_sha);
+    if head_sha != "no-git" {
+        if let Some(status_out) =
+            run_git_capture(workspace_root, &["status", "--porcelain", "-uall"])
+        {
+            fnv1a_64_str(&mut hash, &status_out);
+        }
+        if overrides.staged || overrides.scope != DiffScope::Full || overrides.base_ref.is_some() {
+            if let Some(cached_diff) = run_git_capture(workspace_root, &["diff", "--cached"]) {
+                fnv1a_64_str(&mut hash, &cached_diff);
+            }
+            if let Some(work_diff) = run_git_capture(workspace_root, &["diff"]) {
+                fnv1a_64_str(&mut hash, &work_diff);
+            }
+            if let Some(base_ref) = &overrides.base_ref
+                && let Some(base_sha) = run_git_capture(workspace_root, &["rev-parse", base_ref])
+            {
+                fnv1a_64_str(&mut hash, &base_sha);
+            }
+        }
+    }
+
+    fnv1a_64_str(&mut hash, &format!("pkgs:{}", packages.len()));
+    for pkg in packages {
+        fnv1a_64_str(&mut hash, &pkg.name);
+        fnv1a_64_str(&mut hash, &pkg.root_dir.to_string_lossy());
+        if let Ok(pkg_json) = serde_json::to_string(pkg) {
+            fnv1a_64_str(&mut hash, &pkg_json);
+        }
+        for cfg_name in [
+            "dotore.config.json",
+            "dotore.config.js",
+            "dotore.config.ts",
+            "dotore.config.mjs",
+            "dotore.config.cjs",
+            "pyproject.toml",
+            "requirements.txt",
+            "Cargo.toml",
+            "angular.json",
+        ] {
+            let p = pkg.root_dir.join(cfg_name);
+            if let Ok(content) = fs::read_to_string(&p) {
+                fnv1a_64_str(&mut hash, cfg_name);
+                fnv1a_64_str(&mut hash, &content);
+            }
+        }
+    }
+
+    let mut sorted_pairs: Vec<(&Path, &str)> = pairs
+        .iter()
+        .map(|(p, c)| (p.as_path(), c.as_str()))
+        .collect();
+    sorted_pairs.sort_by_key(|(a, _)| *a);
+    fnv1a_64_str(&mut hash, &format!("pairs:{}", sorted_pairs.len()));
+    for (path, content) in sorted_pairs {
+        fnv1a_64_str(&mut hash, &path.to_string_lossy());
+        fnv1a_64_str(&mut hash, &content.len().to_string());
+        hash = fnv1a_64_step(hash, content.as_bytes());
+    }
+
+    let mut sorted_manifests: Vec<(&Path, &str)> = manifests
+        .iter()
+        .map(|(p, c)| (p.as_path(), c.as_str()))
+        .collect();
+    sorted_manifests.sort_by_key(|(a, _)| *a);
+    fnv1a_64_str(&mut hash, &format!("manifests:{}", sorted_manifests.len()));
+    for (path, content) in sorted_manifests {
+        fnv1a_64_str(&mut hash, &path.to_string_lossy());
+        fnv1a_64_str(&mut hash, &content.len().to_string());
+        hash = fnv1a_64_step(hash, content.as_bytes());
+    }
+
+    (format!("scan::{hash:016x}"), canonical_root_str, head_sha)
 }
 
 /// Returns all [`RuleId`]s tagged with [`RuleTag::Design`] (excluding whole-project analysis rules).

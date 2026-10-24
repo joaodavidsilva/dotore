@@ -187,6 +187,9 @@ pub struct CheckArgs {
     #[arg(long = "no-pager")]
     pub no_pager: bool,
 
+    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
     pub projects: Vec<String>,
@@ -223,6 +226,9 @@ pub struct FixArgs {
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
     pub projects: Vec<String>,
@@ -259,6 +265,9 @@ pub struct PlanArgs {
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
     pub projects: Vec<String>,
@@ -326,6 +335,9 @@ pub struct ReportArgs {
     #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
     pub tiers: Vec<String>,
 
+    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
     pub projects: Vec<String>,
@@ -847,6 +859,7 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         base_ref: args.base_ref.clone(),
         staged: args.staged,
         baseline_path: args.baseline.clone(),
+        no_cache: args.no_cache,
         projects: args.projects.clone(),
     };
 
@@ -923,6 +936,7 @@ fn scan_workspace_for_subcommand(
     custom_rules_only: bool,
     ignore_tags: &[String],
     config_path: Option<&PathBuf>,
+    no_cache: bool,
     projects: &[String],
 ) -> Result<
     (
@@ -942,6 +956,7 @@ fn scan_workspace_for_subcommand(
         custom_rules_only,
         ignore_tags: ignore_tags.to_vec(),
         config_path: config_path.cloned(),
+        no_cache,
         projects: projects.to_vec(),
         ..Default::default()
     };
@@ -962,6 +977,7 @@ fn run_fix(args: &FixArgs) -> ExitCode {
         args.custom_rules_only,
         &args.ignore_tags,
         args.config.as_ref(),
+        args.no_cache,
         &args.projects,
     ) {
         Ok(res) => res,
@@ -991,6 +1007,7 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
         args.custom_rules_only,
         &args.ignore_tags,
         args.config.as_ref(),
+        args.no_cache,
         &args.projects,
     ) {
         Ok(res) => res,
@@ -1049,6 +1066,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         base_ref: None,
         staged: false,
         baseline_path: None,
+        no_cache: args.no_cache,
         projects: args.projects.clone(),
     };
     let spinner_guard = if should_launch_tui(false) {
