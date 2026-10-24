@@ -4,7 +4,8 @@
 use std::path::Path;
 
 use dotore_core::{
-    AutofixPatch, ByteSpan, Diagnostic, RuleId, RuleSeverity, SourceLoc, loc_from_line_starts,
+    AutofixPatch, ByteSpan, Diagnostic, ResolvedCallerSite, RuleId, RuleSeverity, SourceLoc,
+    loc_from_line_starts,
 };
 use syn::{
     Attribute, Expr, ExprClosure, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemTrait, Lit, Macro,
@@ -30,6 +31,10 @@ pub struct RsCandidateFinding {
     pub span: ByteSpan,
     /// Optional deterministic [`AutofixPatch`] attached to this finding.
     pub autofix: Option<AutofixPatch>,
+    /// Optional cross-file **Caller Sites** or peer occurrence sites.
+    pub caller_sites: Vec<ResolvedCallerSite>,
+    /// Optional multi-step cascade or signal chain steps.
+    pub cascade_steps: Vec<String>,
 }
 
 impl RsCandidateFinding {
@@ -53,6 +58,8 @@ impl RsCandidateFinding {
             loc,
             span,
             autofix: None,
+            caller_sites: Vec::new(),
+            cascade_steps: Vec::new(),
         }
     }
 
@@ -70,6 +77,20 @@ impl RsCandidateFinding {
         self
     }
 
+    /// Attaches resolved cross-file [`ResolvedCallerSite`]s to this candidate finding.
+    #[must_use]
+    pub fn with_caller_sites(mut self, caller_sites: Vec<ResolvedCallerSite>) -> Self {
+        self.caller_sites = caller_sites;
+        self
+    }
+
+    /// Attaches cascade or structural signal steps to this candidate finding.
+    #[must_use]
+    pub fn with_cascade_steps(mut self, cascade_steps: Vec<String>) -> Self {
+        self.cascade_steps = cascade_steps;
+        self
+    }
+
     /// Converts this candidate finding into a [`Diagnostic`] using [`Diagnostic::builder`].
     #[must_use]
     pub fn to_diagnostic(&self, file_path: &Path, severity: RuleSeverity) -> Diagnostic {
@@ -84,6 +105,8 @@ impl RsCandidateFinding {
         .with_subject(self.subject_name.clone())
         .with_severity(severity)
         .with_message_id(self.message_id)
+        .with_caller_sites(self.caller_sites.clone())
+        .with_cascade_steps(self.cascade_steps.clone())
         .with_autofix(self.autofix.clone())
     }
 }
@@ -193,8 +216,9 @@ impl RsScopeTracker {
     #[must_use]
     pub(crate) fn enter_mod(&mut self, item: &ItemMod) -> RsScopeSnapshot {
         let snap = self.snapshot();
-        self.in_test_context =
-            self.in_test_context || attrs_indicate_test_context(&item.attrs) || item.ident == "tests";
+        self.in_test_context = self.in_test_context
+            || attrs_indicate_test_context(&item.attrs)
+            || item.ident == "tests";
         let mod_name = item.ident.to_string();
         self.current_inline_module = Some(mod_name.clone());
         self.current_subject_name = Some(mod_name);
@@ -324,9 +348,7 @@ pub(crate) fn loc_at(line_starts: &[u32], byte_offset: u32) -> SourceLoc {
 #[must_use]
 pub(crate) fn slice_source(source: &str, span: ByteSpan) -> &str {
     let start = usize::try_from(span.start).unwrap_or(0);
-    let end = usize::try_from(span.end)
-        .unwrap_or(start)
-        .min(source.len());
+    let end = usize::try_from(span.end).unwrap_or(start).min(source.len());
     if start <= end && end <= source.len() {
         &source[start..end]
     } else {
@@ -543,8 +565,7 @@ pub(crate) fn is_cheap_clone_type(ty: &Type) -> bool {
         Type::Path(tp) => tp.path.segments.iter().any(|seg| {
             matches!(
                 seg.ident.to_string().as_str(),
-                "u8"
-                    | "u16"
+                "u8" | "u16"
                     | "u32"
                     | "u64"
                     | "u128"
@@ -689,7 +710,9 @@ pub(crate) fn attrs_indicate_test_context(attrs: &[Attribute]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use dotore_core::{ByteSpan, PrescriptionTier, RuleId, RuleSeverity, SourceLoc, compute_line_starts};
+    use dotore_core::{
+        ByteSpan, PrescriptionTier, RuleId, RuleSeverity, SourceLoc, compute_line_starts,
+    };
     use syn::parse_quote;
 
     use super::*;
@@ -733,7 +756,10 @@ mod tests {
 
         let ident_expr: Expr = parse_quote!((&guard));
         assert_eq!(extract_expr_ident(&ident_expr).as_deref(), Some("guard"));
-        assert_eq!(extract_receiver_ident(&ident_expr).as_deref(), Some("guard"));
+        assert_eq!(
+            extract_receiver_ident(&ident_expr).as_deref(),
+            Some("guard")
+        );
     }
 
     #[test]

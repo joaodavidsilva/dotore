@@ -65,10 +65,7 @@ use crate::{
 
 /// Evaluates all enabled rules across the [`ProjectGraph`] using default React capability gate and config.
 #[must_use]
-pub fn evaluate_project(
-    graph: &ProjectGraph,
-    enabled_rules: Option<&[RuleId]>,
-) -> Vec<Diagnostic> {
+pub fn evaluate_project(graph: &ProjectGraph, enabled_rules: Option<&[RuleId]>) -> Vec<Diagnostic> {
     let default_pkg = WorkspacePackage {
         name: "default".to_string(),
         root_dir: std::path::PathBuf::from("."),
@@ -149,6 +146,7 @@ pub fn evaluate_file_in_package(
     bundle_size::evaluate_barrel_imports(graph, file, gate, &is_active, out);
     security::evaluate_security_rules(graph, file, &is_active, out);
     server_nextjs::evaluate_server_and_nextjs_rules(graph, file, config, &is_active, out);
+    architecture::evaluate_file_soc_rules(file, config, &is_active, out);
 
     // Restamp severities and apply inline suppressions for diagnostics emitted on this file
     let mut retained = Vec::with_capacity(out.len().saturating_sub(start_idx));
@@ -915,5 +913,3 @@ fn evaluate_jsx_element_rules<F>(
         );
     }
 }
-
-

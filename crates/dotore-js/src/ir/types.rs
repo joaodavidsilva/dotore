@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 
 pub use dotore_core::diff::ContextualSpanProvider;
 pub use dotore_core::ir::{
-    BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
-    FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
-    PackageAnalysisResult, RelatedHookOwnerSpanIr, SourceLoc, SubjectEffectOwner, SymbolKind,
-    SymbolOutline, classify_file_context, compute_line_starts, loc_from_line_starts,
+    ArchitectureFileFacets, BlockDisableRange, ByteSpan, ConcernBucket, ConcernSignalSite,
+    ContextualOwnerSpansIr, ExtractedFile, FileContext, FileSuppressions, HelperFingerprintIr,
+    InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId, LineDisableDirective,
+    OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, SourceLoc, StaticCatalogSiteIr,
+    StructLiteralConstructionSiteIr, SubjectEffectOwner, SymbolKind, SymbolOutline,
+    classify_file_context, compute_line_starts, loc_from_line_starts,
 };
 
 use crate::rules::{AutofixPatch, RuleId};
@@ -779,6 +781,8 @@ pub struct FileIr {
     pub(crate) context_consumers: Vec<ContextConsumerSiteIr>,
     /// Single-pass AST owner spans for `--scope contextual` diff filtering.
     pub contextual_owner_spans: ContextualOwnerSpansIr,
+    /// Language-agnostic multi-signal structural facets for architecture, SoC, and reuse rules.
+    pub architecture_facets: ArchitectureFileFacets,
 }
 
 impl FileIr {
@@ -803,6 +807,7 @@ impl FileIr {
         let file_context = self.file_context;
         let symbol_outlines = self.symbol_outlines.clone();
         let suppressions = self.suppressions.clone();
+        let architecture_facets = self.architecture_facets.clone();
         ExtractedFile {
             path,
             source,
@@ -814,8 +819,10 @@ impl FileIr {
             subjects_count,
             effects_count,
             subject_spans,
+            architecture_facets: ArchitectureFileFacets::default(),
             payload: Box::new(self),
         }
+        .with_architecture_facets(architecture_facets)
     }
 }
 

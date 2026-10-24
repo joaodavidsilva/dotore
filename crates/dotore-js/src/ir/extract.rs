@@ -17,8 +17,7 @@ pub(crate) use super::outlines_and_suppressions::extract_file_suppressions;
 
 use super::{
     dataflow::{
-        extract_async_flows, extract_mutations, extract_security_sinks,
-        extract_semantic_rule_sites,
+        extract_async_flows, extract_mutations, extract_security_sinks, extract_semantic_rule_sites,
     },
     jsx_subtree::extract_jsx_subtrees,
     module_ir::extract_module_ir,
@@ -27,8 +26,8 @@ use super::{
     react_ast::{RefEntry, extract_caller_sites, extract_jsx_elements},
     subject::extract_subjects,
     types::{
-        ByteSpan, ContextualOwnerSpansIr, FileIr, FileSuppressions, ModuleIr, MotionFileIr,
-        RelatedHookOwnerSpanIr, classify_file_context, compute_line_starts,
+        ArchitectureFileFacets, ByteSpan, ContextualOwnerSpansIr, FileIr, FileSuppressions,
+        ModuleIr, MotionFileIr, RelatedHookOwnerSpanIr, classify_file_context, compute_line_starts,
     },
 };
 
@@ -79,6 +78,7 @@ where
             context_providers: Vec::new(),
             context_consumers: Vec::new(),
             contextual_owner_spans: ContextualOwnerSpansIr::default(),
+            architecture_facets: ArchitectureFileFacets::default(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -120,6 +120,7 @@ where
             context_providers: Vec::new(),
             context_consumers: Vec::new(),
             contextual_owner_spans: ContextualOwnerSpansIr::default(),
+            architecture_facets: ArchitectureFileFacets::default(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -231,6 +232,19 @@ where
     crate::rules::angular::extract_angular_sites(&semantic, &line_starts, &mut semantic_sites);
     let mut contextual_owner_spans = extract_contextual_owner_spans(&semantic);
     contextual_owner_spans.element_spans = jsx_subtrees.iter().map(|s| s.span).collect();
+    let mut architecture_facets = ArchitectureFileFacets::default();
+    crate::rules::architecture::extract_soc_architecture_facets(
+        path,
+        source,
+        &parsed.program,
+        &semantic,
+        &module,
+        &subjects,
+        &jsx_elements,
+        &symbol_outlines,
+        &line_starts,
+        &mut architecture_facets,
+    );
 
     let file_ir = FileIr {
         path: path.to_path_buf(),
@@ -255,6 +269,7 @@ where
         context_providers,
         context_consumers,
         contextual_owner_spans,
+        architecture_facets,
     };
 
     f(&file_ir, &semantic)
