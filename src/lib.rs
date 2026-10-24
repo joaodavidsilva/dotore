@@ -1316,6 +1316,16 @@ fn compute_scan_cache_meta_and_key(
 
     let mut hash = FNV1A_64_OFFSET_BASIS;
     fnv1a_64_str(&mut hash, env!("CARGO_PKG_VERSION"));
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Ok(meta) = fs::metadata(&exe_path)
+    {
+        fnv1a_64_str(&mut hash, &meta.len().to_string());
+        if let Ok(modified) = meta.modified()
+            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            fnv1a_64_str(&mut hash, &dur.as_nanos().to_string());
+        }
+    }
     fnv1a_64_str(&mut hash, &JSON_REPORT_SCHEMA_VERSION.to_string());
     fnv1a_64_str(&mut hash, &SCAN_CACHE_SCHEMA_VERSION.to_string());
     fnv1a_64_str(&mut hash, &canonical_root_str);
