@@ -614,13 +614,6 @@ pub(crate) fn has_jsx_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool
 /// Returns `true` if `attrs` contains `target` as a boolean shorthand (`<Comp disabled />`)
 /// or with a literal `true` value (`<Comp disabled={true} />`).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn has_jsx_truthy_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool {
     let Some(attr) = find_last_jsx_attr(attrs, target) else {
         return false;
@@ -652,13 +645,6 @@ pub(crate) fn jsx_has_spread_attr(attrs: &[JSXAttributeItem<'_>]) -> bool {
 
 /// Extracts the Static string value of a [`JSXAttribute`] (`foo="bar"` or `foo={"bar"}` or ``foo={`bar`}``).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn jsx_attr_string_value<'a>(attr: &'a JSXAttribute<'a>) -> Option<&'a str> {
     match attr.value.as_ref()? {
         JSXAttributeValue::StringLiteral(s) => s.value.as_str(),
@@ -885,13 +871,6 @@ pub(crate) fn get_object_prop_static_str<'a>(
 
 /// Extracts a boolean literal value for property `key_name` on `obj`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn get_object_prop_bool(obj: &ObjectExpression<'_>, key_name: &str) -> Option<bool> {
     let prop = get_object_prop(obj, key_name)?;
     if let Expression::BooleanLiteral(b) = unparenthesized(&prop.value) {
