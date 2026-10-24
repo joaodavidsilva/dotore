@@ -1,21 +1,25 @@
-//! Single-pass Python AST/semantic detectors for `asyncio` concurrency rules
-//! (`py-async-no-blocking-call`, `py-async-no-sequential-await-in-loop`,
-//! `py-async-no-unawaited-coroutine`, `py-async-no-fire-and-forget-task`) and
-//! hot-loop performance rules (`py-perf-hoist-regex`, `py-perf-no-linear-membership-in-loop`).
+//! Python `asyncio` concurrency hazard detectors:
+//! - `py-async-no-blocking-call` (`Capability::Asyncio` / `Capability::FastApi`)
+//! - `py-async-no-sequential-await-in-loop` (`Capability::Asyncio` / `Capability::FastApi`)
+//! - `py-async-no-unawaited-coroutine` (`Capability::Asyncio` / `Capability::FastApi`)
+//! - `py-async-no-fire-and-forget-task` (`Capability::Asyncio` / `Capability::FastApi`)
 
 use std::{collections::HashSet, path::Path};
 
-use dotore_core::{
-    AutofixPatch, ByteEdit, ByteSpan, Diagnostic, RuleId, loc_from_line_starts,
-};
-use ruff_python_ast::{CmpOp, Expr, ExprCall, Operator, Stmt};
+use dotore_core::{Diagnostic, RuleId, loc_from_line_starts};
+use ruff_python_ast::{Expr, ExprCall, Stmt};
 use ruff_text_size::Ranged;
 
 use crate::{
-    callee_qualified_name, graph::PyUnawaitedCallCandidate, slice_source, text_range_to_byte_span,
+    graph::PyUnawaitedCallCandidate,
+    matchers::{
+        PyScopeTracker, build_py_diagnostic, callee_qualified_name, collect_expr_load_names,
+        is_path_constructor_expr, slice_source, text_range_to_byte_span,
+    },
 };
 
-pub(crate) fn extract_async_and_perf_diagnostics(
+/// Evaluates the 4 `asyncio` concurrency rules over `suite` and collects cross-file unawaited call candidates.
+pub(crate) fn extract_asyncio_diagnostics(
     path: &Path,
     source: &str,
     line_starts: &[u32],
@@ -29,16 +33,13 @@ pub(crate) fn extract_async_and_perf_diagnostics(
     }
     let (async_functions, async_methods) = collect_file_async_defs(suite);
     let (root_consumed_coro_vars, root_retained_task_vars) = collect_consumed_async_vars(suite);
-    let module_hoist_insert_offset = compute_module_hoist_insert_offset(suite, line_starts);
-    let mut visitor = AsyncPerfVisitor {
+    let mut visitor = AsyncioRuleVisitor {
         path,
         source,
         line_starts,
         out,
         unawaited_calls,
-        class_stack: Vec::new(),
-        subject_stack: Vec::new(),
-        async_fn_stack: Vec::new(),
+        scope: PyScopeTracker::new(),
         in_executor_offload: false,
         in_coroutine_consumer: false,
         in_task_consumer: false,
@@ -53,73 +54,34 @@ pub(crate) fn extract_async_and_perf_diagnostics(
         async_methods,
         consumed_coro_vars_stack: vec![root_consumed_coro_vars],
         retained_task_vars_stack: vec![root_retained_task_vars],
-        fn_depth: 0,
-        loop_depth: 0,
-        module_hoist_insert_offset,
-        hoisted_regex_count: 0,
-        re_compile_aliases: HashSet::new(),
-        list_vars_stack: vec![HashSet::new()],
     };
     visitor.visit_suite(suite);
 }
 
-struct AsyncPerfVisitor<'a> {
+struct AsyncioRuleVisitor<'a> {
     path: &'a Path,
     source: &'a str,
     line_starts: &'a [u32],
     out: &'a mut Vec<Diagnostic>,
     unawaited_calls: &'a mut Vec<PyUnawaitedCallCandidate>,
-    class_stack: Vec<String>,
-    subject_stack: Vec<String>,
-    /// Stack recording whether each enclosing function scope is `async def` (`true`) or `def` (`false`).
-    async_fn_stack: Vec<bool>,
-    /// True when visiting arguments of `asyncio.to_thread`, `loop.run_in_executor`, `anyio.to_thread.run_sync`, etc.
+    scope: PyScopeTracker,
     in_executor_offload: bool,
-    /// True when visiting an expression directly consumed by `await`, `return`, `yield`, or an async scheduler.
     in_coroutine_consumer: bool,
-    /// True when visiting an expression whose `Task` result is awaited, returned, stored on an attribute/subscript, or passed to a call.
     in_task_consumer: bool,
-    /// Local aliases imported from `time` for `sleep` (e.g. `from time import sleep`).
     sync_sleep_aliases: HashSet<String>,
-    /// Local aliases imported from `urllib.request` for `urlopen` / `urlretrieve`.
     sync_urlopen_aliases: HashSet<String>,
-    /// Variables assigned `requests.Session()` or `httpx.Client()`.
     sync_http_session_vars: HashSet<String>,
-    /// Variables assigned `httpx.AsyncClient(...)` or `aiohttp.ClientSession(...)`.
     async_http_client_vars: HashSet<String>,
-    /// Variables bound via `async with asyncio.TaskGroup() as tg:`.
     task_group_vars: HashSet<String>,
-    /// Variables assigned `Path(...)` or `pathlib.Path(...)`.
     path_vars: HashSet<String>,
-    /// Stack of active synchronous `for` loop frames recording cross-iteration awaited variables.
     sync_for_chained_vars_stack: Vec<HashSet<String>>,
-    /// Top-level or nested `async def` function names defined in this file.
     async_functions: HashSet<String>,
-    /// `async def` method names defined on classes in this file.
     async_methods: HashSet<String>,
-    /// Per-function-scope local variables whose coroutine value is awaited, returned, or scheduled.
     consumed_coro_vars_stack: Vec<HashSet<String>>,
-    /// Per-function-scope local variables whose `asyncio.Task` value is strongly retained, awaited, or returned.
     retained_task_vars_stack: Vec<HashSet<String>>,
-    /// Current nesting depth inside `def` / `async def` functions.
-    fn_depth: usize,
-    /// Current nesting depth inside `for` / `while` loops or comprehensions.
-    loop_depth: usize,
-    /// 0-based byte offset at module scope where hoisted `_COMPILED_RE` constants are inserted.
-    module_hoist_insert_offset: u32,
-    /// Counter of hoisted `re.compile(...)` constants in this file.
-    hoisted_regex_count: usize,
-    /// Local aliases imported from `re` / `regex` for `compile`.
-    re_compile_aliases: HashSet<String>,
-    /// Stack of lexical scopes tracking variables known to hold `list` values.
-    list_vars_stack: Vec<HashSet<String>>,
 }
 
-impl<'a> AsyncPerfVisitor<'a> {
-    fn is_in_async_fn(&self) -> bool {
-        self.async_fn_stack.last().copied().unwrap_or(false)
-    }
-
+impl<'a> AsyncioRuleVisitor<'a> {
     fn visit_suite(&mut self, suite: &[Stmt]) {
         for stmt in suite {
             self.visit_stmt(stmt);
@@ -152,56 +114,31 @@ impl<'a> AsyncPerfVisitor<'a> {
                         self.sync_urlopen_aliases.insert(bound);
                     } else if module == "asyncio" && orig == "sleep" {
                         self.async_functions.insert(bound);
-                    } else if matches!(module.as_str(), "re" | "regex") && orig == "compile" {
-                        self.re_compile_aliases.insert(bound);
                     }
                 }
             }
             Stmt::ClassDef(class_def) => {
-                let class_name = class_def.name.to_string();
-                let qualified = if let Some(parent) = self.class_stack.last() {
-                    format!("{parent}.{class_name}")
-                } else {
-                    class_name.clone()
-                };
-                self.class_stack.push(class_name);
-                self.subject_stack.push(qualified);
+                self.scope.enter_class(class_def.name.as_str());
                 self.visit_suite(&class_def.body);
-                self.subject_stack.pop();
-                self.class_stack.pop();
+                self.scope.exit_class();
             }
             Stmt::FunctionDef(func_def) => {
-                let fn_name = func_def.name.to_string();
-                let subject_name = if let Some(cls) = self.class_stack.last() {
-                    format!("{cls}.{fn_name}")
-                } else {
-                    fn_name
-                };
                 for dec in &func_def.decorator_list {
                     self.visit_expr(&dec.expression);
                 }
-                let saved_classes = std::mem::take(&mut self.class_stack);
                 let saved_for_stack = std::mem::take(&mut self.sync_for_chained_vars_stack);
-                let saved_loop_depth = self.loop_depth;
-                self.loop_depth = 0;
-                self.fn_depth += 1;
                 let (fn_consumed_coros, fn_retained_tasks) =
                     collect_consumed_async_vars(&func_def.body);
-                self.subject_stack.push(subject_name);
-                self.async_fn_stack.push(func_def.is_async);
+                let saved_scope = self
+                    .scope
+                    .enter_function(func_def.name.as_str(), func_def.is_async);
                 self.consumed_coro_vars_stack.push(fn_consumed_coros);
                 self.retained_task_vars_stack.push(fn_retained_tasks);
-                self.list_vars_stack.push(HashSet::new());
                 self.visit_suite(&func_def.body);
-                self.list_vars_stack.pop();
                 self.retained_task_vars_stack.pop();
                 self.consumed_coro_vars_stack.pop();
-                self.async_fn_stack.pop();
-                self.subject_stack.pop();
-                self.fn_depth -= 1;
-                self.loop_depth = saved_loop_depth;
+                self.scope.exit_function(saved_scope);
                 self.sync_for_chained_vars_stack = saved_for_stack;
-                self.class_stack = saved_classes;
             }
             Stmt::Assign(assign) => {
                 let (coro_consumed, task_retained) = assign
@@ -229,12 +166,8 @@ impl<'a> AsyncPerfVisitor<'a> {
                     self.in_task_consumer = prev_task;
                 }
             }
-            Stmt::AugAssign(aug) => {
-                self.visit_expr(&aug.value);
-            }
-            Stmt::Expr(expr_stmt) => {
-                self.visit_expr(&expr_stmt.value);
-            }
+            Stmt::AugAssign(aug) => self.visit_expr(&aug.value),
+            Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
             Stmt::Return(ret) => {
                 if let Some(val) = &ret.value {
                     let prev_coro = self.in_coroutine_consumer;
@@ -269,7 +202,7 @@ impl<'a> AsyncPerfVisitor<'a> {
             }
             Stmt::For(for_stmt) => {
                 self.visit_expr(&for_stmt.iter);
-                self.loop_depth += 1;
+                self.scope.enter_loop();
                 if for_stmt.is_async {
                     self.visit_suite(&for_stmt.body);
                 } else {
@@ -279,14 +212,14 @@ impl<'a> AsyncPerfVisitor<'a> {
                     self.sync_for_chained_vars_stack.pop();
                 }
                 self.visit_suite(&for_stmt.orelse);
-                self.loop_depth -= 1;
+                self.scope.exit_loop();
             }
             Stmt::While(while_stmt) => {
                 self.visit_expr(&while_stmt.test);
-                self.loop_depth += 1;
+                self.scope.enter_loop();
                 self.visit_suite(&while_stmt.body);
                 self.visit_suite(&while_stmt.orelse);
-                self.loop_depth -= 1;
+                self.scope.exit_loop();
             }
             Stmt::With(with_stmt) => {
                 for item in &with_stmt.items {
@@ -340,15 +273,6 @@ impl<'a> AsyncPerfVisitor<'a> {
     }
 
     fn record_var_init(&mut self, var_name: &str, value: &Expr) {
-        if is_list_init_expr(value) {
-            if let Some(frame) = self.list_vars_stack.last_mut() {
-                frame.insert(var_name.to_string());
-            }
-        } else if is_set_or_dict_init_expr(value) {
-            for frame in &mut self.list_vars_stack {
-                frame.remove(var_name);
-            }
-        }
         if let Expr::Call(call) = value {
             let callee = callee_qualified_name(&call.func);
             if matches!(callee.as_str(), "requests.Session" | "httpx.Client") {
@@ -378,12 +302,6 @@ impl<'a> AsyncPerfVisitor<'a> {
         }
     }
 
-    fn is_list_var(&self, var_name: &str) -> bool {
-        self.list_vars_stack
-            .iter()
-            .any(|frame| frame.contains(var_name))
-    }
-
     fn is_coro_var_consumed(&self, var_name: &str) -> bool {
         self.consumed_coro_vars_stack
             .iter()
@@ -398,7 +316,7 @@ impl<'a> AsyncPerfVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses Python expression nodes to inspect calls and subexpressions"
+        reason = "Traverses Python expression nodes to inspect asyncio calls and awaits"
     )]
     fn visit_expr(&mut self, expr: &Expr) {
         match expr {
@@ -410,7 +328,6 @@ impl<'a> AsyncPerfVisitor<'a> {
                 }
                 self.check_fire_and_forget_task(call, &callee);
                 self.check_unawaited_coroutine_call(call, &callee);
-                self.check_hoist_regex(call, &callee);
                 let prev_offload = self.in_executor_offload;
                 let prev_coro = self.in_coroutine_consumer;
                 let prev_task = self.in_task_consumer;
@@ -477,16 +394,13 @@ impl<'a> AsyncPerfVisitor<'a> {
                 self.visit_expr(&bin.left);
                 self.visit_expr(&bin.right);
             }
-            Expr::UnaryOp(un) => {
-                self.visit_expr(&un.operand);
-            }
+            Expr::UnaryOp(un) => self.visit_expr(&un.operand),
             Expr::BoolOp(b) => {
                 for v in &b.values {
                     self.visit_expr(v);
                 }
             }
             Expr::Compare(cmp) => {
-                self.check_linear_membership_in_loop(cmp);
                 for op_expr in &cmp.operands {
                     self.visit_expr(op_expr);
                 }
@@ -527,13 +441,13 @@ impl<'a> AsyncPerfVisitor<'a> {
                 let has_sync_gen = comp.generators.iter().any(|g| !g.is_async);
                 for (idx, generator) in comp.generators.iter().enumerate() {
                     if idx > 0 {
-                        self.loop_depth += 1;
+                        self.scope.enter_loop();
                     }
                     self.visit_expr(&generator.iter);
                     if idx > 0 {
-                        self.loop_depth -= 1;
+                        self.scope.exit_loop();
                     }
-                    self.loop_depth += 1;
+                    self.scope.enter_loop();
                     if has_sync_gen {
                         self.sync_for_chained_vars_stack.push(HashSet::new());
                     }
@@ -543,9 +457,9 @@ impl<'a> AsyncPerfVisitor<'a> {
                     if has_sync_gen {
                         self.sync_for_chained_vars_stack.pop();
                     }
-                    self.loop_depth -= 1;
+                    self.scope.exit_loop();
                 }
-                self.loop_depth += 1;
+                self.scope.enter_loop();
                 if has_sync_gen {
                     self.sync_for_chained_vars_stack.push(HashSet::new());
                 }
@@ -553,19 +467,19 @@ impl<'a> AsyncPerfVisitor<'a> {
                 if has_sync_gen {
                     self.sync_for_chained_vars_stack.pop();
                 }
-                self.loop_depth -= 1;
+                self.scope.exit_loop();
             }
             Expr::SetComp(comp) => {
                 let has_sync_gen = comp.generators.iter().any(|g| !g.is_async);
                 for (idx, generator) in comp.generators.iter().enumerate() {
                     if idx > 0 {
-                        self.loop_depth += 1;
+                        self.scope.enter_loop();
                     }
                     self.visit_expr(&generator.iter);
                     if idx > 0 {
-                        self.loop_depth -= 1;
+                        self.scope.exit_loop();
                     }
-                    self.loop_depth += 1;
+                    self.scope.enter_loop();
                     if has_sync_gen {
                         self.sync_for_chained_vars_stack.push(HashSet::new());
                     }
@@ -575,9 +489,9 @@ impl<'a> AsyncPerfVisitor<'a> {
                     if has_sync_gen {
                         self.sync_for_chained_vars_stack.pop();
                     }
-                    self.loop_depth -= 1;
+                    self.scope.exit_loop();
                 }
-                self.loop_depth += 1;
+                self.scope.enter_loop();
                 if has_sync_gen {
                     self.sync_for_chained_vars_stack.push(HashSet::new());
                 }
@@ -585,19 +499,19 @@ impl<'a> AsyncPerfVisitor<'a> {
                 if has_sync_gen {
                     self.sync_for_chained_vars_stack.pop();
                 }
-                self.loop_depth -= 1;
+                self.scope.exit_loop();
             }
             Expr::DictComp(comp) => {
                 let has_sync_gen = comp.generators.iter().any(|g| !g.is_async);
                 for (idx, generator) in comp.generators.iter().enumerate() {
                     if idx > 0 {
-                        self.loop_depth += 1;
+                        self.scope.enter_loop();
                     }
                     self.visit_expr(&generator.iter);
                     if idx > 0 {
-                        self.loop_depth -= 1;
+                        self.scope.exit_loop();
                     }
-                    self.loop_depth += 1;
+                    self.scope.enter_loop();
                     if has_sync_gen {
                         self.sync_for_chained_vars_stack.push(HashSet::new());
                     }
@@ -607,9 +521,9 @@ impl<'a> AsyncPerfVisitor<'a> {
                     if has_sync_gen {
                         self.sync_for_chained_vars_stack.pop();
                     }
-                    self.loop_depth -= 1;
+                    self.scope.exit_loop();
                 }
-                self.loop_depth += 1;
+                self.scope.enter_loop();
                 if has_sync_gen {
                     self.sync_for_chained_vars_stack.push(HashSet::new());
                 }
@@ -620,63 +534,52 @@ impl<'a> AsyncPerfVisitor<'a> {
                 if has_sync_gen {
                     self.sync_for_chained_vars_stack.pop();
                 }
-                self.loop_depth -= 1;
+                self.scope.exit_loop();
             }
             Expr::Generator(comp) => {
                 for (idx, generator) in comp.generators.iter().enumerate() {
                     if idx > 0 {
-                        self.loop_depth += 1;
+                        self.scope.enter_loop();
                     }
                     self.visit_expr(&generator.iter);
                     if idx > 0 {
-                        self.loop_depth -= 1;
+                        self.scope.exit_loop();
                     }
-                    self.loop_depth += 1;
+                    self.scope.enter_loop();
                     for if_clause in &generator.ifs {
                         self.visit_expr(if_clause);
                     }
-                    self.loop_depth -= 1;
+                    self.scope.exit_loop();
                 }
-                self.loop_depth += 1;
+                self.scope.enter_loop();
                 self.visit_expr(&comp.elt);
-                self.loop_depth -= 1;
+                self.scope.exit_loop();
             }
-            Expr::Named(named) => {
-                self.visit_expr(&named.value);
-            }
+            Expr::Named(named) => self.visit_expr(&named.value),
             _ => {}
         }
     }
 
     fn check_blocking_call_in_async(&mut self, call: &ExprCall, callee: &str) {
-        if !self.is_in_async_fn() {
+        if !self.scope.is_in_async_fn() {
             return;
         }
         let Some((target_display, suggestion)) = self.classify_blocking_call(call, callee) else {
             return;
         };
         let span = text_range_to_byte_span(call.range());
-        let loc = loc_from_line_starts(self.line_starts, span.start);
-        let meta = RuleId::PyAsyncNoBlockingCall.metadata();
-        self.out.push(Diagnostic {
-            file: self.path.to_path_buf(),
-            subject_name: self.subject_stack.last().cloned(),
-            rule: RuleId::PyAsyncNoBlockingCall,
-            category: meta.category,
-            severity: meta.default_severity,
-            message_id: "pyAsyncNoBlockingCall",
-            tier: meta.default_tier,
-            target_name: target_display.clone(),
-            message: format!(
+        self.out.push(build_py_diagnostic(
+            self.path,
+            self.line_starts,
+            span,
+            self.scope.current_subject(),
+            RuleId::PyAsyncNoBlockingCall,
+            "pyAsyncNoBlockingCall",
+            target_display.clone(),
+            format!(
                 "Synchronous blocking call `{target_display}(...)` inside `async def` stalls the event loop; {suggestion}."
             ),
-            docs_url: meta.docs_url,
-            loc,
-            span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        ));
     }
 
     fn classify_blocking_call(
@@ -796,7 +699,7 @@ impl<'a> AsyncPerfVisitor<'a> {
     }
 
     fn check_sequential_await_in_loop(&mut self, aw: &ruff_python_ast::ExprAwait) {
-        if !self.is_in_async_fn() || self.sync_for_chained_vars_stack.is_empty() {
+        if !self.scope.is_in_async_fn() || self.sync_for_chained_vars_stack.is_empty() {
             return;
         }
         let Expr::Call(call) = aw.value.as_ref() else {
@@ -831,32 +734,23 @@ impl<'a> AsyncPerfVisitor<'a> {
         }
 
         let span = text_range_to_byte_span(aw.range());
-        let loc = loc_from_line_starts(self.line_starts, span.start);
         let target_display = if callee.is_empty() {
             "await".to_string()
         } else {
             callee
         };
-        let meta = RuleId::PyAsyncNoSequentialAwaitInLoop.metadata();
-        self.out.push(Diagnostic {
-            file: self.path.to_path_buf(),
-            subject_name: self.subject_stack.last().cloned(),
-            rule: RuleId::PyAsyncNoSequentialAwaitInLoop,
-            category: meta.category,
-            severity: meta.default_severity,
-            message_id: "pyAsyncNoSequentialAwaitInLoop",
-            tier: meta.default_tier,
-            target_name: target_display.clone(),
-            message: format!(
+        self.out.push(build_py_diagnostic(
+            self.path,
+            self.line_starts,
+            span,
+            self.scope.current_subject(),
+            RuleId::PyAsyncNoSequentialAwaitInLoop,
+            "pyAsyncNoSequentialAwaitInLoop",
+            target_display.clone(),
+            format!(
                 "Sequential `await {target_display}(...)` inside a `for` loop serializes independent coroutines; run concurrently with `await asyncio.gather(...)` or `async with asyncio.TaskGroup() as tg:`."
             ),
-            docs_url: meta.docs_url,
-            loc,
-            span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        ));
     }
 
     fn check_unawaited_coroutine_call(&mut self, call: &ExprCall, callee: &str) {
@@ -868,32 +762,24 @@ impl<'a> AsyncPerfVisitor<'a> {
         if !self.is_coroutine_callee(call, callee) {
             self.unawaited_calls.push(PyUnawaitedCallCandidate {
                 callee: callee.to_string(),
-                subject_name: self.subject_stack.last().cloned(),
+                subject_name: self.scope.current_subject(),
                 span,
                 loc,
             });
             return;
         }
-        let meta = RuleId::PyAsyncNoUnawaitedCoroutine.metadata();
-        self.out.push(Diagnostic {
-            file: self.path.to_path_buf(),
-            subject_name: self.subject_stack.last().cloned(),
-            rule: RuleId::PyAsyncNoUnawaitedCoroutine,
-            category: meta.category,
-            severity: meta.default_severity,
-            message_id: "pyAsyncNoUnawaitedCoroutine",
-            tier: meta.default_tier,
-            target_name: callee.to_string(),
-            message: format!(
+        self.out.push(build_py_diagnostic(
+            self.path,
+            self.line_starts,
+            span,
+            self.scope.current_subject(),
+            RuleId::PyAsyncNoUnawaitedCoroutine,
+            "pyAsyncNoUnawaitedCoroutine",
+            callee.to_string(),
+            format!(
                 "Coroutine `{callee}(...)` is called without `await`, `asyncio.gather(...)`, or `TaskGroup.create_task(...)` and will never execute."
             ),
-            docs_url: meta.docs_url,
-            loc,
-            span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        ));
     }
 
     fn is_coroutine_callee(&self, call: &ExprCall, callee: &str) -> bool {
@@ -932,7 +818,15 @@ impl<'a> AsyncPerfVisitor<'a> {
             if self.async_http_client_vars.contains(&recv)
                 && matches!(
                     method,
-                    "get" | "post" | "put" | "delete" | "patch" | "head" | "options" | "request" | "aclose"
+                    "get"
+                        | "post"
+                        | "put"
+                        | "delete"
+                        | "patch"
+                        | "head"
+                        | "options"
+                        | "request"
+                        | "aclose"
                 )
             {
                 return true;
@@ -946,27 +840,18 @@ impl<'a> AsyncPerfVisitor<'a> {
             return;
         }
         let span = text_range_to_byte_span(call.range());
-        let loc = loc_from_line_starts(self.line_starts, span.start);
-        let meta = RuleId::PyAsyncNoFireAndForgetTask.metadata();
-        self.out.push(Diagnostic {
-            file: self.path.to_path_buf(),
-            subject_name: self.subject_stack.last().cloned(),
-            rule: RuleId::PyAsyncNoFireAndForgetTask,
-            category: meta.category,
-            severity: meta.default_severity,
-            message_id: "pyAsyncNoFireAndForgetTask",
-            tier: meta.default_tier,
-            target_name: callee.to_string(),
-            message: format!(
+        self.out.push(build_py_diagnostic(
+            self.path,
+            self.line_starts,
+            span,
+            self.scope.current_subject(),
+            RuleId::PyAsyncNoFireAndForgetTask,
+            "pyAsyncNoFireAndForgetTask",
+            callee.to_string(),
+            format!(
                 "Task created by `{callee}(...)` has no strong reference retained (`background_tasks.add(task)`), `await`, or `TaskGroup` ownership and may be garbage-collected mid-execution."
             ),
-            docs_url: meta.docs_url,
-            loc,
-            span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        ));
     }
 
     fn is_weak_task_creation_call(&self, callee: &str) -> bool {
@@ -989,135 +874,6 @@ impl<'a> AsyncPerfVisitor<'a> {
         }
         false
     }
-
-    fn check_hoist_regex(&mut self, call: &ExprCall, callee: &str) {
-        if self.fn_depth == 0 && self.loop_depth == 0 {
-            return;
-        }
-        if !matches!(callee, "re.compile" | "regex.compile")
-            && !self.re_compile_aliases.contains(callee)
-        {
-            return;
-        }
-        let Some(first_arg) = call.arguments.args.first() else {
-            return;
-        };
-        if !matches!(first_arg, Expr::StringLiteral(_) | Expr::BytesLiteral(_)) {
-            return;
-        }
-        if !call.arguments.args[1..]
-            .iter()
-            .all(is_constant_regex_flag_expr)
-            || !call
-                .arguments
-                .keywords
-                .iter()
-                .all(|kw| is_constant_regex_flag_expr(&kw.value))
-        {
-            return;
-        }
-
-        self.hoisted_regex_count += 1;
-        let const_name = if self.hoisted_regex_count == 1 && !self.source.contains("_COMPILED_RE") {
-            "_COMPILED_RE".to_string()
-        } else {
-            format!("_COMPILED_RE_{}", self.hoisted_regex_count)
-        };
-
-        let span = text_range_to_byte_span(call.range());
-        let loc = loc_from_line_starts(self.line_starts, span.start);
-        let call_text = slice_source(self.source, span);
-        let insert_pos = self.module_hoist_insert_offset;
-
-        let meta = RuleId::PyPerfHoistRegex.metadata();
-        self.out.push(Diagnostic {
-            file: self.path.to_path_buf(),
-            subject_name: self.subject_stack.last().cloned(),
-            rule: RuleId::PyPerfHoistRegex,
-            category: meta.category,
-            severity: meta.default_severity,
-            message_id: "pyPerfHoistRegex",
-            tier: meta.default_tier,
-            target_name: callee.to_string(),
-            message: format!(
-                "Constant regular expression `{call_text}` is compiled repeatedly inside a function or loop; hoist `{const_name} = {call_text}` to module scope."
-            ),
-            docs_url: meta.docs_url,
-            loc,
-            span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: Some(AutofixPatch {
-                description: format!("Hoist `{call_text}` to module-level `{const_name}`"),
-                edits: vec![
-                    ByteEdit {
-                        file: None,
-                        span: ByteSpan {
-                            start: insert_pos,
-                            end: insert_pos,
-                        },
-                        replacement: format!("{const_name} = {call_text}\n\n"),
-                    },
-                    ByteEdit {
-                        file: None,
-                        span,
-                        replacement: const_name,
-                    },
-                ],
-            }),
-        });
-    }
-
-    fn check_linear_membership_in_loop(&mut self, cmp: &ruff_python_ast::ExprCompare) {
-        if self.loop_depth == 0 {
-            return;
-        }
-        for (op, comparator) in cmp.ops.iter().zip(cmp.comparators()) {
-            if !matches!(op, CmpOp::In | CmpOp::NotIn) {
-                continue;
-            }
-            if !self.is_list_collection_expr(comparator) {
-                continue;
-            }
-            let span = text_range_to_byte_span(cmp.range());
-            let loc = loc_from_line_starts(self.line_starts, span.start);
-            let rhs_text =
-                slice_source(self.source, text_range_to_byte_span(comparator.range())).trim();
-            let meta = RuleId::PyPerfNoLinearMembershipInLoop.metadata();
-            self.out.push(Diagnostic {
-                file: self.path.to_path_buf(),
-                subject_name: self.subject_stack.last().cloned(),
-                rule: RuleId::PyPerfNoLinearMembershipInLoop,
-                category: meta.category,
-                severity: meta.default_severity,
-                message_id: "pyPerfNoLinearMembershipInLoop",
-                tier: meta.default_tier,
-                target_name: rhs_text.to_string(),
-                message: format!(
-                    "Linear O(n) membership check against list `{rhs_text}` inside a loop; convert `{rhs_text}` to a `set` before the loop for O(1) lookup."
-                ),
-                docs_url: meta.docs_url,
-                loc,
-                span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
-        }
-    }
-
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Matches list literals, list comprehensions, list(...) calls, and variables bound to lists"
-    )]
-    fn is_list_collection_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::List(_) | Expr::ListComp(_) => true,
-            Expr::Call(call) => callee_qualified_name(&call.func) == "list",
-            Expr::Name(n) => self.is_list_var(n.id.as_str()),
-            _ => false,
-        }
-    }
 }
 
 fn is_executor_offload_callee(callee: &str) -> bool {
@@ -1132,22 +888,6 @@ fn is_executor_offload_callee(callee: &str) -> bool {
             | "asgiref.sync.sync_to_async"
     ) || callee.ends_with(".run_in_executor")
         || callee.ends_with(".run_sync")
-}
-
-fn is_path_constructor_expr(expr: &Expr) -> bool {
-    if let Expr::Call(call) = expr {
-        let callee = callee_qualified_name(&call.func);
-        return matches!(
-            callee.as_str(),
-            "Path"
-                | "pathlib.Path"
-                | "PurePath"
-                | "pathlib.PurePath"
-                | "PosixPath"
-                | "WindowsPath"
-        );
-    }
-    false
 }
 
 fn is_coroutine_scheduler_callee(callee: &str) -> bool {
@@ -1180,76 +920,6 @@ fn collect_file_async_defs(suite: &[Stmt]) -> (HashSet<String>, HashSet<String>)
     let mut async_methods = HashSet::new();
     collect_async_defs_in_suite(suite, None, &mut async_fns, &mut async_methods);
     (async_fns, async_methods)
-}
-
-fn compute_module_hoist_insert_offset(suite: &[Stmt], line_starts: &[u32]) -> u32 {
-    for (idx, stmt) in suite.iter().enumerate() {
-        if idx == 0
-            && let Stmt::Expr(expr_stmt) = stmt
-            && matches!(expr_stmt.value.as_ref(), Expr::StringLiteral(_))
-        {
-            continue;
-        }
-        if matches!(stmt, Stmt::Import(_) | Stmt::ImportFrom(_)) {
-            continue;
-        }
-        let start = stmt.range().start().to_u32();
-        let loc = loc_from_line_starts(line_starts, start);
-        return line_starts
-            .get((loc.line.saturating_sub(1)) as usize)
-            .copied()
-            .unwrap_or(start);
-    }
-    0
-}
-
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "Checks whether a regex flag expression is a compile-time constant"
-)]
-fn is_constant_regex_flag_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::NumberLiteral(_) => true,
-        Expr::Attribute(attr) => matches!(
-            callee_qualified_name(&attr.value).as_str(),
-            "re" | "regex" | "RegexFlag" | "re.RegexFlag"
-        ),
-        Expr::Name(n) => {
-            n.id.chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-        }
-        Expr::BinOp(bin) if bin.op == Operator::BitOr => {
-            is_constant_regex_flag_expr(&bin.left) && is_constant_regex_flag_expr(&bin.right)
-        }
-        _ => false,
-    }
-}
-
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "Checks whether an initializer expression constructs a Python list"
-)]
-fn is_list_init_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::List(_) | Expr::ListComp(_) => true,
-        Expr::Call(call) => callee_qualified_name(&call.func) == "list",
-        _ => false,
-    }
-}
-
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "Checks whether an initializer expression constructs a set or dict"
-)]
-fn is_set_or_dict_init_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::Set(_) | Expr::SetComp(_) | Expr::Dict(_) | Expr::DictComp(_) => true,
-        Expr::Call(call) => matches!(
-            callee_qualified_name(&call.func).as_str(),
-            "set" | "frozenset" | "dict"
-        ),
-        _ => false,
-    }
 }
 
 #[expect(
@@ -1286,7 +956,12 @@ fn collect_async_defs_in_suite(
                 );
             }
             Stmt::If(if_stmt) => {
-                collect_async_defs_in_suite(&if_stmt.body, enclosing_class, async_fns, async_methods);
+                collect_async_defs_in_suite(
+                    &if_stmt.body,
+                    enclosing_class,
+                    async_fns,
+                    async_methods,
+                );
                 for clause in &if_stmt.elif_else_clauses {
                     collect_async_defs_in_suite(
                         &clause.body,
@@ -1494,12 +1169,16 @@ fn collect_consumed_vars_in_expr(
             collect_expr_load_names(&starred.value, consumed_coros);
             collect_expr_load_names(&starred.value, retained_tasks);
         }
-        Expr::Attribute(a) => collect_consumed_vars_in_expr(&a.value, consumed_coros, retained_tasks),
+        Expr::Attribute(a) => {
+            collect_consumed_vars_in_expr(&a.value, consumed_coros, retained_tasks);
+        }
         Expr::BinOp(b) => {
             collect_consumed_vars_in_expr(&b.left, consumed_coros, retained_tasks);
             collect_consumed_vars_in_expr(&b.right, consumed_coros, retained_tasks);
         }
-        Expr::UnaryOp(u) => collect_consumed_vars_in_expr(&u.operand, consumed_coros, retained_tasks),
+        Expr::UnaryOp(u) => {
+            collect_consumed_vars_in_expr(&u.operand, consumed_coros, retained_tasks);
+        }
         Expr::BoolOp(b) => {
             for v in &b.values {
                 collect_consumed_vars_in_expr(v, consumed_coros, retained_tasks);
@@ -1613,78 +1292,5 @@ fn expr_contains_await(expr: &Expr) -> bool {
         }
         Expr::Subscript(s) => expr_contains_await(&s.value) || expr_contains_await(&s.slice),
         _ => false,
-    }
-}
-
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "Collects identifier names referenced inside an expression"
-)]
-fn collect_expr_load_names(expr: &Expr, out: &mut HashSet<String>) {
-    match expr {
-        Expr::Name(n) => {
-            out.insert(n.id.to_string());
-        }
-        Expr::Attribute(a) => {
-            collect_expr_load_names(&a.value, out);
-        }
-        Expr::Call(c) => {
-            collect_expr_load_names(&c.func, out);
-            for arg in &c.arguments.args {
-                collect_expr_load_names(arg, out);
-            }
-            for kw in &c.arguments.keywords {
-                collect_expr_load_names(&kw.value, out);
-            }
-        }
-        Expr::Await(aw) => collect_expr_load_names(&aw.value, out),
-        Expr::BinOp(b) => {
-            collect_expr_load_names(&b.left, out);
-            collect_expr_load_names(&b.right, out);
-        }
-        Expr::UnaryOp(u) => collect_expr_load_names(&u.operand, out),
-        Expr::BoolOp(b) => {
-            for v in &b.values {
-                collect_expr_load_names(v, out);
-            }
-        }
-        Expr::Compare(cmp) => {
-            for op in &cmp.operands {
-                collect_expr_load_names(op, out);
-            }
-        }
-        Expr::Subscript(s) => {
-            collect_expr_load_names(&s.value, out);
-            collect_expr_load_names(&s.slice, out);
-        }
-        Expr::List(l) => {
-            for e in &l.elts {
-                collect_expr_load_names(e, out);
-            }
-        }
-        Expr::Tuple(t) => {
-            for e in &t.elts {
-                collect_expr_load_names(e, out);
-            }
-        }
-        Expr::Set(s) => {
-            for e in &s.elts {
-                collect_expr_load_names(e, out);
-            }
-        }
-        Expr::Dict(d) => {
-            for item in &d.items {
-                if let Some(k) = &item.key {
-                    collect_expr_load_names(k, out);
-                }
-                collect_expr_load_names(&item.value, out);
-            }
-        }
-        Expr::If(i) => {
-            collect_expr_load_names(&i.test, out);
-            collect_expr_load_names(&i.body, out);
-            collect_expr_load_names(&i.orelse, out);
-        }
-        _ => {}
     }
 }
