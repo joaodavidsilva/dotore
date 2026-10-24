@@ -779,7 +779,11 @@ fn detects_migration_rule_buckets_and_renders_per_rule_summary_text() {
 
     let report = analyze_project_sources(files, None);
     let buckets = detect_migration_rule_buckets(&report);
-    assert_eq!(buckets.len(), 1, "Expected exactly 1 migration bucket, got {buckets:?}");
+    assert_eq!(
+        buckets.len(),
+        1,
+        "Expected exactly 1 migration bucket, got {buckets:?}"
+    );
 
     let bucket = &buckets[0];
     assert_eq!(bucket.rule, RuleId::NoDerivedState);
@@ -883,7 +887,10 @@ fn synthesizes_self_contained_agent_handoff_prompt_and_writes_diagnostics_bundle
     assert!(standalone_prompt.contains("Root-Cause Group"));
     assert!(standalone_prompt.contains("Prescription Tier"));
     assert!(standalone_prompt.contains("root_cause_group_id"));
-    assert!(standalone_prompt.contains("rcg::no-adjust-state-on-prop-change::src/UserEditor.tsx::user-editor"));
+    assert!(
+        standalone_prompt
+            .contains("rcg::no-adjust-state-on-prop-change::src/UserEditor.tsx::user-editor")
+    );
     assert!(standalone_prompt.contains("surgical"));
     assert!(standalone_prompt.contains("autofix"));
     assert!(standalone_prompt.contains("src/UserEditor.tsx:"));
@@ -900,11 +907,19 @@ fn synthesizes_self_contained_agent_handoff_prompt_and_writes_diagnostics_bundle
     let bundle = write_diagnostics_bundle(&report, &bundle_dir).expect("write_diagnostics_bundle");
 
     assert_eq!(bundle.bundle_dir, bundle_dir);
-    assert_eq!(bundle.diagnostics_json_path, bundle_dir.join("diagnostics.json"));
-    assert!(bundle.diagnostics_json_path.exists(), "diagnostics.json must exist");
+    assert_eq!(
+        bundle.diagnostics_json_path,
+        bundle_dir.join("diagnostics.json")
+    );
+    assert!(
+        bundle.diagnostics_json_path.exists(),
+        "diagnostics.json must exist"
+    );
 
-    let diag_json_str = fs::read_to_string(&bundle.diagnostics_json_path).expect("read diagnostics.json");
-    let diag_json: serde_json::Value = serde_json::from_str(&diag_json_str).expect("parse diagnostics.json");
+    let diag_json_str =
+        fs::read_to_string(&bundle.diagnostics_json_path).expect("read diagnostics.json");
+    let diag_json: serde_json::Value =
+        serde_json::from_str(&diag_json_str).expect("parse diagnostics.json");
     assert_eq!(
         diag_json["diagnostics"].as_array().map(Vec::len),
         Some(report.diagnostics.len())
@@ -929,7 +944,11 @@ fn synthesizes_self_contained_agent_handoff_prompt_and_writes_diagnostics_bundle
             .any(|(r, _)| *r == RuleId::NoAdjustStateOnPropChange)
     );
     for (rule, rule_txt_path) in &bundle.rule_summary_files {
-        assert!(rule_txt_path.exists(), "Expected {} to exist", rule_txt_path.display());
+        assert!(
+            rule_txt_path.exists(),
+            "Expected {} to exist",
+            rule_txt_path.display()
+        );
         assert_eq!(
             rule_txt_path.file_name().and_then(|n| n.to_str()),
             Some(format!("{}.txt", rule.as_str()).as_str())
@@ -937,7 +956,9 @@ fn synthesizes_self_contained_agent_handoff_prompt_and_writes_diagnostics_bundle
         let txt_content = fs::read_to_string(rule_txt_path).expect("read rule .txt");
         assert!(txt_content.contains(rule.as_str()));
         assert!(
-            bundle.prompt_markdown.contains(&format!("{}.txt", rule.as_str())),
+            bundle
+                .prompt_markdown
+                .contains(&format!("{}.txt", rule.as_str())),
             "Expected prompt_markdown to reference {}.txt",
             rule.as_str()
         );

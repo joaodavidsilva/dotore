@@ -2,12 +2,16 @@
 
 use std::{
     fmt::Write as _,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    report::{JsonReport, read_json_report},
+    rules::{Diagnostic, RuleSeverity},
+};
 /// Supported CI provider backends for `dotore ci`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -220,10 +224,11 @@ fn validate_ci_scope(raw: &str) -> Result<String, String> {
     }
 }
 
-fn render_ci_workflow(provider: CiProviderKind, blocking: &str, scope: &str) -> String {
-    match provider {
-        CiProviderKind::GithubActions => format!(
-            r#"# dotore workflow v2
+/// Renders the GitHub Actions workflow YAML (`.github/workflows/dotore.yml`) for `blocking` and `scope`.
+#[must_use]
+pub fn render_github_actions_workflow(blocking: &str, scope: &str) -> String {
+    format!(
+        r#"# dotore workflow v2
 # Static React & TypeScript analysis and deterministic remediation gate.
 name: dotore
 
@@ -235,6 +240,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: dotore-${{{{ github.event.pull_request.number || github.ref }}}}
@@ -248,19 +254,41 @@ jobs:
         with:
           fetch-depth: 0
       - name: Run dotore
-        run: dotore check --scope {scope} --blocking {blocking}
+        run: dotore check --scope {scope} --blocking {blocking} --json-out dotore-report.json
+      - name: Render PR comment
+        if: always() && github.event_name == 'pull_request'
+        run: dotore ci comment dotore-report.json -o dotore-comment.md
 "#
-        ),
-        CiProviderKind::GitlabCi => format!(
-            r#"# dotore workflow v2
+    )
+}
+
+/// Renders the GitLab CI snippet (`.gitlab-ci.yml`) for `blocking` and `scope`.
+#[must_use]
+pub fn render_gitlab_ci_snippet(blocking: &str, scope: &str) -> String {
+    format!(
+        r#"# dotore workflow v2
 dotore:
   stage: test
   script:
-    - dotore check --scope {scope} --blocking {blocking}
+    - dotore check --scope {scope} --blocking {blocking} --json-out dotore-report.json
+    - dotore ci comment dotore-report.json -o dotore-comment.md
+  artifacts:
+    when: always
+    paths:
+      - dotore-report.json
+      - dotore-comment.md
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 "#
-        ),
+    )
+}
+
+/// Renders the CI workflow configuration for `provider`, `blocking`, and `scope`.
+#[must_use]
+pub fn render_ci_workflow(provider: CiProviderKind, blocking: &str, scope: &str) -> String {
+    match provider {
+        CiProviderKind::GithubActions => render_github_actions_workflow(blocking, scope),
+        CiProviderKind::GitlabCi => render_gitlab_ci_snippet(blocking, scope),
     }
 }
 
@@ -572,4 +600,400 @@ process.exit(0);
     let serialized = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(&settings_path, format!("{serialized}\n"))
         .map_err(|e| format!("Failed to write {}: {e}", settings_path.display()))
+}
+
+/// Canonical HTML comment marker at the top of every generated pull-request summary comment.
+pub const PR_COMMENT_MARKER: &str = "<!-- dotore:summary -->";
+
+/// Repository and CI environment context for rendering blob links and warnings in a PR comment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCommentRepoContext {
+    /// GitHub repository slug (`owner/repo` from `GITHUB_REPOSITORY`).
+    pub github_repository: Option<String>,
+    /// GitHub server base URL (`GITHUB_SERVER_URL`, defaults to `"https://github.com"`).
+    pub github_server_url: Option<String>,
+    /// Commit SHA (`GITHUB_SHA` or `CI_COMMIT_SHA`).
+    pub commit_sha: Option<String>,
+    /// GitLab project URL (`CI_PROJECT_URL`).
+    pub gitlab_project_url: Option<String>,
+    /// Whether `DOTORE_SILENCE_MISSING_BASELINE_WARNING` is truthy (`true`, `1`, or `yes`).
+    pub silence_missing_baseline_warning: bool,
+}
+
+/// Alias for [`PrCommentRepoContext`] representing CI environment variables for PR comments.
+pub type PrCommentEnv = PrCommentRepoContext;
+
+impl PrCommentRepoContext {
+    /// Reads [`PrCommentRepoContext`] from the current process environment variables.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let non_empty_env = |key: &str| {
+            std::env::var(key)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let silence_missing_baseline_warning =
+            std::env::var("DOTORE_SILENCE_MISSING_BASELINE_WARNING").is_ok_and(|v| {
+                let trimmed = v.trim();
+                trimmed == "1"
+                    || trimmed.eq_ignore_ascii_case("true")
+                    || trimmed.eq_ignore_ascii_case("yes")
+            });
+        Self {
+            github_repository: non_empty_env("GITHUB_REPOSITORY"),
+            github_server_url: non_empty_env("GITHUB_SERVER_URL"),
+            commit_sha: non_empty_env("GITHUB_SHA").or_else(|| non_empty_env("CI_COMMIT_SHA")),
+            gitlab_project_url: non_empty_env("CI_PROJECT_URL"),
+            silence_missing_baseline_warning,
+        }
+    }
+
+    /// Alias for [`PrCommentRepoContext::from_env`].
+    #[must_use]
+    pub fn from_process_env() -> Self {
+        Self::from_env()
+    }
+
+    /// Constructs a GitHub repository context for `repository` (`owner/repo`) and `commit_sha`.
+    #[must_use]
+    pub fn github(repository: impl Into<String>, commit_sha: impl Into<String>) -> Self {
+        Self {
+            github_repository: Some(repository.into()),
+            github_server_url: None,
+            commit_sha: Some(commit_sha.into()),
+            gitlab_project_url: None,
+            silence_missing_baseline_warning: false,
+        }
+    }
+
+    /// Constructs a GitLab project context for `project_url` and `commit_sha`.
+    #[must_use]
+    pub fn gitlab(project_url: impl Into<String>, commit_sha: impl Into<String>) -> Self {
+        Self {
+            github_repository: None,
+            github_server_url: None,
+            commit_sha: Some(commit_sha.into()),
+            gitlab_project_url: Some(project_url.into()),
+            silence_missing_baseline_warning: false,
+        }
+    }
+
+    /// Overrides the GitHub server base URL (`GITHUB_SERVER_URL`).
+    #[must_use]
+    pub fn with_server_url(mut self, server_url: impl Into<String>) -> Self {
+        self.github_server_url = Some(server_url.into());
+        self
+    }
+
+    /// Sets whether the shallow-checkout `baseline_degraded` warning is silenced.
+    #[must_use]
+    pub const fn with_silence_missing_baseline_warning(mut self, silence: bool) -> Self {
+        self.silence_missing_baseline_warning = silence;
+        self
+    }
+
+    /// Formats `file` and 1-based `line` as a clickable GitHub/GitLab blob URL, if repo metadata is present.
+    #[must_use]
+    pub fn blob_url(&self, file: &Path, line: u32) -> Option<String> {
+        let norm_file = normalize_comment_file_path(file);
+        let sha = self
+            .commit_sha
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+
+        if let Some(repo) = self
+            .github_repository
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let server = self
+                .github_server_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("https://github.com")
+                .trim_end_matches('/');
+            let clean_repo = repo.trim_matches('/');
+            return Some(format!(
+                "{server}/{clean_repo}/blob/{sha}/{norm_file}#L{line}"
+            ));
+        }
+
+        if let Some(proj_url) = self
+            .gitlab_project_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let proj = proj_url.trim_end_matches('/');
+            return Some(format!("{proj}/-/blob/{sha}/{norm_file}#L{line}"));
+        }
+
+        None
+    }
+
+    /// Formats `file:line` as a Markdown link when repository metadata is available, or `` `file:line` `` locally.
+    #[must_use]
+    pub fn format_file_line(&self, file: &Path, line: u32) -> String {
+        let norm_file = normalize_comment_file_path(file);
+        if let Some(url) = self.blob_url(file, line) {
+            format!("[{norm_file}:{line}]({url})")
+        } else {
+            format!("`{norm_file}:{line}`")
+        }
+    }
+}
+
+fn normalize_comment_file_path(file: &Path) -> String {
+    let raw = file.to_string_lossy().replace('\\', "/");
+    raw.strip_prefix("./").unwrap_or(&raw).to_string()
+}
+
+fn format_pr_diagnostic_bullet(diag: &Diagnostic, ctx: &PrCommentRepoContext) -> String {
+    let loc_md = ctx.format_file_line(&diag.file, diag.loc.line);
+    let subject_part = diag
+        .subject_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map_or_else(String::new, |s| format!(" in `{s}`"));
+    format!(
+        "- **`{}`** ({} · {}) at {}{}: {}",
+        diag.rule.as_str(),
+        diag.tier.as_str(),
+        diag.category.as_str(),
+        loc_md,
+        subject_part,
+        diag.message
+    )
+}
+
+/// Renders a deterministic `<!-- dotore:summary -->` pull-request Markdown comment for `report`
+/// under an explicit [`PrCommentRepoContext`].
+#[must_use]
+pub fn render_github_pr_comment(report: &JsonReport, ctx: &PrCommentRepoContext) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{PR_COMMENT_MARKER}");
+
+    let status_badge = if report.summary.error_count > 0 {
+        "❌ Action Required"
+    } else if report.summary.warning_count > 0 {
+        "⚠️ Warnings Found"
+    } else {
+        "✅ Passed"
+    };
+
+    let _ = writeln!(out, "## 🩺 dotore Pull Request Summary — {status_badge}\n");
+    let _ = writeln!(
+        out,
+        "| Metric | Value |\n| :--- | :--- |\n| **Health Score** | **{}/100** ({}) |\n| **Diagnostics** | **{}** ({} errors, {} warnings) across {}/{} files ({} Subjects) |\n| **Prescription Tiers** | {} Autofix · {} Surgical · {} Refactor |",
+        report.summary.health_score,
+        report.summary.score_label,
+        report.summary.total_diagnostics,
+        report.summary.error_count,
+        report.summary.warning_count,
+        report.summary.affected_file_count,
+        report.summary.files_scanned,
+        report.summary.subjects_scanned,
+        report.summary.autofix_count,
+        report.summary.surgical_count,
+        report.summary.refactor_count,
+    );
+
+    if let Some(baseline) = &report.baseline {
+        let _ = writeln!(
+            out,
+            "| **Baseline (`{}`)** | **+{}** introduced, **-{}** fixed ({} pre-existing suppressed, {} total in baseline) |",
+            baseline.baseline_source,
+            baseline.introduced_count,
+            baseline.fixed_count,
+            baseline.preexisting_count,
+            baseline.baseline_total_count,
+        );
+    }
+    out.push('\n');
+
+    if report.baseline_degraded && !ctx.silence_missing_baseline_warning {
+        let _ = writeln!(
+            out,
+            "<details>\n<summary>⚠️ Shallow checkout detected — baseline comparison degraded to diff mode</summary>\n\n`dotore` could not read the baseline git revision because the repository was checked out with a shallow history. Update your CI workflow to fetch full history (`fetch-depth: 0`):\n\n```diff\n - uses: actions/checkout@v5\n+  with:\n+    fetch-depth: 0\n```\n\nTo silence this warning, set `DOTORE_SILENCE_MISSING_BASELINE_WARNING=true`.\n</details>\n"
+        );
+    }
+
+    if report.diagnostics.is_empty() {
+        if let Some(baseline) = &report.baseline
+            && baseline.fixed_count > 0
+        {
+            let _ = writeln!(
+                out,
+                "✅ **No new issues introduced!** (-{} fixed vs `{}`.)",
+                baseline.fixed_count, baseline.baseline_source
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "✅ **No issues found.** All analyzed files passed `dotore` checks."
+            );
+        }
+        return out;
+    }
+
+    let errors: Vec<&Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == RuleSeverity::Error)
+        .collect();
+    let warnings: Vec<&Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == RuleSeverity::Warning)
+        .collect();
+
+    if !errors.is_empty() {
+        let _ = writeln!(out, "### ❌ Errors ({})\n", errors.len());
+        for diag in &errors {
+            let _ = writeln!(out, "{}", format_pr_diagnostic_bullet(diag, ctx));
+        }
+        out.push('\n');
+    }
+
+    if !warnings.is_empty() {
+        let _ = writeln!(
+            out,
+            "<details>\n<summary>⚠️ Warnings ({})</summary>\n",
+            warnings.len()
+        );
+        for diag in &warnings {
+            let _ = writeln!(out, "{}", format_pr_diagnostic_bullet(diag, ctx));
+        }
+        let _ = writeln!(out, "\n</details>\n");
+    }
+
+    if report.summary.autofix_count > 0 {
+        let _ = writeln!(
+            out,
+            "💡 Run `dotore fix` to automatically apply **{}** deterministic `Autofix` rewrite(s).",
+            report.summary.autofix_count
+        );
+    }
+
+    out
+}
+
+/// Renders a deterministic `<!-- dotore:summary -->` pull-request Markdown comment for `report`
+/// using the current process environment variables.
+#[must_use]
+pub fn render_github_pr_comment_from_env(report: &JsonReport) -> String {
+    render_github_pr_comment(report, &PrCommentRepoContext::from_env())
+}
+
+/// Alias for [`render_github_pr_comment`] rendering a pull-request Markdown comment with explicit [`PrCommentEnv`].
+#[must_use]
+pub fn render_pr_comment_markdown_with_env(report: &JsonReport, env: &PrCommentEnv) -> String {
+    render_github_pr_comment(report, env)
+}
+
+/// Alias for [`render_github_pr_comment_from_env`] rendering a pull-request Markdown comment from process env.
+#[must_use]
+pub fn render_pr_comment_markdown(report: &JsonReport) -> String {
+    render_github_pr_comment_from_env(report)
+}
+
+/// Renders the PR Markdown comment for `report` under `ctx` and writes it to `output_path`.
+///
+/// # Errors
+/// Returns an `io::Error` if creating parent directories or writing `output_path` fails.
+pub fn write_github_pr_comment(
+    report: &JsonReport,
+    output_path: &Path,
+    ctx: &PrCommentRepoContext,
+) -> io::Result<String> {
+    let markdown = render_github_pr_comment(report, ctx);
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, &markdown)?;
+    Ok(markdown)
+}
+
+/// Loads a serialized [`JsonReport`] from `report_path` and renders its PR Markdown comment,
+/// optionally writing it to `output_path`.
+///
+/// # Errors
+/// Returns an error string if reading/parsing `report_path` or writing `output_path` fails.
+pub fn generate_ci_comment(
+    report_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<String, String> {
+    let report = read_json_report(report_path)
+        .map_err(|e| format!("Failed to read JSON report {}: {e}", report_path.display()))?;
+    let ctx = PrCommentRepoContext::from_env();
+    if let Some(out) = output_path {
+        write_github_pr_comment(&report, out, &ctx)
+            .map_err(|e| format!("Failed to write PR comment to {}: {e}", out.display()))
+    } else {
+        Ok(render_github_pr_comment(&report, &ctx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::{
+        diff::{BaselineSummary, ScanMode},
+        ir::{ByteSpan, SourceLoc},
+        report::build_extracted_report,
+        rules::{Diagnostic, RuleId},
+    };
+
+    use super::*;
+
+    #[test]
+    fn pr_comment_formats_blob_urls_baseline_delta_and_degraded_warning() {
+        let mut report = build_extracted_report(
+            &[],
+            vec![
+                Diagnostic::new(
+                    RuleId::NoDerivedState,
+                    "./src/components/Cart.tsx",
+                    SourceLoc {
+                        line: 14,
+                        column: 5,
+                    },
+                    ByteSpan { start: 10, end: 30 },
+                    "total",
+                    "Compute derived value during render.",
+                )
+                .with_subject_name("Cart"),
+            ],
+            &HashMap::new(),
+        );
+        report.mode = ScanMode::Baseline;
+        report.baseline = Some(BaselineSummary {
+            baseline_source: "main".to_string(),
+            introduced_count: 1,
+            fixed_count: 4,
+            preexisting_count: 2,
+            baseline_total_count: 6,
+        });
+        report.baseline_degraded = true;
+
+        let gh_ctx = PrCommentRepoContext::github("org/shop", "abc12345");
+        let md = render_github_pr_comment(&report, &gh_ctx);
+        assert!(md.starts_with(PR_COMMENT_MARKER));
+        assert!(md.contains(
+            "[src/components/Cart.tsx:14](https://github.com/org/shop/blob/abc12345/src/components/Cart.tsx#L14)"
+        ));
+        assert!(md.contains("**+1** introduced, **-4** fixed"));
+        assert!(md.contains("fetch-depth: 0"));
+
+        let silenced = gh_ctx.with_silence_missing_baseline_warning(true);
+        let md_silenced = render_github_pr_comment(&report, &silenced);
+        assert!(!md_silenced.contains("fetch-depth: 0"));
+    }
 }
