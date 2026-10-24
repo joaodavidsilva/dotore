@@ -40,8 +40,8 @@ pub use config::{
     ArchitectureThresholdsConfig, Capability, CapabilityGate, CapabilityPredicate, ConfigMutation,
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, discover_workspace_packages,
-    discover_workspace_packages_with_analyzers, load_config_from_dir, mutate_config_in_dir,
-    resolve_package_for_file,
+    discover_workspace_packages_with_analyzers, filter_workspace_packages, load_config_from_dir,
+    mutate_config_in_dir, resolve_package_for_file,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -1049,7 +1049,10 @@ pub fn scan_workspace_with_overrides(
     set_progress_phase(1, 0);
     let analyzers = default_analyzers();
     let workspace_root = determine_workspace_root(&options.paths);
-    let mut packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
+    let all_packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
+    let mut packages =
+        filter_workspace_packages(&all_packages, &workspace_root, &overrides.projects)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
         let content = fs::read_to_string(cfg_path)?;
@@ -1073,8 +1076,14 @@ pub fn scan_workspace_with_overrides(
     let paths: Vec<PathBuf> = raw_paths
         .into_iter()
         .filter(|p| {
-            resolve_package_for_file(p, &packages)
-                .is_none_or(|pkg| !pkg.config.is_file_ignored(p, &pkg.root_dir))
+            resolve_package_for_file(p, &all_packages).is_none_or(|resolved_pkg| {
+                packages
+                    .iter()
+                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
+                    && !resolved_pkg
+                        .config
+                        .is_file_ignored(p, &resolved_pkg.root_dir)
+            })
         })
         .collect();
 
@@ -1104,9 +1113,14 @@ pub fn scan_workspace_with_overrides(
         .any(|pkg| pkg.capability_gate.has(Capability::Motion))
     {
         for style_path in collect_style_files(&options.paths) {
-            if resolve_package_for_file(&style_path, &packages)
-                .is_none_or(|pkg| !pkg.config.is_file_ignored(&style_path, &pkg.root_dir))
-                && let Ok(content) = fs::read_to_string(&style_path)
+            if resolve_package_for_file(&style_path, &all_packages).is_none_or(|resolved_pkg| {
+                packages
+                    .iter()
+                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
+                    && !resolved_pkg
+                        .config
+                        .is_file_ignored(&style_path, &resolved_pkg.root_dir)
+            }) && let Ok(content) = fs::read_to_string(&style_path)
             {
                 pairs.push((style_path, content));
             }
@@ -1262,7 +1276,10 @@ fn scan_design_js(
     let js_analyzer = JsLanguageAnalyzer;
     let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
     let workspace_root = determine_workspace_root(&options.paths);
-    let mut packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
+    let all_packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
+    let mut packages =
+        filter_workspace_packages(&all_packages, &workspace_root, &overrides.projects)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
         let content = fs::read_to_string(cfg_path)?;
@@ -1286,8 +1303,14 @@ fn scan_design_js(
     let paths: Vec<PathBuf> = raw_paths
         .into_iter()
         .filter(|p| {
-            resolve_package_for_file(p, &packages)
-                .is_none_or(|pkg| !pkg.config.is_file_ignored(p, &pkg.root_dir))
+            resolve_package_for_file(p, &all_packages).is_none_or(|resolved_pkg| {
+                packages
+                    .iter()
+                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
+                    && !resolved_pkg
+                        .config
+                        .is_file_ignored(p, &resolved_pkg.root_dir)
+            })
         })
         .collect();
 
@@ -1402,11 +1425,14 @@ pub(crate) fn load_disk_manifests(
     sources: &HashMap<PathBuf, String>,
 ) -> HashMap<PathBuf, String> {
     let mut manifests = HashMap::new();
-    let mut candidate_dirs = vec![workspace_root.to_path_buf()];
+    let mut candidate_dirs = Vec::new();
     for pkg in packages {
         if !candidate_dirs.contains(&pkg.root_dir) {
             candidate_dirs.push(pkg.root_dir.clone());
         }
+    }
+    if candidate_dirs.is_empty() {
+        candidate_dirs.push(workspace_root.to_path_buf());
     }
     for dir in candidate_dirs {
         for name in [

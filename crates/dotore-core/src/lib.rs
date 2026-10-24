@@ -32,9 +32,9 @@ pub use config::{
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, content_enables_react_compiler,
     discover_workspace_packages, discover_workspace_packages_with_analyzers,
-    find_nearest_ancestor_file, load_config_from_dir, load_local_config_in_dir,
-    mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str, relative_forward_slash,
-    resolve_package_for_file, strip_jsonc, strip_source_extension,
+    filter_workspace_packages, find_nearest_ancestor_file, load_config_from_dir,
+    load_local_config_in_dir, mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str,
+    relative_forward_slash, resolve_package_for_file, strip_jsonc, strip_source_extension,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -141,4 +141,6 @@ pub struct CliOverrides {
     pub staged: bool,
     /// Compare against a saved baseline JSON report or git revision (`--baseline <path>`).
     pub baseline_path: Option<PathBuf>,
+    /// Filter to specific workspace package(s) by name or relative path (`--project <name-or-path>`).
+    pub projects: Vec<String>,
 }
