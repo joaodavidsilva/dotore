@@ -1,9 +1,12 @@
-//! Single-pass detectors for Axum shared state contention, SQLx formatted queries and N+1 loop queries,
-//! Leptos/Dioxus reactive signal **Render Cascades**, and crate architecture boolean parameter rules.
+//! Single-pass detectors for Axum shared state contention and SQLx query hazards:
+//!
+//! 1. `rs-sqlx-no-formatted-query-string` ([`RuleId::RsSqlxNoFormattedQueryString`])
+//! 2. `rs-sqlx-no-query-in-loop` ([`RuleId::RsSqlxNoQueryInLoop`])
+//! 3. `rs-axum-no-contended-mutex-state` ([`RuleId::RsAxumNoContendedMutexState`])
 
 use std::collections::{HashMap, HashSet};
 
-use dotore_core::{ByteSpan, RuleId, SourceLoc, loc_from_line_starts};
+use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
     BinOp, Expr, ExprAssign, ExprCall, ExprForLoop, ExprLoop, ExprMacro, ExprMethodCall, ExprWhile,
     File, FnArg, GenericArgument, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemStruct, Local, Macro,
@@ -12,28 +15,23 @@ use syn::{
     visit::{self, Visit},
 };
 
-use crate::ir::{
-    RsCandidateFinding, attrs_indicate_test_context, extract_pat_ident, span_to_bytes,
+use crate::matchers::{
+    RsCandidateFinding, RsScopeTracker, extract_pat_ident, is_format_macro, loc_at, span_to_bytes,
 };
 
-/// Extracts candidate findings for Axum, SQLx, Leptos/Dioxus UI, and architecture rules from `ast`.
-pub(crate) fn extract_axum_sqlx_ui_arch_findings(
+/// Extracts candidate findings for Axum and SQLx rules from `ast`.
+pub(crate) fn extract_axum_sqlx_findings(
     ast: &File,
-    source: &str,
     line_starts: &[u32],
     out: &mut Vec<RsCandidateFinding>,
 ) {
     let mut struct_mutex_fields = HashMap::new();
     collect_struct_mutex_fields(ast, &mut struct_mutex_fields);
 
-    let mut extractor = AxumSqlxUiArchVisitor {
-        source,
+    let mut extractor = AxumSqlxVisitor {
         line_starts,
         findings: out,
-        in_test_context: false,
-        current_subject_name: None,
-        current_parent_type: None,
-        loop_depth: 0,
+        scope: RsScopeTracker::for_file(ast),
         formatted_vars: HashSet::new(),
         reported_loop_query_spans: Vec::new(),
         struct_mutex_fields,
@@ -67,26 +65,22 @@ fn collect_struct_mutex_fields(ast: &File, out: &mut HashMap<String, Vec<String>
     collector.visit_file(ast);
 }
 
-struct AxumSqlxUiArchVisitor<'a> {
-    source: &'a str,
+struct AxumSqlxVisitor<'a> {
     line_starts: &'a [u32],
     findings: &'a mut Vec<RsCandidateFinding>,
-    in_test_context: bool,
-    current_subject_name: Option<String>,
-    current_parent_type: Option<String>,
-    loop_depth: usize,
+    scope: RsScopeTracker,
     formatted_vars: HashSet<String>,
     reported_loop_query_spans: Vec<ByteSpan>,
     struct_mutex_fields: HashMap<String, Vec<String>>,
 }
 
-impl AxumSqlxUiArchVisitor<'_> {
+impl AxumSqlxVisitor<'_> {
     fn span_to_bytes(&self, span: proc_macro2::Span) -> ByteSpan {
         span_to_bytes(span)
     }
 
     fn loc_at(&self, byte_offset: u32) -> SourceLoc {
-        loc_from_line_starts(self.line_starts, byte_offset)
+        loc_at(self.line_starts, byte_offset)
     }
 
     fn is_inside_reported_loop_query(&self, span: ByteSpan) -> bool {
@@ -105,18 +99,17 @@ impl AxumSqlxUiArchVisitor<'_> {
         if self.expr_is_formatted_sql(first_arg) {
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
-            self.findings.push(RsCandidateFinding {
-                rule: RuleId::RsSqlxNoFormattedQueryString,
-                subject_name: self.current_subject_name.clone(),
-                target_name: func_name.clone(),
-                message_id: "rsSqlxNoFormattedQueryString",
-                message: format!(
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsSqlxNoFormattedQueryString,
+                self.scope.subject_name(),
+                func_name.clone(),
+                "rsSqlxNoFormattedQueryString",
+                format!(
                     "SQLx query `{func_name}(...)` is constructed with `format!(...)` string interpolation; use parameterized `$1` / `?` placeholders with `.bind(...)` instead."
                 ),
                 loc,
                 span,
-                autofix: None,
-            });
+            ));
         }
     }
 
@@ -158,7 +151,7 @@ impl AxumSqlxUiArchVisitor<'_> {
     }
 
     fn check_axum_contended_mutex_state(&mut self, sig: &Signature, body: Option<&syn::Block>) {
-        if self.in_test_context {
+        if self.scope.in_test() {
             return;
         }
         for input in &sig.inputs {
@@ -175,175 +168,67 @@ impl AxumSqlxUiArchVisitor<'_> {
             let struct_with_mutex = extract_inner_state_struct_names(&pat_type.ty)
                 .into_iter()
                 .any(|name| self.struct_mutex_fields.contains_key(&name));
-            let body_locks_state = extract_state_binding_ident(&pat_type.pat)
+            let body_locks_state = extract_pat_ident(&pat_type.pat)
                 .zip(body)
                 .is_some_and(|(binding, blk)| block_calls_mutex_lock_on_binding(blk, &binding));
 
             if direct_mutex || struct_with_mutex || body_locks_state {
                 let span = self.span_to_bytes(pat_type.span());
                 let loc = self.loc_at(span.start);
-                self.findings.push(RsCandidateFinding {
-                    rule: RuleId::RsAxumNoContendedMutexState,
-                    subject_name: self.current_subject_name.clone(),
-                    target_name: "State<Mutex<...>>".to_string(),
-                    message_id: "rsAxumNoContendedMutexState",
-                    message: "Axum `State` wraps a contended `Mutex`, serializing concurrent HTTP requests; prefer `DashMap`, `RwLock`, actor channels (`mpsc::Sender`), or database pool state.".to_string(),
+                self.findings.push(RsCandidateFinding::new(
+                    RuleId::RsAxumNoContendedMutexState,
+                    self.scope.subject_name(),
+                    "State<Mutex<...>>",
+                    "rsAxumNoContendedMutexState",
+                    "Axum `State` wraps a contended `Mutex`, serializing concurrent HTTP requests; prefer `DashMap`, `RwLock`, actor channels (`mpsc::Sender`), or database pool state.",
                     loc,
                     span,
-                    autofix: None,
-                });
+                ));
             }
-        }
-    }
-
-    fn check_reactive_effect_call(&mut self, node: &ExprCall) {
-        let Some(effect_fn) = extract_reactive_effect_fn_name(&node.func) else {
-            return;
-        };
-        for arg in &node.args {
-            let Expr::Closure(closure) = arg else {
-                continue;
-            };
-            let mut inspector = EffectSignalInspector::default();
-            inspector.visit_expr(&closure.body);
-            if let Some((write_target, write_span)) = inspector.first_signal_write
-                && inspector.has_signal_read
-            {
-                let span = self.span_to_bytes(write_span);
-                let loc = self.loc_at(span.start);
-                self.findings.push(RsCandidateFinding {
-                    rule: RuleId::RsUiNoDerivedSignalInEffect,
-                    subject_name: self.current_subject_name.clone(),
-                    target_name: write_target.clone(),
-                    message_id: "rsUiNoDerivedSignalInEffect",
-                    message: format!(
-                        "Reactive signal write `{write_target}` inside `{effect_fn}(...)` computes derived state from another signal; use `Memo::new(move |_| ...)` or `use_memo(move || ...)` to avoid a Render Cascade."
-                    ),
-                    loc,
-                    span,
-                    autofix: None,
-                });
-                break;
-            }
-        }
-    }
-
-    fn check_many_boolean_params(&mut self, sig: &Signature, is_public_api: bool) {
-        if self.in_test_context {
-            return;
-        }
-        let mut bool_count = 0usize;
-        let mut consecutive_bools = 0usize;
-        let mut max_consecutive_bools = 0usize;
-
-        for input in &sig.inputs {
-            let FnArg::Typed(pat_type) = input else {
-                consecutive_bools = 0;
-                continue;
-            };
-            if is_bool_type(&pat_type.ty) {
-                bool_count += 1;
-                consecutive_bools += 1;
-                max_consecutive_bools = max_consecutive_bools.max(consecutive_bools);
-            } else {
-                consecutive_bools = 0;
-            }
-        }
-
-        if bool_count >= 3 || (is_public_api && max_consecutive_bools >= 2) {
-            let span = self.span_to_bytes(sig.span());
-            let ident_span = self.span_to_bytes(sig.ident.span());
-            let loc = self.loc_at(ident_span.start);
-            let fn_name = sig.ident.to_string();
-            self.findings.push(RsCandidateFinding {
-                rule: RuleId::RsArchNoManyBooleanParams,
-                subject_name: self.current_subject_name.clone(),
-                target_name: fn_name.clone(),
-                message_id: "rsArchNoManyBooleanParams",
-                message: format!(
-                    "Function `{fn_name}` declares {bool_count} `bool` parameters; replace multiple boolean flags with an options struct or domain `enum`."
-                ),
-                loc,
-                span,
-                autofix: None,
-            });
         }
     }
 }
 
-impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
+impl<'ast> Visit<'ast> for AxumSqlxVisitor<'_> {
     fn visit_item_mod(&mut self, i: &'ast ItemMod) {
-        let prev_test = self.in_test_context;
-        self.in_test_context =
-            prev_test || attrs_indicate_test_context(&i.attrs) || i.ident == "tests";
-        let prev_subj = self.current_subject_name.replace(i.ident.to_string());
+        let snap = self.scope.enter_mod(i);
         visit::visit_item_mod(self, i);
-        self.current_subject_name = prev_subj;
-        self.in_test_context = prev_test;
+        self.scope.exit(snap);
     }
 
     fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
-        let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
-        let self_ty = extract_simple_type_name(&i.self_ty).unwrap_or_else(|| "Impl".to_string());
-        let prev_parent = self.current_parent_type.replace(self_ty.clone());
-        let prev_subj = self.current_subject_name.replace(self_ty);
+        let snap = self.scope.enter_impl(i);
         visit::visit_item_impl(self, i);
-        self.current_subject_name = prev_subj;
-        self.current_parent_type = prev_parent;
-        self.in_test_context = prev_test;
+        self.scope.exit(snap);
     }
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
-        let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
-        let fn_name = i.sig.ident.to_string();
-        let prev_subj = self.current_subject_name.replace(fn_name);
-        let prev_loop = std::mem::replace(&mut self.loop_depth, 0);
+        let snap = self.scope.enter_fn(i);
         let prev_vars = std::mem::take(&mut self.formatted_vars);
 
-        let _ = self.source;
         self.check_axum_contended_mutex_state(&i.sig, Some(&i.block));
-        self.check_many_boolean_params(&i.sig, matches!(i.vis, syn::Visibility::Public(_)));
 
         visit::visit_item_fn(self, i);
 
         self.formatted_vars = prev_vars;
-        self.loop_depth = prev_loop;
-        self.current_subject_name = prev_subj;
-        self.in_test_context = prev_test;
+        self.scope.exit(snap);
     }
 
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
-        let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
-        let method_name = i.sig.ident.to_string();
-        let qualified = if let Some(parent) = &self.current_parent_type {
-            format!("{parent}::{method_name}")
-        } else {
-            method_name
-        };
-        let prev_subj = self.current_subject_name.replace(qualified);
-        let prev_loop = std::mem::replace(&mut self.loop_depth, 0);
+        let snap = self.scope.enter_method(i);
         let prev_vars = std::mem::take(&mut self.formatted_vars);
 
         self.check_axum_contended_mutex_state(&i.sig, Some(&i.block));
-        self.check_many_boolean_params(&i.sig, matches!(i.vis, syn::Visibility::Public(_)));
         visit::visit_impl_item_fn(self, i);
 
         self.formatted_vars = prev_vars;
-        self.loop_depth = prev_loop;
-        self.current_subject_name = prev_subj;
-        self.in_test_context = prev_test;
+        self.scope.exit(snap);
     }
 
     fn visit_trait_item_fn(&mut self, i: &'ast TraitItemFn) {
-        let prev_subj = self.current_subject_name.replace(i.sig.ident.to_string());
-        let prev_loop = std::mem::replace(&mut self.loop_depth, 0);
-        self.check_many_boolean_params(&i.sig, true);
+        let snap = self.scope.enter_trait_fn(i);
         visit::visit_trait_item_fn(self, i);
-        self.loop_depth = prev_loop;
-        self.current_subject_name = prev_subj;
+        self.scope.exit(snap);
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
@@ -371,26 +256,26 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
 
     fn visit_expr_for_loop(&mut self, node: &'ast ExprForLoop) {
         self.visit_expr(&node.expr);
-        self.loop_depth += 1;
+        let snap = self.scope.enter_loop();
         self.visit_block(&node.body);
-        self.loop_depth -= 1;
+        self.scope.exit(snap);
     }
 
     fn visit_expr_while(&mut self, node: &'ast ExprWhile) {
-        self.loop_depth += 1;
+        let snap = self.scope.enter_loop();
         self.visit_expr(&node.cond);
         self.visit_block(&node.body);
-        self.loop_depth -= 1;
+        self.scope.exit(snap);
     }
 
     fn visit_expr_loop(&mut self, node: &'ast ExprLoop) {
-        self.loop_depth += 1;
+        let snap = self.scope.enter_loop();
         self.visit_block(&node.body);
-        self.loop_depth -= 1;
+        self.scope.exit(snap);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if !self.in_test_context {
+        if !self.scope.in_test() {
             let method = node.method.to_string();
             if method == "push_str"
                 && let Expr::Path(p) = node.receiver.as_ref()
@@ -399,7 +284,7 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
                 self.formatted_vars.insert(ident.to_string());
             }
 
-            if self.loop_depth > 0
+            if self.scope.in_loop()
                 && is_sqlx_terminal_method(&method)
                 && receiver_chain_is_sqlx_query(&node.receiver)
             {
@@ -407,18 +292,17 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
                 if !self.is_inside_reported_loop_query(span) {
                     let loc = self.loc_at(span.start);
                     self.reported_loop_query_spans.push(span);
-                    self.findings.push(RsCandidateFinding {
-                        rule: RuleId::RsSqlxNoQueryInLoop,
-                        subject_name: self.current_subject_name.clone(),
-                        target_name: format!("sqlx::{method}"),
-                        message_id: "rsSqlxNoQueryInLoop",
-                        message: format!(
+                    self.findings.push(RsCandidateFinding::new(
+                        RuleId::RsSqlxNoQueryInLoop,
+                        self.scope.subject_name(),
+                        format!("sqlx::{method}"),
+                        "rsSqlxNoQueryInLoop",
+                        format!(
                             "SQLx query `.{method}(...)` executed inside a loop causes N+1 database round-trips; batch queries before the loop with `ANY($1)` or `QueryBuilder::push_tuples`."
                         ),
                         loc,
                         span,
-                        autofix: None,
-                    });
+                    ));
                 }
             }
         }
@@ -426,29 +310,27 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if !self.in_test_context {
+        if !self.scope.in_test() {
             self.check_sqlx_formatted_query_call(node);
-            self.check_reactive_effect_call(node);
 
-            if self.loop_depth > 0
+            if self.scope.in_loop()
                 && let Some(func_name) = extract_sqlx_query_fn_name(&node.func)
             {
                 let span = self.span_to_bytes(node.span());
                 if !self.is_inside_reported_loop_query(span) {
                     let loc = self.loc_at(span.start);
                     self.reported_loop_query_spans.push(span);
-                    self.findings.push(RsCandidateFinding {
-                        rule: RuleId::RsSqlxNoQueryInLoop,
-                        subject_name: self.current_subject_name.clone(),
-                        target_name: func_name.clone(),
-                        message_id: "rsSqlxNoQueryInLoop",
-                        message: format!(
+                    self.findings.push(RsCandidateFinding::new(
+                        RuleId::RsSqlxNoQueryInLoop,
+                        self.scope.subject_name(),
+                        func_name.clone(),
+                        "rsSqlxNoQueryInLoop",
+                        format!(
                             "SQLx query `{func_name}(...)` executed inside a loop causes N+1 database round-trips; batch queries outside the loop."
                         ),
                         loc,
                         span,
-                        autofix: None,
-                    });
+                    ));
                 }
             }
         }
@@ -456,21 +338,20 @@ impl<'ast> Visit<'ast> for AxumSqlxUiArchVisitor<'_> {
     }
 
     fn visit_expr_macro(&mut self, node: &'ast ExprMacro) {
-        if !self.in_test_context && self.loop_depth > 0 && is_sqlx_query_macro(&node.mac) {
+        if !self.scope.in_test() && self.scope.in_loop() && is_sqlx_query_macro(&node.mac) {
             let span = self.span_to_bytes(node.span());
             if !self.is_inside_reported_loop_query(span) {
                 let loc = self.loc_at(span.start);
                 self.reported_loop_query_spans.push(span);
-                self.findings.push(RsCandidateFinding {
-                    rule: RuleId::RsSqlxNoQueryInLoop,
-                    subject_name: self.current_subject_name.clone(),
-                    target_name: "sqlx::query!".to_string(),
-                    message_id: "rsSqlxNoQueryInLoop",
-                    message: "SQLx query macro executed inside a loop causes N+1 database round-trips; batch queries outside the loop.".to_string(),
+                self.findings.push(RsCandidateFinding::new(
+                    RuleId::RsSqlxNoQueryInLoop,
+                    self.scope.subject_name(),
+                    "sqlx::query!",
+                    "rsSqlxNoQueryInLoop",
+                    "SQLx query macro executed inside a loop causes N+1 database round-trips; batch queries outside the loop.",
                     loc,
                     span,
-                    autofix: None,
-                });
+                ));
             }
         }
         visit::visit_expr_macro(self, node);
@@ -557,13 +438,6 @@ fn is_sqlx_query_macro(mac: &Macro) -> bool {
     segs.len() == 1 || segs.iter().any(|s| s == "sqlx")
 }
 
-fn is_format_macro(mac: &Macro) -> bool {
-    mac.path
-        .segments
-        .last()
-        .is_some_and(|s| s.ident == "format")
-}
-
 fn is_string_lit_or_to_string(expr: &Expr) -> bool {
     #[expect(
         clippy::wildcard_enum_match_arm,
@@ -576,14 +450,6 @@ fn is_string_lit_or_to_string(expr: &Expr) -> bool {
         }) => true,
         Expr::MethodCall(mc) => mc.method == "to_string" || mc.method == "to_owned",
         _ => false,
-    }
-}
-
-fn extract_simple_type_name(ty: &Type) -> Option<String> {
-    if let Type::Path(tp) = ty {
-        tp.path.segments.last().map(|s| s.ident.to_string())
-    } else {
-        None
     }
 }
 
@@ -634,18 +500,6 @@ fn is_axum_state_pattern(pat: &syn::Pat) -> bool {
             .is_some_and(|seg| seg.ident == "State")
     } else {
         false
-    }
-}
-
-fn extract_state_binding_ident(pat: &syn::Pat) -> Option<String> {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Matches `State(ident)` tuple-struct destructuring or direct `ident: State<...>`"
-    )]
-    match pat {
-        syn::Pat::TupleStruct(ts) => ts.elems.first().and_then(extract_pat_ident),
-        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
-        _ => None,
     }
 }
 
@@ -713,110 +567,3 @@ fn expr_starts_with_ident(expr: &Expr, ident: &str) -> bool {
         _ => false,
     }
 }
-
-fn extract_reactive_effect_fn_name(func: &Expr) -> Option<String> {
-    let Expr::Path(expr_path) = func else {
-        return None;
-    };
-    let segs: Vec<String> = expr_path
-        .path
-        .segments
-        .iter()
-        .map(|s| s.ident.to_string())
-        .collect();
-    let last = segs.last()?.as_str();
-    if matches!(
-        last,
-        "create_effect"
-            | "create_isomorphic_effect"
-            | "create_render_effect"
-            | "use_effect"
-            | "use_reactive"
-    ) {
-        return Some(last.to_string());
-    }
-    if last == "new"
-        && segs.len() >= 2
-        && matches!(
-            segs[segs.len() - 2].as_str(),
-            "Effect" | "RenderEffect" | " IsoEffect"
-        )
-    {
-        return Some(format!("{}::new", segs[segs.len() - 2]));
-    }
-    None
-}
-
-#[derive(Default)]
-struct EffectSignalInspector {
-    has_signal_read: bool,
-    first_signal_write: Option<(String, proc_macro2::Span)>,
-}
-
-impl<'ast> Visit<'ast> for EffectSignalInspector {
-    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        let method = node.method.to_string();
-        if matches!(
-            method.as_str(),
-            "get" | "get_untracked" | "read" | "with" | "with_untracked" | "peek"
-        ) {
-            self.has_signal_read = true;
-        }
-        if matches!(
-            method.as_str(),
-            "set" | "update" | "set_untracked" | "update_untracked" | "write"
-        ) && self.first_signal_write.is_none()
-        {
-            let recv = extract_receiver_ident(&node.receiver)
-                .unwrap_or_else(|| "signal".to_string());
-            self.first_signal_write = Some((format!("{recv}.{method}"), node.span()));
-        }
-        visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let Expr::Path(p) = node.func.as_ref()
-            && p.qself.is_none()
-            && let Some(ident) = p.path.get_ident()
-        {
-            let name = ident.to_string();
-            if name.starts_with("set_") && !node.args.is_empty() {
-                if self.first_signal_write.is_none() {
-                    self.first_signal_write = Some((name, node.span()));
-                }
-            } else if node.args.is_empty() && name.chars().next().is_some_and(char::is_lowercase) {
-                self.has_signal_read = true;
-            }
-        }
-        visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_macro(&mut self, node: &'ast ExprMacro) {
-        let tokens = node.mac.tokens.to_string().replace(' ', "");
-        if tokens.contains(".get(")
-            || tokens.contains(".get_untracked(")
-            || tokens.contains(".read(")
-            || tokens.contains(".with(")
-        {
-            self.has_signal_read = true;
-        }
-        visit::visit_expr_macro(self, node);
-    }
-}
-
-fn extract_receiver_ident(expr: &Expr) -> Option<String> {
-    if let Expr::Path(p) = expr {
-        p.path.segments.last().map(|s| s.ident.to_string())
-    } else {
-        None
-    }
-}
-
-fn is_bool_type(ty: &Type) -> bool {
-    if let Type::Path(tp) = ty {
-        tp.qself.is_none() && tp.path.is_ident("bool")
-    } else {
-        false
-    }
-}
-
