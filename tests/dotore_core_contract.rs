@@ -184,3 +184,41 @@ export function Form({ first, last }: { first: string; last: string }) {
     assert_eq!(ws_sources.len(), 1);
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn root_dotore_facade_reexports_decomposed_report_diff_and_config_apis() {
+    use dotore::{
+        CiProviderKind, ConfigTargetKind, DiffScope, JSON_REPORT_SCHEMA_VERSION,
+        build_extracted_report, explain_rule, filter_diagnostics_by_scope, format_terminal_report,
+        normalize_ast_tokens, parse_why_location, render_html_report,
+    };
+
+    let default_cfg = DotoreConfig::default();
+    assert!(default_cfg.warnings);
+    assert_eq!(
+        serde_json::to_string(&ConfigTargetKind::JsonFile).unwrap(),
+        "\"json-file\""
+    );
+
+    assert_eq!(
+        DiffScope::parse("contextual"),
+        Some(DiffScope::Contextual)
+    );
+    assert_eq!(
+        normalize_ast_tokens("foo( 'bar' )"),
+        "foo ( \"bar\" )"
+    );
+    let _ = filter_diagnostics_by_scope::<ExtractedFile>;
+
+    assert_eq!(JSON_REPORT_SCHEMA_VERSION, 3);
+    let empty_report =
+        build_extracted_report(&[], Vec::new(), &std::collections::HashMap::new());
+    assert!(format_terminal_report(&empty_report).contains("HEALTH SCORE"));
+    assert!(render_html_report(&empty_report).contains("<!DOCTYPE html>"));
+    assert!(explain_rule("no-derived-state", &default_cfg).is_some());
+    assert_eq!(parse_why_location("src/App.tsx:10").unwrap().line, 10);
+    assert_eq!(
+        CiProviderKind::parse("github"),
+        Some(CiProviderKind::GithubActions)
+    );
+}
