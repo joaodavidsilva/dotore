@@ -89,7 +89,7 @@ crates/
           hoisting_and_compiler.rs # module-scope static/pure hoisting autofixes, nested components, and React Compiler memoization
           context_and_boundaries.rs # Context.Provider/useContext extraction, overloaded providers, and ancestral Suspense/ErrorBoundary checks
           component_contracts.rs # Subject size/complexity, boolean props, handler names, inline HOCs, and deprecated React APIs
-          soc_rules.rs    # JS/TS Separation of Concerns facets and single-file rules (thin entrypoints, mixed I/O + presentation, static catalogs, monoliths)
+          soc_rules.rs    # JS/TS Separation of Concerns and reuse facets and detectors (thin entrypoints, mixed I/O + presentation, static catalogs, monoliths, duplicated helpers, fluent builders, inline terminal UI)
         bundle_size.rs    # barrel imports, heavy packages, and dynamic import rules
         correctness.rs    # unstable keys, numeric && render, DOM nesting, and input rules
         defensive_js.rs   # defensive JS/TS/DOM runtime safety rules root and shared guard inspectors

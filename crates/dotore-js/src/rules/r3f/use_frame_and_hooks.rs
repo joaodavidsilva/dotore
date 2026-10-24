@@ -961,7 +961,7 @@ pub(crate) fn check_use_frame_call(
     }
 }
 
-pub(crate) fn check_animation_loop_call(
+fn check_animation_loop_call(
     ctx: &FileAnalysisCtx<'_>,
     node_id: NodeId,
     call: &CallExpression<'_>,
@@ -1195,7 +1195,7 @@ pub(crate) fn check_animation_loop_call(
     }
 }
 
-pub(crate) fn check_use_three_call(
+fn check_use_three_call(
     ctx: &FileAnalysisCtx<'_>,
     node_id: NodeId,
     call: &CallExpression<'_>,

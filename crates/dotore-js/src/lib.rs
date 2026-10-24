@@ -38,8 +38,9 @@ pub use ir::{
     FileSuppressions, HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr, JsxElementIr,
     LineDisableDirective, OpenerLineRange, RelatedHookOwnerSpanIr, SecuritySinkKind,
     SetterCallSite, SourceLoc, StaticCatalogSiteIr, StructLiteralConstructionSiteIr,
-    SubjectEffectOwner, SubjectIr, SubjectKind, SymbolKind, classify_file_context,
-    compute_line_starts, inspect_file_semantic, loc_from_line_starts, parse_file_ir,
+    SubjectEffectOwner, SubjectIr, SubjectKind, SymbolKind, TerminalUiPrimitiveKind,
+    classify_file_context, compute_line_starts, inspect_file_semantic, loc_from_line_starts,
+    parse_file_ir,
 };
 pub use planner::enrich_cross_file_autofixes;
 pub use rules::{

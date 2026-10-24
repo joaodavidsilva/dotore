@@ -4,6 +4,7 @@
 
 use std::{
     any::Any,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -1108,11 +1109,38 @@ pub struct StructLiteralConstructionSiteIr {
     pub span: ByteSpan,
 }
 
+/// Classification of an inline terminal UI primitive literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalUiPrimitiveKind {
+    /// Raw ANSI SGR or control escape sequence (`\x1b[...`, `\u001b[...`, `\033[...`).
+    AnsiEscape,
+    /// Unicode box-drawing border or frame character (`┌`, `─`, `│`, `╭`, `═`, etc.).
+    BoxDrawing,
+}
+
+impl TerminalUiPrimitiveKind {
+    /// Returns the canonical kebab-case identifier (`"ansi-escape"` or `"box-drawing"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AnsiEscape => "ansi-escape",
+            Self::BoxDrawing => "box-drawing",
+        }
+    }
+}
+
+impl fmt::Display for TerminalUiPrimitiveKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Inline ANSI escape sequence or Unicode box-drawing literal detected in a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineTerminalUiPrimitiveSiteIr {
-    /// Classification of the primitive (`"ansi-escape"` or `"box-drawing"`).
-    pub kind: String,
+    /// Classification of the primitive (`AnsiEscape` or `BoxDrawing`).
+    pub kind: TerminalUiPrimitiveKind,
     /// Short representative snippet or token.
     pub snippet: String,
     /// 1-based source location of the literal.
@@ -1487,4 +1515,39 @@ pub fn extract_normalized_signature_header(
         .trim()
         .to_string();
     (signature, sig_end_loc.line)
+}
+
+/// 64-bit FNV-1a offset basis (`0xcbf2_9ce4_8422_2325`).
+pub const FNV1A_64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+const FNV1A_64_PRIME: u64 = 0x0100_0000_01b3;
+
+/// Mixes a single byte into a 64-bit FNV-1a `hash` in place.
+#[inline]
+pub const fn fnv1a_64_byte(hash: &mut u64, byte: u8) {
+    *hash ^= byte as u64;
+    *hash = hash.wrapping_mul(FNV1A_64_PRIME);
+}
+
+/// Mixes a string `s` followed by a `0xff` delimiter byte into a 64-bit FNV-1a `hash` in place.
+#[inline]
+pub fn fnv1a_64_str(hash: &mut u64, s: &str) {
+    for b in s.bytes() {
+        fnv1a_64_byte(hash, b);
+    }
+    fnv1a_64_byte(hash, 0xff);
+}
+
+/// Returns the updated 64-bit FNV-1a `hash` after mixing `bytes` and a `0xff` delimiter byte.
+#[must_use]
+#[inline]
+pub const fn fnv1a_64_step(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(FNV1A_64_PRIME);
+        i += 1;
+    }
+    hash ^= 0xff;
+    hash.wrapping_mul(FNV1A_64_PRIME)
 }

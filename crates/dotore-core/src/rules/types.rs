@@ -47,7 +47,7 @@ impl RuleCategory {
             "performance" | "perf" => Some(Self::Performance),
             "accessibility" | "a11y" => Some(Self::Accessibility),
             "security" => Some(Self::Security),
-            "maintainability" | "architecture" => Some(Self::Maintainability),
+            "maintainability" | "architecture" | "arch" => Some(Self::Maintainability),
             _ => None,
         }
     }

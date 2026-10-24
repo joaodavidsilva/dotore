@@ -113,7 +113,7 @@ impl RsCandidateFinding {
 
 /// Saved lexical-scope state restored when exiting a nested `syn` item or expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RsScopeSnapshot {
+pub struct RsScopeSnapshot {
     pub in_test_context: bool,
     pub current_subject_name: Option<String>,
     pub current_parent_type: Option<String>,
@@ -677,7 +677,7 @@ pub(crate) fn is_cheap_handle_ident(ident: &str) -> bool {
 
 /// Returns `true` if `attr` is a `#[cfg(test)]` attribute (or `#[cfg(all(..., test))]`).
 #[must_use]
-pub(crate) fn is_cfg_test_attr(attr: &Attribute) -> bool {
+fn is_cfg_test_attr(attr: &Attribute) -> bool {
     if !attr.path().is_ident("cfg") {
         return false;
     }
@@ -692,7 +692,7 @@ pub(crate) fn is_cfg_test_attr(attr: &Attribute) -> bool {
 
 /// Returns `true` if `attrs` contains a test runner attribute (`#[test]`, `#[tokio::test]`, `#[sqlx::test]`, `#[rstest]`, `#[bench]`).
 #[must_use]
-pub(crate) fn has_test_attr(attrs: &[Attribute]) -> bool {
+fn has_test_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         let path_str = path_to_string(attr.path());
         matches!(

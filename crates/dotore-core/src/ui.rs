@@ -556,6 +556,14 @@ pub fn classify_style_bucket(diag: &Diagnostic) -> &'static str {
     let id = diag.rule.as_str();
     if id.contains("unused") || id.contains("dead") || id.contains("orphan") {
         "UNUSED"
+    } else if diag.rule.is_architecture_soc_or_reuse_rule()
+        || id.contains("import")
+        || id.contains("circular")
+        || id.contains("barrel")
+        || id.contains("arch")
+        || id.contains("export")
+    {
+        "IMPORTS & ARCH"
     } else if id.contains("derived-state")
         || id.contains("effect")
         || id.contains("state")
@@ -611,13 +619,6 @@ pub fn classify_style_bucket(diag: &Diagnostic) -> &'static str {
         || id.contains("capacity")
     {
         "PERF & LOOPS"
-    } else if id.contains("import")
-        || id.contains("circular")
-        || id.contains("barrel")
-        || id.contains("arch")
-        || id.contains("export")
-    {
-        "IMPORTS & ARCH"
     } else if diag.rule.metadata().tags.contains(&RuleTag::Design) || id.contains("design") {
         "UI DESIGN"
     } else {

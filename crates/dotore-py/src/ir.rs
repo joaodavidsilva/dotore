@@ -5,10 +5,11 @@ use std::path::Path;
 
 use dotore_core::{
     ArchitectureFileFacets, ByteSpan, ConcernBucket, ConcernSignalSite, ContextualOwnerSpansIr,
-    Diagnostic, ExtractedFile, FileSuppressions, HelperFingerprintIr,
+    Diagnostic, ExtractedFile, FNV1A_64_OFFSET_BASIS, FileSuppressions, HelperFingerprintIr,
     InlineTerminalUiPrimitiveSiteIr, LanguageId, SourceLoc, StaticCatalogSiteIr,
     StructLiteralConstructionSiteIr, SuppressionDirectiveKind, SymbolKind, SymbolOutline,
-    compute_line_starts, loc_from_line_starts, parse_python_suppression_directive,
+    TerminalUiPrimitiveKind, compute_line_starts, fnv1a_64_byte, fnv1a_64_str,
+    loc_from_line_starts, parse_python_suppression_directive,
 };
 use ruff_python_ast::{
     BoolOp, CmpOp, Expr, ExprCall, ExprFString, ExprStringLiteral, ModModule, Operator,
@@ -144,6 +145,20 @@ pub(crate) fn extract_python_file(path: &Path, source: &str) -> ExtractedFile {
     );
     for lit_site in &architecture_facets.struct_literal_sites {
         contextual_owner_spans.element_spans.push(lit_site.span);
+    }
+    for cat_site in &architecture_facets.static_catalog_sites {
+        contextual_owner_spans
+            .function_boundary_spans
+            .push(cat_site.span);
+    }
+    for sig in &architecture_facets.concern_signals {
+        if sig.bucket == ConcernBucket::EntrypointAdapter
+            && sig.detail == "if __name__ == \"__main__\""
+        {
+            contextual_owner_spans
+                .function_boundary_spans
+                .push(sig.span);
+        }
     }
     let ir = PyFileIr {
         valid_syntax,
@@ -1217,7 +1232,7 @@ impl<'a> PyArchFacetWalker<'a> {
             self.facets
                 .inline_terminal_ui_sites
                 .push(InlineTerminalUiPrimitiveSiteIr {
-                    kind: "ansi-escape".to_string(),
+                    kind: TerminalUiPrimitiveKind::AnsiEscape,
                     snippet: "\\x1b[".to_string(),
                     loc,
                     span,
@@ -1232,7 +1247,7 @@ impl<'a> PyArchFacetWalker<'a> {
             self.facets
                 .inline_terminal_ui_sites
                 .push(InlineTerminalUiPrimitiveSiteIr {
-                    kind: "box-drawing".to_string(),
+                    kind: TerminalUiPrimitiveKind::BoxDrawing,
                     snippet: "box-drawing literal".to_string(),
                     loc,
                     span,
@@ -1470,10 +1485,22 @@ fn is_pascal_case_class_name(name: &str) -> bool {
 )]
 fn is_default_or_literal_expr(expr: &Expr) -> bool {
     match expr {
-        Expr::NoneLiteral(_)
-        | Expr::BooleanLiteral(_)
-        | Expr::NumberLiteral(_)
-        | Expr::StringLiteral(_) => true,
+        Expr::NoneLiteral(_) => true,
+        Expr::BooleanLiteral(b) => !b.value,
+        Expr::NumberLiteral(num) => match &num.value {
+            ruff_python_ast::Number::Int(i) => i.as_u64() == Some(0),
+            ruff_python_ast::Number::Float(f) => *f == 0.0,
+            ruff_python_ast::Number::Complex { real, imag } => *real == 0.0 && *imag == 0.0,
+        },
+        Expr::StringLiteral(s) => {
+            let text = s.value.to_str();
+            text.is_empty()
+                || matches!(
+                    text.to_ascii_lowercase().as_str(),
+                    "default" | "none" | "auto" | "utf-8" | "utf8"
+                )
+        }
+        Expr::BytesLiteral(b) => b.value.is_empty(),
         Expr::List(l) => l.elts.is_empty(),
         Expr::Tuple(t) => t.elts.is_empty(),
         Expr::Set(s) => s.elts.is_empty(),
@@ -1532,34 +1559,20 @@ fn count_non_docstring_statements(suite: &[Stmt]) -> usize {
     total
 }
 
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0100_0000_01b3;
-
-fn fnv1a_byte(hash: &mut u64, byte: u8) {
-    *hash ^= u64::from(byte);
-    *hash = hash.wrapping_mul(FNV_PRIME);
-}
-
-fn fnv1a_str(hash: &mut u64, s: &str) {
-    for b in s.bytes() {
-        fnv1a_byte(hash, b);
-    }
-    fnv1a_byte(hash, 0xff);
-}
-
 fn compute_function_structural_hash(func_def: &StmtFunctionDef, param_count: usize) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS;
-    fnv1a_byte(&mut hash, u8::from(func_def.is_async));
-    fnv1a_byte(&mut hash, u8::try_from(param_count).unwrap_or(u8::MAX));
-    hash_suite(&mut hash, &func_def.body, true);
+    let mut hash = FNV1A_64_OFFSET_BASIS;
+    fnv1a_64_byte(&mut hash, u8::from(func_def.is_async));
+    fnv1a_64_byte(&mut hash, u8::try_from(param_count).unwrap_or(u8::MAX));
+    let body_without_docstring = match func_def.body.split_first() {
+        Some((first, rest)) if is_docstring_stmt(first) => rest,
+        _ => &func_def.body,
+    };
+    hash_suite(&mut hash, body_without_docstring);
     hash
 }
 
-fn hash_suite(hash: &mut u64, suite: &[Stmt], skip_first_docstring: bool) {
-    for (idx, stmt) in suite.iter().enumerate() {
-        if skip_first_docstring && idx == 0 && is_docstring_stmt(stmt) {
-            continue;
-        }
+fn hash_suite(hash: &mut u64, suite: &[Stmt]) {
+    for stmt in suite {
         hash_stmt(hash, stmt);
     }
 }
@@ -1571,7 +1584,7 @@ fn hash_suite(hash: &mut u64, suite: &[Stmt], skip_first_docstring: bool) {
 fn hash_stmt(hash: &mut u64, stmt: &Stmt) {
     match stmt {
         Stmt::Assign(assign) => {
-            fnv1a_str(hash, "Stmt::Assign");
+            fnv1a_64_str(hash, "Stmt::Assign");
             for target in &assign.targets {
                 hash_assign_target_shape(hash, target);
             }
@@ -1579,82 +1592,82 @@ fn hash_stmt(hash: &mut u64, stmt: &Stmt) {
         }
         Stmt::AnnAssign(ann) => {
             if let Some(val) = &ann.value {
-                fnv1a_str(hash, "Stmt::Assign");
+                fnv1a_64_str(hash, "Stmt::Assign");
                 hash_assign_target_shape(hash, &ann.target);
                 hash_expr(hash, val);
             } else {
-                fnv1a_str(hash, "Stmt::AnnDecl");
+                fnv1a_64_str(hash, "Stmt::AnnDecl");
             }
         }
         Stmt::AugAssign(aug) => {
-            fnv1a_str(hash, "Stmt::AugAssign");
+            fnv1a_64_str(hash, "Stmt::AugAssign");
             hash_assign_target_shape(hash, &aug.target);
             hash_operator(hash, aug.op);
             hash_expr(hash, &aug.value);
         }
         Stmt::Return(ret) => {
-            fnv1a_str(hash, "Stmt::Return");
+            fnv1a_64_str(hash, "Stmt::Return");
             if let Some(val) = &ret.value {
                 hash_expr(hash, val);
             }
         }
         Stmt::Expr(expr_stmt) => {
-            fnv1a_str(hash, "Stmt::Expr");
+            fnv1a_64_str(hash, "Stmt::Expr");
             hash_expr(hash, &expr_stmt.value);
         }
         Stmt::If(if_stmt) => {
-            fnv1a_str(hash, "Stmt::If");
+            fnv1a_64_str(hash, "Stmt::If");
             hash_expr(hash, &if_stmt.test);
-            hash_suite(hash, &if_stmt.body, false);
+            hash_suite(hash, &if_stmt.body);
             for clause in &if_stmt.elif_else_clauses {
-                fnv1a_str(hash, "Stmt::ElifElse");
+                fnv1a_64_str(hash, "Stmt::ElifElse");
                 if let Some(t) = &clause.test {
                     hash_expr(hash, t);
                 }
-                hash_suite(hash, &clause.body, false);
+                hash_suite(hash, &clause.body);
             }
         }
         Stmt::For(for_stmt) => {
-            fnv1a_str(hash, "Stmt::For");
+            fnv1a_64_str(hash, "Stmt::For");
             hash_assign_target_shape(hash, &for_stmt.target);
             hash_expr(hash, &for_stmt.iter);
-            hash_suite(hash, &for_stmt.body, false);
-            hash_suite(hash, &for_stmt.orelse, false);
+            hash_suite(hash, &for_stmt.body);
+            hash_suite(hash, &for_stmt.orelse);
         }
         Stmt::While(while_stmt) => {
-            fnv1a_str(hash, "Stmt::While");
+            fnv1a_64_str(hash, "Stmt::While");
             hash_expr(hash, &while_stmt.test);
-            hash_suite(hash, &while_stmt.body, false);
-            hash_suite(hash, &while_stmt.orelse, false);
+            hash_suite(hash, &while_stmt.body);
+            hash_suite(hash, &while_stmt.orelse);
         }
         Stmt::With(with_stmt) => {
-            fnv1a_str(hash, "Stmt::With");
+            fnv1a_64_str(hash, "Stmt::With");
             for item in &with_stmt.items {
                 hash_expr(hash, &item.context_expr);
             }
-            hash_suite(hash, &with_stmt.body, false);
+            hash_suite(hash, &with_stmt.body);
         }
         Stmt::Try(try_stmt) => {
-            fnv1a_str(hash, "Stmt::Try");
-            hash_suite(hash, &try_stmt.body, false);
+            fnv1a_64_str(hash, "Stmt::Try");
+            hash_suite(hash, &try_stmt.body);
             for h in &try_stmt.handlers {
                 let ruff_python_ast::ExceptHandler::ExceptHandler(handler) = h;
-                fnv1a_str(hash, "Stmt::Except");
-                hash_suite(hash, &handler.body, false);
+                fnv1a_64_str(hash, "Stmt::Except");
+                hash_suite(hash, &handler.body);
             }
-            hash_suite(hash, &try_stmt.orelse, false);
-            hash_suite(hash, &try_stmt.finalbody, false);
+            hash_suite(hash, &try_stmt.orelse);
+            hash_suite(hash, &try_stmt.finalbody);
         }
         Stmt::Raise(r) => {
-            fnv1a_str(hash, "Stmt::Raise");
+            fnv1a_64_str(hash, "Stmt::Raise");
             if let Some(exc) = &r.exc {
                 hash_expr(hash, exc);
             }
         }
-        Stmt::Break(_) => fnv1a_str(hash, "Stmt::Break"),
-        Stmt::Continue(_) => fnv1a_str(hash, "Stmt::Continue"),
-        Stmt::Pass(_) => fnv1a_str(hash, "Stmt::Pass"),
-        _ => fnv1a_str(hash, "Stmt::Other"),
+        Stmt::Break(_) => fnv1a_64_str(hash, "Stmt::Break"),
+        Stmt::Continue(_) => fnv1a_64_str(hash, "Stmt::Continue"),
+        Stmt::Pass(_) => fnv1a_64_str(hash, "Stmt::Pass"),
+        _ => fnv1a_64_str(hash, "Stmt::Other"),
     }
 }
 
@@ -1664,25 +1677,25 @@ fn hash_stmt(hash: &mut u64, stmt: &Stmt) {
 )]
 fn hash_assign_target_shape(hash: &mut u64, target: &Expr) {
     match target {
-        Expr::Name(_) => fnv1a_str(hash, "Target::Name"),
+        Expr::Name(_) => fnv1a_64_str(hash, "Target::Name"),
         Expr::Subscript(s) => {
-            fnv1a_str(hash, "Target::Subscript");
+            fnv1a_64_str(hash, "Target::Subscript");
             hash_expr(hash, &s.value);
             hash_expr(hash, &s.slice);
         }
         Expr::Attribute(a) => {
-            fnv1a_str(hash, "Target::Attr");
-            fnv1a_str(hash, a.attr.as_str());
+            fnv1a_64_str(hash, "Target::Attr");
+            fnv1a_64_str(hash, a.attr.as_str());
             hash_expr(hash, &a.value);
         }
         Expr::Tuple(t) => {
-            fnv1a_str(hash, "Target::Tuple");
-            fnv1a_byte(hash, u8::try_from(t.elts.len()).unwrap_or(u8::MAX));
+            fnv1a_64_str(hash, "Target::Tuple");
+            fnv1a_64_byte(hash, u8::try_from(t.elts.len()).unwrap_or(u8::MAX));
             for elt in &t.elts {
                 hash_assign_target_shape(hash, elt);
             }
         }
-        _ => fnv1a_str(hash, "Target::Other"),
+        _ => fnv1a_64_str(hash, "Target::Other"),
     }
 }
 
@@ -1692,24 +1705,24 @@ fn hash_assign_target_shape(hash: &mut u64, target: &Expr) {
 )]
 fn hash_expr(hash: &mut u64, expr: &Expr) {
     match expr {
-        Expr::Name(_) => fnv1a_str(hash, "Expr::Name"),
+        Expr::Name(_) => fnv1a_64_str(hash, "Expr::Name"),
         Expr::Attribute(attr) => {
-            fnv1a_str(hash, "Expr::Attr");
-            fnv1a_str(hash, attr.attr.as_str());
+            fnv1a_64_str(hash, "Expr::Attr");
+            fnv1a_64_str(hash, attr.attr.as_str());
             hash_expr(hash, &attr.value);
         }
         Expr::Call(call) => {
-            fnv1a_str(hash, "Expr::Call");
+            fnv1a_64_str(hash, "Expr::Call");
             if let Expr::Name(n) = call.func.as_ref() {
-                fnv1a_str(hash, n.id.as_str());
+                fnv1a_64_str(hash, n.id.as_str());
             } else {
                 hash_expr(hash, &call.func);
             }
-            fnv1a_byte(
+            fnv1a_64_byte(
                 hash,
                 u8::try_from(call.arguments.args.len()).unwrap_or(u8::MAX),
             );
-            fnv1a_byte(
+            fnv1a_64_byte(
                 hash,
                 u8::try_from(call.arguments.keywords.len()).unwrap_or(u8::MAX),
             );
@@ -1718,34 +1731,34 @@ fn hash_expr(hash: &mut u64, expr: &Expr) {
             }
             for kw in &call.arguments.keywords {
                 if let Some(k) = &kw.arg {
-                    fnv1a_str(hash, k.as_str());
+                    fnv1a_64_str(hash, k.as_str());
                 }
                 hash_expr(hash, &kw.value);
             }
         }
         Expr::BinOp(b) => {
-            fnv1a_str(hash, "Expr::BinOp");
+            fnv1a_64_str(hash, "Expr::BinOp");
             hash_operator(hash, b.op);
             hash_expr(hash, &b.left);
             hash_expr(hash, &b.right);
         }
         Expr::UnaryOp(u) => {
-            fnv1a_str(hash, "Expr::UnaryOp");
+            fnv1a_64_str(hash, "Expr::UnaryOp");
             hash_unary_op(hash, u.op);
             hash_expr(hash, &u.operand);
         }
         Expr::BoolOp(b) => {
-            fnv1a_str(hash, "Expr::BoolOp");
+            fnv1a_64_str(hash, "Expr::BoolOp");
             match b.op {
-                BoolOp::And => fnv1a_str(hash, "And"),
-                BoolOp::Or => fnv1a_str(hash, "Or"),
+                BoolOp::And => fnv1a_64_str(hash, "And"),
+                BoolOp::Or => fnv1a_64_str(hash, "Or"),
             }
             for v in &b.values {
                 hash_expr(hash, v);
             }
         }
         Expr::Compare(cmp) => {
-            fnv1a_str(hash, "Expr::Compare");
+            fnv1a_64_str(hash, "Expr::Compare");
             for op in &cmp.ops {
                 hash_cmp_op(hash, *op);
             }
@@ -1754,34 +1767,34 @@ fn hash_expr(hash: &mut u64, expr: &Expr) {
             }
         }
         Expr::Subscript(s) => {
-            fnv1a_str(hash, "Expr::Subscript");
+            fnv1a_64_str(hash, "Expr::Subscript");
             hash_expr(hash, &s.value);
             hash_expr(hash, &s.slice);
         }
         Expr::List(l) => {
-            fnv1a_str(hash, "Expr::List");
-            fnv1a_byte(hash, u8::try_from(l.elts.len()).unwrap_or(u8::MAX));
+            fnv1a_64_str(hash, "Expr::List");
+            fnv1a_64_byte(hash, u8::try_from(l.elts.len()).unwrap_or(u8::MAX));
             for e in &l.elts {
                 hash_expr(hash, e);
             }
         }
         Expr::Tuple(t) => {
-            fnv1a_str(hash, "Expr::Tuple");
-            fnv1a_byte(hash, u8::try_from(t.elts.len()).unwrap_or(u8::MAX));
+            fnv1a_64_str(hash, "Expr::Tuple");
+            fnv1a_64_byte(hash, u8::try_from(t.elts.len()).unwrap_or(u8::MAX));
             for e in &t.elts {
                 hash_expr(hash, e);
             }
         }
         Expr::Set(s) => {
-            fnv1a_str(hash, "Expr::Set");
-            fnv1a_byte(hash, u8::try_from(s.elts.len()).unwrap_or(u8::MAX));
+            fnv1a_64_str(hash, "Expr::Set");
+            fnv1a_64_byte(hash, u8::try_from(s.elts.len()).unwrap_or(u8::MAX));
             for e in &s.elts {
                 hash_expr(hash, e);
             }
         }
         Expr::Dict(d) => {
-            fnv1a_str(hash, "Expr::Dict");
-            fnv1a_byte(hash, u8::try_from(d.items.len()).unwrap_or(u8::MAX));
+            fnv1a_64_str(hash, "Expr::Dict");
+            fnv1a_64_byte(hash, u8::try_from(d.items.len()).unwrap_or(u8::MAX));
             for item in &d.items {
                 if let Some(k) = &item.key {
                     hash_expr(hash, k);
@@ -1790,31 +1803,31 @@ fn hash_expr(hash: &mut u64, expr: &Expr) {
             }
         }
         Expr::If(if_expr) => {
-            fnv1a_str(hash, "Expr::If");
+            fnv1a_64_str(hash, "Expr::If");
             hash_expr(hash, &if_expr.test);
             hash_expr(hash, &if_expr.body);
             hash_expr(hash, &if_expr.orelse);
         }
         Expr::Await(aw) => {
-            fnv1a_str(hash, "Expr::Await");
+            fnv1a_64_str(hash, "Expr::Await");
             hash_expr(hash, &aw.value);
         }
         Expr::StringLiteral(s) => {
-            fnv1a_str(hash, "Expr::Str");
-            fnv1a_str(hash, s.value.to_str());
+            fnv1a_64_str(hash, "Expr::Str");
+            fnv1a_64_str(hash, s.value.to_str());
         }
         Expr::FString(fstr) => {
-            fnv1a_str(hash, "Expr::FString");
+            fnv1a_64_str(hash, "Expr::FString");
             for part in fstr.value.elements() {
                 if let Some(lit) = part.as_literal() {
-                    fnv1a_str(hash, &lit.value);
+                    fnv1a_64_str(hash, &lit.value);
                 } else if let Some(interp) = part.as_interpolation() {
                     hash_expr(hash, &interp.expression);
                 }
             }
         }
         Expr::ListComp(comp) => {
-            fnv1a_str(hash, "Expr::ListComp");
+            fnv1a_64_str(hash, "Expr::ListComp");
             hash_expr(hash, &comp.elt);
             for g in &comp.generators {
                 hash_expr(hash, &g.iter);
@@ -1824,7 +1837,7 @@ fn hash_expr(hash: &mut u64, expr: &Expr) {
             }
         }
         Expr::SetComp(comp) => {
-            fnv1a_str(hash, "Expr::SetComp");
+            fnv1a_64_str(hash, "Expr::SetComp");
             hash_expr(hash, &comp.elt);
             for g in &comp.generators {
                 hash_expr(hash, &g.iter);
@@ -1834,7 +1847,7 @@ fn hash_expr(hash: &mut u64, expr: &Expr) {
             }
         }
         Expr::DictComp(comp) => {
-            fnv1a_str(hash, "Expr::DictComp");
+            fnv1a_64_str(hash, "Expr::DictComp");
             if let Some(k) = &comp.key {
                 hash_expr(hash, k);
             }
@@ -1846,13 +1859,13 @@ fn hash_expr(hash: &mut u64, expr: &Expr) {
                 }
             }
         }
-        Expr::NumberLiteral(_) => fnv1a_str(hash, "Expr::Num"),
+        Expr::NumberLiteral(_) => fnv1a_64_str(hash, "Expr::Num"),
         Expr::BooleanLiteral(b) => {
-            fnv1a_str(hash, "Expr::Bool");
-            fnv1a_byte(hash, u8::from(b.value));
+            fnv1a_64_str(hash, "Expr::Bool");
+            fnv1a_64_byte(hash, u8::from(b.value));
         }
-        Expr::NoneLiteral(_) => fnv1a_str(hash, "Expr::None"),
-        _ => fnv1a_str(hash, "Expr::Other"),
+        Expr::NoneLiteral(_) => fnv1a_64_str(hash, "Expr::None"),
+        _ => fnv1a_64_str(hash, "Expr::Other"),
     }
 }
 
@@ -1872,7 +1885,7 @@ fn hash_operator(hash: &mut u64, op: Operator) {
         Operator::BitAnd => "&",
         Operator::FloorDiv => "//",
     };
-    fnv1a_str(hash, label);
+    fnv1a_64_str(hash, label);
 }
 
 fn hash_unary_op(hash: &mut u64, op: UnaryOp) {
@@ -1882,7 +1895,7 @@ fn hash_unary_op(hash: &mut u64, op: UnaryOp) {
         UnaryOp::UAdd => "+u",
         UnaryOp::USub => "-u",
     };
-    fnv1a_str(hash, label);
+    fnv1a_64_str(hash, label);
 }
 
 fn hash_cmp_op(hash: &mut u64, op: CmpOp) {
@@ -1898,5 +1911,5 @@ fn hash_cmp_op(hash: &mut u64, op: CmpOp) {
         CmpOp::In => "in",
         CmpOp::NotIn => "not in",
     };
-    fnv1a_str(hash, label);
+    fnv1a_64_str(hash, label);
 }

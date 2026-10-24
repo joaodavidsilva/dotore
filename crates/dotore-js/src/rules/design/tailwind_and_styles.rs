@@ -115,7 +115,7 @@ pub(super) fn check_jsx_attribute_design(
     }
 }
 
-pub(super) fn check_class_name_literal_design(
+fn check_class_name_literal_design(
     class_str: &str,
     content_span: ByteSpan,
     subject_name: &Option<String>,
@@ -343,7 +343,7 @@ pub(super) fn check_class_name_literal_design(
     clippy::too_many_arguments,
     reason = "Evaluates all inline style design rules in one pass"
 )]
-pub(super) fn check_inline_style_design(
+fn check_inline_style_design(
     semantic: &Semantic<'_>,
     node_id: NodeId,
     attr: &JSXAttribute<'_>,

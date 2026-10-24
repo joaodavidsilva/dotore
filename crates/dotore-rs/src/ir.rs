@@ -11,10 +11,11 @@ use std::{
 
 use dotore_core::{
     ArchitectureFileFacets, ByteSpan, ConcernBucket, ConcernSignalSite, ContextualOwnerSpansIr,
-    ExtractedFile, FileContext, FileSuppressions, HelperFingerprintIr,
+    ExtractedFile, FNV1A_64_OFFSET_BASIS, FileContext, FileSuppressions, HelperFingerprintIr,
     InlineTerminalUiPrimitiveSiteIr, LanguageId, SourceLoc, StaticCatalogSiteIr,
-    StructLiteralConstructionSiteIr, SymbolKind, SymbolOutline, classify_file_context,
-    compute_line_starts, extract_c_style_comment_suppressions, map_rust_allow_lint_to_rules,
+    StructLiteralConstructionSiteIr, SymbolKind, SymbolOutline, TerminalUiPrimitiveKind,
+    classify_file_context, compute_line_starts, extract_c_style_comment_suppressions,
+    fnv1a_64_step, map_rust_allow_lint_to_rules,
 };
 use proc_macro2::TokenTree;
 use syn::{
@@ -508,6 +509,9 @@ impl<'ast> Visit<'ast> for IrAstExtractor<'_> {
             .with_signature_end_line(signature_end_line),
         );
 
+        self.contextual_owner_spans
+            .function_boundary_spans
+            .push(span);
         visit::visit_item_const(self, i);
     }
 
@@ -535,6 +539,9 @@ impl<'ast> Visit<'ast> for IrAstExtractor<'_> {
             .with_signature_end_line(signature_end_line),
         );
 
+        self.contextual_owner_spans
+            .function_boundary_spans
+            .push(span);
         visit::visit_item_static(self, i);
     }
 
@@ -802,12 +809,12 @@ impl ArchitectureFacetsVisitor<'_> {
                 .facets
                 .inline_terminal_ui_sites
                 .iter()
-                .any(|s| s.span == span && s.kind == "box-drawing")
+                .any(|s| s.span == span && s.kind == TerminalUiPrimitiveKind::BoxDrawing)
             {
                 self.facets
                     .inline_terminal_ui_sites
                     .push(InlineTerminalUiPrimitiveSiteIr {
-                        kind: "box-drawing".to_string(),
+                        kind: TerminalUiPrimitiveKind::BoxDrawing,
                         snippet,
                         loc,
                         span,
@@ -823,12 +830,12 @@ impl ArchitectureFacetsVisitor<'_> {
                 .facets
                 .inline_terminal_ui_sites
                 .iter()
-                .any(|s| s.span == span && s.kind == "ansi-escape")
+                .any(|s| s.span == span && s.kind == TerminalUiPrimitiveKind::AnsiEscape)
             {
                 self.facets
                     .inline_terminal_ui_sites
                     .push(InlineTerminalUiPrimitiveSiteIr {
-                        kind: "ansi-escape".to_string(),
+                        kind: TerminalUiPrimitiveKind::AnsiEscape,
                         snippet,
                         loc,
                         span,
@@ -875,7 +882,17 @@ impl ArchitectureFacetsVisitor<'_> {
         if elems.iter().all(is_numeric_or_bool_literal) {
             return;
         }
-        if matches!(vis, Visibility::Inherited) && elems.iter().all(is_private_dep_capability_tuple)
+        if matches!(vis, Visibility::Inherited)
+            && (elems.iter().all(is_private_dep_capability_tuple)
+                || elems.iter().all(|e| {
+                    matches!(
+                        e,
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Str(_),
+                            ..
+                        })
+                    )
+                }))
         {
             return;
         }
@@ -1518,18 +1535,12 @@ struct FnvHasher(u64);
 
 impl FnvHasher {
     const fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
+        Self(FNV1A_64_OFFSET_BASIS)
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= u64::from(b);
-            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
-        }
-        self.0 ^= 0xff;
-        self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        self.0 = fnv1a_64_step(self.0, bytes);
     }
-
     fn write_str(&mut self, s: &str) {
         self.write_bytes(s.as_bytes());
     }

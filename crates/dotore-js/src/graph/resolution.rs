@@ -172,11 +172,7 @@ impl ProjectGraph {
 
     /// Resolves `specifier` imported from `importer_path` to matching [`FileIr`] entries in the graph.
     #[must_use]
-    pub(crate) fn resolve_imported_module_files(
-        &self,
-        importer_path: &Path,
-        specifier: &str,
-    ) -> Vec<&FileIr> {
+    fn resolve_imported_module_files(&self, importer_path: &Path, specifier: &str) -> Vec<&FileIr> {
         resolve_specifier_to_target_indices(
             importer_path,
             specifier,
@@ -1071,7 +1067,7 @@ pub(super) fn normalize_module_stem(path: &Path) -> String {
     strip_source_extension(&normalize_path_components(path))
 }
 
-pub(super) fn normalize_path_components(path: &Path) -> String {
+fn normalize_path_components(path: &Path) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut has_leading_root = false;
 

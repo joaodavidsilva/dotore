@@ -59,7 +59,7 @@ pub(super) fn check_async_parallel_in_block(
     flush_async_parallel_run(block_node_id, &run, semantic, line_starts, out);
 }
 
-pub(super) fn flush_async_parallel_run(
+fn flush_async_parallel_run(
     block_node_id: NodeId,
     run: &[&Statement<'_>],
     semantic: &Semantic<'_>,
@@ -330,7 +330,7 @@ pub(super) fn check_loop_rules(
     );
 }
 
-pub(super) fn check_async_await_in_loop(
+fn check_async_await_in_loop(
     loop_node_id: NodeId,
     loop_span: Span,
     loop_body_span: Span,

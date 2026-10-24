@@ -37,7 +37,7 @@ pub(crate) struct PubCrateItemIr {
 
 /// An external `pub mod <name>;` declaration extracted from a Rust file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PubModDeclIr {
+struct PubModDeclIr {
     /// Submodule identifier (`<name>` in `pub mod <name>;`).
     pub name: String,
     /// Whether the `pub mod <name>;` declaration carries an explicit `///` / `#[doc = ...]` attribute.
@@ -54,7 +54,7 @@ pub(crate) struct RsFileGraphIr {
     /// All non-test `pub(crate)` items declared in this file.
     pub pub_crate_items: Vec<PubCrateItemIr>,
     /// All non-test external `pub mod <name>;` declarations in this file.
-    pub pub_mod_decls: Vec<PubModDeclIr>,
+    pub_mod_decls: Vec<PubModDeclIr>,
     /// Top-level `pub` item names (`fn`, `struct`, `enum`, `trait`, `type`, `const`, `static`) declared in this file.
     pub pub_item_names: HashSet<String>,
     /// Module names and item names re-exported via `pub use <mod>::...` at the root of this file.
@@ -120,6 +120,7 @@ pub(crate) fn collect_unused_pub_crate_findings_for_package(
         if file.file_context != FileContext::Production {
             continue;
         }
+        let is_entrypoint = is_crate_entrypoint_path(&file.path);
 
         if let Some(mod_rs_finding) = check_legacy_mod_rs_file(&file.path, graph_ir) {
             out.push((file.path.clone(), mod_rs_finding));
@@ -152,7 +153,10 @@ pub(crate) fn collect_unused_pub_crate_findings_for_package(
                 {
                     out.push((file.path.clone(), build_unused_pub_crate_finding(item)));
                 }
-            } else if !is_ident_referenced_outside_span(&file.source, &item.name, item.span) {
+            } else if multi_file
+                || !is_entrypoint
+                || !is_ident_referenced_outside_span(&file.source, &item.name, item.span)
+            {
                 out.push((file.path.clone(), build_unused_pub_crate_finding(item)));
             }
         }
@@ -348,6 +352,13 @@ fn build_unused_pub_crate_finding(item: &PubCrateItemIr) -> RsCandidateFinding {
         ),
         item.loc,
         item.span,
+    )
+}
+
+fn is_crate_entrypoint_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("lib.rs" | "main.rs")
     )
 }
 

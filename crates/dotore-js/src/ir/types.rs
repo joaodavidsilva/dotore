@@ -13,7 +13,7 @@ pub use dotore_core::ir::{
     InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId, LineDisableDirective,
     OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, SourceLoc, StaticCatalogSiteIr,
     StructLiteralConstructionSiteIr, SubjectEffectOwner, SymbolKind, SymbolOutline,
-    classify_file_context, compute_line_starts, loc_from_line_starts,
+    TerminalUiPrimitiveKind, classify_file_context, compute_line_starts, loc_from_line_starts,
 };
 
 use crate::rules::{AutofixPatch, RuleId};

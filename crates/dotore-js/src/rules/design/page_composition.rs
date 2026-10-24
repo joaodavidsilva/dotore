@@ -333,7 +333,7 @@ pub(super) fn check_page_root_design_rules(
 }
 
 #[derive(Default)]
-pub(super) struct PageSubtreeStats {
+struct PageSubtreeStats {
     card_count: usize,
     centered_paragraph_count: usize,
     font_families: HashSet<String>,

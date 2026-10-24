@@ -239,8 +239,9 @@ pub async fn handler(
         );
 
         let graph_ir = graph::extract_file_graph_ir(&ast, source, &starts);
+        let first_pub_crate: &graph::PubCrateItemIr = &graph_ir.pub_crate_items[0];
         assert_eq!(graph_ir.pub_crate_items.len(), 1);
-        assert_eq!(graph_ir.pub_crate_items[0].name, "unused_helper");
+        assert_eq!(first_pub_crate.name, "unused_helper");
 
         // Verify Autofix round-trip on RsTokioNoBlockingInAsync
         let diags = analyze_rs_source(

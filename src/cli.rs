@@ -147,6 +147,14 @@ pub struct CheckArgs {
     #[arg(long = "rule", value_name = "RULE_ID")]
     pub rules: Vec<String>,
 
+    /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
+    #[arg(long = "category", value_name = "CATEGORY")]
+    pub categories: Vec<String>,
+
+    /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.).
+    #[arg(long = "only", value_name = "FILTER")]
+    pub only: Vec<String>,
+
     /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`).
     #[arg(long = "tier", value_name = "TIER")]
     pub tiers: Vec<String>,
@@ -258,7 +266,7 @@ pub struct ReportArgs {
 
 /// Output format for `dotore search`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum SearchFormat {
+enum SearchFormat {
     /// Human-readable terminal output.
     Text,
     /// Machine-readable JSON report.
@@ -286,7 +294,7 @@ pub struct SearchArgs {
 
     /// Output format (`text` or `json`).
     #[arg(short = 'f', long = "format", value_enum, default_value_t = SearchFormat::Text, value_name = "FORMAT")]
-    pub(crate) format: SearchFormat,
+    format: SearchFormat,
 
     /// Disable ANSI syntax highlighting in text output.
     #[arg(long)]
@@ -318,12 +326,12 @@ pub struct ScanArgs {
 pub struct RulesArgs {
     /// Rules subcommand (`list`, `explain`, `enable`, `disable`, `set`, `category`, `ignore-tag`, `unignore-tag`).
     #[command(subcommand)]
-    pub(crate) command: RulesSubcommand,
+    command: RulesSubcommand,
 }
 
 /// Subcommands under `dotore rules`.
 #[derive(Debug, Clone, Subcommand)]
-pub(crate) enum RulesSubcommand {
+enum RulesSubcommand {
     /// List all available rules with their effective severities.
     List(RulesListArgs),
     /// Render the rationale, examples, configuration snippet, and Prescription Tier for a rule.
@@ -346,7 +354,7 @@ pub(crate) enum RulesSubcommand {
 
 /// CLI arguments for `dotore rules list`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesListArgs {
+struct RulesListArgs {
     /// Filter by category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability`).
     #[arg(long, value_name = "CATEGORY")]
     pub category: Option<String>,
@@ -374,7 +382,7 @@ pub(crate) struct RulesListArgs {
 
 /// CLI arguments for `dotore rules explain`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesExplainArgs {
+struct RulesExplainArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias (`effect/<id>`, `react/<id>`).
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -390,7 +398,7 @@ pub(crate) struct RulesExplainArgs {
 
 /// CLI arguments for `dotore rules enable`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesEnableArgs {
+struct RulesEnableArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -406,7 +414,7 @@ pub(crate) struct RulesEnableArgs {
 
 /// CLI arguments for `dotore rules disable`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesDisableArgs {
+struct RulesDisableArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -418,7 +426,7 @@ pub(crate) struct RulesDisableArgs {
 
 /// CLI arguments for `dotore rules set`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesSetArgs {
+struct RulesSetArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -434,7 +442,7 @@ pub(crate) struct RulesSetArgs {
 
 /// CLI arguments for `dotore rules category`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesCategoryArgs {
+struct RulesCategoryArgs {
     /// Rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability`).
     #[arg(value_name = "CATEGORY")]
     pub category: String,
@@ -450,7 +458,7 @@ pub(crate) struct RulesCategoryArgs {
 
 /// CLI arguments for `dotore rules ignore-tag` and `dotore rules unignore-tag`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct RulesTagArgs {
+struct RulesTagArgs {
     /// Behavioral tag (`design`, `test-noise`, `r3f`, etc.).
     #[arg(value_name = "TAG")]
     pub tag: String,
@@ -481,12 +489,12 @@ pub struct WhyArgs {
 pub struct CiArgs {
     /// CI workflow subcommand (`install`, `upgrade`, `config`).
     #[command(subcommand)]
-    pub(crate) command: CiSubcommand,
+    command: CiSubcommand,
 }
 
 /// Subcommands under `dotore ci`.
 #[derive(Debug, Clone, Subcommand)]
-pub(crate) enum CiSubcommand {
+enum CiSubcommand {
     /// Generate a CI pull-request workflow (`.github/workflows/dotore.yml` or `.gitlab-ci.yml`).
     Install(CiActionArgs),
     /// Upgrade an existing CI workflow to the latest `dotore` v2 configuration.
@@ -507,7 +515,7 @@ impl CiSubcommand {
 
 /// CLI arguments for `dotore ci install`, `dotore ci upgrade`, and `dotore ci config`.
 #[derive(Debug, Clone, Args)]
-pub(crate) struct CiActionArgs {
+struct CiActionArgs {
     /// CI provider (`github-actions` or `gitlab-ci`).
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
@@ -572,19 +580,101 @@ pub fn run_cli(cli: Cli) -> ExitCode {
     }
 }
 
-fn build_scan_options(
-    paths: &[PathBuf],
-    include_tests: bool,
+fn resolve_enabled_rules(
     rule_strs: &[String],
-    tier_strs: &[String],
-) -> Result<ScanOptions, String> {
-    let mut rules = Vec::new();
+    category_strs: &[String],
+    only_strs: &[String],
+) -> Result<Option<Vec<RuleId>>, String> {
+    let mut rules: Vec<RuleId> = Vec::new();
+
     for r in rule_strs {
         let Some(parsed) = RuleId::parse(r) else {
             return Err(format!("Unknown rule ID: {r:?}"));
         };
-        rules.push(parsed);
+        if !rules.contains(&parsed) {
+            rules.push(parsed);
+        }
     }
+
+    for cat_raw in category_strs {
+        let trimmed = cat_raw.trim();
+        if trimmed.eq_ignore_ascii_case("arch") || trimmed.eq_ignore_ascii_case("architecture") {
+            for meta in crate::rule_registry() {
+                if (meta.category == RuleCategory::Maintainability
+                    || meta.id.is_architecture_soc_or_reuse_rule())
+                    && !rules.contains(&meta.id)
+                {
+                    rules.push(meta.id);
+                }
+            }
+        } else if let Some(parsed_cat) = RuleCategory::parse(trimmed) {
+            for meta in crate::rule_registry() {
+                if meta.category == parsed_cat && !rules.contains(&meta.id) {
+                    rules.push(meta.id);
+                }
+            }
+        } else {
+            return Err(format!(
+                "Unknown rule category: {cat_raw:?} (expected Bugs, Performance, Accessibility, Security, Maintainability, or Architecture)"
+            ));
+        }
+    }
+
+    for filter_raw in only_strs {
+        let trimmed = filter_raw.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(exact) = RuleId::parse(trimmed) {
+            if !rules.contains(&exact) {
+                rules.push(exact);
+            }
+            continue;
+        }
+        if lower == "arch" || lower == "architecture" {
+            for meta in crate::rule_registry() {
+                if (meta.id.is_architecture_soc_or_reuse_rule()
+                    || meta.canonical_id.contains("arch")
+                    || meta.category == RuleCategory::Maintainability)
+                    && !rules.contains(&meta.id)
+                {
+                    rules.push(meta.id);
+                }
+            }
+            continue;
+        }
+        if let Some(parsed_cat) = RuleCategory::parse(trimmed) {
+            for meta in crate::rule_registry() {
+                if meta.category == parsed_cat && !rules.contains(&meta.id) {
+                    rules.push(meta.id);
+                }
+            }
+            continue;
+        }
+        let mut matched_prefix = false;
+        for meta in crate::rule_registry() {
+            if meta.canonical_id.starts_with(&lower) {
+                matched_prefix = true;
+                if !rules.contains(&meta.id) {
+                    rules.push(meta.id);
+                }
+            }
+        }
+        if !matched_prefix {
+            return Err(format!("Unknown --only filter: {filter_raw:?}"));
+        }
+    }
+
+    Ok((!rules.is_empty()).then_some(rules))
+}
+
+fn build_scan_options(
+    paths: &[PathBuf],
+    include_tests: bool,
+    rule_strs: &[String],
+    category_strs: &[String],
+    only_strs: &[String],
+    tier_strs: &[String],
+) -> Result<ScanOptions, String> {
+    let rules = resolve_enabled_rules(rule_strs, category_strs, only_strs)?;
 
     let mut tiers = Vec::new();
     for t in tier_strs {
@@ -599,14 +689,14 @@ fn build_scan_options(
     Ok(ScanOptions {
         paths: paths.to_vec(),
         include_tests,
-        rules: (!rules.is_empty()).then_some(rules),
+        rules,
         tiers: (!tiers.is_empty()).then_some(tiers),
     })
 }
 
 /// Runs `dotore check` (or `dotore score` when `args.score` is `true`).
 #[must_use]
-pub(crate) fn run_check(args: &CheckArgs) -> ExitCode {
+fn run_check(args: &CheckArgs) -> ExitCode {
     let Some(scope) = DiffScope::parse(&args.scope) else {
         eprintln!(
             "error: Unknown --scope {:?} (expected full, changed, contextual, or lines)",
@@ -642,14 +732,20 @@ pub(crate) fn run_check(args: &CheckArgs) -> ExitCode {
         None => None,
     };
 
-    let options =
-        match build_scan_options(&args.paths, args.include_tests, &args.rules, &args.tiers) {
-            Ok(opts) => opts,
-            Err(msg) => {
-                eprintln!("error: {msg}");
-                return ExitCode::from(2);
-            }
-        };
+    let options = match build_scan_options(
+        &args.paths,
+        args.include_tests,
+        &args.rules,
+        &args.categories,
+        &args.only,
+        &args.tiers,
+    ) {
+        Ok(opts) => opts,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(2);
+        }
+    };
 
     let overrides = CliOverrides {
         no_inline_disables: args.no_inline_disables,
@@ -747,7 +843,7 @@ fn scan_workspace_for_subcommand(
 
 /// Runs `dotore fix`.
 #[must_use]
-pub(crate) fn run_fix(args: &FixArgs) -> ExitCode {
+fn run_fix(args: &FixArgs) -> ExitCode {
     let (report, sources) = match scan_workspace_for_subcommand(
         &args.paths,
         args.include_tests,
@@ -775,7 +871,7 @@ pub(crate) fn run_fix(args: &FixArgs) -> ExitCode {
 
 /// Runs `dotore plan`.
 #[must_use]
-pub(crate) fn run_plan(args: &PlanArgs) -> ExitCode {
+fn run_plan(args: &PlanArgs) -> ExitCode {
     let (report, _) = match scan_workspace_for_subcommand(
         &args.paths,
         args.include_tests,
@@ -803,7 +899,7 @@ pub(crate) fn run_plan(args: &PlanArgs) -> ExitCode {
 
 /// Runs `dotore report`.
 #[must_use]
-pub(crate) fn run_report(args: &ReportArgs) -> ExitCode {
+fn run_report(args: &ReportArgs) -> ExitCode {
     let (report, _) = match scan_workspace_for_subcommand(
         &args.paths,
         args.include_tests,
@@ -855,7 +951,7 @@ fn parse_symbol_kinds_arg(raw: &str) -> Result<Vec<SymbolKind>, String> {
 
 /// Runs `dotore search`.
 #[must_use]
-pub(crate) fn run_search(args: &SearchArgs) -> ExitCode {
+fn run_search(args: &SearchArgs) -> ExitCode {
     let kinds = match args.kind.as_deref() {
         Some(raw) => match parse_symbol_kinds_arg(raw) {
             Ok(parsed) => Some(parsed),
@@ -912,7 +1008,7 @@ pub(crate) fn run_search(args: &SearchArgs) -> ExitCode {
 
 /// Runs `dotore scan`.
 #[must_use]
-pub(crate) fn run_scan(args: &ScanArgs) -> ExitCode {
+fn run_scan(args: &ScanArgs) -> ExitCode {
     let format = match resolve_runtime_scan_format(args.format.as_deref()) {
         Ok(fmt) => fmt,
         Err(err) => {
@@ -993,7 +1089,7 @@ pub(crate) fn run_scan(args: &ScanArgs) -> ExitCode {
 
 /// Runs `dotore rules`.
 #[must_use]
-pub(crate) fn run_rules(args: &RulesArgs) -> ExitCode {
+fn run_rules(args: &RulesArgs) -> ExitCode {
     match &args.command {
         RulesSubcommand::List(list_args) => {
             let config = load_config_from_dir(&list_args.cwd);
@@ -1189,7 +1285,7 @@ fn apply_cli_config_mutation(cwd: &Path, mutation: ConfigMutation, summary: &str
 
 /// Runs `dotore why <file:line>`.
 #[must_use]
-pub(crate) fn run_why(args: &WhyArgs) -> ExitCode {
+fn run_why(args: &WhyArgs) -> ExitCode {
     match explain_location(&args.location, &args.cwd) {
         Ok(report) => {
             if args.json {
@@ -1214,15 +1310,21 @@ pub(crate) fn run_why(args: &WhyArgs) -> ExitCode {
 
 /// Runs `dotore design`.
 #[must_use]
-pub(crate) fn run_design(args: &CheckArgs) -> ExitCode {
-    let options =
-        match build_scan_options(&args.paths, args.include_tests, &args.rules, &args.tiers) {
-            Ok(opts) => opts,
-            Err(msg) => {
-                eprintln!("error: {msg}");
-                return ExitCode::from(2);
-            }
-        };
+fn run_design(args: &CheckArgs) -> ExitCode {
+    let options = match build_scan_options(
+        &args.paths,
+        args.include_tests,
+        &args.rules,
+        &args.categories,
+        &args.only,
+        &args.tiers,
+    ) {
+        Ok(opts) => opts,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(2);
+        }
+    };
     let overrides = CliOverrides {
         no_inline_disables: args.no_inline_disables,
         custom_rules_only: args.custom_rules_only,
@@ -1273,7 +1375,7 @@ pub(crate) fn run_design(args: &CheckArgs) -> ExitCode {
 
 /// Runs `dotore ci`.
 #[must_use]
-pub(crate) fn run_ci(args: &CiArgs) -> ExitCode {
+fn run_ci(args: &CiArgs) -> ExitCode {
     let (sub_name, act_args) = args.command.action_args();
     let provider = if let Some(raw_prov) = &act_args.provider {
         let Some(parsed) = CiProviderKind::parse(raw_prov) else {
@@ -1317,7 +1419,7 @@ pub(crate) fn run_ci(args: &CiArgs) -> ExitCode {
 
 /// Runs `dotore install`.
 #[must_use]
-pub(crate) fn run_install(args: &InstallArgs) -> ExitCode {
+fn run_install(args: &InstallArgs) -> ExitCode {
     match install_dotore(&InstallOptions {
         cwd: args.cwd.clone(),
         yes: args.yes,
