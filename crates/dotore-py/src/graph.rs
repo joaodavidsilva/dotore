@@ -7,13 +7,19 @@ use std::{
 };
 
 use dotore_core::{
-    ByteSpan, Capability, Diagnostic, ExtractedFile, FileContext, RuleId, RuleTag, SourceLoc,
-    SymbolKind, SymbolOutline, WorkspacePackage, loc_from_line_starts,
+    ByteSpan, Diagnostic, ExtractedFile, FileContext, RuleId, SourceLoc, SymbolKind, SymbolOutline,
+    WorkspacePackage, loc_from_line_starts,
 };
 use ruff_python_ast::{Decorator, Expr, Stmt};
 use ruff_text_size::Ranged;
 
-use crate::{PyFileIr, callee_qualified_name, text_range_to_byte_span};
+use crate::{
+    PyFileIr,
+    matchers::{
+        all_function_parameters, callee_qualified_name, resolve_active_py_rule_severity,
+        text_range_to_byte_span,
+    },
+};
 
 /// Single-file module import/export and reference summary extracted during `extract_file`.
 #[derive(Debug, Clone, Default)]
@@ -274,13 +280,7 @@ impl<'a> GraphAstWalker<'a> {
                 for dec in &func_def.decorator_list {
                     self.walk_expr(&dec.expression);
                 }
-                for param in func_def
-                    .parameters
-                    .posonlyargs
-                    .iter()
-                    .chain(func_def.parameters.args.iter())
-                    .chain(func_def.parameters.kwonlyargs.iter())
-                {
+                for param in all_function_parameters(func_def) {
                     if let Some(ann) = &param.parameter.annotation {
                         self.walk_expr(ann);
                     }
@@ -526,60 +526,6 @@ fn extract_string_list_into(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-pub(crate) fn gate_allows_py_rule(package: &WorkspacePackage, rule: RuleId) -> bool {
-    let meta = rule.metadata();
-    if package.capability_gate.allows_rule(meta) {
-        return true;
-    }
-    matches!(
-        rule,
-        RuleId::PyAsyncNoBlockingCall
-            | RuleId::PyAsyncNoSequentialAwaitInLoop
-            | RuleId::PyAsyncNoUnawaitedCoroutine
-            | RuleId::PyAsyncNoFireAndForgetTask
-    ) && package.capability_gate.has(Capability::Asyncio)
-}
-
-fn should_run_graph_rule(
-    package: &WorkspacePackage,
-    file: &ExtractedFile,
-    rule: RuleId,
-    enabled_rules: Option<&[RuleId]>,
-    loc_line: u32,
-    span: ByteSpan,
-) -> bool {
-    if let Some(allowed) = enabled_rules
-        && !allowed.contains(&rule)
-    {
-        return false;
-    }
-    if package
-        .config
-        .is_overridden_for_file(rule, &file.path, &package.root_dir)
-    {
-        return false;
-    }
-    if !gate_allows_py_rule(package, rule) {
-        return false;
-    }
-    let meta = rule.metadata();
-    if enabled_rules.is_none()
-        && file.file_context != FileContext::Production
-        && meta.tags.contains(&RuleTag::TestNoise)
-        && !meta.tags.contains(&RuleTag::MigrationHint)
-        && package.config.explicit_rule_override(rule).is_none()
-    {
-        return false;
-    }
-    if package.config.effective_severity(rule).is_none() {
-        return false;
-    }
-    if package.config.respect_inline_disables && file.is_suppressed(rule, loc_line, span) {
-        return false;
-    }
-    true
-}
-
 pub(crate) fn evaluate_package_graph_rules(
     package: &WorkspacePackage,
     files: &[ExtractedFile],
@@ -752,20 +698,14 @@ fn evaluate_circular_imports(
                     continue;
                 };
                 let file = &files[u];
-                if !should_run_graph_rule(
+                let Some(effective_sev) = resolve_active_py_rule_severity(
                     package,
                     file,
                     RuleId::PyArchNoCircularImports,
                     enabled_rules,
                     loc.line,
                     span,
-                ) {
-                    continue;
-                }
-                let Some(effective_sev) = package
-                    .config
-                    .effective_severity(RuleId::PyArchNoCircularImports)
-                else {
+                ) else {
                     continue;
                 };
                 let cycle_display = format_cycle_from_node(&cycle, u, files);
@@ -775,26 +715,20 @@ fn evaluate_circular_imports(
                     .and_then(|s| s.to_str())
                     .unwrap_or("module")
                     .to_string();
-                let meta = RuleId::PyArchNoCircularImports.metadata();
-                diagnostics.push(Diagnostic {
-                    file: file.path.clone(),
-                    subject_name: None,
-                    rule: RuleId::PyArchNoCircularImports,
-                    category: meta.category,
-                    severity: effective_sev,
-                    message_id: "pyArchNoCircularImports",
-                    tier: meta.default_tier,
-                    target_name: target_file_name,
-                    message: format!(
-                        "Circular import cycle detected ({cycle_display}); move type-only imports under `if TYPE_CHECKING:` or extract shared definitions into a separate module."
-                    ),
-                    docs_url: meta.docs_url,
-                    loc,
-                    span,
-                    cascade_steps: Vec::new(),
-                    caller_sites: Vec::new(),
-                    autofix: None,
-                });
+                diagnostics.push(
+                    Diagnostic::for_rule(
+                        RuleId::PyArchNoCircularImports,
+                        file.path.clone(),
+                        loc,
+                        span,
+                        format!(
+                            "Circular import cycle detected ({cycle_display}); move type-only imports under `if TYPE_CHECKING:` or extract shared definitions into a separate module."
+                        ),
+                    )
+                    .with_severity(effective_sev)
+                    .with_message_id("pyArchNoCircularImports")
+                    .with_target_name(target_file_name),
+                );
             }
         }
     }
@@ -858,7 +792,14 @@ fn evaluate_unused_exports(
         let Some(ir) = file.downcast_payload::<PyFileIr>() else {
             continue;
         };
-        collect_star_imported_targets(u, file, &ir.module_graph.all_imports, files, &module_index, &mut star_imported_modules);
+        collect_star_imported_targets(
+            u,
+            file,
+            &ir.module_graph.all_imports,
+            files,
+            &module_index,
+            &mut star_imported_modules,
+        );
     }
 
     for (idx, file) in files.iter().enumerate() {
@@ -891,43 +832,32 @@ fn evaluate_unused_exports(
             if used_in_other_file {
                 continue;
             }
-            if !should_run_graph_rule(
+            let Some(effective_sev) = resolve_active_py_rule_severity(
                 package,
                 file,
                 RuleId::PyArchNoUnusedExports,
                 enabled_rules,
                 export.loc.line,
                 export.span,
-            ) {
-                continue;
-            }
-            let Some(effective_sev) = package
-                .config
-                .effective_severity(RuleId::PyArchNoUnusedExports)
-            else {
+            ) else {
                 continue;
             };
-            let meta = RuleId::PyArchNoUnusedExports.metadata();
-            diagnostics.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: export.subject_name.clone(),
-                rule: RuleId::PyArchNoUnusedExports,
-                category: meta.category,
-                severity: effective_sev,
-                message_id: "pyArchNoUnusedExports",
-                tier: meta.default_tier,
-                target_name: export.name.clone(),
-                message: format!(
-                    "Public top-level symbol `{}` is never imported or referenced by any other module in this package; prefix with `_` if module-private or remove if dead code.",
-                    export.name
-                ),
-                docs_url: meta.docs_url,
-                loc: export.loc,
-                span: export.span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            diagnostics.push(
+                Diagnostic::for_rule(
+                    RuleId::PyArchNoUnusedExports,
+                    file.path.clone(),
+                    export.loc,
+                    export.span,
+                    format!(
+                        "Public top-level symbol `{}` is never imported or referenced by any other module in this package; prefix with `_` if module-private or remove if dead code.",
+                        export.name
+                    ),
+                )
+                .with_subject(export.subject_name.clone())
+                .with_severity(effective_sev)
+                .with_message_id("pyArchNoUnusedExports")
+                .with_target_name(export.name.clone()),
+            );
         }
     }
 }
@@ -966,8 +896,13 @@ fn evaluate_cross_file_unawaited_coroutines(
         if ir.module_graph.potential_unawaited_calls.is_empty() {
             continue;
         }
-        let imported_async_callees =
-            collect_imported_async_callees(u, file, &ir.module_graph.all_imports, files, module_index);
+        let imported_async_callees = collect_imported_async_callees(
+            u,
+            file,
+            &ir.module_graph.all_imports,
+            files,
+            module_index,
+        );
         if imported_async_callees.is_empty() {
             continue;
         }
@@ -976,43 +911,32 @@ fn evaluate_cross_file_unawaited_coroutines(
             if !imported_async_callees.contains(&call.callee) {
                 continue;
             }
-            if !should_run_graph_rule(
+            let Some(effective_sev) = resolve_active_py_rule_severity(
                 package,
                 file,
                 RuleId::PyAsyncNoUnawaitedCoroutine,
                 enabled_rules,
                 call.loc.line,
                 call.span,
-            ) {
-                continue;
-            }
-            let Some(effective_sev) = package
-                .config
-                .effective_severity(RuleId::PyAsyncNoUnawaitedCoroutine)
-            else {
+            ) else {
                 continue;
             };
-            let meta = RuleId::PyAsyncNoUnawaitedCoroutine.metadata();
-            diagnostics.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: call.subject_name.clone(),
-                rule: RuleId::PyAsyncNoUnawaitedCoroutine,
-                category: meta.category,
-                severity: effective_sev,
-                message_id: "pyAsyncNoUnawaitedCoroutine",
-                tier: meta.default_tier,
-                target_name: call.callee.clone(),
-                message: format!(
-                    "Coroutine `{}(...)` imported from package module is called without `await`, `asyncio.gather(...)`, or `TaskGroup.create_task(...)` and will never execute.",
-                    call.callee
-                ),
-                docs_url: meta.docs_url,
-                loc: call.loc,
-                span: call.span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            diagnostics.push(
+                Diagnostic::for_rule(
+                    RuleId::PyAsyncNoUnawaitedCoroutine,
+                    file.path.clone(),
+                    call.loc,
+                    call.span,
+                    format!(
+                        "Coroutine `{}(...)` imported from package module is called without `await`, `asyncio.gather(...)`, or `TaskGroup.create_task(...)` and will never execute.",
+                        call.callee
+                    ),
+                )
+                .with_subject(call.subject_name.clone())
+                .with_severity(effective_sev)
+                .with_message_id("pyAsyncNoUnawaitedCoroutine")
+                .with_target_name(call.callee.clone()),
+            );
         }
     }
 }
