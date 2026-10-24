@@ -819,9 +819,10 @@ impl FileIr {
             subjects_count,
             effects_count,
             subject_spans,
-            architecture_facets,
+            architecture_facets: ArchitectureFileFacets::default(),
             payload: Box::new(self),
         }
+        .with_architecture_facets(architecture_facets)
     }
 }
 

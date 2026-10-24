@@ -486,6 +486,565 @@ fn js_language_analyzer_validates_syntax_across_js_jsx_ts_tsx_mjs_cjs_and_autofi
 }
 
 #[test]
+fn js_soc_rules_detect_bloated_entrypoints_mixed_io_presentation_static_catalogs_and_monoliths() {
+    use dotore_core::{
+        ArchitectureThresholdsConfig, ConcernBucket, build_root_cause_groups_and_capsules,
+    };
+    use dotore_js::{ProjectGraph, evaluate_project_with_packages};
+
+    let analyzer = JsLanguageAnalyzer;
+
+    // 1. Violating entrypoint: embeds direct I/O + domain type + inline JSX
+    let bloated_main_src = r#"import fs from 'node:fs';
+
+export interface BootstrapConfig {
+    port: number;
+    host: string;
+}
+
+export async function main() {
+    const raw = fs.readFileSync('./config.json', 'utf8');
+    const res = await fetch('https://api.example.com/bootstrap');
+    const data = await res.json();
+    return <main className="app-shell"><h1>{data.title}</h1><pre>{raw}</pre></main>;
+}
+"#;
+
+    // 2. Adversarial valid thin entrypoint: mounts <App /> and delegates
+    let thin_main_src = r#"import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { App } from './App';
+
+const root = document.getElementById('root');
+if (root) {
+    createRoot(root).render(
+        <StrictMode>
+            <App />
+        </StrictMode>
+    );
+}
+"#;
+
+    // 3. Adversarial valid thin CLI entrypoint: parses args and calls runner
+    let thin_cli_src = r#"import { runCli } from './runner';
+
+const args = process.argv.slice(2);
+const exitCode = await runCli(args);
+process.exit(exitCode);
+"#;
+
+    // 4. Violating mixed I/O + presentation module (production)
+    let mixed_io_ui_src = r#"import React from 'react';
+
+export async function OrdersDashboard({ accountId }: { accountId: string }) {
+    const response = await fetch(`/api/accounts/${accountId}/orders`);
+    const orders = await response.json();
+    return (
+        <section className="orders-view">
+            <h2>Orders</h2>
+            <ul>{orders.map((o: { id: string; total: number }) => <li key={o.id}>{o.total}</li>)}</ul>
+        </section>
+    );
+}
+"#;
+
+    // 5. Adversarial valid thin route loader file (React Router / Remix loader + route component)
+    let valid_route_loader_src = r#"import { useLoaderData } from 'react-router';
+
+export async function loader() {
+    const res = await fetch('/api/orders');
+    return res.json();
+}
+
+export default function OrdersRoute() {
+    const orders = useLoaderData();
+    return <div className="route-orders">{orders.length}</div>;
+}
+"#;
+
+    // 6. Violating mixed types + static catalog module (3 domain types + 26-entry static catalog)
+    let mut catalog_entries = String::new();
+    for i in 1..=26 {
+        catalog_entries.push_str(&format!(
+            "    {{ id: 'rule-{i}', severity: 'warning', enabled: true }},\n"
+        ));
+    }
+    let mixed_catalog_types_src = format!(
+        r#"export interface RuleRecord {{
+    id: string;
+    severity: RuleLevel;
+    enabled: boolean;
+}}
+
+export type RuleLevel = 'error' | 'warning';
+
+export enum RuleDomain {{
+    Core = 'core',
+    Arch = 'arch',
+}}
+
+export const BUILTIN_RULES: RuleRecord[] = [
+{catalog_entries}];
+"#
+    );
+
+    // 7. Adversarial valid pure catalog module (0 domain types, only imports type)
+    let pure_catalog_src = format!(
+        r#"import type {{ RuleRecord }} from './types';
+
+export const SEPARATED_RULES: RuleRecord[] = [
+{catalog_entries}];
+"#
+    );
+
+    // 8. Violating mixed-domain monolith (>= 3 concern buckets AND >= 12 top-level symbols)
+    let monolith_src = r#"import fs from 'node:fs';
+
+export interface UserAccount { id: string; email: string; }
+export interface InvoiceRecord { id: string; amount: number; }
+export type PaymentStatus = 'pending' | 'paid' | 'failed';
+export enum AuditCategory { Billing = 'billing', Security = 'security' }
+
+export async function fetchUserAccount(id: string): Promise<UserAccount> {
+    const res = await fetch(`/api/users/${id}`);
+    return res.json();
+}
+
+export function readInvoiceCache(path: string): string {
+    return fs.readFileSync(path, 'utf8');
+}
+
+export function validateUserEmail(email: string): boolean {
+    if (!email.includes('@')) {
+        return false;
+    }
+    return email.trim().length > 3;
+}
+
+export function parseInvoiceLine(line: string): InvoiceRecord {
+    const parts = line.split(',');
+    return { id: parts[0] ?? '', amount: Number(parts[1] ?? 0) };
+}
+
+export function normalizePaymentStatus(raw: string): PaymentStatus {
+    if (raw === 'paid') return 'paid';
+    if (raw === 'failed') return 'failed';
+    return 'pending';
+}
+
+export function computeInvoiceTotal(items: InvoiceRecord[]): number {
+    let sum = 0;
+    for (const item of items) {
+        sum += item.amount;
+    }
+    return sum;
+}
+
+export function AccountSummaryBanner({ user }: { user: UserAccount }) {
+    return <header className="account-banner"><span>{user.email}</span></header>;
+}
+
+export function InvoiceTableView({ invoices }: { invoices: InvoiceRecord[] }) {
+    return <section className="invoices">{invoices.map((inv) => <div key={inv.id}>{inv.amount}</div>)}</section>;
+}
+"#;
+
+    // 9. Adversarial valid large cohesive parser (>= 12 top-level symbols, but only TypeDefinitions + AstOrValidationHelper)
+    let cohesive_parser_src = r#"export interface Token { kind: string; text: string; }
+export type NodeKind = 'ident' | 'number' | 'binary';
+
+export function isDigit(ch: string): boolean { return ch >= '0' && ch <= '9'; }
+export function isAlpha(ch: string): boolean { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'); }
+export function trimToken(raw: string): string { return raw.trim(); }
+export function makeToken(kind: string, text: string): Token { return { kind, text }; }
+export function parseIdent(src: string): Token { return makeToken('ident', trimToken(src)); }
+export function parseNumber(src: string): Token { return makeToken('number', trimToken(src)); }
+export function parsePrimary(src: string): Token { return isDigit(src[0] ?? '') ? parseNumber(src) : parseIdent(src); }
+export function parseUnary(src: string): Token { return parsePrimary(src); }
+export function parseMultiplicative(src: string): Token { return parseUnary(src); }
+export function parseAdditive(src: string): Token { return parseMultiplicative(src); }
+export function parseComparison(src: string): Token { return parseAdditive(src); }
+export function parseExpression(src: string): Token { return parseComparison(src); }
+"#;
+
+    let files = vec![
+        analyzer.extract_file(Path::new("src/main.tsx"), bloated_main_src),
+        analyzer.extract_file(Path::new("apps/clean/src/main.tsx"), thin_main_src),
+        analyzer.extract_file(Path::new("bin/cli.ts"), thin_cli_src),
+        analyzer.extract_file(
+            Path::new("src/components/OrdersDashboard.tsx"),
+            mixed_io_ui_src,
+        ),
+        analyzer.extract_file(Path::new("src/routes/orders.tsx"), valid_route_loader_src),
+        analyzer.extract_file(
+            Path::new("src/components/OrdersDashboard.test.tsx"),
+            mixed_io_ui_src,
+        ),
+        analyzer.extract_file(Path::new("src/rules/catalog.ts"), &mixed_catalog_types_src),
+        analyzer.extract_file(Path::new("src/rules/data.ts"), &pure_catalog_src),
+        analyzer.extract_file(Path::new("src/monolith.tsx"), monolith_src),
+        analyzer.extract_file(Path::new("src/parser.ts"), cohesive_parser_src),
+    ];
+
+    // Verify ArchitectureFileFacets were populated on ExtractedFile
+    let main_extracted = &files[0];
+    assert!(main_extracted.architecture_facets.is_entrypoint);
+    assert!(
+        main_extracted
+            .architecture_facets
+            .has_bucket(ConcernBucket::DataOrNetworkIo)
+    );
+    assert!(
+        main_extracted
+            .architecture_facets
+            .has_bucket(ConcernBucket::TerminalOrUiPresentation)
+    );
+
+    let catalog_extracted = &files[6];
+    assert_eq!(catalog_extracted.architecture_facets.public_type_count, 3);
+    assert_eq!(
+        catalog_extracted
+            .architecture_facets
+            .static_catalog_sites
+            .len(),
+        1
+    );
+    assert_eq!(
+        catalog_extracted.architecture_facets.static_catalog_sites[0].entry_count,
+        26
+    );
+
+    let pkg = WorkspacePackage {
+        name: "web".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    };
+
+    let soc_rules = [
+        RuleId::ArchThinEntrypoint,
+        RuleId::ArchNoMixedIoAndPresentation,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        RuleId::ArchNoMixedDomainMonolith,
+    ];
+    let res = analyzer.analyze_package(&pkg, &files, Some(&soc_rules));
+
+    for diag in &res.diagnostics {
+        assert_eq!(diag.severity, RuleSeverity::Warning);
+        assert_eq!(diag.tier, PrescriptionTier::Refactor);
+        assert!(diag.autofix.is_none());
+    }
+
+    let by_file_and_rule: Vec<(PathBuf, RuleId)> = res
+        .diagnostics
+        .iter()
+        .map(|d| (d.file.clone(), d.rule))
+        .collect();
+
+    // Positive detections
+    assert!(
+        by_file_and_rule.contains(&(PathBuf::from("src/main.tsx"), RuleId::ArchThinEntrypoint)),
+        "Expected ArchThinEntrypoint on src/main.tsx, got: {by_file_and_rule:#?}"
+    );
+    assert!(
+        by_file_and_rule.contains(&(
+            PathBuf::from("src/components/OrdersDashboard.tsx"),
+            RuleId::ArchNoMixedIoAndPresentation
+        )),
+        "Expected ArchNoMixedIoAndPresentation on OrdersDashboard.tsx, got: {by_file_and_rule:#?}"
+    );
+    assert!(
+        by_file_and_rule.contains(&(
+            PathBuf::from("src/rules/catalog.ts"),
+            RuleId::ArchSeparateStaticCatalogFromTypes
+        )),
+        "Expected ArchSeparateStaticCatalogFromTypes on src/rules/catalog.ts, got: {by_file_and_rule:#?}"
+    );
+    assert!(
+        by_file_and_rule.contains(&(
+            PathBuf::from("src/monolith.tsx"),
+            RuleId::ArchNoMixedDomainMonolith
+        )),
+        "Expected ArchNoMixedDomainMonolith on src/monolith.tsx, got: {by_file_and_rule:#?}"
+    );
+
+    // Zero diagnostics on adversarial valid files
+    for valid_path in [
+        "apps/clean/src/main.tsx",
+        "bin/cli.ts",
+        "src/routes/orders.tsx",
+        "src/components/OrdersDashboard.test.tsx",
+        "src/rules/data.ts",
+        "src/parser.ts",
+    ] {
+        assert!(
+            !res.diagnostics
+                .iter()
+                .any(|d| d.file == Path::new(valid_path)),
+            "Expected 0 SoC diagnostics on valid file `{valid_path}`, got: {:#?}",
+            res.diagnostics
+        );
+    }
+
+    // Verify Contextual Owner spans: line-scope outside declaration vs contextual-scope
+    let catalog_diag = res
+        .diagnostics
+        .iter()
+        .find(|d| d.rule == RuleId::ArchSeparateStaticCatalogFromTypes)
+        .expect("catalog diagnostic");
+    let change_on_line_1 = ChangedFileLineRanges {
+        file: PathBuf::from("src/rules/catalog.ts"),
+        ranges: vec![(1, 1)],
+        deletion_lines: Vec::new(),
+    };
+    assert!(!diagnostic_intersects_changed_lines(
+        catalog_diag,
+        Some(&files[6]),
+        Some(&mixed_catalog_types_src),
+        &change_on_line_1,
+        false,
+    ));
+    assert!(diagnostic_intersects_changed_lines(
+        catalog_diag,
+        Some(&files[6]),
+        Some(&mixed_catalog_types_src),
+        &change_on_line_1,
+        true,
+    ));
+
+    // Verify ProjectGraph PlannerContext architecture_facets_for_file and Fix Capsules
+    let file_irs: Vec<FileIr> = files
+        .iter()
+        .filter_map(|f| f.downcast_payload::<FileIr>().cloned())
+        .collect();
+    let graph = ProjectGraph::build(file_irs);
+    let graph_diags =
+        evaluate_project_with_packages(&graph, std::slice::from_ref(&pkg), Some(&soc_rules));
+    assert_eq!(graph_diags.len(), res.diagnostics.len());
+
+    let mut sources = HashMap::new();
+    for f in &files {
+        sources.insert(f.path.clone(), f.source.clone());
+    }
+    let (groups, capsules) = build_root_cause_groups_and_capsules(&graph, &graph_diags, &sources);
+    assert!(!groups.is_empty());
+    assert_eq!(groups.len(), capsules.len());
+    for capsule in &capsules {
+        assert!(!capsule.caller_site_excerpts.is_empty());
+        assert!(capsule.exemplar.is_some());
+    }
+
+    // Verify threshold overrides in DotoreConfig::architecture
+    let mut relaxed_pkg = pkg.clone();
+    relaxed_pkg.config.architecture = ArchitectureThresholdsConfig {
+        min_types_with_catalog: 10,
+        min_static_catalog_entries: 100,
+        max_entrypoint_statements: 200,
+        min_monolith_domain_clusters: 6,
+        min_monolith_symbols: 50,
+        ..ArchitectureThresholdsConfig::default()
+    };
+    let relaxed_res = analyzer.analyze_package(&relaxed_pkg, &files, Some(&soc_rules));
+    assert!(
+        !relaxed_res
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::ArchSeparateStaticCatalogFromTypes),
+        "Expected relaxed catalog thresholds to suppress ArchSeparateStaticCatalogFromTypes"
+    );
+    assert!(
+        !relaxed_res
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::ArchNoMixedDomainMonolith),
+        "Expected relaxed monolith thresholds to suppress ArchNoMixedDomainMonolith"
+    );
+
+    // Verify inline suppressions (`// dotore-disable-next-line`)
+    let suppressed_mixed_src =
+        format!("// dotore-disable-next-line arch-no-mixed-io-and-presentation\n{mixed_io_ui_src}");
+    let suppressed_file = analyzer.extract_file(
+        Path::new("src/components/SuppressedOrders.tsx"),
+        &suppressed_mixed_src,
+    );
+    let suppressed_res = analyzer.analyze_package(
+        &pkg,
+        &[suppressed_file],
+        Some(&[RuleId::ArchNoMixedIoAndPresentation]),
+    );
+    assert!(
+        suppressed_res.diagnostics.is_empty(),
+        "Expected inline suppression to silence ArchNoMixedIoAndPresentation, got: {:#?}",
+        suppressed_res.diagnostics
+    );
+}
+
+#[test]
+fn js_soc_rules_cover_statement_budgets_cli_terminal_boxes_angular_templates_and_custom_thresholds()
+{
+    use dotore_core::ArchitectureThresholdsConfig;
+
+    let analyzer = JsLanguageAnalyzer;
+
+    // 1. Entrypoint exceeding custom `max_entrypoint_statements: 5` without I/O
+    let statement_heavy_cli_src = r#"import { parseArgs } from './args';
+
+export function cli(rawArgs: string[]): number {
+    const parsed = parseArgs(rawArgs);
+    let total = 0;
+    const stepOne = parsed.count + 1;
+    const stepTwo = stepOne * 2;
+    const stepThree = stepTwo - 1;
+    total += stepThree;
+    return total;
+}
+"#;
+
+    // 2. CLI command module mixing Prisma/DB I/O with inline ANSI & Unicode box-drawing presentation
+    let cli_mixed_io_box_src = r#"export async function renderAccountStatus(prisma: any, db: any, userId: string) {
+    const account = await prisma.account.findUnique({ where: { id: userId } });
+    const rows = await db.query('SELECT * FROM audit_log WHERE user_id = $1', [userId]);
+    const header = "\x1b[32m┌────────────────────────┐\x1b[0m";
+    const footer = "└────────────────────────┘";
+    return `${header}\n${account.email} (${rows.length})\n${footer}`;
+}
+"#;
+
+    // 3. Angular @Component mixing axios/indexedDB I/O with inline HTML template presentation
+    let angular_mixed_src = r#"import { Component } from '@angular/core';
+import axios from 'axios';
+
+@Component({
+    selector: 'app-billing',
+    template: `<div class="billing-card"><span>Billing</span></div>`
+})
+export class BillingComponent {
+    async loadInvoices() {
+        const res = await axios.get('/api/invoices');
+        indexedDB.open('billing-cache', 1);
+        return res.data;
+    }
+}
+"#;
+
+    // 4. Module with 2 domain types + 5-entry catalog (clean under defaults, flagged when thresholds lowered)
+    let small_catalog_src = r#"export interface MetricDef {
+    key: string;
+    unit: MetricUnit;
+}
+
+export type MetricUnit = 'ms' | 'bytes';
+
+export const METRIC_DEFS: readonly MetricDef[] = [
+    { key: 'tti', unit: 'ms' },
+    { key: 'fcp', unit: 'ms' },
+    { key: 'lcp', unit: 'ms' },
+    { key: 'cls', unit: 'ms' },
+    { key: 'heap', unit: 'bytes' },
+] as const;
+"#;
+
+    // 5. Cohesive state machine with 14 top-level symbols across only 2 buckets (TypeDefinitions + AstOrValidationHelper)
+    let state_machine_src = r#"export type MachineState = 'idle' | 'loading' | 'ready' | 'error';
+export interface MachineEvent { kind: string; payload?: string; }
+
+export function isIdle(s: MachineState): boolean { return s === 'idle'; }
+export function isLoading(s: MachineState): boolean { return s === 'loading'; }
+export function isReady(s: MachineState): boolean { return s === 'ready'; }
+export function isError(s: MachineState): boolean { return s === 'error'; }
+export function validateEvent(e: MachineEvent): boolean { return e.kind.length > 0; }
+export function normalizeEventKind(k: string): string { return k.trim().toLowerCase(); }
+export function transitionFromIdle(e: MachineEvent): MachineState { return e.kind === 'fetch' ? 'loading' : 'idle'; }
+export function transitionFromLoading(e: MachineEvent): MachineState { return e.kind === 'resolve' ? 'ready' : 'error'; }
+export function transitionFromReady(e: MachineEvent): MachineState { return e.kind === 'reset' ? 'idle' : 'ready'; }
+export function transitionFromError(e: MachineEvent): MachineState { return e.kind === 'retry' ? 'loading' : 'error'; }
+export function computeNextState(s: MachineState, e: MachineEvent): MachineState {
+    if (!validateEvent(e)) return s;
+    if (s === 'idle') return transitionFromIdle(e);
+    if (s === 'loading') return transitionFromLoading(e);
+    if (s === 'ready') return transitionFromReady(e);
+    return transitionFromError(e);
+}
+export function formatMachineState(s: MachineState): string { return `[state:${s}]`; }
+"#;
+
+    let files = vec![
+        analyzer.extract_file(Path::new("src/cli.ts"), statement_heavy_cli_src),
+        analyzer.extract_file(Path::new("src/commands/status.ts"), cli_mixed_io_box_src),
+        analyzer.extract_file(Path::new("src/billing.component.ts"), angular_mixed_src),
+        analyzer.extract_file(Path::new("src/metrics.ts"), small_catalog_src),
+        analyzer.extract_file(Path::new("src/stateMachine.ts"), state_machine_src),
+    ];
+
+    let soc_rules = [
+        RuleId::ArchThinEntrypoint,
+        RuleId::ArchNoMixedIoAndPresentation,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        RuleId::ArchNoMixedDomainMonolith,
+    ];
+
+    // Under default thresholds:
+    // - `src/commands/status.ts` and `src/billing.component.ts` fire `ArchNoMixedIoAndPresentation`
+    // - `src/cli.ts` (7 statements <= 25), `src/metrics.ts` (2 types, 5 entries), and `src/stateMachine.ts` emit 0 diagnostics
+    let default_pkg = WorkspacePackage {
+        name: "app".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_angular(),
+        config: DotoreConfig::default(),
+    };
+    let default_res = analyzer.analyze_package(&default_pkg, &files, Some(&soc_rules));
+    let default_hits: Vec<(PathBuf, RuleId)> = default_res
+        .diagnostics
+        .iter()
+        .map(|d| (d.file.clone(), d.rule))
+        .collect();
+    assert!(default_hits.contains(&(
+        PathBuf::from("src/commands/status.ts"),
+        RuleId::ArchNoMixedIoAndPresentation
+    )));
+    assert!(default_hits.contains(&(
+        PathBuf::from("src/billing.component.ts"),
+        RuleId::ArchNoMixedIoAndPresentation
+    )));
+    assert!(
+        !default_hits
+            .iter()
+            .any(|(f, _)| f == Path::new("src/cli.ts")
+                || f == Path::new("src/metrics.ts")
+                || f == Path::new("src/stateMachine.ts")),
+        "Expected 0 default diagnostics on cli.ts, metrics.ts, and stateMachine.ts, got: {default_hits:#?}"
+    );
+
+    // Under tightened thresholds (`max_entrypoint_statements: 5`, `min_types_with_catalog: 2`, `min_static_catalog_entries: 4`):
+    // `src/cli.ts` fires `ArchThinEntrypoint` and `src/metrics.ts` fires `ArchSeparateStaticCatalogFromTypes`,
+    // while `src/stateMachine.ts` still emits 0 diagnostics!
+    let mut strict_pkg = default_pkg;
+    strict_pkg.config.architecture = ArchitectureThresholdsConfig {
+        max_entrypoint_statements: 5,
+        min_types_with_catalog: 2,
+        min_static_catalog_entries: 4,
+        ..ArchitectureThresholdsConfig::default()
+    };
+    let strict_res = analyzer.analyze_package(&strict_pkg, &files, Some(&soc_rules));
+    let strict_hits: Vec<(PathBuf, RuleId)> = strict_res
+        .diagnostics
+        .iter()
+        .map(|d| (d.file.clone(), d.rule))
+        .collect();
+    assert!(strict_hits.contains(&(PathBuf::from("src/cli.ts"), RuleId::ArchThinEntrypoint)));
+    assert!(strict_hits.contains(&(
+        PathBuf::from("src/metrics.ts"),
+        RuleId::ArchSeparateStaticCatalogFromTypes
+    )));
+    assert!(
+        !strict_hits
+            .iter()
+            .any(|(f, _)| f == Path::new("src/stateMachine.ts")),
+        "Cohesive state machine must still emit 0 diagnostics under strict thresholds"
+    );
+}
+
+#[test]
 fn js_language_analyzer_detects_duplicated_helper_logic_across_modules_and_ignores_trivial_helpers()
 {
     use dotore_core::build_root_cause_groups_and_capsules;

@@ -227,15 +227,6 @@ where
         &mut context_providers,
         &mut context_consumers,
     );
-    crate::rules::architecture::extract_reuse_architecture_facets(
-        path,
-        source,
-        &semantic,
-        &subjects,
-        &module,
-        &line_starts,
-        &mut architecture_facets,
-    );
     crate::rules::effect_teardown::extract_effect_teardown_sites(
         path,
         &semantic,
@@ -252,6 +243,27 @@ where
     crate::rules::angular::extract_angular_sites(&semantic, &line_starts, &mut semantic_sites);
     let mut contextual_owner_spans = extract_contextual_owner_spans(&semantic);
     contextual_owner_spans.element_spans = jsx_subtrees.iter().map(|s| s.span).collect();
+    crate::rules::architecture::extract_soc_architecture_facets(
+        path,
+        source,
+        &parsed.program,
+        &semantic,
+        &module,
+        &subjects,
+        &jsx_elements,
+        &symbol_outlines,
+        &line_starts,
+        &mut architecture_facets,
+    );
+    crate::rules::architecture::extract_reuse_architecture_facets(
+        path,
+        source,
+        &semantic,
+        &subjects,
+        &module,
+        &line_starts,
+        &mut architecture_facets,
+    );
 
     let file_ir = FileIr {
         path: path.to_path_buf(),

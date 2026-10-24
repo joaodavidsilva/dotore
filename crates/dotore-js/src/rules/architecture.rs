@@ -9,6 +9,7 @@
 mod component_contracts;
 mod context_and_boundaries;
 mod hoisting_and_compiler;
+mod soc_rules;
 
 use std::collections::HashSet;
 
@@ -18,6 +19,7 @@ use oxc_semantic::{NodeId, Semantic};
 pub(crate) use self::context_and_boundaries::{
     evaluate_architecture_project_graph_rules, extract_reuse_architecture_facets,
 };
+pub(crate) use self::soc_rules::{evaluate_file_soc_rules, extract_soc_architecture_facets};
 use self::{
     component_contracts::check_module_and_expr_architecture_rules,
     context_and_boundaries::extract_context_sites_in_file,

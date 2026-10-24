@@ -42,6 +42,13 @@ impl PlannerContext for ProjectGraph {
             .unwrap_or_default()
     }
 
+    fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
+        self.files
+            .iter()
+            .find(|f| f.path == file)
+            .map(|f| &f.architecture_facets)
+    }
+
     fn callers_of(&self, target_file: &Path, subject_name: &str) -> Vec<ResolvedCallerSite> {
         Self::callers_of(self, target_file, subject_name)
     }
@@ -122,26 +129,21 @@ impl PlannerContext for ProjectGraph {
         count
     }
 
-    fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
-        self.files
-            .iter()
-            .find(|f| f.path == file)
-            .map(|f| &f.architecture_facets)
-    }
-
     fn find_rule_exemplar(
         &self,
         group: &RootCauseGroup,
         diagnostics: &[Diagnostic],
         sources: &HashMap<PathBuf, String>,
     ) -> Option<SourceExcerpt> {
+        let mut sorted_files: Vec<&FileIr> = self.files.iter().collect();
+        sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
+
         if group.rule.is_architecture_soc_or_reuse_rule()
-            && let Some(ex) = find_architecture_exemplar_in_graph(self, group, diagnostics, sources)
+            && let Some(ex) =
+                find_js_architecture_exemplar(&sorted_files, group, diagnostics, sources)
         {
             return Some(ex);
         }
-        let mut sorted_files: Vec<&FileIr> = self.files.iter().collect();
-        sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
 
         for file in &sorted_files {
             let Some(src) = sources.get(&file.path) else {
@@ -176,8 +178,8 @@ impl PlannerContext for ProjectGraph {
     }
 }
 
-fn find_architecture_exemplar_in_graph(
-    graph: &ProjectGraph,
+fn find_js_architecture_exemplar(
+    sorted_files: &[&FileIr],
     group: &RootCauseGroup,
     diagnostics: &[Diagnostic],
     sources: &HashMap<PathBuf, String>,
@@ -188,26 +190,25 @@ fn find_architecture_exemplar_in_graph(
         .map(|d| d.file.as_path())
         .collect();
 
-    let mut ordered: Vec<&FileIr> = graph
-        .files
+    let unflagged: Vec<&FileIr> = sorted_files
         .iter()
+        .copied()
         .filter(|f| f.path != group.file && !flagged_for_rule.contains(f.path.as_path()))
         .collect();
-    ordered.sort_by(|a, b| a.path.cmp(&b.path));
 
     if group.rule == RuleId::ArchNoInlineTerminalUiPrimitives {
-        if let Some(ui_file) = ordered.iter().copied().find(|f| {
+        if let Some(ui_file) = unflagged.iter().copied().find(|f| {
             f.architecture_facets.is_ui_kit_module
                 || f.path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| s == "ui" || s.ends_with("_ui"))
+                    .is_some_and(|s| s == "ui" || s.ends_with("_ui") || s.ends_with("-ui"))
         }) && let Some(ex) = excerpt_for_file_ir(ui_file, sources)
         {
             return Some(ex);
         }
     } else if group.rule == RuleId::ArchPreferFluentBuilder
-        && let Some(builder_file) = ordered
+        && let Some(builder_file) = unflagged
             .iter()
             .copied()
             .find(|f| {
@@ -217,7 +218,7 @@ fn find_architecture_exemplar_in_graph(
                     .any(|t| t == &group.target_name)
             })
             .or_else(|| {
-                ordered
+                unflagged
                     .iter()
                     .copied()
                     .find(|f| !f.architecture_facets.defined_builder_types.is_empty())
@@ -227,7 +228,7 @@ fn find_architecture_exemplar_in_graph(
         return Some(ex);
     }
 
-    if let Some(cohesive) = ordered
+    if let Some(cohesive) = unflagged
         .iter()
         .copied()
         .find(|f| f.architecture_facets.distinct_concern_buckets().len() == 1)
@@ -236,7 +237,7 @@ fn find_architecture_exemplar_in_graph(
         return Some(ex);
     }
 
-    for candidate in ordered {
+    for candidate in unflagged {
         if let Some(ex) = excerpt_for_file_ir(candidate, sources) {
             return Some(ex);
         }

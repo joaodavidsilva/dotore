@@ -33,11 +33,13 @@ pub mod rules;
 
 pub use graph::{ProjectGraph, ResolvedCallerSite};
 pub use ir::{
-    BlockDisableRange, ByteSpan, CallerSite, ContextualOwnerSpansIr, DepRef, DepsSpec, EffectNode,
-    FileContext, FileIr, FileSuppressions, JsxElementIr, LineDisableDirective, OpenerLineRange,
-    RelatedHookOwnerSpanIr, SecuritySinkKind, SetterCallSite, SourceLoc, SubjectEffectOwner,
-    SubjectIr, SubjectKind, SymbolKind, classify_file_context, compute_line_starts,
-    inspect_file_semantic, loc_from_line_starts, parse_file_ir,
+    ArchitectureFileFacets, BlockDisableRange, ByteSpan, CallerSite, ConcernBucket,
+    ConcernSignalSite, ContextualOwnerSpansIr, DepRef, DepsSpec, EffectNode, FileContext, FileIr,
+    FileSuppressions, HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr, JsxElementIr,
+    LineDisableDirective, OpenerLineRange, RelatedHookOwnerSpanIr, SecuritySinkKind,
+    SetterCallSite, SourceLoc, StaticCatalogSiteIr, StructLiteralConstructionSiteIr,
+    SubjectEffectOwner, SubjectIr, SubjectKind, SymbolKind, classify_file_context,
+    compute_line_starts, inspect_file_semantic, loc_from_line_starts, parse_file_ir,
 };
 pub use planner::enrich_cross_file_autofixes;
 pub use rules::{
@@ -222,11 +224,8 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
             .map(|s| s.effect_nodes.len())
             .sum();
         let graph = ProjectGraph::build(file_irs);
-        let mut diagnostics = evaluate_project_with_packages(
-            &graph,
-            std::slice::from_ref(package),
-            enabled_rules,
-        );
+        let mut diagnostics =
+            evaluate_project_with_packages(&graph, std::slice::from_ref(package), enabled_rules);
         enrich_cross_file_autofixes(&graph, &mut diagnostics, &sources);
         PackageAnalysisResult {
             diagnostics,

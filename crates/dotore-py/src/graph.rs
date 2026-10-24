@@ -2,13 +2,14 @@
 //! `py-arch-no-unused-exports`, and cross-file `async def` tracking).
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
 use dotore_core::{
-    ByteSpan, Diagnostic, ExtractedFile, FileContext, RuleId, SourceLoc, SymbolKind, SymbolOutline,
-    WorkspacePackage, loc_from_line_starts,
+    ByteSpan, ConcernBucket, Diagnostic, ExtractedFile, FileContext, HelperFingerprintIr,
+    ResolvedCallerSite, RuleId, RuleSeverity, SourceLoc, StructLiteralConstructionSiteIr,
+    SymbolKind, SymbolOutline, WorkspacePackage, loc_from_line_starts,
 };
 use ruff_python_ast::{Decorator, Expr, Stmt};
 use ruff_text_size::Ranged;
@@ -532,9 +533,14 @@ pub(crate) fn evaluate_package_graph_rules(
     enabled_rules: Option<&[RuleId]>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    evaluate_architecture_file_rules(package, files, enabled_rules, diagnostics);
+    evaluate_prefer_fluent_builder_rule(package, files, enabled_rules, diagnostics);
+
     if files.len() < 2 {
         return;
     }
+
+    evaluate_duplicated_helper_logic_rule(package, files, enabled_rules, diagnostics);
 
     let module_index = build_module_lookup(files, &package.root_dir);
     evaluate_cross_file_unawaited_coroutines(
@@ -813,7 +819,8 @@ fn evaluate_unused_exports(
         };
 
         for export in &ir.module_graph.public_exports {
-            if export.has_registration_decorator || ir.module_graph.dunder_all.contains(&export.name)
+            if export.has_registration_decorator
+                || ir.module_graph.dunder_all.contains(&export.name)
             {
                 continue;
             }
@@ -1016,4 +1023,655 @@ fn is_entrypoint_or_test_module(path: &Path, file_context: FileContext) -> bool 
             .to_str()
             .is_some_and(|s| matches!(s, "tests" | "test" | "migrations" | "alembic"))
     })
+}
+
+fn evaluate_architecture_file_rules(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for file in files {
+        if package
+            .config
+            .is_file_ignored(&file.path, &package.root_dir)
+        {
+            continue;
+        }
+        evaluate_thin_entrypoint_rule(package, file, enabled_rules, diagnostics);
+        evaluate_mixed_io_and_presentation_rule(package, file, enabled_rules, diagnostics);
+        evaluate_separate_static_catalog_from_types_rule(package, file, enabled_rules, diagnostics);
+        evaluate_mixed_domain_monolith_rule(package, file, enabled_rules, diagnostics);
+        evaluate_inline_terminal_ui_primitives_rule(package, file, enabled_rules, diagnostics);
+    }
+}
+
+fn evaluate_thin_entrypoint_rule(
+    package: &WorkspacePackage,
+    file: &ExtractedFile,
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let facets = &file.architecture_facets;
+    if !facets.is_entrypoint {
+        return;
+    }
+    let has_domain_types = facets.has_bucket(ConcernBucket::TypeDefinitions);
+    let has_io = facets.has_bucket(ConcernBucket::DataOrNetworkIo);
+    let has_entrypoint_loop = facets
+        .signals_for_bucket(ConcernBucket::EntrypointAdapter)
+        .iter()
+        .any(|s| s.detail == "entrypoint-domain-loop");
+    let max_stmts = package.config.architecture.max_entrypoint_statements;
+    let exceeds_statements = facets.entrypoint_statement_count > max_stmts;
+    let embeds_loop_queries = has_entrypoint_loop && has_io && max_stmts <= 25;
+
+    if !(has_domain_types && has_io) && !embeds_loop_queries && !exceeds_statements {
+        return;
+    }
+
+    let (subject_name, span, loc) = resolve_entrypoint_anchor(file);
+    if is_file_level_rule_suppressed(package, file, RuleId::ArchThinEntrypoint) {
+        return;
+    }
+    let Some(effective_sev) = resolve_active_py_rule_severity(
+        package,
+        file,
+        RuleId::ArchThinEntrypoint,
+        enabled_rules,
+        loc.line,
+        span,
+    ) else {
+        return;
+    };
+
+    let target_name = file
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("main.py")
+        .to_string();
+    let mut cascade_steps = Vec::new();
+    if has_domain_types && has_io {
+        cascade_steps
+            .push("concern: type-definitions + data-or-network-io in entrypoint".to_string());
+    }
+    if embeds_loop_queries {
+        cascade_steps.push("concern: entrypoint-domain-loop + data-or-network-io".to_string());
+    }
+    if exceeds_statements {
+        cascade_steps.push(format!(
+            "entrypoint_statements={} > max_entrypoint_statements={max_stmts}",
+            facets.entrypoint_statement_count
+        ));
+    }
+    let msg = if has_domain_types && has_io {
+        format!(
+            "Python entrypoint `{target_name}` defines domain/ORM/Pydantic classes and executes direct I/O queries instead of delegating to an imported library runner function."
+        )
+    } else if embeds_loop_queries {
+        format!(
+            "Python entrypoint `{target_name}` embeds a domain loop executing direct I/O queries instead of delegating to an imported library runner function."
+        )
+    } else {
+        format!(
+            "Python entrypoint `{target_name}` contains {} statements (threshold: {max_stmts}) instead of delegating to a thin library runner function.",
+            facets.entrypoint_statement_count
+        )
+    };
+
+    diagnostics.push(
+        Diagnostic::for_rule(
+            RuleId::ArchThinEntrypoint,
+            file.path.clone(),
+            loc,
+            span,
+            msg,
+        )
+        .with_subject(subject_name)
+        .with_severity(effective_sev)
+        .with_message_id("archThinEntrypoint")
+        .with_target_name(target_name)
+        .with_cascade_steps(cascade_steps),
+    );
+}
+
+fn evaluate_mixed_io_and_presentation_rule(
+    package: &WorkspacePackage,
+    file: &ExtractedFile,
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if file.file_context != FileContext::Production {
+        return;
+    }
+    let facets = &file.architecture_facets;
+    let respect_disables = package.config.respect_inline_disables;
+    let io_signals: Vec<_> = facets
+        .signals_for_bucket(ConcernBucket::DataOrNetworkIo)
+        .into_iter()
+        .filter(|s| {
+            !respect_disables
+                || !file.is_suppressed(RuleId::ArchNoMixedIoAndPresentation, s.loc.line, s.span)
+        })
+        .collect();
+    let ui_signals: Vec<_> = facets
+        .signals_for_bucket(ConcernBucket::TerminalOrUiPresentation)
+        .into_iter()
+        .filter(|s| {
+            !s.detail.starts_with("import ")
+                && (!respect_disables
+                    || !file.is_suppressed(
+                        RuleId::ArchNoMixedIoAndPresentation,
+                        s.loc.line,
+                        s.span,
+                    ))
+        })
+        .collect();
+    if io_signals.is_empty() || ui_signals.is_empty() {
+        return;
+    }
+
+    let primary_sig = ui_signals[0];
+    let span = primary_sig.span;
+    let loc = primary_sig.loc;
+    let subject_name = enclosing_subject_for_span(file, span);
+
+    if is_file_level_rule_suppressed(package, file, RuleId::ArchNoMixedIoAndPresentation) {
+        return;
+    }
+    let Some(effective_sev) = resolve_active_py_rule_severity(
+        package,
+        file,
+        RuleId::ArchNoMixedIoAndPresentation,
+        enabled_rules,
+        loc.line,
+        span,
+    ) else {
+        return;
+    };
+
+    let target_name = file
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("module.py")
+        .to_string();
+    let io_detail = &io_signals[0].detail;
+    let ui_detail = &ui_signals[0].detail;
+    let cascade_steps = vec![
+        format!("data-or-network-io: {io_detail}"),
+        format!("terminal-or-ui-presentation: {ui_detail}"),
+    ];
+
+    diagnostics.push(
+        Diagnostic::for_rule(
+            RuleId::ArchNoMixedIoAndPresentation,
+            file.path.clone(),
+            loc,
+            span,
+            format!(
+                "Module `{target_name}` mixes data/network/file I/O (`{io_detail}`) with terminal or UI presentation (`{ui_detail}`); separate I/O adapters from presentation rendering."
+            ),
+        )
+        .with_subject(subject_name)
+        .with_severity(effective_sev)
+        .with_message_id("archNoMixedIoAndPresentation")
+        .with_target_name(target_name)
+        .with_cascade_steps(cascade_steps),
+    );
+}
+
+fn evaluate_separate_static_catalog_from_types_rule(
+    package: &WorkspacePackage,
+    file: &ExtractedFile,
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if file.file_context != FileContext::Production {
+        return;
+    }
+    let facets = &file.architecture_facets;
+    let min_types = package.config.architecture.min_types_with_catalog;
+    let min_entries = package.config.architecture.min_static_catalog_entries;
+    if facets.public_type_count < min_types {
+        return;
+    }
+    let Some(catalog) = facets
+        .static_catalog_sites
+        .iter()
+        .find(|c| c.entry_count >= min_entries)
+    else {
+        return;
+    };
+
+    if is_file_level_rule_suppressed(package, file, RuleId::ArchSeparateStaticCatalogFromTypes) {
+        return;
+    }
+    let Some(effective_sev) = resolve_active_py_rule_severity(
+        package,
+        file,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        enabled_rules,
+        catalog.loc.line,
+        catalog.span,
+    ) else {
+        return;
+    };
+
+    let cascade_steps = vec![
+        format!("public_types={} >= {min_types}", facets.public_type_count),
+        format!(
+            "static_catalog={}: {} entries >= {min_entries}",
+            catalog.name, catalog.entry_count
+        ),
+    ];
+    diagnostics.push(
+        Diagnostic::for_rule(
+            RuleId::ArchSeparateStaticCatalogFromTypes,
+            file.path.clone(),
+            catalog.loc,
+            catalog.span,
+            format!(
+                "Module declares {} domain classes alongside static catalog `{}` ({} entries); extract static catalog data into a dedicated module.",
+                facets.public_type_count, catalog.name, catalog.entry_count
+            ),
+        )
+        .with_severity(effective_sev)
+        .with_message_id("archSeparateStaticCatalogFromTypes")
+        .with_target_name(catalog.name.clone())
+        .with_cascade_steps(cascade_steps),
+    );
+}
+
+fn evaluate_mixed_domain_monolith_rule(
+    package: &WorkspacePackage,
+    file: &ExtractedFile,
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if file.file_context != FileContext::Production {
+        return;
+    }
+    let facets = &file.architecture_facets;
+    let top_level_symbols = file
+        .symbol_outlines
+        .iter()
+        .filter(|s| s.parent_name.is_none())
+        .count();
+    let min_symbols = package.config.architecture.min_monolith_symbols;
+    let min_clusters = package.config.architecture.min_monolith_domain_clusters;
+    let buckets = facets.distinct_concern_buckets();
+    if top_level_symbols < min_symbols || buckets.len() < min_clusters {
+        return;
+    }
+
+    let (span, loc) = file.symbol_outlines.first().map_or(
+        (
+            ByteSpan {
+                start: 0,
+                end: u32::try_from(file.source.len()).unwrap_or(0),
+            },
+            SourceLoc { line: 1, column: 1 },
+        ),
+        |sym| (sym.span, sym.loc),
+    );
+    if is_file_level_rule_suppressed(package, file, RuleId::ArchNoMixedDomainMonolith) {
+        return;
+    }
+    let Some(effective_sev) = resolve_active_py_rule_severity(
+        package,
+        file,
+        RuleId::ArchNoMixedDomainMonolith,
+        enabled_rules,
+        loc.line,
+        span,
+    ) else {
+        return;
+    };
+
+    let target_name = file
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("module.py")
+        .to_string();
+    let bucket_names: Vec<&str> = buckets.iter().map(|b| b.as_str()).collect();
+    let cascade_steps = vec![
+        format!("top_level_symbols={top_level_symbols} >= {min_symbols}"),
+        format!("concern_buckets=[{}]", bucket_names.join(", ")),
+    ];
+    diagnostics.push(
+        Diagnostic::for_rule(
+            RuleId::ArchNoMixedDomainMonolith,
+            file.path.clone(),
+            loc,
+            span,
+            format!(
+                "Monolithic module `{target_name}` combines {top_level_symbols} top-level symbols across {} orthogonal concern buckets ({}); decompose into focused domain submodules.",
+                buckets.len(),
+                bucket_names.join(", ")
+            ),
+        )
+        .with_severity(effective_sev)
+        .with_message_id("archNoMixedDomainMonolith")
+        .with_target_name(target_name)
+        .with_cascade_steps(cascade_steps),
+    );
+}
+
+fn evaluate_inline_terminal_ui_primitives_rule(
+    package: &WorkspacePackage,
+    file: &ExtractedFile,
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if file.file_context != FileContext::Production {
+        return;
+    }
+    let facets = &file.architecture_facets;
+    if facets.is_ui_kit_module {
+        return;
+    }
+    for site in &facets.inline_terminal_ui_sites {
+        let Some(effective_sev) = resolve_active_py_rule_severity(
+            package,
+            file,
+            RuleId::ArchNoInlineTerminalUiPrimitives,
+            enabled_rules,
+            site.loc.line,
+            site.span,
+        ) else {
+            continue;
+        };
+        let subject_name = enclosing_subject_for_span(file, site.span);
+        diagnostics.push(
+            Diagnostic::for_rule(
+                RuleId::ArchNoInlineTerminalUiPrimitives,
+                file.path.clone(),
+                site.loc,
+                site.span,
+                format!(
+                    "Inline terminal UI primitive (`{}`) used outside a dedicated `ui.py` / `console.py` / `terminal.py` module; extract into a shared terminal UI helper.",
+                    site.kind
+                ),
+            )
+            .with_subject(subject_name)
+            .with_severity(effective_sev)
+            .with_message_id("archNoInlineTerminalUiPrimitives")
+            .with_target_name(site.kind.clone()),
+        );
+    }
+}
+
+fn evaluate_duplicated_helper_logic_rule(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let min_stmts = package.config.architecture.min_helper_statements;
+    let min_modules = package.config.architecture.min_duplicated_helper_modules;
+
+    let mut by_hash: BTreeMap<u64, Vec<(usize, &HelperFingerprintIr, RuleSeverity)>> =
+        BTreeMap::new();
+
+    for (file_idx, file) in files.iter().enumerate() {
+        if file.file_context != FileContext::Production
+            || package
+                .config
+                .is_file_ignored(&file.path, &package.root_dir)
+        {
+            continue;
+        }
+        for helper in &file.architecture_facets.helper_fingerprints {
+            if !helper.is_private || helper.statement_count < min_stmts {
+                continue;
+            }
+            let Some(sev) = resolve_active_py_rule_severity(
+                package,
+                file,
+                RuleId::ArchNoDuplicatedHelperLogic,
+                enabled_rules,
+                helper.loc.line,
+                helper.span,
+            ) else {
+                continue;
+            };
+            by_hash
+                .entry(helper.normalized_hash)
+                .or_default()
+                .push((file_idx, helper, sev));
+        }
+    }
+
+    for (hash, sites) in by_hash {
+        let distinct_modules: BTreeSet<usize> = sites.iter().map(|(idx, _, _)| *idx).collect();
+        if distinct_modules.len() < min_modules {
+            continue;
+        }
+        let primary_target_name = sites[0].1.name.clone();
+        for (site_pos, &(file_idx, helper, sev)) in sites.iter().enumerate() {
+            let file = &files[file_idx];
+            let caller_sites: Vec<ResolvedCallerSite> = sites
+                .iter()
+                .enumerate()
+                .filter(|&(other_pos, _)| other_pos != site_pos)
+                .map(
+                    |(_, &(other_file_idx, other_helper, _))| ResolvedCallerSite {
+                        caller_file: files[other_file_idx].path.clone(),
+                        parent_subject_name: Some(other_helper.name.clone()),
+                        component_name: other_helper.name.clone(),
+                        loc: other_helper.loc,
+                        span: other_helper.span,
+                        has_key: false,
+                        passed_props: Vec::new(),
+                    },
+                )
+                .collect();
+            let peer_files: Vec<String> = caller_sites
+                .iter()
+                .map(|c| format!("{}:{}", c.caller_file.display(), c.loc.line))
+                .collect();
+            let cascade_steps = vec![
+                format!(
+                    "normalized_hash=0x{hash:08x}, statements={} >= {min_stmts}",
+                    helper.statement_count
+                ),
+                format!("peer_modules=[{}]", peer_files.join(", ")),
+            ];
+            diagnostics.push(
+                Diagnostic::for_rule(
+                    RuleId::ArchNoDuplicatedHelperLogic,
+                    file.path.clone(),
+                    helper.loc,
+                    helper.span,
+                    format!(
+                        "Private helper `{}` ({} statements, hash `0x{hash:08x}`) duplicates normalized AST logic across {} sibling modules ({}); extract into a shared internal utility module.",
+                        helper.name,
+                        helper.statement_count,
+                        distinct_modules.len(),
+                        peer_files.join(", ")
+                    ),
+                )
+                .with_subject(Some(helper.name.clone()))
+                .with_severity(sev)
+                .with_message_id("archNoDuplicatedHelperLogic")
+                .with_target_name(primary_target_name.clone())
+                .with_caller_sites(caller_sites)
+                .with_cascade_steps(cascade_steps),
+            );
+        }
+    }
+}
+
+fn evaluate_prefer_fluent_builder_rule(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let min_fields = package.config.architecture.min_builder_fields;
+    let min_sites = package.config.architecture.min_builder_sites;
+
+    let mut defined_builders: HashSet<&str> = HashSet::new();
+    for file in files {
+        for builder_type in &file.architecture_facets.defined_builder_types {
+            defined_builders.insert(builder_type.as_str());
+        }
+    }
+
+    let mut by_type: BTreeMap<
+        String,
+        Vec<(usize, &StructLiteralConstructionSiteIr, RuleSeverity)>,
+    > = BTreeMap::new();
+
+    for (file_idx, file) in files.iter().enumerate() {
+        if file.file_context != FileContext::Production
+            || package
+                .config
+                .is_file_ignored(&file.path, &package.root_dir)
+        {
+            continue;
+        }
+        for site in &file.architecture_facets.struct_literal_sites {
+            if defined_builders.contains(site.type_name.as_str()) {
+                continue;
+            }
+            if site.field_names.len() < min_fields || site.default_or_literal_fields.is_empty() {
+                continue;
+            }
+            let Some(sev) = resolve_active_py_rule_severity(
+                package,
+                file,
+                RuleId::ArchPreferFluentBuilder,
+                enabled_rules,
+                site.loc.line,
+                site.span,
+            ) else {
+                continue;
+            };
+            by_type
+                .entry(site.type_name.clone())
+                .or_default()
+                .push((file_idx, site, sev));
+        }
+    }
+
+    for (type_name, sites) in by_type {
+        if sites.len() < min_sites {
+            continue;
+        }
+        for (site_pos, &(file_idx, site, sev)) in sites.iter().enumerate() {
+            let file = &files[file_idx];
+            let subject_name = enclosing_subject_for_span(file, site.span);
+            let caller_sites: Vec<ResolvedCallerSite> = sites
+                .iter()
+                .enumerate()
+                .filter(|&(other_pos, _)| other_pos != site_pos)
+                .map(|(_, &(other_file_idx, other_site, _))| ResolvedCallerSite {
+                    caller_file: files[other_file_idx].path.clone(),
+                    parent_subject_name: enclosing_subject_for_span(
+                        &files[other_file_idx],
+                        other_site.span,
+                    ),
+                    component_name: type_name.clone(),
+                    loc: other_site.loc,
+                    span: other_site.span,
+                    has_key: false,
+                    passed_props: other_site.field_names.clone(),
+                })
+                .collect();
+            let cascade_steps = vec![
+                format!(
+                    "type={type_name}, fields={} >= {min_fields}, sites={} >= {min_sites}",
+                    site.field_names.len(),
+                    sites.len()
+                ),
+                format!(
+                    "default_or_literal_fields=[{}]",
+                    site.default_or_literal_fields.join(", ")
+                ),
+            ];
+            diagnostics.push(
+                Diagnostic::for_rule(
+                    RuleId::ArchPreferFluentBuilder,
+                    file.path.clone(),
+                    site.loc,
+                    site.span,
+                    format!(
+                        "`{type_name}(...)` is constructed across {} call sites with {} keyword arguments including boilerplate defaults (`{}`); define a `{type_name}Builder`, `{type_name}.from_defaults(...)`, or `build_*` factory.",
+                        sites.len(),
+                        site.field_names.len(),
+                        site.default_or_literal_fields.join(", ")
+                    ),
+                )
+                .with_subject(subject_name)
+                .with_severity(sev)
+                .with_message_id("archPreferFluentBuilder")
+                .with_target_name(type_name.clone())
+                .with_caller_sites(caller_sites)
+                .with_cascade_steps(cascade_steps),
+            );
+        }
+    }
+}
+
+fn resolve_entrypoint_anchor(file: &ExtractedFile) -> (Option<String>, ByteSpan, SourceLoc) {
+    if let Some((subj, span, loc)) = file
+        .subject_spans
+        .iter()
+        .find(|(name, _, _)| matches!(name.as_deref(), Some("main" | "cli" | "run")))
+    {
+        return (subj.clone(), *span, *loc);
+    }
+    if let Some(sig) = file
+        .architecture_facets
+        .signals_for_bucket(ConcernBucket::EntrypointAdapter)
+        .first()
+    {
+        return (None, sig.span, sig.loc);
+    }
+    if let Some(first_sym) = file.symbol_outlines.first() {
+        return (None, first_sym.span, first_sym.loc);
+    }
+    (
+        None,
+        ByteSpan {
+            start: 0,
+            end: u32::try_from(file.source.len()).unwrap_or(0),
+        },
+        SourceLoc { line: 1, column: 1 },
+    )
+}
+
+fn enclosing_subject_for_span(file: &ExtractedFile, span: ByteSpan) -> Option<String> {
+    file.subject_spans
+        .iter()
+        .filter(|(_, s, _)| s.start <= span.start && span.end <= s.end)
+        .min_by_key(|(_, s, _)| s.end.saturating_sub(s.start))
+        .and_then(|(name, _, _)| name.clone())
+}
+
+fn is_file_level_rule_suppressed(
+    package: &WorkspacePackage,
+    file: &ExtractedFile,
+    rule: RuleId,
+) -> bool {
+    if !package.config.respect_inline_disables {
+        return false;
+    }
+    let first_code_line = file.symbol_outlines.first().map_or(1, |s| s.loc.line);
+    if file.suppressions.matches_line_or_block(rule, 1)
+        || file.suppressions.matches_line_or_block(rule, 2)
+        || file
+            .suppressions
+            .matches_line_or_block(rule, first_code_line)
+    {
+        return true;
+    }
+    file.suppressions
+        .line_directives
+        .iter()
+        .any(|d| !d.rules.is_empty() && dotore_core::rule_list_matches(&d.rules, rule))
 }
