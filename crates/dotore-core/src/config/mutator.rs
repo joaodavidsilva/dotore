@@ -12,7 +12,9 @@ use serde_json::{Map, Value};
 use crate::rules::{RuleCategory, RuleId, RuleSeverityOverride, RuleTag};
 
 use super::{
-    loader::{CONFIG_EXTENSIONS, ConfigCursor, DotoreConfig, ParsedObject, parse_exported_module_object},
+    loader::{
+        CONFIG_EXTENSIONS, ConfigCursor, DotoreConfig, ParsedObject, parse_exported_module_object,
+    },
     workspace::normalize_path_buf,
 };
 

@@ -719,7 +719,13 @@ fn scan_workspace_for_subcommand(
     custom_rules_only: bool,
     ignore_tags: &[String],
     config_path: Option<&PathBuf>,
-) -> Result<(crate::JsonReport, std::collections::HashMap<PathBuf, String>), ExitCode> {
+) -> Result<
+    (
+        crate::JsonReport,
+        std::collections::HashMap<PathBuf, String>,
+    ),
+    ExitCode,
+> {
     let options = ScanOptions {
         paths: paths.to_vec(),
         include_tests,

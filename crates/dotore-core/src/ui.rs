@@ -2,6 +2,12 @@
 //! `FilterTabBar`, `StatusBar`, and `LiveSpinner`) for static terminal reports and the
 //! interactive TUI explorer.
 
+use crate::{
+    report::JsonReport,
+    rules::{
+        BlastRadiusTier, Diagnostic, PrescriptionTier, RuleCategory, RuleId, RuleSeverity, RuleTag,
+    },
+};
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
@@ -14,12 +20,6 @@ use std::{
     },
     thread,
     time::{Duration, Instant},
-};
-use crate::{
-    report::JsonReport,
-    rules::{
-        BlastRadiusTier, Diagnostic, PrescriptionTier, RuleCategory, RuleId, RuleSeverity, RuleTag,
-    },
 };
 
 /// Standard horizontal inner width (`78` characters between left and right box corners)
@@ -1095,11 +1095,7 @@ impl<'a> FilterTabBar<'a> {
         {
             if idx == active_idx {
                 let pill = format!(" ▶ {} ({}) ", tab.label, tab.count);
-                let _ = write!(
-                    out,
-                    "{} ",
-                    mode.paint("\x1b[48;5;51;38;5;16;1m", &pill)
-                );
+                let _ = write!(out, "{} ", mode.paint("\x1b[48;5;51;38;5;16;1m", &pill));
             } else {
                 let item = format!("[ {} ({}) ]", tab.label, tab.count);
                 let _ = write!(out, "{} ", mode.paint(tab.badge_ansi, &item));

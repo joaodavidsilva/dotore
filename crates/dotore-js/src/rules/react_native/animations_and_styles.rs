@@ -20,11 +20,7 @@ use super::{
     DETOX_ELEMENT_ACTIONS, LEGACY_SHADOW_PROPS, TOUCHABLE_COMPONENTS, find_jsx_attr,
     is_named_import_from,
 };
-use crate::{
-    ir::types::SemanticRuleSite,
-    matchers::push_semantic_site,
-    rules::RuleId,
-};
+use crate::{ir::types::SemanticRuleSite, matchers::push_semantic_site, rules::RuleId};
 
 #[expect(
     clippy::too_many_arguments,

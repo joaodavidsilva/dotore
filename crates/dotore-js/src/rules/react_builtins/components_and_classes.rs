@@ -535,21 +535,11 @@ fn check_lifecycle_set_state_calls(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     let target_rule = match method_name {
-        "componentDidMount" => Some((
-            RuleId::NoDidMountSetState,
-            "noDidMountSetState",
-            false,
-        )),
-        "componentDidUpdate" => Some((
-            RuleId::NoDidUpdateSetState,
-            "noDidUpdateSetState",
-            true,
-        )),
-        "componentWillUpdate" | "UNSAFE_componentWillUpdate" => Some((
-            RuleId::NoWillUpdateSetState,
-            "noWillUpdateSetState",
-            false,
-        )),
+        "componentDidMount" => Some((RuleId::NoDidMountSetState, "noDidMountSetState", false)),
+        "componentDidUpdate" => Some((RuleId::NoDidUpdateSetState, "noDidUpdateSetState", true)),
+        "componentWillUpdate" | "UNSAFE_componentWillUpdate" => {
+            Some((RuleId::NoWillUpdateSetState, "noWillUpdateSetState", false))
+        }
         _ => None,
     };
     let Some((rule, message_id, allow_if_guarded)) = target_rule else {
@@ -591,9 +581,7 @@ fn check_lifecycle_set_state_calls(
             Some(cls_name.to_string()),
             message_id,
             method_name,
-            format!(
-                "Do not call `this.setState` inside `{method_name}` in `{cls_name}`."
-            ),
+            format!("Do not call `this.setState` inside `{method_name}` in `{cls_name}`."),
             line_starts,
             call.span,
         );

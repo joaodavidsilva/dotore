@@ -167,15 +167,12 @@ serde = "1.0"
         None,
     );
     assert!(
-        report_no_tokio
-            .diagnostics
-            .iter()
-            .all(|d| !matches!(
-                d.rule,
-                RuleId::RsTokioNoStdLockAcrossAwait
-                    | RuleId::RsTokioNoBlockingInAsync
-                    | RuleId::RsTokioPreferBoundedChannel
-            )),
+        report_no_tokio.diagnostics.iter().all(|d| !matches!(
+            d.rule,
+            RuleId::RsTokioNoStdLockAcrossAwait
+                | RuleId::RsTokioNoBlockingInAsync
+                | RuleId::RsTokioPreferBoundedChannel
+        )),
         "Expected no Tokio diagnostics when Cargo.toml lacks tokio, got: {:#?}",
         report_no_tokio.diagnostics
     );

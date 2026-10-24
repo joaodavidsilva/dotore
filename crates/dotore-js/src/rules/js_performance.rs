@@ -643,7 +643,13 @@ mod tests {
             .semantic;
         let file = parse_file_ir(Path::new(path), src);
         let mut sites = Vec::new();
-        extract_js_performance_sites(Path::new(path), &sem, &file.module, &line_starts, &mut sites);
+        extract_js_performance_sites(
+            Path::new(path),
+            &sem,
+            &file.module,
+            &line_starts,
+            &mut sites,
+        );
         sites
     }
 

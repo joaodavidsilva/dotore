@@ -477,11 +477,9 @@ fn is_maybe_undefined_object_arg(
                             && !param_src.contains('=')
                     }
                 }
-                AstKind::VariableDeclarator(decl) => {
-                    decl.init.as_ref().is_some_and(|init| {
-                        matches!(init.without_parentheses(), Expression::ChainExpression(_))
-                    })
-                }
+                AstKind::VariableDeclarator(decl) => decl.init.as_ref().is_some_and(|init| {
+                    matches!(init.without_parentheses(), Expression::ChainExpression(_))
+                }),
                 _ => false,
             }
         }
@@ -510,10 +508,7 @@ pub(super) fn check_no_object_or_array_coerced_to_string_in_template_literal(
 
     for expr in &tpl.expressions {
         if is_object_or_array_valued_expr(semantic, expr) {
-            let target = expr
-                .span()
-                .source_text(semantic.source_text())
-                .to_string();
+            let target = expr.span().source_text(semantic.source_text()).to_string();
             sites.push(SemanticRuleSite {
                 rule: RuleId::NoObjectOrArrayCoercedToStringInTemplateLiteral,
                 subject_name: subj_name.clone(),

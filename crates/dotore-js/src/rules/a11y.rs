@@ -780,7 +780,11 @@ mod tests {
             &semantic_ret.semantic,
             &line_starts,
         );
-        (sites.into_iter().map(|s| s.rule).collect(), dom_ids, has_spread)
+        (
+            sites.into_iter().map(|s| s.rule).collect(),
+            dom_ids,
+            has_spread,
+        )
     }
 
     #[test]

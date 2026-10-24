@@ -1,11 +1,7 @@
 //! User configuration loader for `dotore.config.*` (TS, JS, MJS, CJS, JSON, JSONC)
 //! and the `"dotore"` key in `package.json`.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-};
+use std::{collections::HashMap, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

@@ -234,7 +234,10 @@ pub(super) fn check_no_unguarded_throwing_parse_call(
     let Some(first_arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
         return;
     };
-    if matches!(first_arg.without_parentheses(), Expression::StringLiteral(_)) {
+    if matches!(
+        first_arg.without_parentheses(),
+        Expression::StringLiteral(_)
+    ) {
         return;
     }
     if is_inside_try_block(semantic, node_id) {
@@ -276,7 +279,10 @@ pub(super) fn check_no_unguarded_throwing_new_url(
     let Some(first_arg) = new_expr.arguments.first().and_then(|a| a.as_expression()) else {
         return;
     };
-    if matches!(first_arg.without_parentheses(), Expression::StringLiteral(_)) {
+    if matches!(
+        first_arg.without_parentheses(),
+        Expression::StringLiteral(_)
+    ) {
         return;
     }
     if is_inside_try_block(semantic, node_id) {

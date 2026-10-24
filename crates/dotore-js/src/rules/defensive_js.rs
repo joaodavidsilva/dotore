@@ -105,14 +105,7 @@ pub(crate) fn extract_defensive_js_sites(
                     line_starts,
                     sites,
                 );
-                check_predicate_in_logical(
-                    semantic,
-                    node_id,
-                    log,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
+                check_predicate_in_logical(semantic, node_id, log, &subj_name, line_starts, sites);
             }
             AstKind::StaticMemberExpression(mem) => {
                 check_no_array_find_result_member_access_without_guard(
@@ -283,13 +276,7 @@ pub(crate) fn extract_defensive_js_sites(
                 );
             }
             AstKind::ConditionalExpression(cond) => {
-                check_predicate_in_condition(
-                    semantic,
-                    &cond.test,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
+                check_predicate_in_condition(semantic, &cond.test, &subj_name, line_starts, sites);
             }
             AstKind::WhileStatement(while_stmt) => {
                 check_predicate_in_condition(
@@ -349,10 +336,7 @@ pub(crate) fn extract_defensive_js_sites(
 // ---------------------------------------------------------------------------
 // Shared AST / Scope Helpers
 // ---------------------------------------------------------------------------
-fn resolve_symbol_id(
-    semantic: &Semantic<'_>,
-    ident: &IdentifierReference<'_>,
-) -> Option<SymbolId> {
+fn resolve_symbol_id(semantic: &Semantic<'_>, ident: &IdentifierReference<'_>) -> Option<SymbolId> {
     resolve_ident_symbol(semantic, ident)
 }
 
@@ -429,11 +413,7 @@ fn enclosing_function_span(semantic: &Semantic<'_>, node_id: NodeId) -> Span {
     Span::new(0, semantic.source_text().len() as u32)
 }
 
-fn has_nullish_guard_before(
-    semantic: &Semantic<'_>,
-    before_offset: u32,
-    var_name: &str,
-) -> bool {
+fn has_nullish_guard_before(semantic: &Semantic<'_>, before_offset: u32, var_name: &str) -> bool {
     let src = semantic
         .source_text()
         .get(..before_offset as usize)
@@ -516,18 +496,46 @@ export function Cart({ items, user }: { items: any[]; user?: any }, config = { r
 }
 "#;
         let sites = run_defensive_js(src);
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoArithmeticOnOptionalChainedOperand));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoArrayFindResultMemberAccessWithoutGuard));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoArrayIndexDerefWithoutBoundsOrEmptyGuard));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoNonNullAssertionOnMaybeUndefinedResult));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoNullishCoalescingArithmeticPrecedence));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoObjectKeysValuesEntriesOnMaybeUndefined));
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoArithmeticOnOptionalChainedOperand)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoArrayFindResultMemberAccessWithoutGuard)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoArrayIndexDerefWithoutBoundsOrEmptyGuard)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoNonNullAssertionOnMaybeUndefinedResult)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoNullishCoalescingArithmeticPrecedence)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoObjectKeysValuesEntriesOnMaybeUndefined)
+        );
         assert!(
             sites
                 .iter()
                 .any(|s| s.rule == RuleId::NoObjectOrArrayCoercedToStringInTemplateLiteral)
         );
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoWholeObjectDefaultLosingPerKeyDefaults));
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoWholeObjectDefaultLosingPerKeyDefaults)
+        );
     }
 
     #[test]
@@ -590,12 +598,36 @@ export function SearchForm({ query }: { query: string }) {
 }
 "#;
         let sites = run_defensive_js(src);
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoAsyncEventHandlerWithoutReentryGuard));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoEnterSubmitWithoutImeCompositionGuard));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoFloatingThenInJsxHandler));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoCollapseRequestErrorToEmptyState));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoLoadingFlagResetOutsideFinally));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoPassiveRequestOwnerRef));
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoAsyncEventHandlerWithoutReentryGuard)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoEnterSubmitWithoutImeCompositionGuard)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoFloatingThenInJsxHandler)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoCollapseRequestErrorToEmptyState)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoLoadingFlagResetOutsideFinally)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoPassiveRequestOwnerRef)
+        );
         assert!(
             sites
                 .iter()
@@ -628,20 +660,30 @@ export function Inspector({ selector, pattern, rawUrl, rawJson }: { selector: st
 }
 "#;
         let sites = run_defensive_js(src);
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoNonLiteralSelectorQueryWithoutTryCatch));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoUnescapedDynamicStringInRegexp));
-        assert!(sites.iter().any(|s| s.rule == RuleId::NoUnguardedNumericInputParse));
         assert!(
             sites
                 .iter()
-                .any(|s| s.rule == RuleId::NoUnguardedThrowingParseCall && s.target_name == "new URL")
+                .any(|s| s.rule == RuleId::NoNonLiteralSelectorQueryWithoutTryCatch)
         );
         assert!(
-            sites.iter().any(|s| {
-                s.rule == RuleId::NoUnguardedThrowingParseCall
-                    && s.target_name == "decodeURIComponent"
-            })
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoUnescapedDynamicStringInRegexp)
         );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoUnguardedNumericInputParse)
+        );
+        assert!(
+            sites
+                .iter()
+                .any(|s| s.rule == RuleId::NoUnguardedThrowingParseCall
+                    && s.target_name == "new URL")
+        );
+        assert!(sites.iter().any(|s| {
+            s.rule == RuleId::NoUnguardedThrowingParseCall && s.target_name == "decodeURIComponent"
+        }));
         assert!(sites.iter().any(|s| s.rule == RuleId::NoUnsafeJsonParse));
     }
 }

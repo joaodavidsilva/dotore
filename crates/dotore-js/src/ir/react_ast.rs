@@ -72,8 +72,6 @@ pub(crate) fn is_direct_render_phase_node(semantic: &Semantic<'_>, node_id: Node
     false
 }
 
-
-
 /// Checks if an ES6 `class` extends `Component` or `PureComponent` (`React.Component` / `React.PureComponent`).
 pub(crate) fn is_react_component_class(cls: &oxc_ast::ast::Class<'_>, source: &str) -> bool {
     let header = Span::new(cls.span.start, cls.body.span.start).source_text(source);
@@ -403,8 +401,6 @@ fn extract_jsx_props(attributes: &[JSXAttributeItem<'_>]) -> (bool, Vec<String>)
     }
     (has_key, passed_props)
 }
-
-
 
 /// Extracts all [`JsxElementIr`] nodes from the file.
 pub(crate) fn extract_jsx_elements(
@@ -982,8 +978,6 @@ fn is_map_callee(callee: &Expression<'_>) -> bool {
         Expression::StaticMemberExpression(mem) if mem.property.name == "map"
     )
 }
-
-
 
 /// Inspects a **Subject** node (`Function` or `VariableDeclarator`) to determine if it is
 /// wrapped in `memo(...)` / `React.memo(...)` and whether a custom comparator is supplied.

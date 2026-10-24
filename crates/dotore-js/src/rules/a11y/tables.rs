@@ -606,7 +606,9 @@ pub(super) fn get_implicit_role(
     const_strings: &HashMap<SymbolId, String>,
 ) -> Option<&'static str> {
     match tag {
-        "a" | "area" | "link" => find_jsx_attr_ignore_case(&opening.attributes, "href").map(|_| "link"),
+        "a" | "area" | "link" => {
+            find_jsx_attr_ignore_case(&opening.attributes, "href").map(|_| "link")
+        }
         "article" => Some("article"),
         "aside" => Some("complementary"),
         "button" => Some("button"),

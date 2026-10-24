@@ -193,7 +193,11 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("styled-components", &[Capability::StyledComponents]),
     (
         "@angular/core",
-        &[Capability::Angular, Capability::Rxjs, Capability::TypeScript],
+        &[
+            Capability::Angular,
+            Capability::Rxjs,
+            Capability::TypeScript,
+        ],
     ),
     (
         "@angular/common",

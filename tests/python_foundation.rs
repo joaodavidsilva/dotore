@@ -347,10 +347,7 @@ def build_audit_timestamps(epoch_ts: float):
     for diag in &diags {
         assert_eq!(diag.rule, RuleId::PyRequireTimezoneAwareDatetime);
         assert_eq!(diag.tier, PrescriptionTier::Autofix);
-        assert_eq!(
-            diag.subject_name.as_deref(),
-            Some("build_audit_timestamps")
-        );
+        assert_eq!(diag.subject_name.as_deref(), Some("build_audit_timestamps"));
         assert!(diag.autofix.is_some());
     }
     assert_eq!(diags[0].loc.line, 5);

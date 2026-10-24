@@ -92,8 +92,8 @@ pub(crate) fn check_motion_jsx_element(
     // 1. `motion-animate-presence-must-outlive-child`
     let has_conditional_child = animate_presence_has_conditional_child(&jsx_el.children);
     let directly_in_conditional = is_animate_presence_in_conditional(semantic, node_id, subj_id);
-    let subject_has_early_null_return = subj_id
-        .is_some_and(|sid| subject_has_early_empty_return(semantic, sid, jsx_el.span.start));
+    let subject_has_early_null_return =
+        subj_id.is_some_and(|sid| subject_has_early_empty_return(semantic, sid, jsx_el.span.start));
 
     if !has_conditional_child && (directly_in_conditional || subject_has_early_null_return) {
         push_site(
@@ -393,8 +393,10 @@ pub(crate) fn check_motion_jsx_opening(
     // 5. `motion-drag-axis-constraint-mismatch`
     if let Some(constraints_attr) = find_jsx_attr(&opening.attributes, "dragConstraints")
         && let Some(JSXAttributeValue::ExpressionContainer(cont)) = &constraints_attr.value
-        && let Some(Expression::ObjectExpression(obj)) =
-            cont.expression.as_expression().map(Expression::without_parentheses)
+        && let Some(Expression::ObjectExpression(obj)) = cont
+            .expression
+            .as_expression()
+            .map(Expression::without_parentheses)
     {
         let drag_axis = find_jsx_attr(&opening.attributes, "drag")
             .and_then(|a| a.value.as_ref())
@@ -589,9 +591,9 @@ pub(crate) fn check_motion_call_expression(
 
     // 7b. `motion-keyframe-times-mismatch` on `animate(target, keyframes, options)`
     let callee_name = extract_callee_name(&call.callee);
-    if (callee_name.is_some_and(|n| {
-        imports.motion_animate_locals.contains(n) || animate_bindings.contains(n)
-    }) || callee_name == Some("animate"))
+    if (callee_name
+        .is_some_and(|n| imports.motion_animate_locals.contains(n) || animate_bindings.contains(n))
+        || callee_name == Some("animate"))
         && call.arguments.len() >= 3
         && let Some(Expression::ObjectExpression(kf_obj)) = call
             .arguments
@@ -612,7 +614,8 @@ pub(crate) fn check_motion_call_expression(
             subject_name.clone(),
             "motionKeyframeTimesMismatch",
             "times",
-            "`times` length does not match the number of keyframes passed to `animate()`.".to_string(),
+            "`times` length does not match the number of keyframes passed to `animate()`."
+                .to_string(),
             loc_from_line_starts(line_starts, call.span.start),
             ByteSpan {
                 start: call.span.start,
@@ -783,8 +786,10 @@ fn has_motion_layout_prop(attrs: &[JSXAttributeItem<'_>]) -> bool {
         }
         if id.name == "layout" {
             if let Some(JSXAttributeValue::ExpressionContainer(cont)) = &a.value
-                && let Some(Expression::BooleanLiteral(b)) =
-                    cont.expression.as_expression().map(Expression::without_parentheses)
+                && let Some(Expression::BooleanLiteral(b)) = cont
+                    .expression
+                    .as_expression()
+                    .map(Expression::without_parentheses)
             {
                 return b.value;
             }

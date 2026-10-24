@@ -17,9 +17,9 @@ use super::{
         check_alt_text, check_anchor_rules, check_control_and_label_association,
         check_custom_a11y_rules, check_element_content_media_and_form_rules,
     },
-    has_accessible_child, has_nonempty_literal_attr,
-    is_attr_statically_false, is_attr_statically_true_or_true_str, is_content_editable_tabbable,
-    is_focusable_element, is_interactive_element,
+    has_accessible_child, has_nonempty_literal_attr, is_attr_statically_false,
+    is_attr_statically_true_or_true_str, is_content_editable_tabbable, is_focusable_element,
+    is_interactive_element,
     keyboard_and_focus::{check_element_keyboard_and_focus_rules, check_no_outline_none},
     parse_attr_number, push_site,
     tables::{
@@ -35,7 +35,9 @@ use crate::{
         ByteSpan, SourceLoc,
         types::{SemanticRuleSite, loc_from_line_starts},
     },
-    matchers::{find_jsx_attr_ignore_case, get_attr_static_str, get_jsx_tag_name, jsx_has_spread_attr},
+    matchers::{
+        find_jsx_attr_ignore_case, get_attr_static_str, get_jsx_tag_name, jsx_has_spread_attr,
+    },
     rules::RuleId,
 };
 
@@ -379,7 +381,8 @@ fn check_element_core_aria_rules(
     }
 
     // 5. `aria-activedescendant-has-tabindex`
-    if is_html && find_jsx_attr_ignore_case(&opening.attributes, "aria-activedescendant").is_some() {
+    if is_html && find_jsx_attr_ignore_case(&opening.attributes, "aria-activedescendant").is_some()
+    {
         let tab_idx =
             find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").and_then(parse_attr_number);
         let tab_ok = match find_jsx_attr_ignore_case(&opening.attributes, "tabIndex") {

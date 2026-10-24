@@ -19,9 +19,7 @@ use oxc_semantic::{NodeId, Semantic};
 use oxc_span::{GetSpan, Span};
 
 use crate::{
-    ir::{
-        ByteSpan, SemanticRuleSite, SubjectIr, SubjectKind, loc_from_line_starts,
-    },
+    ir::{ByteSpan, SemanticRuleSite, SubjectIr, SubjectKind, loc_from_line_starts},
     rules::{AutofixPatch, RuleId},
 };
 
@@ -43,7 +41,10 @@ pub(crate) fn extract_angular_class_subjects(
             continue;
         };
         let name = id.name.to_string();
-        if subjects.iter().any(|s| s.name.as_deref() == Some(name.as_str())) {
+        if subjects
+            .iter()
+            .any(|s| s.name.as_deref() == Some(name.as_str()))
+        {
             continue;
         }
         let parent_id = semantic.nodes().parent_id(node_id);
@@ -323,9 +324,7 @@ fn has_on_push_change_detection(cls: &Class<'_>) -> bool {
             let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
                 continue;
             };
-            if prop_key_str(&prop.key) == Some("changeDetection")
-                && expr_is_on_push(&prop.value)
-            {
+            if prop_key_str(&prop.key) == Some("changeDetection") && expr_is_on_push(&prop.value) {
                 return true;
             }
         }
@@ -419,7 +418,9 @@ fn check_component_decorator_metadata(
         };
         match key_name {
             "template" => {
-                if let Some((tpl_text, inner_start)) = extract_template_text_and_offset(&prop.value, source) {
+                if let Some((tpl_text, inner_start)) =
+                    extract_template_text_and_offset(&prop.value, source)
+                {
                     extract_angular_html_template_sites(
                         tpl_text,
                         inner_start,
@@ -878,9 +879,7 @@ fn is_subscribe_call(call: &CallExpression<'_>) -> bool {
     )
 }
 
-fn collect_class_teardown_identifiers(
-    semantic: &Semantic<'_>,
-) -> HashMap<NodeId, HashSet<String>> {
+fn collect_class_teardown_identifiers(semantic: &Semantic<'_>) -> HashMap<NodeId, HashSet<String>> {
     let mut map: HashMap<NodeId, HashSet<String>> = HashMap::new();
     let source = semantic.source_text();
 
@@ -1181,8 +1180,7 @@ fn collect_native_element_aliases(semantic: &Semantic<'_>) -> HashSet<String> {
 fn expr_contains_native_element_access(expr: &Expression<'_>) -> bool {
     match expr.without_parentheses() {
         Expression::StaticMemberExpression(mem) => {
-            mem.property.name == "nativeElement"
-                || expr_contains_native_element_access(&mem.object)
+            mem.property.name == "nativeElement" || expr_contains_native_element_access(&mem.object)
         }
         Expression::ChainExpression(chain) => {
             if let oxc_ast::ast::ChainElement::StaticMemberExpression(mem) = &chain.expression {

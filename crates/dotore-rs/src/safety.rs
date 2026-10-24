@@ -210,9 +210,7 @@ impl SafetyVisitor<'_> {
             Expr::Unary(expr_unary) => {
                 if matches!(expr_unary.op, UnOp::Neg(_)) {
                     match self.infer_expr_numeric_type(&expr_unary.expr) {
-                        Some(NumericType::UnsuffixedInt(v)) => {
-                            Some(NumericType::UnsuffixedInt(-v))
-                        }
+                        Some(NumericType::UnsuffixedInt(v)) => Some(NumericType::UnsuffixedInt(-v)),
                         Some(other) => Some(other),
                         None => Some(NumericType::I64),
                     }
@@ -980,8 +978,5 @@ fn block_always_diverges(block: &Block) -> bool {
 }
 
 fn expr_diverges(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Return(_) | Expr::Break(_) | Expr::Continue(_)
-    )
+    matches!(expr, Expr::Return(_) | Expr::Break(_) | Expr::Continue(_))
 }

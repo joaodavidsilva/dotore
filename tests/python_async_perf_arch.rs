@@ -140,10 +140,7 @@ fn py_async_no_sequential_await_in_loop_flags_independent_awaits_and_allows_gath
     assert_eq!(diags.len(), 2, "Expected 2 diagnostics, got {diags:?}");
     assert_eq!(diags[0].rule, RuleId::PyAsyncNoSequentialAwaitInLoop);
     assert_eq!(diags[0].tier, PrescriptionTier::Surgical);
-    assert_eq!(
-        diags[0].subject_name.as_deref(),
-        Some("fetch_all_profiles")
-    );
+    assert_eq!(diags[0].subject_name.as_deref(), Some("fetch_all_profiles"));
     assert_eq!(diags[0].loc.line, 4);
     assert_eq!(diags[1].loc.line, 6);
 
@@ -435,10 +432,7 @@ fn py_perf_no_linear_membership_in_loop_flags_list_in_loop_and_allows_sets() {
     for diag in &diags {
         assert_eq!(diag.rule, RuleId::PyPerfNoLinearMembershipInLoop);
         assert_eq!(diag.tier, PrescriptionTier::Surgical);
-        assert_eq!(
-            diag.subject_name.as_deref(),
-            Some("filter_active_events")
-        );
+        assert_eq!(diag.subject_name.as_deref(), Some("filter_active_events"));
     }
     assert_eq!(diags[0].loc.line, 7);
     assert_eq!(diags[1].loc.line, 9);
@@ -641,7 +635,10 @@ async def register_user(email: str) -> dict:
         "Expected 1 cross-file unawaited coroutine diagnostic, got {:?}",
         report.diagnostics
     );
-    assert_eq!(report.diagnostics[0].rule, RuleId::PyAsyncNoUnawaitedCoroutine);
+    assert_eq!(
+        report.diagnostics[0].rule,
+        RuleId::PyAsyncNoUnawaitedCoroutine
+    );
     assert_eq!(report.diagnostics[0].file, PathBuf::from("app/signup.py"));
     assert_eq!(
         report.diagnostics[0].subject_name.as_deref(),

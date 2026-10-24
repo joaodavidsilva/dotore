@@ -2282,7 +2282,6 @@ pub(crate) const fn rule_meta(
     }
 }
 
-
 /// Returns the static catalog of all registered [`RuleMetadata`] entries.
 #[must_use]
 pub const fn rule_registry() -> &'static [RuleMetadata] {

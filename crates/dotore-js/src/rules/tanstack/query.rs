@@ -21,8 +21,7 @@ use super::{
     ImportedBindingInfo, MUTATING_HTTP_METHODS, TANSTACK_MUTATION_HOOKS, TANSTACK_QUERY_HOOKS,
     extract_static_http_method, is_identifier_shadowed_by_local, is_inside_use_effect_execution,
     is_tanstack_observer_method_call, is_tanstack_query_source, resolve_const_initializer,
-    resolve_tanstack_hook_call,
-    router_and_invalidation::check_mutation_missing_invalidation,
+    resolve_tanstack_hook_call, router_and_invalidation::check_mutation_missing_invalidation,
 };
 use crate::{
     ir::{
@@ -455,10 +454,7 @@ fn find_mutating_http_in_query_fn(semantic: &Semantic<'_>, query_fn_span: Span) 
     None
 }
 
-fn resolve_static_url_text(
-    semantic: &Semantic<'_>,
-    url_expr: &Expression<'_>,
-) -> Option<String> {
+fn resolve_static_url_text(semantic: &Semantic<'_>, url_expr: &Expression<'_>) -> Option<String> {
     match unwrap_expr(url_expr) {
         Expression::StringLiteral(s) => s.value.as_str().map(str::to_string),
         Expression::TemplateLiteral(tpl) => {

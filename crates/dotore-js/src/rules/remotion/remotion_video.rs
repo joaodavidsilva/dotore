@@ -179,8 +179,10 @@ fn has_css_url_in_style_attr(semantic: &Semantic<'_>, attrs: &[JSXAttributeItem<
     let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
         return false;
     };
-    let Some(Expression::ObjectExpression(obj)) =
-        cont.expression.as_expression().map(Expression::without_parentheses)
+    let Some(Expression::ObjectExpression(obj)) = cont
+        .expression
+        .as_expression()
+        .map(Expression::without_parentheses)
     else {
         return false;
     };

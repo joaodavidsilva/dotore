@@ -15,9 +15,7 @@ use dotore_core::ir::extract_c_style_comment_suppressions;
 
 use crate::matchers::{collect_binding_identifiers, property_key_name};
 
-use super::types::{
-    ByteSpan, FileSuppressions, SymbolKind, SymbolOutline, loc_from_line_starts,
-};
+use super::types::{ByteSpan, FileSuppressions, SymbolKind, SymbolOutline, loc_from_line_starts};
 
 struct OutlineTarget<'a> {
     name: String,
@@ -740,18 +738,8 @@ const items = [1, 2];
             Some("/** Renders a greeting banner. */")
         );
 
-        assert!(
-            file.suppressions
-                .matches_line(RuleId::NoDerivedState, 5)
-        );
-        assert!(
-            file.suppressions
-                .matches_line_or_block(RuleId::JsxKey, 8)
-        );
-        assert!(
-            !file
-                .suppressions
-                .matches_line_or_block(RuleId::JsxKey, 10)
-        );
+        assert!(file.suppressions.matches_line(RuleId::NoDerivedState, 5));
+        assert!(file.suppressions.matches_line_or_block(RuleId::JsxKey, 8));
+        assert!(!file.suppressions.matches_line_or_block(RuleId::JsxKey, 10));
     }
 }

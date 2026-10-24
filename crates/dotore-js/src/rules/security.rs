@@ -651,7 +651,9 @@ mod tests {
             Some((22, "NEXT_PUBLIC_STRIPE_SECRET"))
         );
         assert_eq!(
-            find_suspicious_public_env_in_line("const k = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;"),
+            find_suspicious_public_env_in_line(
+                "const k = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;"
+            ),
             None
         );
     }

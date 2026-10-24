@@ -210,7 +210,9 @@ pub(crate) fn check_route_object_recursive(
             None,
             "reactRouterNoDuplicateRouteId",
             &route_id,
-            &format!("Duplicate route id `{route_id}`; every route `id` must be unique within the router."),
+            &format!(
+                "Duplicate route id `{route_id}`; every route `id` must be unique within the router."
+            ),
             span,
             None,
         );
@@ -227,7 +229,9 @@ pub(crate) fn check_route_object_recursive(
             None,
             "reactRouterNoInvalidSplatPath",
             path_val,
-            &format!("Invalid splat route path `{path_val}`; `*` may only appear as `*` or at the end of a path as `/*`."),
+            &format!(
+                "Invalid splat route path `{path_val}`; `*` may only appear as `*` or at the end of a path as `/*`."
+            ),
             *path_span,
             None,
         );
@@ -250,7 +254,9 @@ pub(crate) fn check_route_object_recursive(
                 None,
                 "reactRouterNoInvalidAbsoluteChildPath",
                 child_path,
-                &format!("Absolute child route path `{child_path}` does not start with parent path `{norm_parent}`."),
+                &format!(
+                    "Absolute child route path `{child_path}` does not start with parent path `{norm_parent}`."
+                ),
                 *child_span,
                 None,
             );
@@ -300,7 +306,9 @@ pub(crate) fn check_route_object_recursive(
             Some(comp_name.clone()),
             "reactRouterDescendantRoutesRequireSplat",
             path_val,
-            &format!("Route `{path_val}` renders `{comp_name}` which contains descendant `<Routes>`, so its path must end with `/*`."),
+            &format!(
+                "Route `{path_val}` renders `{comp_name}` which contains descendant `<Routes>`, so its path must end with `/*`."
+            ),
             *path_span,
             None,
         );
@@ -327,7 +335,9 @@ pub(crate) fn check_route_object_recursive(
                 Some(comp_name.clone()),
                 "reactRouterNestedRouteRequiresOutlet",
                 comp_name,
-                &format!("Parent route component `{comp_name}` has child routes but does not render `<Outlet />`."),
+                &format!(
+                    "Parent route component `{comp_name}` has child routes but does not render `<Outlet />`."
+                ),
                 route_obj.span,
                 None,
             );
@@ -388,10 +398,7 @@ pub(crate) fn check_route_object_recursive(
     }
 
     // Recurse into children
-    let effective_parent_path = path_prop
-        .as_ref()
-        .map(|(p, _)| p.as_str())
-        .or(parent_path);
+    let effective_parent_path = path_prop.as_ref().map(|(p, _)| p.as_str()).or(parent_path);
     if let Some((_, expr)) = children_prop
         && let Expression::ArrayExpression(arr) = expr.without_parentheses()
     {
@@ -474,7 +481,9 @@ fn check_lazy_returned_object(
                 None,
                 "reactRouterNoInvalidLazyRouteProperties",
                 key_str,
-                &format!("Route `lazy()` cannot return immutable route-matching property `{key_str}`; move `{key_str}` onto the static route definition."),
+                &format!(
+                    "Route `lazy()` cannot return immutable route-matching property `{key_str}`; move `{key_str}` onto the static route definition."
+                ),
                 prop.span,
                 None,
             );
@@ -566,7 +575,9 @@ pub(crate) fn check_jsx_route_element_recursive(
             None,
             "reactRouterNoInvalidSplatPath",
             path_val,
-            &format!("Invalid splat route path `{path_val}`; `*` may only appear as `*` or at the end of a path as `/*`."),
+            &format!(
+                "Invalid splat route path `{path_val}`; `*` may only appear as `*` or at the end of a path as `/*`."
+            ),
             *path_span,
             None,
         );
@@ -589,7 +600,9 @@ pub(crate) fn check_jsx_route_element_recursive(
                 None,
                 "reactRouterNoInvalidAbsoluteChildPath",
                 child_path,
-                &format!("Absolute child route path `{child_path}` does not start with parent path `{norm_parent}`."),
+                &format!(
+                    "Absolute child route path `{child_path}` does not start with parent path `{norm_parent}`."
+                ),
                 *child_span,
                 None,
             );
@@ -656,7 +669,9 @@ pub(crate) fn check_jsx_route_element_recursive(
             Some(comp_name.clone()),
             "reactRouterDescendantRoutesRequireSplat",
             path_val,
-            &format!("Route `{path_val}` renders `{comp_name}` which contains descendant `<Routes>`, so its path must end with `/*`."),
+            &format!(
+                "Route `{path_val}` renders `{comp_name}` which contains descendant `<Routes>`, so its path must end with `/*`."
+            ),
             *path_span,
             None,
         );
@@ -675,7 +690,9 @@ pub(crate) fn check_jsx_route_element_recursive(
                 Some(comp_name.clone()),
                 "reactRouterNestedRouteRequiresOutlet",
                 comp_name,
-                &format!("Parent `<Route>` component `{comp_name}` has nested routes but does not render `<Outlet />`."),
+                &format!(
+                    "Parent `<Route>` component `{comp_name}` has nested routes but does not render `<Outlet />`."
+                ),
                 opening.span,
                 None,
             );
@@ -721,10 +738,7 @@ pub(crate) fn check_jsx_route_element_recursive(
         );
     }
 
-    let effective_parent_path = path_attr
-        .as_ref()
-        .map(|(p, _)| p.as_str())
-        .or(parent_path);
+    let effective_parent_path = path_attr.as_ref().map(|(p, _)| p.as_str()).or(parent_path);
     for child_route in child_routes {
         check_jsx_route_element_recursive(
             child_route,
@@ -830,7 +844,9 @@ pub(crate) fn check_middleware_statements(
                     Some(fn_name.to_string()),
                     "reactRouterNoCatchMiddlewareNext",
                     next_name,
-                    &format!("Wrapping `{next_name}()` in `try/catch` inside middleware does not reliably catch downstream route errors; use `ErrorBoundary` or `handleError`."),
+                    &format!(
+                        "Wrapping `{next_name}()` in `try/catch` inside middleware does not reliably catch downstream route errors; use `ErrorBoundary` or `handleError`."
+                    ),
                     try_stmt.span,
                     None,
                 );
@@ -849,7 +865,9 @@ pub(crate) fn check_middleware_statements(
                 Some(fn_name.to_string()),
                 "reactRouterNoMultipleMiddlewareNext",
                 next_name,
-                &format!("Middleware calls `{next_name}()` multiple times; call `{next_name}()` at most once and reuse the returned `Response`."),
+                &format!(
+                    "Middleware calls `{next_name}()` multiple times; call `{next_name}()` at most once and reuse the returned `Response`."
+                ),
                 *span,
                 None,
             );
@@ -872,7 +890,9 @@ pub(crate) fn check_middleware_statements(
                 Some(fn_name.to_string()),
                 "reactRouterNoMiddlewareResponseBodyConsumption",
                 &format!("response.{method}"),
-                &format!("Middleware consumes the outgoing response body via `.{method}()`, leaving an empty stream for the client."),
+                &format!(
+                    "Middleware consumes the outgoing response body via `.{method}()`, leaving an empty stream for the client."
+                ),
                 call_span,
                 None,
             );
@@ -888,7 +908,9 @@ pub(crate) fn check_middleware_statements(
             Some(fn_name.to_string()),
             "reactRouterServerMiddlewareReturnResponse",
             fn_name,
-            &format!("Server middleware `{fn_name}` calls `{next_name}()` without returning a `Response`."),
+            &format!(
+                "Server middleware `{fn_name}` calls `{next_name}()` without returning a `Response`."
+            ),
             fn_span,
             None,
         );

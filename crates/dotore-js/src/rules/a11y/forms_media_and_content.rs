@@ -9,9 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
     AstKind,
-    ast::{
-        Expression, JSXAttributeValue, JSXChild, JSXElement, JSXElementName, JSXOpeningElement,
-    },
+    ast::{Expression, JSXAttributeValue, JSXChild, JSXElement, JSXElementName, JSXOpeningElement},
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 
@@ -219,13 +217,14 @@ pub(super) fn check_element_content_media_and_form_rules(
 
     // 19. `iframe-has-title`
     if tag == "iframe" && !is_hidden_from_screen_reader(opening, semantic, const_strings) {
-        let title_ok = find_jsx_attr_ignore_case(&opening.attributes, "title").is_some_and(|attr| {
-            if let Some(s) = get_attr_static_str(semantic, attr, const_strings) {
-                !s.trim().is_empty()
-            } else {
-                !is_attr_null_or_undefined(attr) && !is_attr_statically_false(attr)
-            }
-        });
+        let title_ok =
+            find_jsx_attr_ignore_case(&opening.attributes, "title").is_some_and(|attr| {
+                if let Some(s) = get_attr_static_str(semantic, attr, const_strings) {
+                    !s.trim().is_empty()
+                } else {
+                    !is_attr_null_or_undefined(attr) && !is_attr_statically_false(attr)
+                }
+            });
         if !title_ok {
             push_site(
                 sites,
@@ -317,7 +316,8 @@ pub(super) fn check_element_content_media_and_form_rules(
     {
         let is_muted = find_jsx_attr_ignore_case(&opening.attributes, "muted")
             .is_some_and(|a| !is_attr_statically_false(a));
-        let is_ref_only_without_src = find_jsx_attr_ignore_case(&opening.attributes, "ref").is_some()
+        let is_ref_only_without_src = find_jsx_attr_ignore_case(&opening.attributes, "ref")
+            .is_some()
             && find_jsx_attr_ignore_case(&opening.attributes, "src").is_none()
             && jsx_el.children.is_empty();
         let has_captions = jsx_el.children.iter().any(|child| {
@@ -381,7 +381,8 @@ pub(super) fn check_alt_text(
             let has_valid_alt = find_jsx_attr_ignore_case(&opening.attributes, "alt")
                 .is_some_and(|a| a.value.is_some() && !is_attr_null_or_undefined(a));
             let has_aria_label = ["aria-label", "aria-labelledby"].iter().any(|k| {
-                find_jsx_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val)
+                find_jsx_attr_ignore_case(&opening.attributes, k)
+                    .is_some_and(has_non_empty_attr_val)
             });
             if !has_valid_alt && !has_aria_label {
                 push_site(
@@ -398,7 +399,8 @@ pub(super) fn check_alt_text(
         }
         "area" => {
             let has_name = ["alt", "aria-label", "aria-labelledby"].iter().any(|k| {
-                find_jsx_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val)
+                find_jsx_attr_ignore_case(&opening.attributes, k)
+                    .is_some_and(has_non_empty_attr_val)
             });
             if !has_name {
                 push_site(
@@ -758,9 +760,9 @@ pub(super) fn check_custom_a11y_rules(
         .as_deref()
         .and_then(|r| r.split_whitespace().next());
     let class_str = get_class_name_str(opening, semantic, const_strings).unwrap_or_default();
-    let has_a11y_name = ["aria-label", "aria-labelledby", "title"]
-        .iter()
-        .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some_and(has_non_empty_attr_val));
+    let has_a11y_name = ["aria-label", "aria-labelledby", "title"].iter().any(|a| {
+        find_jsx_attr_ignore_case(&opening.attributes, a).is_some_and(has_non_empty_attr_val)
+    });
 
     // 1, 6, 10–12, 15, 17. ARIA, dialog, status, landmark, and presentation role rules
     check_custom_aria_and_role_rules(
@@ -854,7 +856,10 @@ pub(super) fn check_custom_a11y_rules(
     }
 
     // 4. `no-broken-image-source`
-    if tag == "img" && !has_spread && find_jsx_attr_ignore_case(&opening.attributes, "ref").is_none() {
+    if tag == "img"
+        && !has_spread
+        && find_jsx_attr_ignore_case(&opening.attributes, "ref").is_none()
+    {
         let src_attr = find_jsx_attr_ignore_case(&opening.attributes, "src");
         let is_broken = match src_attr {
             None => true,
@@ -1168,7 +1173,8 @@ pub(super) fn check_custom_a11y_rules(
         && find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
-        && !find_jsx_attr_ignore_case(&opening.attributes, "name").is_some_and(has_non_empty_attr_val)
+        && !find_jsx_attr_ignore_case(&opening.attributes, "name")
+            .is_some_and(has_non_empty_attr_val)
     {
         push_site(
             sites,

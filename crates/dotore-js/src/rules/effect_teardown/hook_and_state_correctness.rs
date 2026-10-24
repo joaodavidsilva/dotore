@@ -87,11 +87,7 @@ pub(super) fn check_subject_effect_and_correctness_rules(
                         setter_to_state.insert(setter, s);
                     }
                 } else if (is_react_hook_callee(semantic, &call.callee, "useEffectEvent")
-                    || is_react_hook_callee(
-                        semantic,
-                        &call.callee,
-                        "experimental_useEffectEvent",
-                    ))
+                    || is_react_hook_callee(semantic, &call.callee, "experimental_useEffectEvent"))
                     && let Some(id) = decl.id.get_binding_identifier()
                 {
                     effect_event_names.insert(id.name.to_string());
@@ -414,7 +410,8 @@ fn check_subject_call_rules(
             subj_name.clone(),
             "noCreateRefInFunctionComponent",
             "createRef",
-            "Replace `createRef()` with `useRef()` inside function components and hooks.".to_string(),
+            "Replace `createRef()` with `useRef()` inside function components and hooks."
+                .to_string(),
             call.span,
             line_starts,
             None,
@@ -481,10 +478,7 @@ fn check_subject_call_rules(
     let _ = state_to_setter;
 }
 
-fn expr_roots_at_queried_dom(
-    expr: &Expression<'_>,
-    queried_dom_vars: &HashSet<String>,
-) -> bool {
+fn expr_roots_at_queried_dom(expr: &Expression<'_>, queried_dom_vars: &HashSet<String>) -> bool {
     let mut curr = expr.without_parentheses();
     loop {
         match curr {
@@ -627,21 +621,19 @@ fn check_reducer_arg_for_mutation(
             let decl_id = semantic.scoping().symbol_declaration(sym_id);
             match semantic.nodes().kind(decl_id) {
                 AstKind::Function(_) => Some(decl_id),
-                AstKind::VariableDeclarator(decl) => {
-                    decl.init.as_ref().and_then(|init| {
-                        for (nid, n) in semantic.nodes().iter_enumerated() {
-                            if n.span() == init.without_parentheses().span()
-                                && matches!(
-                                    n.kind(),
-                                    AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-                                )
-                            {
-                                return Some(nid);
-                            }
+                AstKind::VariableDeclarator(decl) => decl.init.as_ref().and_then(|init| {
+                    for (nid, n) in semantic.nodes().iter_enumerated() {
+                        if n.span() == init.without_parentheses().span()
+                            && matches!(
+                                n.kind(),
+                                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+                            )
+                        {
+                            return Some(nid);
                         }
-                        None
-                    })
-                }
+                    }
+                    None
+                }),
                 _ => None,
             }
         }

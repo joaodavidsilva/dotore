@@ -139,8 +139,9 @@ impl TuiState {
             }
             // PageUp or 'b' or 'u' or Ctrl+U
             [0x1b, b'[', b'5', b'~'] | [b'b'] | [b'u'] | [0x15] => {
-                self.scroll_offset =
-                    self.scroll_offset.saturating_sub(viewport_height.saturating_sub(2));
+                self.scroll_offset = self
+                    .scroll_offset
+                    .saturating_sub(viewport_height.saturating_sub(2));
             }
             // Home or 'g' or '0' -> top
             [0x1b, b'[', b'H'] | [b'g'] | [b'0'] => {
@@ -306,10 +307,7 @@ fn query_terminal_size() -> (usize, usize) {
 
 /// Renders the scrollable TUI viewport body lines for `filtered` diagnostics under `group_mode`.
 #[must_use]
-pub fn render_tui_body_lines(
-    filtered: &[&Diagnostic],
-    group_mode: TuiGroupMode,
-) -> Vec<String> {
+pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode) -> Vec<String> {
     let mut lines = Vec::new();
     if filtered.is_empty() {
         lines.push(String::new());

@@ -161,16 +161,7 @@ pub(super) const NATIVE_LABEL_CONTROLS: &[&str] = &[
 ];
 
 pub(super) const NONDETERMINISTIC_ID_CALLEES: &[&str] = &[
-    "nanoid",
-    "uuid",
-    "uuidv4",
-    "uuidV4",
-    "v4",
-    "uniqueId",
-    "shortid",
-    "cuid",
-    "cuid2",
-    "createId",
+    "nanoid", "uuid", "uuidv4", "uuidV4", "v4", "uniqueId", "shortid", "cuid", "cuid2", "createId",
     "ulid",
 ];
 

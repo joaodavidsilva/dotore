@@ -441,7 +441,8 @@ export function Tracker() {
 fn remotion_rules_capability_gate_and_detectors() {
     let cfg = DotoreConfig::default();
     let react_only_gate = CapabilityGate::with_capabilities([Capability::React]);
-    let remotion_gate = CapabilityGate::with_capabilities([Capability::React, Capability::Remotion]);
+    let remotion_gate =
+        CapabilityGate::with_capabilities([Capability::React, Capability::Remotion]);
 
     let source_rand = r#"
 export function Comp() {
@@ -1451,7 +1452,9 @@ fn all_31_ticket_04_rules_registered_and_inferred_by_package_json() {
     for id in expected {
         let parsed = RuleId::parse(id).expect(id);
         assert!(
-            registry.iter().any(|m| m.id == parsed && m.canonical_id == id),
+            registry
+                .iter()
+                .any(|m| m.id == parsed && m.canonical_id == id),
             "missing registry entry for {id}"
         );
     }

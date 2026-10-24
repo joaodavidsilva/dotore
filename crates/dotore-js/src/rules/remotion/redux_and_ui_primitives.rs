@@ -297,10 +297,7 @@ pub(crate) fn collect_styled_intrinsic_components(semantic: &Semantic<'_>) -> Ha
 fn is_styled_intrinsic_initializer(semantic: &Semantic<'_>, init: &Expression<'_>) -> bool {
     let text = init.span().source_text(semantic.source_text()).trim();
     if let Some(after) = text.strip_prefix("styled.") {
-        return after
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_lowercase());
+        return after.bytes().next().is_some_and(|b| b.is_ascii_lowercase());
     }
     if let Some(after) = text.strip_prefix("styled(") {
         let trimmed = after.trim_start();
@@ -452,11 +449,7 @@ pub(crate) fn check_ui_primitive_jsx_opening(
     }
 }
 
-fn has_enclosing_jsx_tag(
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    allowed_tags: &[&str],
-) -> bool {
+fn has_enclosing_jsx_tag(semantic: &Semantic<'_>, node_id: NodeId, allowed_tags: &[&str]) -> bool {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
         if let AstKind::JSXElement(el) = semantic.nodes().kind(anc_id) {
             let tag = get_jsx_element_name(&el.opening_element.name);

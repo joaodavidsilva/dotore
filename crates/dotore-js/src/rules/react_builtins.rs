@@ -129,7 +129,12 @@ export const AnonMemo = memo((props: { label: string }) => <div>{props.label}</d
         let line_starts = compute_line_starts(src);
         let mut sites = Vec::new();
 
-        extract_react_builtins_sites(&semantic, Path::new("src/Dashboard.tsx"), &line_starts, &mut sites);
+        extract_react_builtins_sites(
+            &semantic,
+            Path::new("src/Dashboard.tsx"),
+            &line_starts,
+            &mut sites,
+        );
 
         let rules: Vec<RuleId> = sites.iter().map(|s| s.rule).collect();
         // Hooks submodule

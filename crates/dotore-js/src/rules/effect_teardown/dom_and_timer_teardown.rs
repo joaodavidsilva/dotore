@@ -113,11 +113,10 @@ pub(super) fn check_class_unmount_teardown(
                         "setInterval" | "setTimeout" | "requestAnimationFrame"
                     )
                     .then_some((id.name.as_str(), c.span)),
-                    Expression::StaticMemberExpression(mem) => matches!(
-                        mem.property.name.as_str(),
-                        "addEventListener" | "subscribe"
-                    )
-                    .then_some((mem.property.name.as_str(), c.span)),
+                    Expression::StaticMemberExpression(mem) => {
+                        matches!(mem.property.name.as_str(), "addEventListener" | "subscribe")
+                            .then_some((mem.property.name.as_str(), c.span))
+                    }
                     _ => None,
                 },
                 AstKind::NewExpression(n) => match n.callee.without_parentheses() {
@@ -222,7 +221,11 @@ fn parse_listener_call(
         .trim()
         .to_string();
 
-    let first_arg = call.arguments.first()?.as_expression()?.without_parentheses();
+    let first_arg = call
+        .arguments
+        .first()?
+        .as_expression()?
+        .without_parentheses();
     let (event_type, event_type_span) = match first_arg {
         Expression::StringLiteral(s) => (
             Some(s.value.as_str().unwrap_or_default().to_string()),
@@ -367,8 +370,7 @@ pub(super) fn check_effect_hook_call(
             if let Statement::ExpressionStatement(expr_stmt) = stmt
                 && let Expression::CallExpression(inner_call) =
                     expr_stmt.expression.without_parentheses()
-                && let Expression::Identifier(callee_id) =
-                    inner_call.callee.without_parentheses()
+                && let Expression::Identifier(callee_id) = inner_call.callee.without_parentheses()
                 && subj_param_names.contains(callee_id.name.as_str())
             {
                 push_site(
@@ -595,7 +597,8 @@ fn check_effect_listener_mismatches(
                         .event_type
                         .clone()
                         .unwrap_or_else(|| "removeEventListener".to_string()),
-                    "`removeEventListener` capture flag does not match `addEventListener`.".to_string(),
+                    "`removeEventListener` capture flag does not match `addEventListener`."
+                        .to_string(),
                     rem_same_event.call_span,
                     line_starts,
                     None,
@@ -696,7 +699,8 @@ fn check_promise_then_without_catch(
             subj_name.clone(),
             "noPromiseThenSideEffectInEffectWithoutCatch",
             "then",
-            "Promise `.then(...)` in `useEffect` updates state without a `.catch(...)` handler.".to_string(),
+            "Promise `.then(...)` in `useEffect` updates state without a `.catch(...)` handler."
+                .to_string(),
             then_call.span,
             line_starts,
             None,

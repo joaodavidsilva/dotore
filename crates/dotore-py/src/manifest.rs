@@ -141,7 +141,10 @@ fn infer_from_poetry_table(
         return;
     };
     for group_val in groups.values().filter_map(toml::Value::as_table) {
-        let Some(deps_tbl) = group_val.get("dependencies").and_then(toml::Value::as_table) else {
+        let Some(deps_tbl) = group_val
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+        else {
             continue;
         };
         for (pkg_name, spec) in deps_tbl {

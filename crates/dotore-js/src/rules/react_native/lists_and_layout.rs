@@ -25,11 +25,7 @@ use super::{
     find_jsx_attr, find_state_setter_in_attr, is_named_import_from, is_static_style_value,
     navigation_and_expo::check_bottom_sheet_jsx_rules,
 };
-use crate::{
-    ir::types::SemanticRuleSite,
-    matchers::push_semantic_site,
-    rules::RuleId,
-};
+use crate::{ir::types::SemanticRuleSite, matchers::push_semantic_site, rules::RuleId};
 
 #[expect(
     clippy::too_many_arguments,

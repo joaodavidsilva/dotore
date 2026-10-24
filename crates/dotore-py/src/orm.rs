@@ -517,7 +517,13 @@ fn is_orm_query_callee(callee: &str) -> bool {
     is_session_or_db
         && matches!(
             method,
-            "query" | "execute" | "scalars" | "scalar" | "get" | "scalar_one" | "scalar_one_or_none"
+            "query"
+                | "execute"
+                | "scalars"
+                | "scalar"
+                | "get"
+                | "scalar_one"
+                | "scalar_one_or_none"
         )
 }
 
@@ -593,8 +599,7 @@ fn is_non_relationship_method_or_attr(name: &str) -> bool {
     name.starts_with('_')
         || matches!(
             name,
-            "id"
-                | "pk"
+            "id" | "pk"
                 | "uuid"
                 | "name"
                 | "title"

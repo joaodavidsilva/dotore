@@ -57,10 +57,9 @@ pub use ir::{
     OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite, SourceLoc,
     StaticCatalogSiteIr, StructLiteralConstructionSiteIr, SubjectEffectOwner,
     SuppressionDirectiveKind, SymbolKind, SymbolOutline, classify_file_context,
-    compute_line_starts, extract_c_style_comment_suppressions,
-    extract_normalized_signature_header, loc_from_line_starts, map_rust_allow_lint_to_rules,
-    parse_comment_disable_directive, parse_python_suppression_directive, rule_list_matches,
-    tokenize_suppression_rules,
+    compute_line_starts, extract_c_style_comment_suppressions, extract_normalized_signature_header,
+    loc_from_line_starts, map_rust_allow_lint_to_rules, parse_comment_disable_directive,
+    parse_python_suppression_directive, rule_list_matches, tokenize_suppression_rules,
 };
 pub use planner::{
     PlanResult, PlannerContext, build_caller_site_excerpt, build_fix_capsule,

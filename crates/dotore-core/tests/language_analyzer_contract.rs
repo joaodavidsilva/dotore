@@ -21,12 +21,11 @@ use dotore_core::{
     LineDisableDirective, PackageAnalysisResult, PrescriptionTier, ResolvedCallerSite,
     RuleCategory, RuleId, RuleSeverity, SourceLoc, SuppressionDirectiveKind, SymbolKind,
     SymbolOutline, WorkspacePackage, apply_patches_to_source_with_analyzers,
-    build_extracted_report_with_packages, compute_line_starts,
-    diagnostic_intersects_changed_lines, extract_c_style_comment_suppressions,
-    extract_normalized_signature_header, filter_diagnostics_by_scope, loc_from_line_starts,
-    map_rust_allow_lint_to_rules, parse_comment_disable_directive,
-    parse_python_suppression_directive, rule_registry, search_extracted_files,
-    tokenize_suppression_rules,
+    build_extracted_report_with_packages, compute_line_starts, diagnostic_intersects_changed_lines,
+    extract_c_style_comment_suppressions, extract_normalized_signature_header,
+    filter_diagnostics_by_scope, loc_from_line_starts, map_rust_allow_lint_to_rules,
+    parse_comment_disable_directive, parse_python_suppression_directive, rule_registry,
+    search_extracted_files, tokenize_suppression_rules,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -630,14 +629,20 @@ fn shared_suppression_parser_handles_c_style_python_noqa_and_rust_allow_directiv
         ))
     );
     assert_eq!(
-        parse_comment_disable_directive("dotore-ignore-next-line: py-no-mutable-default-arg", prefixes),
+        parse_comment_disable_directive(
+            "dotore-ignore-next-line: py-no-mutable-default-arg",
+            prefixes
+        ),
         Some((
             SuppressionDirectiveKind::DisableNextLine,
             vec!["py-no-mutable-default-arg".to_string()]
         ))
     );
     assert_eq!(
-        parse_comment_disable_directive("eslint-disable-line react-hooks/exhaustive-deps", prefixes),
+        parse_comment_disable_directive(
+            "eslint-disable-line react-hooks/exhaustive-deps",
+            prefixes
+        ),
         Some((
             SuppressionDirectiveKind::DisableLine,
             vec!["react-hooks/exhaustive-deps".to_string()]
@@ -713,7 +718,10 @@ fn symbol_outline_builder_and_normalized_signature_header_extractor() {
         decl_end,
         Some(body_start),
     );
-    assert_eq!(sig, "export function Button( props: ButtonProps, ): JSX.Element");
+    assert_eq!(
+        sig,
+        "export function Button( props: ButtonProps, ): JSX.Element"
+    );
     assert_eq!(sig_end_line, 4);
 
     let id_offset = u32::try_from(source.find("Button(").unwrap_or(0)).unwrap_or(0);
@@ -755,7 +763,11 @@ fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submod
     assert_eq!(registry.len(), TOTAL_RULES);
 
     for (idx, meta) in registry.iter().enumerate() {
-        assert_eq!(meta.id as usize, idx, "Rule {:?} out of discriminant order", meta.id);
+        assert_eq!(
+            meta.id as usize, idx,
+            "Rule {:?} out of discriminant order",
+            meta.id
+        );
         assert_eq!(meta.id.metadata(), meta);
         assert_eq!(RuleId::parse(meta.canonical_id), Some(meta.id));
         assert_eq!(RuleId::parse(meta.qualified_key), Some(meta.id));
@@ -770,7 +782,9 @@ fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submod
         CapabilityPredicate::REACT_ONLY
     );
     assert_eq!(
-        RuleId::AngularNoSignalWriteInEffect.metadata().capability_gate,
+        RuleId::AngularNoSignalWriteInEffect
+            .metadata()
+            .capability_gate,
         CapabilityPredicate::ANGULAR_ONLY
     );
     assert_eq!(
@@ -797,7 +811,9 @@ fn decomposed_config_submodules_expose_workspace_capability_gate_loader_and_muta
     use dotore_core::rules::RuleSeverityOverride;
 
     assert_eq!(strip_source_extension("src/App.tsx"), "src/App");
-    assert!(content_enables_react_compiler("babel-plugin-react-compiler"));
+    assert!(content_enables_react_compiler(
+        "babel-plugin-react-compiler"
+    ));
     let clean = strip_jsonc("{\n  // comment\n  \"warnings\": false,\n}");
     let cfg = DotoreConfig::from_json_str(&clean).unwrap();
     assert!(!cfg.warnings);
@@ -814,7 +830,10 @@ fn decomposed_config_submodules_expose_workspace_capability_gate_loader_and_muta
 
     let pkgs = discover_workspace_packages(&temp_dir);
     assert_eq!(pkgs.len(), 1);
-    assert_eq!(pkgs[0].capability_gate.package_role, PackageRole::Application);
+    assert_eq!(
+        pkgs[0].capability_gate.package_role,
+        PackageRole::Application
+    );
     assert!(pkgs[0].capability_gate.has(Capability::React));
     assert!(pkgs[0].capability_gate.has(Capability::Nextjs));
     let resolved = resolve_package_for_file(&temp_dir.join("src/App.tsx"), &pkgs).unwrap();
@@ -884,7 +903,10 @@ fn decomposed_diff_submodules_expose_patch_contextual_owner_and_baseline() {
     let diag = Diagnostic::for_rule(
         RuleId::NoDerivedState,
         "src/App.tsx",
-        SourceLoc { line: 2, column: 21 },
+        SourceLoc {
+            line: 2,
+            column: 21,
+        },
         ByteSpan { start: 23, end: 32 },
         "Avoid `.unwrap()` in production.",
     )
@@ -971,7 +993,10 @@ fn decomposed_report_submodules_expose_json_terminal_html_rules_why_and_ci_insta
     let diag = Diagnostic::for_rule(
         RuleId::NoDerivedState,
         "src/lib.rs",
-        SourceLoc { line: 2, column: 21 },
+        SourceLoc {
+            line: 2,
+            column: 21,
+        },
         ByteSpan { start: 30, end: 39 },
         "Avoid `.unwrap()` in production.",
     )
@@ -1196,9 +1221,8 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
         ArchitectureFileFacets, ArchitectureThresholdsConfig, AutofixPatch, ConcernBucket,
         ConcernSignalSite, DotoreConfig, HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr,
         ResolvedCallerSite, StaticCatalogSiteIr, StructLiteralConstructionSiteIr, apply_autofixes,
-        apply_patches_to_source, build_root_cause_groups_and_capsules,
-        compute_root_cause_group_id, explain_location_with_analyzers,
-        format_architecture_signal_explanation,
+        apply_patches_to_source, build_root_cause_groups_and_capsules, compute_root_cause_group_id,
+        explain_location_with_analyzers, format_architecture_signal_explanation,
     };
 
     // 1. Configurable thresholds defaults and JSON deserialization
@@ -1235,14 +1259,23 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
             ConcernSignalSite {
                 bucket: ConcernBucket::DataOrNetworkIo,
                 detail: "fs::read_to_string".to_string(),
-                loc: SourceLoc { line: 3, column: 13 },
+                loc: SourceLoc {
+                    line: 3,
+                    column: 13,
+                },
                 span: ByteSpan { start: 40, end: 66 },
             },
             ConcernSignalSite {
                 bucket: ConcernBucket::TerminalOrUiPresentation,
                 detail: "ansi-escape".to_string(),
-                loc: SourceLoc { line: 4, column: 14 },
-                span: ByteSpan { start: 81, end: 103 },
+                loc: SourceLoc {
+                    line: 4,
+                    column: 14,
+                },
+                span: ByteSpan {
+                    start: 81,
+                    end: 103,
+                },
             },
         ],
         helper_fingerprints: vec![HelperFingerprintIr {
@@ -1252,7 +1285,10 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
             param_count: 2,
             is_private: true,
             loc: SourceLoc { line: 2, column: 1 },
-            span: ByteSpan { start: 13, end: 106 },
+            span: ByteSpan {
+                start: 13,
+                end: 106,
+            },
         }],
         struct_literal_sites: vec![StructLiteralConstructionSiteIr {
             type_name: "Diagnostic".to_string(),
@@ -1270,8 +1306,14 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
         inline_terminal_ui_sites: vec![InlineTerminalUiPrimitiveSiteIr {
             kind: "ansi-escape".to_string(),
             snippet: "\\x1b[31m".to_string(),
-            loc: SourceLoc { line: 4, column: 14 },
-            span: ByteSpan { start: 81, end: 103 },
+            loc: SourceLoc {
+                line: 4,
+                column: 14,
+            },
+            span: ByteSpan {
+                start: 81,
+                end: 103,
+            },
         }],
         static_catalog_sites: vec![StaticCatalogSiteIr {
             name: "RULES".to_string(),
@@ -1368,7 +1410,10 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
         RuleId::ArchNoMixedIoAndPresentation,
         "src/mixed.rs",
         SourceLoc { line: 2, column: 1 },
-        ByteSpan { start: 13, end: 106 },
+        ByteSpan {
+            start: 13,
+            end: 106,
+        },
         "Module mixes I/O and terminal presentation.",
     )
     .with_patch(AutofixPatch::replace(
@@ -1403,7 +1448,10 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
     let dup_helper_a = Diagnostic::new(
         RuleId::ArchNoDuplicatedHelperLogic,
         "src/mod_a.rs",
-        SourceLoc { line: 10, column: 1 },
+        SourceLoc {
+            line: 10,
+            column: 1,
+        },
         ByteSpan { start: 0, end: 20 },
         "fn::arity2::hash_abcd",
         "Private helper `parse_token` duplicates AST logic in `src/mod_b.rs`.",
@@ -1420,7 +1468,10 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
     let dup_helper_b = Diagnostic::new(
         RuleId::ArchNoDuplicatedHelperLogic,
         "src/mod_b.rs",
-        SourceLoc { line: 14, column: 1 },
+        SourceLoc {
+            line: 14,
+            column: 1,
+        },
         ByteSpan { start: 0, end: 20 },
         "fn::arity2::hash_abcd",
         "Private helper `norm_token` duplicates AST logic in `src/mod_a.rs`.",
@@ -1437,8 +1488,14 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
     let inline_ui_diag = Diagnostic::new(
         RuleId::ArchNoInlineTerminalUiPrimitives,
         "src/mixed.rs",
-        SourceLoc { line: 4, column: 14 },
-        ByteSpan { start: 81, end: 103 },
+        SourceLoc {
+            line: 4,
+            column: 14,
+        },
+        ByteSpan {
+            start: 81,
+            end: 103,
+        },
         "ansi-escape",
         "Avoid inline ANSI/box-drawing primitives outside the UI kit.",
     );
@@ -1484,17 +1541,17 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
         .find(|c| c.rule == RuleId::ArchNoMixedIoAndPresentation)
         .expect("SoC capsule");
     assert!(!soc_capsule.caller_site_excerpts.is_empty());
-    assert!(soc_capsule
-        .invariants
-        .iter()
-        .any(|inv| inv.contains("I/O") || inv.contains("presentation")));
+    assert!(
+        soc_capsule
+            .invariants
+            .iter()
+            .any(|inv| inv.contains("I/O") || inv.contains("presentation"))
+    );
 
     // 5. `why` location explainability for architecture signals
-    let arch_exp = format_architecture_signal_explanation(
-        &arch_diag_with_rogue_patch,
-        Some(&facets),
-    )
-    .expect("architecture signal explanation");
+    let arch_exp =
+        format_architecture_signal_explanation(&arch_diag_with_rogue_patch, Some(&facets))
+            .expect("architecture signal explanation");
     assert!(arch_exp.contains("data-or-network-io"));
     assert!(arch_exp.contains("terminal-or-ui-presentation"));
     assert!(arch_exp.contains("fs::read_to_string"));
@@ -1531,7 +1588,9 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
         ) -> PackageAnalysisResult {
             let mut diagnostics = Vec::new();
             for file in files {
-                if file.architecture_facets.has_bucket(ConcernBucket::DataOrNetworkIo)
+                if file
+                    .architecture_facets
+                    .has_bucket(ConcernBucket::DataOrNetworkIo)
                     && file
                         .architecture_facets
                         .has_bucket(ConcernBucket::TerminalOrUiPresentation)
@@ -1557,8 +1616,7 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
         }
     }
 
-    let temp_dir =
-        std::env::temp_dir().join(format!("dotore-arch-why-{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!("dotore-arch-why-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(temp_dir.join("src")).unwrap();
     std::fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
@@ -1566,15 +1624,18 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
 
     let mock_analyzer = MockArchRustAnalyzer { facets };
     let analyzers: &[&dyn LanguageAnalyzer] = &[&mock_analyzer];
-    let why_rep =
-        explain_location_with_analyzers("src/mixed.rs:2", &temp_dir, analyzers).unwrap();
+    let why_rep = explain_location_with_analyzers("src/mixed.rs:2", &temp_dir, analyzers).unwrap();
     assert_eq!(why_rep.entries.len(), 1);
-    assert!(why_rep.entries[0]
-        .explanation
-        .contains("data-or-network-io"));
-    assert!(why_rep.entries[0]
-        .explanation
-        .contains("terminal-or-ui-presentation"));
+    assert!(
+        why_rep.entries[0]
+            .explanation
+            .contains("data-or-network-io")
+    );
+    assert!(
+        why_rep.entries[0]
+            .explanation
+            .contains("terminal-or-ui-presentation")
+    );
     assert!(!why_rep.entries[0].cascade_steps.is_empty());
 
     let _ = std::fs::remove_dir_all(&temp_dir);

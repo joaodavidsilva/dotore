@@ -26,7 +26,9 @@ use crate::{
         react_ast::{find_enclosing_react_node, get_subject_name},
         types::SemanticRuleSite,
     },
-    matchers::{collect_pattern_bound_names, push_semantic_site, resolve_ident_symbol, unwrap_expr},
+    matchers::{
+        collect_pattern_bound_names, push_semantic_site, resolve_ident_symbol, unwrap_expr,
+    },
     rules::RuleId,
 };
 

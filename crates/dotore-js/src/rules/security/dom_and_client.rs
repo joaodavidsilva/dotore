@@ -15,11 +15,11 @@ use crate::{
 use super::{
     extract_jsx_attr_value, extract_object_prop_after_call, extract_template_interpolations,
     find_binding_initializer_in_source, find_const_initializer_in_source,
-    find_function_body_in_source, find_standalone_call, find_string_timer_call, is_identifier_token,
-    is_screaming_constant_ident, is_server_only_path, is_static_string_or_no_interp_template,
-    push_sec_diag, resolve_imported_binding, resolve_static_string_in_file,
-    slice_until_sink_terminator, split_balanced_parens, split_top_level_args,
-    split_top_level_ternary, unquote_js_string_literal,
+    find_function_body_in_source, find_standalone_call, find_string_timer_call,
+    is_identifier_token, is_screaming_constant_ident, is_server_only_path,
+    is_static_string_or_no_interp_template, push_sec_diag, resolve_imported_binding,
+    resolve_static_string_in_file, slice_until_sink_terminator, split_balanced_parens,
+    split_top_level_args, split_top_level_ternary, unquote_js_string_literal,
 };
 
 pub(super) fn check_dangerous_html_sink(

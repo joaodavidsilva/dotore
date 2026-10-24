@@ -143,10 +143,7 @@ fn badge_renders_prescription_tier_blast_radius_severity_and_style_bucket_pills(
         autofix.render(ColorMode::Ansi),
         "\x1b[32;1m(autofix)\x1b[0m"
     );
-    assert_eq!(
-        autofix.render_pill(ColorMode::Plain),
-        " ⚙ AUTOFIX "
-    );
+    assert_eq!(autofix.render_pill(ColorMode::Plain), " ⚙ AUTOFIX ");
     assert_eq!(
         autofix.render_pill(ColorMode::Ansi),
         "\x1b[48;5;22;38;5;48;1m ⚙ AUTOFIX \x1b[0m"
@@ -192,7 +189,10 @@ fn badge_renders_prescription_tier_blast_radius_severity_and_style_bucket_pills(
     assert_eq!(bucket_badge.render(ColorMode::Plain), "[EFFECTS & STATE]");
     assert_eq!(
         bucket_badge.render(ColorMode::Ansi),
-        format!("{}[EFFECTS & STATE]\x1b[0m", style_bucket_color("EFFECTS & STATE"))
+        format!(
+            "{}[EFFECTS & STATE]\x1b[0m",
+            style_bucket_color("EFFECTS & STATE")
+        )
     );
 }
 
@@ -309,9 +309,16 @@ fn status_bar_renders_report_summary_box_and_tui_footer_in_plain_and_ansi() {
     assert!(plain_summary.contains(
         "dotore  score: 91/100 (Great)  files: 14  subjects: 8  effects: 3  findings: 2 (autofix: 1, surgical: 1, refactor: 0)"
     ));
-    assert!(plain_summary.contains("baseline: baseline.json  introduced: 1  fixed: 2  pre-existing: 1"));
-    assert!(plain_summary.contains("Run `dotore fix` to automatically apply 1 deterministic rewrite(s)."));
-    assert!(plain_summary.ends_with("╰──────────────────────────────────────────────────────────────────────────────╯\n"));
+    assert!(
+        plain_summary.contains("baseline: baseline.json  introduced: 1  fixed: 2  pre-existing: 1")
+    );
+    assert!(
+        plain_summary
+            .contains("Run `dotore fix` to automatically apply 1 deterministic rewrite(s).")
+    );
+    assert!(plain_summary.ends_with(
+        "╰──────────────────────────────────────────────────────────────────────────────╯\n"
+    ));
 
     let ansi_summary = summary_bar.render(ColorMode::Ansi);
     assert!(ansi_summary.contains("\x1b[36;1m╭─ SUMMARY "));
@@ -322,7 +329,9 @@ fn status_bar_renders_report_summary_box_and_tui_footer_in_plain_and_ansi() {
     let tui_ansi = tui_bar.render(ColorMode::Ansi);
     assert!(tui_plain.contains("DOTORE"));
     assert!(tui_plain.contains("ALL (5)"));
-    assert!(tui_plain.contains("Mode: By Error Style / Rule  │  Lines 1-20 / 40 (50%)  │  Score: 91/100 (Great)"));
+    assert!(tui_plain.contains(
+        "Mode: By Error Style / Rule  │  Lines 1-20 / 40 (50%)  │  Score: 91/100 (Great)"
+    ));
     assert!(tui_plain.contains("[h/l or ←/→] Filter Tab"));
     assert_eq!(strip_ansi_codes(&tui_ansi), tui_plain);
 }
@@ -341,7 +350,9 @@ fn live_spinner_tracks_atomic_progress_and_formats_30fps_frames() {
         phase: "Evaluating ProjectGraph & Rules",
         completed_files: 5,
         total_files: 10,
-        current_file: "packages/very-long-package-name/src/components/deeply/nested/FeatureComponent.tsx".to_string(),
+        current_file:
+            "packages/very-long-package-name/src/components/deeply/nested/FeatureComponent.tsx"
+                .to_string(),
     };
     let plain_frame = format_spinner_frame(&custom_snap, 0, 1.2, ColorMode::Plain);
     assert!(plain_frame.contains("⠋ DOTORE"));
@@ -374,7 +385,10 @@ fn terminal_and_design_reports_render_via_shared_ui_primitives_in_plain_and_ansi
             line: 12,
             column: 5,
         },
-        span: ByteSpan { start: 120, end: 210 },
+        span: ByteSpan {
+            start: 120,
+            end: 210,
+        },
         cascade_steps: vec![
             "props.users".to_string(),
             "useEffect".to_string(),
@@ -386,14 +400,23 @@ fn terminal_and_design_reports_render_via_shared_ui_primitives_in_plain_and_ansi
             component_name: "UserList".to_string(),
             has_key: false,
             passed_props: vec!["users".to_string()],
-            loc: SourceLoc { line: 42, column: 9 },
-            span: ByteSpan { start: 400, end: 430 },
+            loc: SourceLoc {
+                line: 42,
+                column: 9,
+            },
+            span: ByteSpan {
+                start: 400,
+                end: 430,
+            },
         }],
         autofix: Some(AutofixPatch {
             description: "Replace state + effect with `const visibleUsers = ...`.".to_string(),
             edits: vec![ByteEdit {
                 file: None,
-                span: ByteSpan { start: 120, end: 210 },
+                span: ByteSpan {
+                    start: 120,
+                    end: 210,
+                },
                 replacement: "const visibleUsers = props.users;".to_string(),
             }],
         }),
@@ -467,8 +490,14 @@ fn terminal_and_design_reports_render_via_shared_ui_primitives_in_plain_and_ansi
     };
 
     let tabs = build_filter_tabs(&report);
-    assert!(tabs.iter().any(|t| t.kind == TuiFilterKind::All && t.count == 1));
-    assert!(tabs.iter().any(|t| t.kind == TuiFilterKind::Autofix && t.count == 1));
+    assert!(
+        tabs.iter()
+            .any(|t| t.kind == TuiFilterKind::All && t.count == 1)
+    );
+    assert!(
+        tabs.iter()
+            .any(|t| t.kind == TuiFilterKind::Autofix && t.count == 1)
+    );
     assert!(
         tabs.iter()
             .any(|t| t.kind == TuiFilterKind::StyleBucket("EFFECTS & STATE") && t.count == 1)
@@ -480,12 +509,16 @@ fn terminal_and_design_reports_render_via_shared_ui_primitives_in_plain_and_ansi
 
     let term_plain = format_terminal_report_pretty(&report, false);
     let term_ansi = format_terminal_report_pretty(&report, true);
-    assert!(term_plain.contains("[no-derived-state] (autofix) src/UserList.tsx:12:5 in `UserList`"));
+    assert!(
+        term_plain.contains("[no-derived-state] (autofix) src/UserList.tsx:12:5 in `UserList`")
+    );
     assert!(term_plain.contains("cascade: props.users -> useEffect -> setVisibleUsers(...)"));
     assert!(term_plain.contains(
         "flow:    ┌─► [props.users] ──► [useEffect] ──► [setVisibleUsers(...)] ──► ↻ re-render"
     ));
-    assert!(term_plain.contains("caller:  src/App.tsx:42:9 in `App` (<UserList /> missing key={...})"));
+    assert!(
+        term_plain.contains("caller:  src/App.tsx:42:9 in `App` (<UserList /> missing key={...})")
+    );
     assert!(term_plain.contains("WORKSPACE PACKAGES (1)"));
     assert!(term_plain.contains("BLAST RADIUS   P0: 0   P1: 1   P2: 0   P3: 0"));
     assert_eq!(strip_ansi_codes(&term_ansi), term_plain);

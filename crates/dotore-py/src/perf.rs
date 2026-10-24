@@ -389,12 +389,11 @@ impl<'a> PerfRuleVisitor<'a> {
         }
 
         self.hoisted_regex_count += 1;
-        let const_name =
-            if self.hoisted_regex_count == 1 && !self.source.contains("_COMPILED_RE") {
-                "_COMPILED_RE".to_string()
-            } else {
-                format!("_COMPILED_RE_{}", self.hoisted_regex_count)
-            };
+        let const_name = if self.hoisted_regex_count == 1 && !self.source.contains("_COMPILED_RE") {
+            "_COMPILED_RE".to_string()
+        } else {
+            format!("_COMPILED_RE_{}", self.hoisted_regex_count)
+        };
 
         let span = text_range_to_byte_span(call.range());
         let call_text = slice_source(self.source, span);

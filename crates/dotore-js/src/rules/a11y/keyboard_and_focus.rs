@@ -8,7 +8,10 @@ use std::collections::HashMap;
 
 use oxc_ast::{
     AstKind,
-    ast::{CallExpression, ConditionalExpression, Expression, JSXAttribute, JSXElement, JSXOpeningElement},
+    ast::{
+        CallExpression, ConditionalExpression, Expression, JSXAttribute, JSXElement,
+        JSXOpeningElement,
+    },
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 use oxc_span::GetSpan;
@@ -660,7 +663,8 @@ fn is_inside_modal_or_conditional(
             AstKind::JSXElement(el) => {
                 let tag = get_jsx_tag_name(&el.opening_element.name);
                 if tag == "dialog"
-                    || find_jsx_attr_ignore_case(&el.opening_element.attributes, "aria-modal").is_some()
+                    || find_jsx_attr_ignore_case(&el.opening_element.attributes, "aria-modal")
+                        .is_some()
                     || find_jsx_attr_ignore_case(&el.opening_element.attributes, "role")
                         .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                         .is_some_and(|r| matches!(r.as_str(), "dialog" | "alertdialog"))

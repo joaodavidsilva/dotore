@@ -224,7 +224,8 @@ pub(super) fn check_jsx_element_design(
         let is_live_status = matches!(
             role_val.as_deref(),
             Some("status" | "progressbar" | "alert")
-        ) || find_jsx_attr_ignore_case(&opening.attributes, "aria-busy").is_some();
+        ) || find_jsx_attr_ignore_case(&opening.attributes, "aria-busy")
+            .is_some();
         let text = collect_all_static_text(jsx_el);
         let lower_text = text.to_ascii_lowercase();
         let is_busy_copy = lower_text.contains("loading")

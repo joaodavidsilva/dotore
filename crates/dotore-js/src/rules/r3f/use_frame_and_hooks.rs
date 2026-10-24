@@ -571,9 +571,9 @@ pub(crate) fn check_call_expressions(ctx: &FileAnalysisCtx<'_>, sites: &mut Vec<
                 for arg in &call.arguments {
                     if let Some(Expression::StaticMemberExpression(arg_mem)) =
                         arg.as_expression().map(Expression::without_parentheses)
-                    && arg_mem.property.name == "current"
-                    && let Expression::Identifier(ref_id) = arg_mem.object.without_parentheses()
-                    && ctx.jsx_managed_refs.contains_key(ref_id.name.as_str())
+                        && arg_mem.property.name == "current"
+                        && let Expression::Identifier(ref_id) = arg_mem.object.without_parentheses()
+                        && ctx.jsx_managed_refs.contains_key(ref_id.name.as_str())
                     {
                         ctx.push_site(
                             sites,

@@ -7,9 +7,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use dotore_core::{
-    AutofixPatch, ByteEdit, ByteSpan, Diagnostic, RuleId, loc_from_line_starts,
-};
+use dotore_core::{AutofixPatch, ByteEdit, ByteSpan, Diagnostic, RuleId, loc_from_line_starts};
 use ruff_python_ast::{
     CmpOp, Expr, ExprCall, ExprSubscript, Stmt, StmtClassDef, StmtFunctionDef, UnaryOp,
 };
@@ -1031,10 +1029,7 @@ fn is_typing_generic_receiver(recv: &str) -> bool {
             | "Final"
             | "Generic"
             | "Protocol"
-    ) || tail
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
+    ) || tail.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
 fn is_dict_or_external_mapping_receiver(recv: &str) -> bool {

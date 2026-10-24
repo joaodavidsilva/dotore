@@ -200,19 +200,12 @@ fn root_dotore_facade_reexports_decomposed_report_diff_and_config_apis() {
         "\"json-file\""
     );
 
-    assert_eq!(
-        DiffScope::parse("contextual"),
-        Some(DiffScope::Contextual)
-    );
-    assert_eq!(
-        normalize_ast_tokens("foo( 'bar' )"),
-        "foo ( \"bar\" )"
-    );
+    assert_eq!(DiffScope::parse("contextual"), Some(DiffScope::Contextual));
+    assert_eq!(normalize_ast_tokens("foo( 'bar' )"), "foo ( \"bar\" )");
     let _ = filter_diagnostics_by_scope::<ExtractedFile>;
 
     assert_eq!(JSON_REPORT_SCHEMA_VERSION, 3);
-    let empty_report =
-        build_extracted_report(&[], Vec::new(), &std::collections::HashMap::new());
+    let empty_report = build_extracted_report(&[], Vec::new(), &std::collections::HashMap::new());
     assert!(format_terminal_report(&empty_report).contains("HEALTH SCORE"));
     assert!(render_html_report(&empty_report).contains("<!DOCTYPE html>"));
     assert!(explain_rule("no-derived-state", &default_cfg).is_some());

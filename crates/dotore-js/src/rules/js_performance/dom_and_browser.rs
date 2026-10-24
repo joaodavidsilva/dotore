@@ -8,7 +8,10 @@ use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
     AstKind,
-    ast::{Argument, CallExpression, Expression, ImportDeclarationSpecifier, ObjectPropertyKind, Statement},
+    ast::{
+        Argument, CallExpression, Expression, ImportDeclarationSpecifier, ObjectPropertyKind,
+        Statement,
+    },
 };
 use oxc_semantic::{NodeId, Semantic};
 use oxc_span::{GetSpan, Span};
