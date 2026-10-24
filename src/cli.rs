@@ -11,22 +11,24 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::{
     BlockingLevel, BuildRuntimeScanReportInput, CiOptions, CiProviderKind, CliOverrides,
-    ConfigMutation, DiffScope, InstallOptions, PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS,
-    RecordRuntimeTraceInput, RuleCategory, RuleId, RuleSeverity, RuleSeverityOverride, RuleTag,
-    RulesListOptions, RuntimeScanFormat, ScanOptions, SearchOptions, SymbolKind, apply_autofixes,
-    build_rule_catalog, build_runtime_scan_report, ci_config, ci_install, ci_upgrade,
-    detect_local_runtime_urls, explain_location, explain_rule, format_design_report,
-    format_design_report_pretty, format_fix_report, format_install_report, format_plan_report,
-    format_rule_catalog_text, format_rule_explanation_text, format_runtime_scan_error_report,
-    format_runtime_scan_report, format_search_json, format_search_text, format_terminal_report,
-    format_terminal_report_pretty, format_why_report_text, install_dotore, load_config_from_dir,
+    ConfigMutation, DiffScope, InstallOptions, PrCommentRepoContext, PrescriptionTier,
+    RUNTIME_SCAN_LOCAL_DEV_PORTS, RecordRuntimeTraceInput, RuleCategory, RuleId, RuleSeverity,
+    RuleSeverityOverride, RuleTag, RulesListOptions, RuntimeScanFormat, ScanOptions, SearchOptions,
+    SymbolKind, apply_autofixes, build_rule_catalog, build_runtime_scan_report, ci_config,
+    ci_install, ci_upgrade, detect_local_runtime_urls, explain_location, explain_rule,
+    format_design_report, format_design_report_pretty, format_fix_report, format_install_report,
+    format_plan_report, format_rule_catalog_text, format_rule_explanation_text,
+    format_runtime_scan_error_report, format_runtime_scan_report, format_search_json,
+    format_search_text, format_terminal_report, format_terminal_report_pretty,
+    format_why_report_text, generate_ci_comment, install_dotore, load_config_from_dir,
     mutate_config_in_dir, plan_project,
     progress::LiveSpinner,
-    prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
-    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols,
-    should_highlight_stdout,
+    prompt_runtime_scan_url_with_io, record_runtime_trace, render_github_pr_comment_from_env,
+    render_html_report, resolve_runtime_scan_format, resolve_scan_exit_code, scan_design,
+    scan_workspace_with_overrides, search_symbols, should_highlight_stdout,
     tui::{run_interactive_tui, should_launch_tui},
-    validate_warning_exit_code, write_and_open_html_report, write_json_report,
+    validate_warning_exit_code, write_and_open_html_report, write_github_pr_comment,
+    write_json_report,
 };
 
 /// Top-level `dotore` CLI parser.
@@ -76,6 +78,25 @@ pub enum Commands {
     Install(InstallArgs),
 }
 
+/// Output format for `dotore check`, `dotore design`, and `dotore report`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable terminal output.
+    Text,
+    /// Machine-readable JSON report.
+    Json,
+    /// Self-contained visual HTML report (`dotore report`).
+    Html,
+    /// Deterministic pull-request Markdown summary comment (`<!-- dotore:summary -->`).
+    #[value(
+        name = "github-pr-comment",
+        alias = "pr-comment",
+        alias = "github-pr",
+        alias = "markdown"
+    )]
+    GithubPrComment,
+}
+
 /// CLI arguments for `dotore check`, `dotore score`, and `dotore design`.
 #[derive(Debug, Clone, Args)]
 pub struct CheckArgs {
@@ -87,6 +108,9 @@ pub struct CheckArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Output format (`text`, `json`, `html`, or `github-pr-comment` / `pr-comment`).
+    #[arg(long = "format", value_enum, value_name = "FORMAT")]
+    pub format: Option<OutputFormat>,
     /// Write the versioned machine-readable JSON report to a file on disk.
     #[arg(long = "json-out", value_name = "FILE")]
     pub json_out: Option<PathBuf>,
@@ -239,6 +263,9 @@ pub struct ReportArgs {
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
+    /// Output format (`html`, `json`, `text`, or `github-pr-comment` / `pr-comment`).
+    #[arg(long = "format", value_enum, value_name = "FORMAT")]
+    pub format: Option<OutputFormat>,
     /// Do not open the generated HTML file in the system browser.
     #[arg(long)]
     pub no_open: bool,
@@ -503,9 +530,13 @@ pub struct WhyArgs {
 /// CLI arguments for `dotore ci`.
 #[derive(Debug, Clone, Args)]
 pub struct CiArgs {
-    /// CI workflow subcommand (`install`, `upgrade`, `config`).
+    /// CI workflow subcommand (`install`, `upgrade`, `config`, `comment`).
     #[command(subcommand)]
-    command: CiSubcommand,
+    command: Option<CiSubcommand>,
+
+    /// Default `install` arguments when no explicit subcommand is passed.
+    #[command(flatten)]
+    action_args: CiActionArgs,
 }
 
 /// Subcommands under `dotore ci`.
@@ -517,16 +548,20 @@ enum CiSubcommand {
     Upgrade(CiActionArgs),
     /// Update `blocking` or `scope` settings in an existing CI workflow.
     Config(CiActionArgs),
+    /// Render a deterministic `<!-- dotore:summary -->` pull-request Markdown comment from a saved JSON report.
+    Comment(CiCommentArgs),
 }
 
-impl CiSubcommand {
-    const fn action_args(&self) -> (&'static str, &CiActionArgs) {
-        match self {
-            Self::Install(a) => ("install", a),
-            Self::Upgrade(a) => ("upgrade", a),
-            Self::Config(a) => ("config", a),
-        }
-    }
+/// CLI arguments for `dotore ci comment`.
+#[derive(Debug, Clone, Args)]
+struct CiCommentArgs {
+    /// Path to the saved JSON report file (`report.json`).
+    #[arg(value_name = "REPORT_JSON")]
+    pub report: PathBuf,
+
+    /// Optional output Markdown file path (`-o comment.md`).
+    #[arg(short = 'o', long = "output", value_name = "FILE")]
+    pub output: Option<PathBuf>,
 }
 
 /// CLI arguments for `dotore ci install`, `dotore ci upgrade`, and `dotore ci config`.
@@ -786,7 +821,16 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         baseline_path: args.baseline.clone(),
     };
 
-    let show_live_spinner = !args.score && !args.json && should_launch_tui(args.no_pager);
+    let is_json = args.json || args.format == Some(OutputFormat::Json);
+    let is_pr_comment = args.format == Some(OutputFormat::GithubPrComment);
+    let is_html = args.format == Some(OutputFormat::Html);
+    let is_explicit_text = args.format == Some(OutputFormat::Text);
+    let show_live_spinner = !args.score
+        && !is_json
+        && !is_pr_comment
+        && !is_html
+        && !is_explicit_text
+        && should_launch_tui(args.no_pager);
     let spinner_guard = if show_live_spinner {
         LiveSpinner::start()
     } else {
@@ -811,7 +855,7 @@ fn run_check(args: &CheckArgs) -> ExitCode {
 
     if args.score {
         println!("{}", report.summary.health_score);
-    } else if args.json {
+    } else if is_json {
         match serde_json::to_string_pretty(&report) {
             Ok(json) => println!("{json}"),
             Err(err) => {
@@ -819,7 +863,11 @@ fn run_check(args: &CheckArgs) -> ExitCode {
                 return ExitCode::from(2);
             }
         }
-    } else if should_launch_tui(args.no_pager) {
+    } else if is_pr_comment {
+        print!("{}", render_github_pr_comment_from_env(&report));
+    } else if is_html {
+        print!("{}", render_html_report(&report));
+    } else if !is_explicit_text && should_launch_tui(args.no_pager) {
         let color = should_highlight_stdout(false);
         if !run_interactive_tui(&report, false) {
             print!("{}", format_terminal_report_pretty(&report, color));
@@ -830,7 +878,6 @@ fn run_check(args: &CheckArgs) -> ExitCode {
     } else {
         print!("{}", format_terminal_report(&report));
     }
-
     let code = resolve_scan_exit_code(&report.diagnostics, blocking, warning_exit_code);
     ExitCode::from(code)
 }
@@ -966,14 +1013,64 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         }
     };
     drop(spinner_guard);
-    match write_and_open_html_report(&report, args.output.as_deref(), !args.no_open) {
-        Ok(path) => {
-            println!("HTML report written to {}", path.display());
+    match args.format {
+        Some(OutputFormat::GithubPrComment) => {
+            let ctx = PrCommentRepoContext::from_env();
+            if let Some(out_path) = &args.output {
+                match write_github_pr_comment(&report, out_path, &ctx) {
+                    Ok(md) => {
+                        print!("{md}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("error writing PR comment: {err}");
+                        ExitCode::from(2)
+                    }
+                }
+            } else {
+                print!("{}", render_github_pr_comment_from_env(&report));
+                ExitCode::SUCCESS
+            }
+        }
+        Some(OutputFormat::Json) => {
+            if let Some(out_path) = &args.output {
+                if let Err(err) = write_json_report(&report, out_path) {
+                    eprintln!("error writing JSON report: {err}");
+                    return ExitCode::from(2);
+                }
+            } else {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(json) => println!("{json}"),
+                    Err(err) => {
+                        eprintln!("error serializing JSON: {err}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            eprintln!("error writing HTML report: {err}");
-            ExitCode::from(2)
+        Some(OutputFormat::Text) => {
+            let text = format_terminal_report(&report);
+            if let Some(out_path) = &args.output
+                && let Err(err) = std::fs::write(out_path, &text)
+            {
+                eprintln!("error writing text report: {err}");
+                return ExitCode::from(2);
+            }
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Some(OutputFormat::Html) | None => {
+            match write_and_open_html_report(&report, args.output.as_deref(), !args.no_open) {
+                Ok(path) => {
+                    println!("HTML report written to {}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("error writing HTML report: {err}");
+                    ExitCode::from(2)
+                }
+            }
         }
     }
 }
@@ -1386,7 +1483,9 @@ fn run_design(args: &CheckArgs) -> ExitCode {
         config_path: args.config.clone(),
         ..Default::default()
     };
-    let show_live_spinner = !args.json && should_launch_tui(args.no_pager);
+    let is_json = args.json || args.format == Some(OutputFormat::Json);
+    let is_pr_comment = args.format == Some(OutputFormat::GithubPrComment);
+    let show_live_spinner = !is_json && !is_pr_comment && should_launch_tui(args.no_pager);
     let spinner_guard = if show_live_spinner {
         LiveSpinner::start()
     } else {
@@ -1401,7 +1500,7 @@ fn run_design(args: &CheckArgs) -> ExitCode {
         }
     };
     drop(spinner_guard);
-    if args.json {
+    if is_json {
         match serde_json::to_string_pretty(&report) {
             Ok(json) => println!("{json}"),
             Err(err) => {
@@ -1409,6 +1508,8 @@ fn run_design(args: &CheckArgs) -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    } else if is_pr_comment {
+        print!("{}", render_github_pr_comment_from_env(&report));
     } else if should_launch_tui(args.no_pager) {
         let color = should_highlight_stdout(false);
         if !run_interactive_tui(&report, true) {
@@ -1430,7 +1531,26 @@ fn run_design(args: &CheckArgs) -> ExitCode {
 /// Runs `dotore ci`.
 #[must_use]
 fn run_ci(args: &CiArgs) -> ExitCode {
-    let (sub_name, act_args) = args.command.action_args();
+    if let Some(CiSubcommand::Comment(comment_args)) = &args.command {
+        return match generate_ci_comment(&comment_args.report, comment_args.output.as_deref()) {
+            Ok(markdown) => {
+                print!("{markdown}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    let (sub_name, act_args) = match &args.command {
+        Some(CiSubcommand::Install(a)) => ("install", a),
+        Some(CiSubcommand::Upgrade(a)) => ("upgrade", a),
+        Some(CiSubcommand::Config(a)) => ("config", a),
+        Some(CiSubcommand::Comment(_)) => unreachable!(),
+        None => ("install", &args.action_args),
+    };
     let provider = if let Some(raw_prov) = &act_args.provider {
         let Some(parsed) = CiProviderKind::parse(raw_prov) else {
             eprintln!(
@@ -1449,9 +1569,10 @@ fn run_ci(args: &CiArgs) -> ExitCode {
         scope: act_args.scope.clone(),
     };
     let res = match &args.command {
-        CiSubcommand::Install(_) => ci_install(&ci_opts),
-        CiSubcommand::Upgrade(_) => ci_upgrade(&ci_opts),
-        CiSubcommand::Config(_) => ci_config(&ci_opts),
+        Some(CiSubcommand::Install(_)) | None => ci_install(&ci_opts),
+        Some(CiSubcommand::Upgrade(_)) => ci_upgrade(&ci_opts),
+        Some(CiSubcommand::Config(_)) => ci_config(&ci_opts),
+        Some(CiSubcommand::Comment(_)) => unreachable!(),
     };
     match res {
         Ok(outcome) => {

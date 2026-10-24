@@ -15,14 +15,17 @@ pub mod terminal;
 pub mod why;
 
 pub use ci_install::{
-    CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult, ci_config,
-    ci_install, ci_upgrade, format_install_report, install_dotore,
+    CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult, PR_COMMENT_MARKER,
+    PrCommentEnv, PrCommentRepoContext, ci_config, ci_install, ci_upgrade, format_install_report,
+    generate_ci_comment, install_dotore, render_ci_workflow, render_github_actions_workflow,
+    render_github_pr_comment, render_github_pr_comment_from_env, render_gitlab_ci_snippet,
+    render_pr_comment_markdown, render_pr_comment_markdown_with_env, write_github_pr_comment,
 };
 pub use html::{render_html_report, write_and_open_html_report};
 pub use json::{
     JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
     build_extracted_report, build_extracted_report_with_packages,
-    build_report_from_planner_context, write_json_report,
+    build_report_from_planner_context, read_json_report, write_json_report,
 };
 pub use rules::{
     RuleCatalogEntry, RulesListOptions, build_rule_catalog, explain_rule, format_rule_catalog_text,

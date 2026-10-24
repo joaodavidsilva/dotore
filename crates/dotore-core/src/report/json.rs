@@ -77,21 +77,26 @@ pub struct ReportSummary {
 }
 
 /// Complete machine-readable report emitted by `dotore check --json` and `--json-out <path>`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonReport {
     /// Version of the machine-readable JSON report schema (`3`).
     pub schema_version: u32,
     /// Active scan mode (`full`, `diff`, `staged`, `baseline`).
+    #[serde(default)]
     pub mode: ScanMode,
     /// Aggregate metrics and local health score.
     pub summary: ReportSummary,
     /// Per-project coverage and capability metadata.
+    #[serde(default)]
     pub projects: Vec<ProjectCoverageMetadata>,
     /// Individual diagnostics.
+    #[serde(default)]
     pub diagnostics: Vec<Diagnostic>,
     /// Clustered **Root-Cause Groups** ordered by static **Blast Radius** descending.
+    #[serde(default)]
     pub root_cause_groups: Vec<RootCauseGroup>,
     /// Self-contained **Fix Capsules** for `Surgical` and `Refactor` **Root-Cause Groups**.
+    #[serde(default)]
     pub fix_capsules: Vec<FixCapsule>,
     /// Source-token-enriched fingerprints keyed by diagnostic `id`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -120,6 +125,15 @@ pub fn write_json_report(report: &JsonReport, path: &Path) -> io::Result<()> {
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(path, format!("{json}\n"))
+}
+
+/// Reads and deserializes a [`JsonReport`] from `path`.
+///
+/// # Errors
+/// Returns an `io::Error` if reading or parsing the JSON file fails.
+pub fn read_json_report(path: &Path) -> io::Result<JsonReport> {
+    let raw = fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Builds a [`JsonReport`] from extracted files, evaluated [`Diagnostic`]s, and file sources.

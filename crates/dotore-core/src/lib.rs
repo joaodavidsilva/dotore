@@ -71,15 +71,20 @@ pub use planner::{
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
-    JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
-    RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
-    build_extracted_report_with_packages, build_report_from_planner_context, build_rule_catalog,
-    ci_config, ci_install, ci_upgrade, diagnose_why_not_active_common, explain_location,
-    explain_location_with_analyzers, explain_rule, format_architecture_signal_explanation,
-    format_design_report, format_design_report_pretty, format_fix_report, format_install_report,
+    JSON_REPORT_SCHEMA_VERSION, JsonReport, PR_COMMENT_MARKER, PrCommentEnv, PrCommentRepoContext,
+    ProjectCoverageMetadata, ReportSummary, RuleCatalogEntry, RulesListOptions, WhyEntry,
+    WhyLocation, WhyReport, build_extracted_report, build_extracted_report_with_packages,
+    build_report_from_planner_context, build_rule_catalog, ci_config, ci_install, ci_upgrade,
+    diagnose_why_not_active_common, explain_location, explain_location_with_analyzers,
+    explain_rule, format_architecture_signal_explanation, format_design_report,
+    format_design_report_pretty, format_fix_report, format_install_report,
     format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
-    format_terminal_report_pretty, format_why_report_text, install_dotore, parse_why_location,
-    render_code_frame, render_html_report, write_and_open_html_report, write_json_report,
+    format_terminal_report_pretty, format_why_report_text, generate_ci_comment, install_dotore,
+    parse_why_location, read_json_report, render_ci_workflow, render_code_frame,
+    render_github_actions_workflow, render_github_pr_comment, render_github_pr_comment_from_env,
+    render_gitlab_ci_snippet, render_html_report, render_pr_comment_markdown,
+    render_pr_comment_markdown_with_env, write_and_open_html_report, write_github_pr_comment,
+    write_json_report,
 };
 pub use rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
