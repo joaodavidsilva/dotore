@@ -444,7 +444,7 @@ pub(super) fn check_jsx_element_design(
     clippy::too_many_arguments,
     reason = "Evaluates all remaining UI design rules on a JSXElement in a single pass"
 )]
-pub(super) fn check_remaining_element_design_rules(
+fn check_remaining_element_design_rules(
     semantic: &Semantic<'_>,
     node_id: NodeId,
     jsx_el: &JSXElement<'_>,

@@ -12,7 +12,7 @@ use ruff_text_size::{Ranged, TextRange};
 
 /// Saved outer scope state restored when exiting a `def` or `async def` function body.
 #[derive(Debug, Clone)]
-pub(crate) struct PySavedFunctionScope {
+pub struct PySavedFunctionScope {
     saved_classes: Vec<String>,
     saved_loop_depth: usize,
     /// Qualified subject name (`"ClassName.method"` or `"func_name"`).
@@ -377,7 +377,7 @@ pub(crate) fn is_subprocess_callee(callee: &str) -> bool {
 
 /// Returns `true` if `package`'s **Capability Gate** allows `rule`.
 #[must_use]
-pub(crate) fn gate_allows_py_rule(package: &WorkspacePackage, rule: RuleId) -> bool {
+fn gate_allows_py_rule(package: &WorkspacePackage, rule: RuleId) -> bool {
     let meta = rule.metadata();
     if package.capability_gate.allows_rule(meta) {
         return true;

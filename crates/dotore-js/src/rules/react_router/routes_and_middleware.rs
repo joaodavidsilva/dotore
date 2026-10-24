@@ -420,7 +420,7 @@ pub(crate) fn check_route_object_recursive(
     }
 }
 
-pub(crate) fn check_lazy_route_expression(
+fn check_lazy_route_expression(
     lazy_expr: &Expression<'_>,
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
@@ -491,7 +491,7 @@ fn check_lazy_returned_object(
     }
 }
 
-pub(crate) fn is_invalid_splat_path(path_val: &str) -> bool {
+fn is_invalid_splat_path(path_val: &str) -> bool {
     if !path_val.contains('*') {
         return false;
     }

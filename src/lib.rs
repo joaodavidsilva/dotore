@@ -60,8 +60,8 @@ pub use dotore_core::{
         InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId, LineDisableDirective,
         OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite,
         SourceLoc, StaticCatalogSiteIr, StructLiteralConstructionSiteIr, SubjectEffectOwner,
-        SymbolKind, SymbolOutline, classify_file_context, compute_line_starts,
-        loc_from_line_starts,
+        SymbolKind, SymbolOutline, TerminalUiPrimitiveKind, classify_file_context,
+        compute_line_starts, loc_from_line_starts,
     },
     rules::{
         AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,

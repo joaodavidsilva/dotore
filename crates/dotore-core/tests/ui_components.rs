@@ -529,3 +529,63 @@ fn terminal_and_design_reports_render_via_shared_ui_primitives_in_plain_and_ansi
     assert!(design_plain.contains("dotore design  files: 2  subjects: 2  findings: 1"));
     assert_eq!(strip_ansi_codes(&design_ansi), design_plain);
 }
+
+#[test]
+fn architecture_diagnostics_with_cascade_steps_classify_as_imports_and_arch_bucket() {
+    let arch_diag = Diagnostic::new(
+        RuleId::ArchNoMixedIoAndPresentation,
+        PathBuf::from("src/OrdersView.tsx"),
+        SourceLoc { line: 8, column: 1 },
+        ByteSpan {
+            start: 40,
+            end: 180,
+        },
+        "OrdersView",
+        "Module mixes I/O with UI presentation.",
+    )
+    .with_cascade_steps(vec![
+        "data-or-network-io: fetch(...)".to_string(),
+        "terminal-or-ui-presentation: <section>".to_string(),
+    ]);
+
+    assert_eq!(classify_style_bucket(&arch_diag), "IMPORTS & ARCH");
+
+    let report = JsonReport {
+        schema_version: 3,
+        mode: ScanMode::Full,
+        summary: ReportSummary {
+            files_scanned: 1,
+            subjects_scanned: 1,
+            effects_scanned: 0,
+            total_diagnostics: 1,
+            error_count: 0,
+            warning_count: 1,
+            affected_file_count: 1,
+            autofix_count: 0,
+            surgical_count: 0,
+            refactor_count: 1,
+            health_score: 96,
+            score_label: "Excellent".to_string(),
+        },
+        projects: Vec::new(),
+        diagnostics: vec![arch_diag],
+        root_cause_groups: Vec::new(),
+        fix_capsules: Vec::new(),
+        diagnostic_fingerprints: BTreeMap::new(),
+        diff: None,
+        baseline: None,
+        baseline_degraded: false,
+    };
+    let tabs = build_filter_tabs(&report);
+    assert!(
+        tabs.iter()
+            .any(|t| t.kind == TuiFilterKind::StyleBucket("IMPORTS & ARCH") && t.count == 1),
+        "Expected IMPORTS & ARCH tab for architecture diagnostic with cascade_steps, got: {tabs:#?}"
+    );
+    assert!(
+        !tabs
+            .iter()
+            .any(|t| t.kind == TuiFilterKind::StyleBucket("EFFECTS & STATE")),
+        "Expected architecture diagnostic with cascade_steps NOT to appear in EFFECTS & STATE tab"
+    );
+}

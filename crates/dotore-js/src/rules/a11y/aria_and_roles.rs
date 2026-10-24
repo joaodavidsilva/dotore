@@ -593,7 +593,7 @@ fn check_aria_hidden_and_prefer_tag(
     clippy::too_many_arguments,
     reason = "Evaluates role-has-required-aria-props and role-supports-aria-props on the same JSXOpeningElement"
 )]
-pub(super) fn check_role_aria_props(
+fn check_role_aria_props(
     semantic: &Semantic<'_>,
     opening: &JSXOpeningElement<'_>,
     tag: &str,

@@ -10,8 +10,8 @@ use std::{
 
 pub use dotore_core::planner::{
     PlanResult, PlannerContext, build_fix_capsule, build_root_cause_groups_and_capsules,
-    compute_root_cause_group_id, excerpt_from_span, format_plan_report, plan_project, slice_span,
-    spans_intersect,
+    compute_root_cause_group_id, excerpt_from_span, find_architecture_exemplar_from_facets,
+    format_plan_report, plan_project, slice_span, spans_intersect,
 };
 
 use crate::{
@@ -190,81 +190,26 @@ fn find_js_architecture_exemplar(
         .map(|d| d.file.as_path())
         .collect();
 
-    let unflagged: Vec<&FileIr> = sorted_files
+    let candidates = sorted_files
         .iter()
         .copied()
         .filter(|f| f.path != group.file && !flagged_for_rule.contains(f.path.as_path()))
-        .collect();
+        .map(|f| {
+            let primary_span = f
+                .subjects
+                .iter()
+                .find(|s| s.name.is_some())
+                .map(|s| s.span)
+                .or_else(|| f.symbol_outlines.first().map(|sym| sym.span));
+            (
+                f.path.as_path(),
+                f.source.as_str(),
+                &f.architecture_facets,
+                primary_span,
+            )
+        });
 
-    if group.rule == RuleId::ArchNoInlineTerminalUiPrimitives {
-        if let Some(ui_file) = unflagged.iter().copied().find(|f| {
-            f.architecture_facets.is_ui_kit_module
-                || f.path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s == "ui" || s.ends_with("_ui") || s.ends_with("-ui"))
-        }) && let Some(ex) = excerpt_for_file_ir(ui_file, sources)
-        {
-            return Some(ex);
-        }
-    } else if group.rule == RuleId::ArchPreferFluentBuilder
-        && let Some(builder_file) = unflagged
-            .iter()
-            .copied()
-            .find(|f| {
-                f.architecture_facets
-                    .defined_builder_types
-                    .iter()
-                    .any(|t| t == &group.target_name)
-            })
-            .or_else(|| {
-                unflagged
-                    .iter()
-                    .copied()
-                    .find(|f| !f.architecture_facets.defined_builder_types.is_empty())
-            })
-        && let Some(ex) = excerpt_for_file_ir(builder_file, sources)
-    {
-        return Some(ex);
-    }
-
-    if let Some(cohesive) = unflagged
-        .iter()
-        .copied()
-        .find(|f| f.architecture_facets.distinct_concern_buckets().len() == 1)
-        && let Some(ex) = excerpt_for_file_ir(cohesive, sources)
-    {
-        return Some(ex);
-    }
-
-    for candidate in unflagged {
-        if let Some(ex) = excerpt_for_file_ir(candidate, sources) {
-            return Some(ex);
-        }
-    }
-
-    None
-}
-
-fn excerpt_for_file_ir(file: &FileIr, sources: &HashMap<PathBuf, String>) -> Option<SourceExcerpt> {
-    let src = sources
-        .get(&file.path)
-        .map_or(file.source.as_str(), String::as_str);
-    if src.is_empty() {
-        return None;
-    }
-    if let Some(subj) = file.subjects.iter().find(|s| s.name.is_some()) {
-        return Some(excerpt_from_span(&file.path, src, subj.span));
-    }
-    if let Some(sym) = file.symbol_outlines.first() {
-        return Some(excerpt_from_span(&file.path, src, sym.span));
-    }
-    let end = u32::try_from(src.len()).unwrap_or(0);
-    Some(excerpt_from_span(
-        &file.path,
-        src,
-        ByteSpan { start: 0, end },
-    ))
+    find_architecture_exemplar_from_facets(group.rule, &group.file, candidates, sources)
 }
 
 #[expect(

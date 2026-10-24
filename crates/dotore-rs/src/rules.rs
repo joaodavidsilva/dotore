@@ -8,7 +8,7 @@ use std::{
 use dotore_core::{
     ByteSpan, CapabilityGate, ConcernBucket, Diagnostic, DotoreConfig, ExtractedFile, FileContext,
     HelperFingerprintIr, PackageAnalysisResult, ResolvedCallerSite, RuleId, RuleSeverity, RuleTag,
-    SourceLoc, StructLiteralConstructionSiteIr, WorkspacePackage,
+    SourceLoc, StructLiteralConstructionSiteIr, SymbolKind, WorkspacePackage,
 };
 
 use crate::{ir::RsFileIr, matchers::RsCandidateFinding};
@@ -455,7 +455,7 @@ fn evaluate_rs_file_soc_rules(
             let finding = RsCandidateFinding::new(
                 RuleId::ArchNoInlineTerminalUiPrimitives,
                 subj_name,
-                site.kind.clone(),
+                site.kind.as_str(),
                 "archNoInlineTerminalUiPrimitives",
                 format!(
                     "Inline `{}` literal (`{}`) used outside designated terminal UI modules; delegate rendering to the shared UI primitive kit.",
@@ -488,11 +488,19 @@ fn evaluate_rs_file_soc_rules(
     let distinct_buckets = facets.distinct_concern_buckets();
     let cluster_count = distinct_buckets.len().max(facets.domain_clusters.len());
     let symbol_count = file.symbol_outlines.len().max(file.subjects_count);
-    if !io_signals.is_empty()
-        && !ui_signals.is_empty()
-        && !is_exempt_report_adapter
+    let distinct_symbol_kinds = file
+        .symbol_outlines
+        .iter()
+        .map(|s| s.kind)
+        .collect::<HashSet<SymbolKind>>()
+        .len();
+    if !is_exempt_report_adapter
         && cluster_count >= arch_cfg.min_monolith_domain_clusters
         && symbol_count >= arch_cfg.min_monolith_symbols
+        && distinct_symbol_kinds >= 3
+        && (!io_signals.is_empty() || !ui_signals.is_empty())
+        && (!facets.static_catalog_sites.is_empty()
+            || (!io_signals.is_empty() && !ui_signals.is_empty()))
     {
         let mod_name = file
             .path
@@ -501,6 +509,16 @@ fn evaluate_rs_file_soc_rules(
             .unwrap_or("monolith")
             .to_string();
         let bucket_names: Vec<&str> = distinct_buckets.iter().map(|b| b.as_str()).collect();
+        let (primary_loc, primary_span) = file.symbol_outlines.first().map_or(
+            (
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan {
+                    start: 0,
+                    end: file_len,
+                },
+            ),
+            |sym| (sym.loc, sym.span),
+        );
         let finding = RsCandidateFinding::new(
             RuleId::ArchNoMixedDomainMonolith,
             Some(mod_name.clone()),
@@ -513,11 +531,8 @@ fn evaluate_rs_file_soc_rules(
                 bucket_names.join(", "),
                 symbol_count
             ),
-            SourceLoc { line: 1, column: 1 },
-            ByteSpan {
-                start: 0,
-                end: file_len,
-            },
+            primary_loc,
+            primary_span,
         )
         .with_cascade_steps(
             bucket_names

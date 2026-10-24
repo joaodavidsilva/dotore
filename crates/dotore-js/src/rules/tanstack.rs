@@ -416,9 +416,7 @@ pub(crate) fn is_tanstack_query_source(src: &str) -> bool {
     (src.starts_with("@tanstack/") && src.contains("query")) || src == "react-query"
 }
 
-pub(crate) fn static_member_prop_name<'a>(
-    expr: &'a Expression<'a>,
-) -> Option<(&'a Expression<'a>, &'a str)> {
+fn static_member_prop_name<'a>(expr: &'a Expression<'a>) -> Option<(&'a Expression<'a>, &'a str)> {
     if let Some(parts) = member_call_parts(expr) {
         return Some(parts);
     }

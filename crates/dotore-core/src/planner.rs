@@ -849,78 +849,107 @@ fn find_architecture_exemplar_in_extracted_files(
         b_same.cmp(&a_same).then_with(|| a.path.cmp(&b.path))
     });
 
-    if group.rule == RuleId::ArchNoInlineTerminalUiPrimitives {
-        if let Some(ui_file) = ordered.iter().copied().find(|f| {
-            f.architecture_facets.is_ui_kit_module
-                || f.path
+    let candidates = ordered.into_iter().map(|f| {
+        let primary_span = f
+            .subject_spans
+            .iter()
+            .find(|(n, _, _)| n.is_some())
+            .map(|(_, span, _)| *span)
+            .or_else(|| f.symbol_outlines.first().map(|sym| sym.span));
+        (
+            f.path.as_path(),
+            f.source.as_str(),
+            &f.architecture_facets,
+            primary_span,
+        )
+    });
+
+    find_architecture_exemplar_from_facets(group.rule, &group.file, candidates, sources)
+}
+
+/// Selects the best repository **Exemplar** [`SourceExcerpt`] for an architecture/SoC/reuse rule
+/// from an ordered iterator of unflagged candidate files `(path, fallback_source, facets, primary_span)`.
+#[must_use]
+pub fn find_architecture_exemplar_from_facets<'a, I>(
+    rule: RuleId,
+    group_file: &Path,
+    files: I,
+    sources: &HashMap<PathBuf, String>,
+) -> Option<SourceExcerpt>
+where
+    I: IntoIterator<
+        Item = (
+            &'a Path,
+            &'a str,
+            &'a ArchitectureFileFacets,
+            Option<ByteSpan>,
+        ),
+    >,
+{
+    if !rule.is_architecture_soc_or_reuse_rule() {
+        return None;
+    }
+
+    let candidates: Vec<(
+        &'a Path,
+        &'a str,
+        &'a ArchitectureFileFacets,
+        Option<ByteSpan>,
+    )> = files
+        .into_iter()
+        .filter(|(p, _, _, _)| *p != group_file)
+        .collect();
+
+    let build_excerpt = |path: &Path,
+                         fallback_src: &str,
+                         primary_span: Option<ByteSpan>|
+     -> Option<SourceExcerpt> {
+        let src = sources.get(path).map_or(fallback_src, String::as_str);
+        if src.is_empty() {
+            return None;
+        }
+        if let Some(span) = primary_span {
+            return Some(excerpt_from_span(path, src, span));
+        }
+        let end = u32::try_from(src.len()).unwrap_or(0);
+        Some(excerpt_from_span(path, src, ByteSpan { start: 0, end }))
+    };
+
+    if rule == RuleId::ArchNoInlineTerminalUiPrimitives {
+        if let Some(&(path, src, _, span)) = candidates.iter().find(|(path, _, facets, _)| {
+            facets.is_ui_kit_module
+                || path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| s == "ui" || s.ends_with("_ui"))
-        }) && let Some(ex) = excerpt_for_extracted_file(ui_file, sources)
+                    .is_some_and(|s| s == "ui" || s.ends_with("_ui") || s.ends_with("-ui"))
+        }) && let Some(ex) = build_excerpt(path, src, span)
         {
             return Some(ex);
         }
-    } else if group.rule == RuleId::ArchPreferFluentBuilder
-        && let Some(builder_file) = ordered
+    } else if rule == RuleId::ArchPreferFluentBuilder
+        && let Some(&(path, src, _, span)) = candidates
             .iter()
-            .copied()
-            .find(|f| {
-                f.architecture_facets
-                    .defined_builder_types
-                    .iter()
-                    .any(|t| t == &group.target_name)
-            })
-            .or_else(|| {
-                ordered
-                    .iter()
-                    .copied()
-                    .find(|f| !f.architecture_facets.defined_builder_types.is_empty())
-            })
-        && let Some(ex) = excerpt_for_extracted_file(builder_file, sources)
+            .find(|(_, _, facets, _)| !facets.defined_builder_types.is_empty())
+        && let Some(ex) = build_excerpt(path, src, span)
     {
         return Some(ex);
     }
 
-    if let Some(cohesive) = ordered
+    if let Some(&(path, src, _, span)) = candidates
         .iter()
-        .copied()
-        .find(|f| f.architecture_facets.distinct_concern_buckets().len() == 1)
-        && let Some(ex) = excerpt_for_extracted_file(cohesive, sources)
+        .find(|(_, _, facets, _)| facets.distinct_concern_buckets().len() == 1)
+        && let Some(ex) = build_excerpt(path, src, span)
     {
         return Some(ex);
     }
 
-    for candidate in ordered {
-        if let Some(ex) = excerpt_for_extracted_file(candidate, sources) {
+    for (path, src, _, span) in candidates {
+        if let Some(ex) = build_excerpt(path, src, span) {
             return Some(ex);
         }
     }
 
     None
-}
-
-fn excerpt_for_extracted_file(
-    file: &ExtractedFile,
-    sources: &HashMap<PathBuf, String>,
-) -> Option<SourceExcerpt> {
-    let src = sources
-        .get(&file.path)
-        .map_or(file.source.as_str(), String::as_str);
-    if src.is_empty() {
-        return None;
-    }
-    if let Some((_, span, _)) = file.subject_spans.iter().find(|(n, _, _)| n.is_some()) {
-        return Some(excerpt_from_span(&file.path, src, *span));
-    }
-    if let Some(sym) = file.symbol_outlines.first() {
-        return Some(excerpt_from_span(&file.path, src, sym.span));
-    }
-    let end = u32::try_from(src.len()).unwrap_or(0);
-    Some(excerpt_from_span(
-        &file.path,
-        src,
-        ByteSpan { start: 0, end },
-    ))
 }
 
 fn same_language_family(a: &Path, b: &Path) -> bool {

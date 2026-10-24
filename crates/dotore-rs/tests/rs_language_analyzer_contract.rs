@@ -814,6 +814,45 @@ pub fn render_ledger_tui() {
         res_monolith.diagnostics
     );
 
+    // 1b. Non-UI monolith combining I/O + types + static catalog + helper (`arch-no-mixed-domain-monolith`)
+    let mut non_ui_catalog = String::new();
+    for i in 0..20 {
+        non_ui_catalog.push_str(&format!("    (\"CODE_{i:02}\", \"Desc {i}\"),\n"));
+    }
+    let non_ui_monolith_src = format!(
+        r#"
+pub struct OrderRecord {{ pub id: u64 }}
+pub struct PaymentRecord {{ pub cents: i64 }}
+pub enum SettlementState {{ Pending, Settled }}
+pub const ERROR_CATALOG: &[(&str, &str)] = &[
+{non_ui_catalog}];
+
+fn normalize_order_code(raw: &str) -> String {{
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {{
+        return "NONE".to_string();
+    }}
+    trimmed.to_ascii_uppercase()
+}}
+
+pub async fn persist_order(pool: &sqlx::PgPool, code: &str) {{
+    let _norm = normalize_order_code(code);
+    let _ = sqlx::query("INSERT INTO orders VALUES (1)").execute(pool).await;
+}}
+"#
+    );
+    let ext_non_ui_monolith =
+        analyzer.extract_file(Path::new("src/backend_monolith.rs"), &non_ui_monolith_src);
+    let res_non_ui_monolith = analyzer.analyze_package(&pkg_custom, &[ext_non_ui_monolith], None);
+    assert!(
+        res_non_ui_monolith
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::ArchNoMixedDomainMonolith),
+        "Expected ArchNoMixedDomainMonolith on non-UI monolith combining I/O + types + static catalog + helpers, got: {:#?}",
+        res_non_ui_monolith.diagnostics
+    );
+
     // 2. Inline suppressions (`// dotore-disable-next-line` and `#[allow(dotore::...)]`)
     let suppressed_src = r#"
 #![allow(dotore::arch_no_mixed_io_and_presentation)]

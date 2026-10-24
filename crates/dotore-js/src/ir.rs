@@ -21,7 +21,7 @@ pub use types::{
     JsxElementIr, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
     PackageAnalysisResult, RelatedHookOwnerSpanIr, SecuritySinkKind, SetterCallSite, SourceLoc,
     StaticCatalogSiteIr, StructLiteralConstructionSiteIr, SubjectEffectOwner, SubjectIr,
-    SubjectKind, SymbolKind, SymbolOutline, classify_file_context, compute_line_starts,
-    loc_from_line_starts,
+    SubjectKind, SymbolKind, SymbolOutline, TerminalUiPrimitiveKind, classify_file_context,
+    compute_line_starts, loc_from_line_starts,
 };
 pub(crate) use types::{ContextConsumerSiteIr, ContextProviderSiteIr, SemanticRuleSite};

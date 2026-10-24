@@ -319,7 +319,7 @@ pub(crate) fn get_effect_cleanup_span(
 }
 
 /// Finds a descendant `NodeId` under `ancestor_id` with exact `target_span`.
-pub(crate) fn find_node_by_span(
+fn find_node_by_span(
     semantic: &Semantic<'_>,
     ancestor_id: NodeId,
     target_span: Span,
@@ -929,7 +929,7 @@ fn is_jsx_root_imported(semantic: &Semantic<'_>, name: &JSXElementName<'_>) -> b
     )
 }
 
-pub(crate) fn check_enclosing_array_map(
+fn check_enclosing_array_map(
     semantic: &Semantic<'_>,
     jsx_node_id: NodeId,
 ) -> (bool, Option<String>) {

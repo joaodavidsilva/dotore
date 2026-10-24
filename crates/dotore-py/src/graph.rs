@@ -28,11 +28,11 @@ pub(crate) struct PyModuleGraphInfo {
     /// Exported top-level `async def` function names defined in this module.
     pub exported_async_functions: HashSet<String>,
     /// Runtime imports outside `if TYPE_CHECKING:` blocks (`py-arch-no-circular-imports`).
-    pub runtime_imports: Vec<PyImportEdge>,
+    runtime_imports: Vec<PyImportEdge>,
     /// All imported module and symbol names (including `if TYPE_CHECKING:`).
-    pub all_imports: Vec<PyImportEdge>,
+    all_imports: Vec<PyImportEdge>,
     /// Public top-level declarations eligible for `py-arch-no-unused-exports`.
-    pub public_exports: Vec<PyExportSymbol>,
+    public_exports: Vec<PyExportSymbol>,
     /// Explicitly listed symbol names in `__all__ = [...]`.
     pub dunder_all: HashSet<String>,
     /// All identifier and attribute names referenced anywhere in this file.
@@ -43,7 +43,7 @@ pub(crate) struct PyModuleGraphInfo {
 
 /// An `import ...` or `from ... import ...` statement in a Python module.
 #[derive(Debug, Clone)]
-pub(crate) struct PyImportEdge {
+struct PyImportEdge {
     /// Relative import dot level (`0` for absolute, `1` for `.`, `2` for `..`, etc.).
     pub level: u32,
     /// Optional dotted module path (`from <module> import ...` or `import <module>`).
@@ -58,7 +58,7 @@ pub(crate) struct PyImportEdge {
 
 /// A top-level public symbol defined in a Python module.
 #[derive(Debug, Clone)]
-pub(crate) struct PyExportSymbol {
+struct PyExportSymbol {
     /// Symbol name.
     pub name: String,
     /// Byte span of the symbol declaration or identifier.
@@ -1071,7 +1071,7 @@ fn evaluate_thin_entrypoint_rule(
     }
 
     let (subject_name, span, loc) = resolve_entrypoint_anchor(file);
-    if is_file_level_rule_suppressed(package, file, RuleId::ArchThinEntrypoint) {
+    if is_file_level_rule_suppressed(package, file, RuleId::ArchThinEntrypoint, loc, span) {
         return;
     }
     let Some(effective_sev) = resolve_active_py_rule_severity(
@@ -1177,7 +1177,13 @@ fn evaluate_mixed_io_and_presentation_rule(
     let loc = primary_sig.loc;
     let subject_name = enclosing_subject_for_span(file, span);
 
-    if is_file_level_rule_suppressed(package, file, RuleId::ArchNoMixedIoAndPresentation) {
+    if is_file_level_rule_suppressed(
+        package,
+        file,
+        RuleId::ArchNoMixedIoAndPresentation,
+        loc,
+        span,
+    ) {
         return;
     }
     let Some(effective_sev) = resolve_active_py_rule_severity(
@@ -1245,7 +1251,13 @@ fn evaluate_separate_static_catalog_from_types_rule(
         return;
     };
 
-    if is_file_level_rule_suppressed(package, file, RuleId::ArchSeparateStaticCatalogFromTypes) {
+    if is_file_level_rule_suppressed(
+        package,
+        file,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        catalog.loc,
+        catalog.span,
+    ) {
         return;
     }
     let Some(effective_sev) = resolve_active_py_rule_severity(
@@ -1316,7 +1328,7 @@ fn evaluate_mixed_domain_monolith_rule(
         ),
         |sym| (sym.span, sym.loc),
     );
-    if is_file_level_rule_suppressed(package, file, RuleId::ArchNoMixedDomainMonolith) {
+    if is_file_level_rule_suppressed(package, file, RuleId::ArchNoMixedDomainMonolith, loc, span) {
         return;
     }
     let Some(effective_sev) = resolve_active_py_rule_severity(
@@ -1399,7 +1411,7 @@ fn evaluate_inline_terminal_ui_primitives_rule(
             .with_subject(subject_name)
             .with_severity(effective_sev)
             .with_message_id("archNoInlineTerminalUiPrimitives")
-            .with_target_name(site.kind.clone()),
+            .with_target_name(site.kind.as_str().to_string()),
         );
     }
 }
@@ -1562,10 +1574,41 @@ fn evaluate_prefer_fluent_builder_rule(
         if sites.len() < min_sites {
             continue;
         }
-        for (site_pos, &(file_idx, site, sev)) in sites.iter().enumerate() {
+        let mut default_field_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for &(_, site, _) in &sites {
+            let unique_defaults: BTreeSet<&str> = site
+                .default_or_literal_fields
+                .iter()
+                .map(String::as_str)
+                .collect();
+            for field in unique_defaults {
+                *default_field_counts.entry(field).or_insert(0) += 1;
+            }
+        }
+        let overlapping_defaults: Vec<&str> = default_field_counts
+            .into_iter()
+            .filter_map(|(field, count)| (count >= 2).then_some(field))
+            .collect();
+        if overlapping_defaults.len() < 2 {
+            continue;
+        }
+        let qualifying_sites: Vec<(usize, &StructLiteralConstructionSiteIr, RuleSeverity)> = sites
+            .into_iter()
+            .filter(|(_, s, _)| {
+                s.default_or_literal_fields
+                    .iter()
+                    .filter(|f| overlapping_defaults.contains(&f.as_str()))
+                    .count()
+                    >= 2
+            })
+            .collect();
+        if qualifying_sites.len() < min_sites {
+            continue;
+        }
+        for (site_pos, &(file_idx, site, sev)) in qualifying_sites.iter().enumerate() {
             let file = &files[file_idx];
             let subject_name = enclosing_subject_for_span(file, site.span);
-            let caller_sites: Vec<ResolvedCallerSite> = sites
+            let caller_sites: Vec<ResolvedCallerSite> = qualifying_sites
                 .iter()
                 .enumerate()
                 .filter(|&(other_pos, _)| other_pos != site_pos)
@@ -1586,7 +1629,7 @@ fn evaluate_prefer_fluent_builder_rule(
                 format!(
                     "type={type_name}, fields={} >= {min_fields}, sites={} >= {min_sites}",
                     site.field_names.len(),
-                    sites.len()
+                    qualifying_sites.len()
                 ),
                 format!(
                     "default_or_literal_fields=[{}]",
@@ -1601,9 +1644,9 @@ fn evaluate_prefer_fluent_builder_rule(
                     site.span,
                     format!(
                         "`{type_name}(...)` is constructed across {} call sites with {} keyword arguments including boilerplate defaults (`{}`); define a `{type_name}Builder`, `{type_name}.from_defaults(...)`, or `build_*` factory.",
-                        sites.len(),
+                        qualifying_sites.len(),
                         site.field_names.len(),
-                        site.default_or_literal_fields.join(", ")
+                        overlapping_defaults.join(", ")
                     ),
                 )
                 .with_subject(subject_name)
@@ -1657,6 +1700,8 @@ fn is_file_level_rule_suppressed(
     package: &WorkspacePackage,
     file: &ExtractedFile,
     rule: RuleId,
+    loc: SourceLoc,
+    span: ByteSpan,
 ) -> bool {
     if !package.config.respect_inline_disables {
         return false;
@@ -1664,14 +1709,39 @@ fn is_file_level_rule_suppressed(
     let first_code_line = file.symbol_outlines.first().map_or(1, |s| s.loc.line);
     if file.suppressions.matches_line_or_block(rule, 1)
         || file.suppressions.matches_line_or_block(rule, 2)
+        || file.suppressions.matches_line_or_block(rule, 3)
         || file
             .suppressions
             .matches_line_or_block(rule, first_code_line)
+        || file.is_suppressed(rule, loc.line, span)
     {
         return true;
     }
-    file.suppressions
-        .line_directives
+    let enclosing_subj_span = file
+        .subject_spans
         .iter()
-        .any(|d| !d.rules.is_empty() && dotore_core::rule_list_matches(&d.rules, rule))
+        .filter(|(_, s, _)| s.start <= span.start && span.end <= s.end)
+        .min_by_key(|(_, s, _)| s.end.saturating_sub(s.start))
+        .map(|(_, s, _)| *s);
+    file.suppressions.line_directives.iter().any(|d| {
+        if d.rules.is_empty() || !dotore_core::rule_list_matches(&d.rules, rule) {
+            return false;
+        }
+        if d.target_line <= 3 {
+            return true;
+        }
+        if let Some(subj_span) = enclosing_subj_span
+            && let Some(ir) = file.downcast_payload::<PyFileIr>()
+        {
+            let subj_start =
+                dotore_core::loc_from_line_starts(&ir.line_starts, subj_span.start).line;
+            let subj_end = dotore_core::loc_from_line_starts(
+                &ir.line_starts,
+                subj_span.end.saturating_sub(1).max(subj_span.start),
+            )
+            .line;
+            return d.target_line >= subj_start && d.target_line <= subj_end;
+        }
+        false
+    })
 }

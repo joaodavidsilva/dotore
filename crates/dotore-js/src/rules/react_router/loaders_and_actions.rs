@@ -184,7 +184,7 @@ pub(crate) fn check_inline_route_handler_expr(
 }
 
 /// Checks `react-router-guard-aborted-handle-error`.
-pub(crate) fn check_handle_error_fn(
+fn check_handle_error_fn(
     fn_name: &str,
     statements: &[Statement<'_>],
     fn_span: Span,
@@ -289,7 +289,7 @@ pub(crate) fn check_loader_or_action_statements(
     }
 }
 
-pub(crate) fn check_loader_or_action_expr(
+fn check_loader_or_action_expr(
     role_name: &str,
     expr: &Expression<'_>,
     _source: &str,
@@ -340,7 +340,7 @@ fn find_session_mutations_in_statements(statements: &[Statement<'_>]) -> Vec<(St
 }
 
 /// Checks `react-router-v8-no-meta-data-field`.
-pub(crate) fn check_meta_data_field(
+fn check_meta_data_field(
     params: &FormalParameters<'_>,
     statements: &[Statement<'_>],
     source: &str,
@@ -362,7 +362,7 @@ pub(crate) fn check_meta_data_field(
     }
 }
 
-pub(crate) fn check_meta_data_field_expr(
+fn check_meta_data_field_expr(
     params: &FormalParameters<'_>,
     expr: &Expression<'_>,
     source: &str,

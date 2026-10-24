@@ -151,7 +151,7 @@ pub(crate) fn push_simple_diagnostic(
 
 /// Constructs a [`SemanticRuleSite`] from an [`oxc_span::Span`] and `line_starts`.
 #[must_use]
-pub(crate) fn make_semantic_site(
+fn make_semantic_site(
     rule: RuleId,
     subject_name: Option<String>,
     message_id: &'static str,
@@ -332,7 +332,7 @@ pub(crate) fn is_react_hook_callee(
     }
 }
 
-pub(crate) fn is_imported_react_hook_symbol(
+fn is_imported_react_hook_symbol(
     semantic: &Semantic<'_>,
     sym_id: SymbolId,
     hook_name: &str,
@@ -790,7 +790,7 @@ pub(crate) fn get_object_prop_bool(obj: &ObjectExpression<'_>, key_name: &str) -
 
 /// Extracts a numeric literal value for property `key_name` on `obj`.
 #[must_use]
-pub(crate) fn get_object_prop_number(obj: &ObjectExpression<'_>, key_name: &str) -> Option<f64> {
+fn get_object_prop_number(obj: &ObjectExpression<'_>, key_name: &str) -> Option<f64> {
     let prop = get_object_prop(obj, key_name)?;
     eval_numeric_expr(&prop.value)
 }

@@ -1248,7 +1248,7 @@ pub(super) fn check_custom_a11y_rules(
     clippy::too_many_arguments,
     reason = "Evaluates shadcn, Radix UI, Base UI, and React Aria composition rules on a JSXElement"
 )]
-pub(super) fn check_ui_library_a11y(
+fn check_ui_library_a11y(
     semantic: &Semantic<'_>,
     jsx_el: &JSXElement<'_>,
     tag: &str,
@@ -1420,7 +1420,7 @@ pub(super) fn check_ui_library_a11y(
     clippy::too_many_arguments,
     reason = "Walks static JSX subtree collecting iframe titles and duplicate referenced IDs in one pass"
 )]
-pub(super) fn collect_subtree_frames_and_ids(
+fn collect_subtree_frames_and_ids(
     jsx_el: &JSXElement<'_>,
     semantic: &Semantic<'_>,
     const_strings: &HashMap<SymbolId, String>,

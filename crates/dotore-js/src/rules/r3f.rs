@@ -57,7 +57,7 @@ use self::{
     webgl_and_shaders::check_shader_materials,
 };
 
-pub(crate) const R3F_MODULES: &[&str] = &[
+const R3F_MODULES: &[&str] = &[
     "@react-three/fiber",
     "@react-three/fiber/native",
     "@react-three/fiber/webgpu",
@@ -67,7 +67,7 @@ pub(crate) const R3F_MODULES: &[&str] = &[
 
 pub(crate) const R3F_WEBGPU_MODULES: &[&str] = &["@react-three/fiber/webgpu"];
 
-pub(crate) const DREI_LOADER_HOOKS: &[&str] = &[
+const DREI_LOADER_HOOKS: &[&str] = &[
     "useCubeTexture",
     "useFBX",
     "useFont",
@@ -336,7 +336,7 @@ pub(crate) const THREE_SHADER_BUILTINS: &[&str] = &[
     "viewMatrix",
 ];
 
-pub(crate) const HTML_INTRINSIC_TAGS: &[&str] = &[
+const HTML_INTRINSIC_TAGS: &[&str] = &[
     "a", "Area", "audio", "b", "button", "canvas", "code", "div", "em", "footer", "form", "h1",
     "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "iframe", "img", "input", "label", "li",
     "main", "nav", "ol", "option", "p", "pre", "section", "select", "small", "span", "strong",

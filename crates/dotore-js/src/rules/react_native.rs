@@ -39,7 +39,7 @@ use self::{
     },
 };
 
-pub(crate) const REACT_NATIVE_TEXT_COMPONENTS: &[&str] = &[
+const REACT_NATIVE_TEXT_COMPONENTS: &[&str] = &[
     "Text",
     "TextInput",
     "Typography",
@@ -55,7 +55,7 @@ pub(crate) const REACT_NATIVE_TEXT_COMPONENTS: &[&str] = &[
     "Animated.Text",
 ];
 
-pub(crate) const REACT_NATIVE_TEXT_KEYWORDS: &[&str] = &[
+const REACT_NATIVE_TEXT_KEYWORDS: &[&str] = &[
     "Text",
     "Title",
     "Label",
@@ -68,7 +68,7 @@ pub(crate) const REACT_NATIVE_TEXT_KEYWORDS: &[&str] = &[
     "Body",
 ];
 
-pub(crate) const REACT_NATIVE_HOST_COMPONENTS: &[&str] = &[
+const REACT_NATIVE_HOST_COMPONENTS: &[&str] = &[
     "View",
     "ScrollView",
     "SafeAreaView",

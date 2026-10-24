@@ -96,7 +96,7 @@ fn is_outside_call_args_within(
 }
 
 /// Traverses upstream variable and function definitions from `ref_id`, stopping at imports and parameters.
-pub(crate) fn ascend<F>(
+fn ascend<F>(
     semantic: &Semantic<'_>,
     ref_entries: &[RefEntry],
     ref_id: ReferenceId,
@@ -266,7 +266,7 @@ fn is_alias_ref(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
 }
 
 /// Returns all references along a synchronous call/alias chain starting at `ref_id`.
-pub(crate) fn get_synchronous_call_chain(
+fn get_synchronous_call_chain(
     semantic: &Semantic<'_>,
     ref_entries: &[RefEntry],
     ref_id: ReferenceId,
@@ -397,7 +397,7 @@ pub(crate) fn is_prop(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
 }
 
 /// Checks if `ref_id` resolves to a constant literal/array/object declaration.
-pub(crate) fn is_constant(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
+fn is_constant(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
     let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
         return false;
     };
@@ -435,7 +435,7 @@ pub(crate) fn is_ref(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
 }
 
 /// Checks if `ref_id` is being accessed via `.current` (`ref.current`).
-pub(crate) fn is_ref_current(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
+fn is_ref_current(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
     let node_id = semantic.scoping().get_reference(ref_id).node_id();
     let node_span = semantic.nodes().get_node(node_id).span();
     matches!(

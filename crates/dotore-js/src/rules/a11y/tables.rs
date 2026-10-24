@@ -518,7 +518,7 @@ pub(super) const GLOBAL_ARIA_PROPERTIES: &[&str] = &[
     "aria-roledescription",
 ];
 
-pub(super) const AUTOFILL_TOKENS: &[&str] = &[
+const AUTOFILL_TOKENS: &[&str] = &[
     "off",
     "on",
     "name",
@@ -583,7 +583,7 @@ pub(super) const UNINFORMATIVE_ARIA_LABELS: &[&str] = &[
     "icon", "button", "image", "img", "graphic", "svg", "picture", "element", "field", "input",
 ];
 
-pub(super) const COMMON_LANG_TAGS: &[&str] = &[
+const COMMON_LANG_TAGS: &[&str] = &[
     "aa", "ab", "ae", "af", "ak", "am", "an", "ar", "as", "av", "ay", "az", "ba", "be", "bg", "bh",
     "bi", "bm", "bn", "bo", "br", "bs", "ca", "ce", "ch", "co", "cr", "cs", "cu", "cv", "cy", "da",
     "de", "dv", "dz", "ee", "el", "en", "eo", "es", "et", "eu", "fa", "ff", "fi", "fj", "fo", "fr",

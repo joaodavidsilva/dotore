@@ -264,6 +264,11 @@ where
         &line_starts,
         &mut architecture_facets,
     );
+    for cat in &architecture_facets.static_catalog_sites {
+        contextual_owner_spans
+            .function_boundary_spans
+            .push(cat.span);
+    }
 
     let file_ir = FileIr {
         path: path.to_path_buf(),

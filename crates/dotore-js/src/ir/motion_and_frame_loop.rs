@@ -144,7 +144,7 @@ pub(crate) fn extract_stylesheet_motion_ir(source: &str) -> MotionFileIr {
 /// Checks if `content` contains a non-negated `@media (... (prefers-reduced-motion: reduce) ...)`
 /// block with at least one CSS declaration (ignoring CSS/SCSS comments and string literals).
 #[must_use]
-pub(crate) fn has_reduced_motion_media_query(content: &str) -> bool {
+fn has_reduced_motion_media_query(content: &str) -> bool {
     let sanitized = remove_css_comments_and_strings(content);
     let lower = sanitized.to_ascii_lowercase();
     let bytes = lower.as_bytes();

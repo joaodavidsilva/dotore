@@ -52,19 +52,22 @@ pub use fixer::{
 };
 pub use ir::{
     ArchitectureFileFacets, BlockDisableRange, ByteSpan, ConcernBucket, ConcernSignalSite,
-    ContextualOwnerSpansIr, ExtractedFile, FileContext, FileSuppressions, HelperFingerprintIr,
-    InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId, LineDisableDirective,
-    OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite, SourceLoc,
-    StaticCatalogSiteIr, StructLiteralConstructionSiteIr, SubjectEffectOwner,
-    SuppressionDirectiveKind, SymbolKind, SymbolOutline, classify_file_context,
-    compute_line_starts, extract_c_style_comment_suppressions, extract_normalized_signature_header,
-    loc_from_line_starts, map_rust_allow_lint_to_rules, parse_comment_disable_directive,
-    parse_python_suppression_directive, rule_list_matches, tokenize_suppression_rules,
+    ContextualOwnerSpansIr, ExtractedFile, FNV1A_64_OFFSET_BASIS, FileContext, FileSuppressions,
+    HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId,
+    LineDisableDirective, OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr,
+    ResolvedCallerSite, SourceLoc, StaticCatalogSiteIr, StructLiteralConstructionSiteIr,
+    SubjectEffectOwner, SuppressionDirectiveKind, SymbolKind, SymbolOutline,
+    TerminalUiPrimitiveKind, classify_file_context, compute_line_starts,
+    extract_c_style_comment_suppressions, extract_normalized_signature_header, fnv1a_64_byte,
+    fnv1a_64_step, fnv1a_64_str, loc_from_line_starts, map_rust_allow_lint_to_rules,
+    parse_comment_disable_directive, parse_python_suppression_directive, rule_list_matches,
+    tokenize_suppression_rules,
 };
 pub use planner::{
     PlanResult, PlannerContext, build_caller_site_excerpt, build_fix_capsule,
     build_root_cause_groups_and_capsules, compute_root_cause_group_id, excerpt_from_span,
-    format_plan_report, plan_project, slice_span, spans_intersect,
+    find_architecture_exemplar_from_facets, format_plan_report, plan_project, slice_span,
+    spans_intersect,
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,

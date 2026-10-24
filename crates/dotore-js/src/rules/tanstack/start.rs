@@ -102,14 +102,14 @@ pub(crate) fn check_tanstack_start_call_rules(
     }
 }
 
-pub(crate) struct ServerFnChainInfo {
+struct ServerFnChainInfo {
     pub(crate) is_server_fn_chain: bool,
     pub(crate) specified_method: Option<String>,
     pub(crate) has_input_validation: bool,
     pub(crate) method_names: Vec<String>,
 }
 
-pub(crate) fn walk_server_fn_chain(outer_call: &CallExpression<'_>) -> ServerFnChainInfo {
+fn walk_server_fn_chain(outer_call: &CallExpression<'_>) -> ServerFnChainInfo {
     let mut info = ServerFnChainInfo {
         is_server_fn_chain: false,
         specified_method: None,
