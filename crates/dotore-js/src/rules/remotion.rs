@@ -19,7 +19,7 @@ use oxc_ast::{
     AstKind,
     ast::{
         ArrayExpressionElement, BindingPattern, CallExpression, Expression,
-        ImportDeclarationSpecifier, JSXAttributeItem, JSXAttributeName, JSXAttributeValue,
+        ImportDeclarationSpecifier, JSXAttributeItem, JSXAttributeValue,
         JSXElementName, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
         UnaryOperator,
     },
@@ -32,7 +32,10 @@ use crate::{
         react_ast::{is_component_name, is_custom_hook_name},
         types::{SemanticRuleSite, SourceLoc},
     },
-    matchers::{extract_callee_short_name, jsx_element_tag_name},
+    matchers::{
+        callee_name, find_jsx_attr as matcher_find_jsx_attr, imported_local_names_from,
+        is_named_hook_call, jsx_element_tag_name,
+    },
     rules::RuleId,
 };
 
@@ -180,7 +183,10 @@ fn is_motion_module(src: &str) -> bool {
 }
 
 fn collect_file_imports(program: &Program<'_>, _semantic: &Semantic<'_>) -> FileImports {
-    let mut out = FileImports::default();
+    let mut out = FileImports {
+        next_image_locals: imported_local_names_from(program, &["next/image", "next/legacy/image"]),
+        ..Default::default()
+    };
     out.animate_presence_locals
         .insert("AnimatePresence".to_string());
     out.motion_factory_locals.insert("motion".to_string());
@@ -276,14 +282,13 @@ fn collect_use_animate_bindings(semantic: &Semantic<'_>) -> HashSet<String> {
         let Expression::CallExpression(call) = init.without_parentheses() else {
             continue;
         };
-        let callee_name = extract_callee_name(&call.callee);
-        if callee_name == Some("useAnimate")
+        if is_named_hook_call(call, "useAnimate")
             && let BindingPattern::ArrayPattern(arr) = &decl.id
             && let Some(Some(BindingPattern::BindingIdentifier(second))) = arr.elements.get(1)
         {
             out.insert(second.name.to_string());
         }
-        if matches!(callee_name, Some("useAnimation" | "useAnimationControls"))
+        if matches!(extract_callee_name(&call.callee), Some("useAnimation" | "useAnimationControls"))
             && let BindingPattern::BindingIdentifier(ident) = &decl.id
         {
             out.insert(ident.name.to_string());
@@ -384,7 +389,7 @@ pub(crate) fn is_iteration_call(call: &CallExpression<'_>) -> bool {
 }
 
 pub(crate) fn extract_callee_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
-    extract_callee_short_name(callee)
+    callee_name(callee)
 }
 
 pub(crate) fn get_jsx_element_name(name: &JSXElementName<'_>) -> String {
@@ -395,15 +400,7 @@ pub(crate) fn find_jsx_attr<'a>(
     attrs: &'a [JSXAttributeItem<'a>],
     target: &str,
 ) -> Option<&'a oxc_ast::ast::JSXAttribute<'a>> {
-    for item in attrs {
-        if let JSXAttributeItem::Attribute(attr) = item
-            && let JSXAttributeName::Identifier(id) = &attr.name
-            && id.name == target
-        {
-            return Some(attr);
-        }
-    }
-    None
+    matcher_find_jsx_attr(attrs, target)
 }
 
 pub(crate) fn has_jsx_truthy_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool {

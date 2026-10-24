@@ -18,10 +18,10 @@ use crate::{
         types::{SemanticRuleSite, loc_from_line_starts},
     },
     matchers::{
-        find_attr, find_attr_ignore_case, get_attr_static_str, get_class_name_str,
+        find_attr, find_jsx_attr_ignore_case, get_attr_static_str, get_class_name_str,
         get_jsx_tag_name, get_style_prop_number, get_style_prop_str,
     },
-    rules::{AutofixPatch, ByteEdit, RuleId},
+    rules::{AutofixPatch, RuleId},
 };
 
 use super::{
@@ -95,14 +95,11 @@ pub(super) fn check_jsx_element_design(
                         start: t.span.start,
                         end: t.span.end,
                     };
-                    let patch = AutofixPatch {
-                        description: "Replace `...` with typographic ellipsis `…`".to_string(),
-                        edits: vec![ByteEdit {
-                            file: None,
-                            span: tspan,
-                            replacement: raw.replace("...", "…"),
-                        }],
-                    };
+                    let patch = AutofixPatch::replace(
+                        "Replace `...` with typographic ellipsis `…`",
+                        tspan,
+                        raw.replace("...", "…"),
+                    );
                     push_design_site(
                         sites,
                         RuleId::DesignNoThreePeriodEllipsis,
@@ -120,14 +117,11 @@ pub(super) fn check_jsx_element_design(
                         start: t.span.start,
                         end: t.span.end,
                     };
-                    let patch = AutofixPatch {
-                        description: "Replace em dash `—` with `--`".to_string(),
-                        edits: vec![ByteEdit {
-                            file: None,
-                            span: tspan,
-                            replacement: raw.replace('—', "--"),
-                        }],
-                    };
+                    let patch = AutofixPatch::replace(
+                        "Replace em dash `—` with `--`",
+                        tspan,
+                        raw.replace('—', "--"),
+                    );
                     push_design_site(
                         sites,
                         RuleId::DesignNoEmDashInJsxText,
@@ -177,8 +171,8 @@ pub(super) fn check_jsx_element_design(
 
     // 4. `no-img-without-dimensions`
     if tag == "img" {
-        let has_attr_dims = find_attr_ignore_case(&opening.attributes, "width").is_some()
-            && find_attr_ignore_case(&opening.attributes, "height").is_some();
+        let has_attr_dims = find_jsx_attr_ignore_case(&opening.attributes, "width").is_some()
+            && find_jsx_attr_ignore_case(&opening.attributes, "height").is_some();
         let has_tw_dims = unvariant_tokens.iter().any(|u| {
             u.starts_with("size-")
                 || u.starts_with("aspect-")
@@ -225,12 +219,12 @@ pub(super) fn check_jsx_element_design(
         .iter()
         .any(|u| matches!(*u, "animate-pulse" | "animate-ping"))
     {
-        let role_val = find_attr_ignore_case(&opening.attributes, "role")
+        let role_val = find_jsx_attr_ignore_case(&opening.attributes, "role")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings));
         let is_live_status = matches!(
             role_val.as_deref(),
             Some("status" | "progressbar" | "alert")
-        ) || find_attr_ignore_case(&opening.attributes, "aria-busy").is_some();
+        ) || find_jsx_attr_ignore_case(&opening.attributes, "aria-busy").is_some();
         let text = collect_all_static_text(jsx_el);
         let lower_text = text.to_ascii_lowercase();
         let is_busy_copy = lower_text.contains("loading")
@@ -408,14 +402,11 @@ pub(super) fn check_jsx_element_design(
                 start: s_lit.span.start + 1,
                 end: s_lit.span.end.saturating_sub(1),
             };
-            let patch = AutofixPatch {
-                description: format!("Remove redundant `{disp}` class on `<{tag}>`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: content_span,
-                    replacement: new_tokens.join(" "),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Remove redundant `{disp}` class on `<{tag}>`"),
+                content_span,
+                new_tokens.join(" "),
+            );
             push_design_site(
                 sites,
                 RuleId::NoRedundantDisplayClass,
@@ -682,8 +673,8 @@ pub(super) fn check_remaining_element_design_rules(
 
     // 10. `require-autoplay-video-poster`
     if tag == "video"
-        && find_attr_ignore_case(&opening.attributes, "autoPlay").is_some()
-        && find_attr_ignore_case(&opening.attributes, "poster").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "autoPlay").is_some()
+        && find_jsx_attr_ignore_case(&opening.attributes, "poster").is_none()
     {
         push_design_site(
             sites,
@@ -699,7 +690,7 @@ pub(super) fn check_remaining_element_design_rules(
     }
 
     // 11. `require-scale-reveal-transform-origin`
-    if find_attr_ignore_case(&opening.attributes, "role")
+    if find_jsx_attr_ignore_case(&opening.attributes, "role")
         .and_then(|a| get_attr_static_str(semantic, a, const_strings))
         .is_some_and(|r| matches!(r.as_str(), "menu" | "listbox"))
         && find_attr(&opening.attributes, "initial")
@@ -814,7 +805,7 @@ fn is_inside_excluded_typography_element(
             if EXCLUDED_TYPOGRAPHY_TAGS.contains(&tag.as_str()) {
                 return true;
             }
-            if find_attr_ignore_case(&el.opening_element.attributes, "translate")
+            if find_jsx_attr_ignore_case(&el.opening_element.attributes, "translate")
                 .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                 .is_some_and(|v| v.eq_ignore_ascii_case("no"))
             {

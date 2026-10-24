@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// WCAG accessibility, ARIA, and UI design polish rules (`230..=421`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::AnchorAmbiguousText,
         "anchor-ambiguous-text",

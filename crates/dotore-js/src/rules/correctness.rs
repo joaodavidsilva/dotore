@@ -27,7 +27,7 @@ use crate::{
         },
         types::loc_from_line_starts,
     },
-    rules::types::{AutofixPatch, ByteEdit, RuleId},
+    rules::types::{AutofixPatch, RuleId},
 };
 
 const ALWAYS_FRESH_CALLEES: &[&str] = &[
@@ -299,17 +299,14 @@ fn check_rendering_conditional_render(
             end: log.span.end,
         };
         let loc = loc_from_line_starts(line_starts, log.span.start);
-        let patch = AutofixPatch {
-            description: format!("Replace `{left_text} &&` with `{left_text} > 0 &&`"),
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: left_span.start,
-                    end: left_span.end,
-                },
-                replacement: format!("{left_text} > 0"),
-            }],
-        };
+        let patch = AutofixPatch::replace(
+            format!("Replace `{left_text} &&` with `{left_text} > 0 &&`"),
+            ByteSpan {
+                start: left_span.start,
+                end: left_span.end,
+            },
+            format!("{left_text} > 0"),
+        );
         sites.push(SemanticRuleSite {
             rule: RuleId::RenderingConditionalRender,
             subject_name: subj_name.clone(),
@@ -613,20 +610,17 @@ fn check_mutating_array_method_on_prop(
     if is_prop(semantic, ref_id) || is_hook_return_value(semantic, ref_id) {
         let autofix = if matches!(method, "sort" | "reverse") {
             let obj_span = mem.object.span();
-            Some(AutofixPatch {
-                description: format!(
+            Some(AutofixPatch::replace(
+                format!(
                     "Clone `{}` (`[...{}].{method}(...)`) before calling `.{method}()`",
                     obj_ident.name, obj_ident.name
                 ),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: obj_span.start,
-                        end: obj_span.end,
-                    },
-                    replacement: format!("[...{}]", obj_ident.name),
-                }],
-            })
+                ByteSpan {
+                    start: obj_span.start,
+                    end: obj_span.end,
+                },
+                format!("[...{}]", obj_ident.name),
+            ))
         } else {
             None
         };

@@ -10,14 +10,14 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub use dotore_core::ui::{
-    FilterTabItem, TuiFilterKind, build_filter_tabs, classify_style_bucket, strip_ansi_codes,
-    style_bucket_color, visible_char_width,
-};
+pub use dotore_core::ui::{FilterTabItem, TuiFilterKind, build_filter_tabs, classify_style_bucket};
 use dotore_core::{
     report::JsonReport,
     rules::{BlastRadiusTier, Diagnostic, PrescriptionTier, RuleSeverity},
-    ui::{AsciiBox, Badge, BoxBorderStyle, ColorMode, FilterTabBar, FlowDiagram, GaugeBar, StatusBar},
+    ui::{
+        AsciiBox, Badge, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FilterTabBar, FlowDiagram,
+        GaugeBar, StatusBar,
+    },
 };
 
 /// Filter tab descriptor rendered in the TUI header bar.
@@ -338,41 +338,41 @@ pub fn render_tui_body_lines(
                 let bucket_badge = Badge::style_bucket(bucket).render(ColorMode::Ansi);
                 let tier_badge = Badge::tier(first.tier).render_pill(ColorMode::Ansi);
                 let sev_badge = Badge::severity(first.severity).render(ColorMode::Ansi);
-                lines.push(format!(
-                    " \x1b[38;5;240m╭───\x1b[0m {bucket_badge} \x1b[38;5;51;1m{rule_name}\x1b[0m  {tier_badge}  {sev_badge}  \x1b[38;5;252;1m({} finding{})\x1b[0m",
-                    items.len(),
-                    if items.len() == 1 { "" } else { "s" }
-                ));
-                lines.push(format!(
-                    " \x1b[38;5;240m│\x1b[0m    \x1b[38;5;245m{}\x1b[0m",
+                let mut rule_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+                    .with_indent(" ")
+                    .with_border_color("\x1b[38;5;240m")
+                    .with_title(format!(
+                        "{bucket_badge} \x1b[38;5;51;1m{rule_name}\x1b[0m  {tier_badge}  {sev_badge}  \x1b[38;5;252;1m({} finding{})\x1b[0m",
+                        items.len(),
+                        if items.len() == 1 { "" } else { "s" }
+                    ));
+                rule_box.add_open_row(format!(
+                    "    \x1b[38;5;245m{}\x1b[0m",
                     first.rule.metadata().title
                 ));
                 for d in &items {
                     let subj = d.subject_name.as_deref().unwrap_or("<module>");
-                    lines.push(format!(
-                        " \x1b[38;5;240m├─►\x1b[0m \x1b[38;5;153;1m{}:{}:{}\x1b[0m \x1b[38;5;244min\x1b[0m \x1b[38;5;219m`{subj}`\x1b[0m",
+                    rule_box.add_open_row(format!(
+                        "  ▸ \x1b[38;5;153;1m{}:{}:{}\x1b[0m \x1b[38;5;244min\x1b[0m \x1b[38;5;219m`{subj}`\x1b[0m",
                         d.file.display(),
                         d.loc.line,
                         d.loc.column
                     ));
-                    lines.push(format!(
-                        " \x1b[38;5;240m│\x1b[0m      \x1b[38;5;254m{}\x1b[0m",
-                        d.message
-                    ));
+                    rule_box.add_open_row(format!("      \x1b[38;5;254m{}\x1b[0m", d.message));
                     if !d.cascade_steps.is_empty() {
                         let flow = FlowDiagram::new(&d.cascade_steps)
                             .with_color("\x1b[38;5;201m")
                             .render(ColorMode::Ansi);
-                        lines.push(format!(" \x1b[38;5;240m│\x1b[0m      {flow}"));
+                        rule_box.add_open_row(format!("      {flow}"));
                     }
                     if let Some(fix) = &d.autofix {
-                        lines.push(format!(
-                            " \x1b[38;5;240m│\x1b[0m      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{}\x1b[0m",
+                        rule_box.add_open_row(format!(
+                            "      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{}\x1b[0m",
                             fix.description
                         ));
                     }
                 }
-                lines.push(" \x1b[38;5;240m╰──────────────────────────────────────────────────────────────────────────────\x1b[0m".to_string());
+                lines.extend(rule_box.render_lines(ColorMode::Ansi));
                 lines.push(String::new());
             }
         }
@@ -385,33 +385,33 @@ pub fn render_tui_body_lines(
                     .push(*d);
             }
             for (file_path, items) in by_file {
-                lines.push(format!(
-                    " \x1b[38;5;240m╭───\x1b[0m \x1b[38;5;117;1m📁 {file_path}\x1b[0m  \x1b[38;5;252;1m({} finding{})\x1b[0m",
-                    items.len(),
-                    if items.len() == 1 { "" } else { "s" }
-                ));
+                let mut file_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+                    .with_indent(" ")
+                    .with_border_color("\x1b[38;5;240m")
+                    .with_title(format!(
+                        "\x1b[38;5;117;1m📁 {file_path}\x1b[0m  \x1b[38;5;252;1m({} finding{})\x1b[0m",
+                        items.len(),
+                        if items.len() == 1 { "" } else { "s" }
+                    ));
                 for d in items {
                     let bucket = classify_style_bucket(d);
                     let bucket_badge = Badge::style_bucket(bucket).render(ColorMode::Ansi);
+                    let rule_badge = Badge::rule(d.rule).render(ColorMode::Ansi);
                     let subj = d.subject_name.as_deref().unwrap_or("<module>");
-                    lines.push(format!(
-                        " \x1b[38;5;240m├─►\x1b[0m \x1b[38;5;228;1mL{}:{}\x1b[0m {bucket_badge} \x1b[38;5;51;1m[{}]\x1b[0m \x1b[38;5;244min\x1b[0m \x1b[38;5;219m`{subj}`\x1b[0m",
+                    file_box.add_open_row(format!(
+                        "  ▸ \x1b[38;5;228;1mL{}:{}\x1b[0m {bucket_badge} {rule_badge} \x1b[38;5;244min\x1b[0m \x1b[38;5;219m`{subj}`\x1b[0m",
                         d.loc.line,
-                        d.loc.column,
-                        d.rule.as_str()
+                        d.loc.column
                     ));
-                    lines.push(format!(
-                        " \x1b[38;5;240m│\x1b[0m      \x1b[38;5;254m{}\x1b[0m",
-                        d.message
-                    ));
+                    file_box.add_open_row(format!("      \x1b[38;5;254m{}\x1b[0m", d.message));
                     if let Some(fix) = &d.autofix {
-                        lines.push(format!(
-                            " \x1b[38;5;240m│\x1b[0m      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{}\x1b[0m",
+                        file_box.add_open_row(format!(
+                            "      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{}\x1b[0m",
                             fix.description
                         ));
                     }
                 }
-                lines.push(" \x1b[38;5;240m╰──────────────────────────────────────────────────────────────────────────────\x1b[0m".to_string());
+                lines.extend(file_box.render_lines(ColorMode::Ansi));
                 lines.push(String::new());
             }
         }
@@ -419,30 +419,31 @@ pub fn render_tui_body_lines(
             for d in filtered {
                 let bucket = classify_style_bucket(d);
                 let bucket_badge = Badge::style_bucket(bucket).render(ColorMode::Ansi);
+                let rule_badge = Badge::rule(d.rule).render(ColorMode::Ansi);
+                let tier_badge = Badge::tier(d.tier).render(ColorMode::Ansi);
                 let subj = d.subject_name.as_deref().unwrap_or("<module>");
-                lines.push(format!(
-                    " \x1b[38;5;240m╭──\x1b[0m {bucket_badge} \x1b[38;5;51;1m[{}]\x1b[0m ({}) \x1b[38;5;153;1m{}:{}:{}\x1b[0m in \x1b[38;5;219m`{subj}`\x1b[0m",
-                    d.rule.as_str(),
-                    d.tier.as_str(),
-                    d.file.display(),
-                    d.loc.line,
-                    d.loc.column
-                ));
-                lines.push(format!(" \x1b[38;5;240m│\x1b[0m  {}", d.message));
+                let mut card_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+                    .with_indent(" ")
+                    .with_border_color("\x1b[38;5;240m")
+                    .with_title(format!(
+                        "{bucket_badge} {rule_badge} {tier_badge} \x1b[38;5;153;1m{}:{}:{}\x1b[0m in \x1b[38;5;219m`{subj}`\x1b[0m",
+                        d.file.display(),
+                        d.loc.line,
+                        d.loc.column
+                    ));
+                card_box.add_open_row(format!("  {}", d.message));
                 if !d.cascade_steps.is_empty() {
                     let flow = FlowDiagram::new(&d.cascade_steps).render(ColorMode::Plain);
-                    lines.push(format!(" \x1b[38;5;240m│\x1b[0m  \x1b[38;5;201mflow:    {flow}\x1b[0m"));
+                    card_box.add_open_row(format!("  \x1b[38;5;201mflow:    {flow}\x1b[0m"));
                 }
                 if let Some(fix) = &d.autofix {
-                    lines.push(format!(
-                        " \x1b[38;5;240m│\x1b[0m  \x1b[38;5;48;1mautofix:\x1b[0m {}",
+                    card_box.add_open_row(format!(
+                        "  \x1b[38;5;48;1mautofix:\x1b[0m {}",
                         fix.description
                     ));
                 }
-                lines.push(format!(
-                    " \x1b[38;5;240m╰──\x1b[0m \x1b[38;5;244mdocs:    {}\x1b[0m",
-                    d.docs_url
-                ));
+                card_box.add_open_row(format!("  \x1b[38;5;244mdocs:    {}\x1b[0m", d.docs_url));
+                lines.extend(card_box.render_lines(ColorMode::Ansi));
                 lines.push(String::new());
             }
         }
@@ -514,48 +515,50 @@ pub fn render_tui_frame(
         )
     };
 
-    let _ = writeln!(
-        frame,
-        "\x1b[2K \x1b[38;5;51;1m╔══ DOTORE\x1b[0m \x1b[38;5;245m· Polyglot Static Analyzer\x1b[0m   {score_gauge}   \x1b[38;5;196;1m✖ {} err\x1b[0m  \x1b[38;5;220;1m▲ {} warn\x1b[0m  \x1b[38;5;48;1m⚙ {} autofix\x1b[0m  \x1b[38;5;220;1m✎ {} surgical\x1b[0m  \x1b[38;5;203;1m⇄ {} refactor\x1b[0m",
-        s.error_count, s.warning_count, s.autofix_count, s.surgical_count, s.refactor_count
-    );
-    let _ = writeln!(
-        frame,
-        "\x1b[2K \x1b[38;5;51;1m║\x1b[0m  \x1b[38;5;250mScope:\x1b[0m {} files · {} subjects · {} effects · {} affected files   \x1b[38;5;250mBlast Radius:\x1b[0m \x1b[38;5;196;1mP0:{p0}\x1b[0m \x1b[38;5;208;1mP1:{p1}\x1b[0m \x1b[38;5;51;1mP2:{p2}\x1b[0m   \x1b[38;5;250mView:\x1b[0m \x1b[38;5;219;1m{}\x1b[0m",
+    let p0_badge = Badge::blast_radius_count(BlastRadiusTier::P0, p0).render_pill(ColorMode::Ansi);
+    let p1_badge = Badge::blast_radius_count(BlastRadiusTier::P1, p1).render_pill(ColorMode::Ansi);
+    let p2_badge = Badge::blast_radius_count(BlastRadiusTier::P2, p2).render_pill(ColorMode::Ansi);
+
+    let mut header_box = AsciiBox::new(BoxBorderStyle::Double, 96)
+        .with_indent(" ")
+        .with_border_color("\x1b[38;5;51;1m")
+        .with_title(format!(
+            "DOTORE\x1b[0m \x1b[38;5;245m· Polyglot Static Analyzer\x1b[0m   {score_gauge}   \x1b[38;5;196;1m✖ {} err\x1b[0m  \x1b[38;5;220;1m▲ {} warn\x1b[0m  \x1b[38;5;48;1m⚙ {} autofix\x1b[0m  \x1b[38;5;220;1m✎ {} surgical\x1b[0m  \x1b[38;5;203;1m⇄ {} refactor\x1b[0m",
+            s.error_count, s.warning_count, s.autofix_count, s.surgical_count, s.refactor_count
+        ));
+    header_box.add_open_row(format!(
+        "  \x1b[38;5;250mScope:\x1b[0m {} files · {} subjects · {} effects · {} affected files   \x1b[38;5;250mBlast Radius:\x1b[0m {p0_badge} {p1_badge} {p2_badge}   \x1b[38;5;250mView:\x1b[0m \x1b[38;5;219;1m{}\x1b[0m",
         s.files_scanned,
         s.subjects_scanned,
         s.effects_scanned,
         s.affected_file_count,
         group_mode.label()
-    );
-    let _ = writeln!(
-        frame,
-        "\x1b[2K \x1b[38;5;51;1m╠══ FILTER TABS (h/l or ←/→ or Tab to switch) ═══════════════════════════════════════════════════\x1b[0m"
-    );
+    ));
+    header_box.add_titled_divider("FILTER TABS (h/l or ←/→ or Tab to switch)");
 
     let tab_strip = FilterTabBar::new(tabs, active_tab_idx).render(ColorMode::Ansi);
-    let _ = writeln!(frame, "\x1b[2K \x1b[38;5;51;1m║\x1b[0m {tab_strip}");
+    header_box.add_open_row(format!(" {tab_strip}"));
 
-    let search_line = if in_search_input {
+    let search_row = if in_search_input {
         format!(
-            " \x1b[38;5;51;1m║\x1b[0m \x1b[48;5;236;38;5;226;1m SEARCH / \x1b[0m \x1b[38;5;255;1m{search_query}█\x1b[0m  \x1b[38;5;244m(Enter to lock, ESC to clear)\x1b[0m"
+            " \x1b[48;5;236;38;5;226;1m SEARCH / \x1b[0m \x1b[38;5;255;1m{search_query}█\x1b[0m  \x1b[38;5;244m(Enter to lock, ESC to clear)\x1b[0m"
         )
     } else if !search_query.is_empty() {
         format!(
-            " \x1b[38;5;51;1m║\x1b[0m \x1b[48;5;236;38;5;48;1m FILTER / \x1b[0m \x1b[38;5;255;1m\"{search_query}\"\x1b[0m  \x1b[38;5;244m(press / to edit, c to clear search)\x1b[0m"
+            " \x1b[48;5;236;38;5;48;1m FILTER / \x1b[0m \x1b[38;5;255;1m\"{search_query}\"\x1b[0m  \x1b[38;5;244m(press / to edit, c to clear search)\x1b[0m"
         )
     } else {
         let active = &tabs[active_tab_idx];
         format!(
-            " \x1b[38;5;51;1m║\x1b[0m \x1b[38;5;245mActive Filter:\x1b[0m {}{} ({} matching)\x1b[0m   \x1b[38;5;244mPress `/` to search by file, rule, or component\x1b[0m",
+            " \x1b[38;5;245mActive Filter:\x1b[0m {}{} ({} matching)\x1b[0m   \x1b[38;5;244mPress `/` to search by file, rule, or component\x1b[0m",
             active.badge_ansi, active.label, active.count
         )
     };
-    let _ = writeln!(frame, "\x1b[2K{search_line}");
-    let _ = writeln!(
-        frame,
-        "\x1b[2K \x1b[38;5;51;1m╚════════════════════════════════════════════════════════════════════════════════════════════════\x1b[0m"
-    );
+    header_box.add_open_row(search_row);
+
+    for line in header_box.render_lines(ColorMode::Ansi) {
+        let _ = writeln!(frame, "\x1b[2K{line}");
+    }
     let _ = writeln!(frame, "\x1b[2K");
 
     let total_lines = body_lines.len().max(1);

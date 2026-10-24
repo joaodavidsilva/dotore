@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Angular Signals/RxJS, Python safety/async/web/ORM/security, and Rust safety/Tokio/SQLx/Axum rules (`921..=964`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::AngularNoSignalWriteInEffect,
         "angular-no-signal-write-in-effect",

@@ -28,7 +28,8 @@ use crate::{
         ByteSpan, FileIr, JsxElementIr,
         types::{ImportBindingIr, ModuleIr, SemanticRuleSite, loc_from_line_starts},
     },
-    rules::{AutofixPatch, ByteEdit, Diagnostic, RuleId, RuleSeverity},
+    matchers::make_diag_for_subject,
+    rules::{AutofixPatch, Diagnostic, RuleId, RuleSeverity},
 };
 
 const HEAVY_LIBRARIES: &[&str] = &[
@@ -271,15 +272,11 @@ fn build_lodash_subpath_autofix(
             | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => return None,
         }
     }
-    Some(AutofixPatch {
-        description: "Rewrite full `lodash` import to per-function `lodash/<fn>` subpath imports"
-            .to_string(),
-        edits: vec![ByteEdit {
-            file: None,
-            span,
-            replacement: lines.join("\n"),
-        }],
-    })
+    Some(AutofixPatch::replace(
+        "Rewrite full `lodash` import to per-function `lodash/<fn>` subpath imports",
+        span,
+        lines.join("\n"),
+    ))
 }
 
 fn has_non_type_import_specifier_or_bare(imp: &ImportDeclaration<'_>) -> bool {
@@ -875,24 +872,16 @@ pub(crate) fn evaluate_barrel_imports<F>(
             "Importing from an index file pulls in extra code. Import directly from the source file instead.".to_string()
         };
 
-        let meta = RuleId::NoBarrelImport.metadata();
-        out.push(Diagnostic {
-            file: file.path.clone(),
-            subject_name: None,
-            rule: RuleId::NoBarrelImport,
-            category: meta.category,
-            severity: meta.default_severity,
-            message_id: "noBarrelImport",
-            tier: meta.default_tier,
-            target_name: imp.source.clone(),
+        out.push(make_diag_for_subject(
+            RuleId::NoBarrelImport,
+            file.path.clone(),
+            None,
+            "noBarrelImport",
+            imp.source.clone(),
             message,
-            docs_url: meta.docs_url,
-            loc: imp.loc,
-            span: imp.span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+            imp.loc,
+            imp.span,
+        ));
         return;
     }
 }

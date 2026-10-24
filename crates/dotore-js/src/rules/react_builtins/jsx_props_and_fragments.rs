@@ -22,7 +22,7 @@ use crate::{
         push_semantic_site, push_semantic_site_with_fix, push_simple_diagnostic,
         resolve_ident_symbol,
     },
-    rules::types::{AutofixPatch, ByteEdit, Diagnostic, RuleId, RuleSeverity},
+    rules::types::{AutofixPatch, Diagnostic, RuleId, RuleSeverity},
 };
 
 pub(super) fn check_jsx_builtin_rules_in_file(
@@ -166,17 +166,11 @@ fn check_button_has_type(
             return;
         }
         let insert_pos = opening.name.span().end;
-        let patch = AutofixPatch {
-            description: "Add `type=\"button\"` to `<button>`".to_string(),
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: insert_pos,
-                    end: insert_pos,
-                },
-                replacement: " type=\"button\"".to_string(),
-            }],
-        };
+        let patch = AutofixPatch::insert(
+            "Add `type=\"button\"` to `<button>`",
+            insert_pos,
+            " type=\"button\"",
+        );
         push_semantic_site_with_fix(
             sites,
             RuleId::ButtonHasType,
@@ -447,17 +441,11 @@ fn check_jsx_no_target_blank(
 
     if is_target_blank && !has_noopener {
         let insert_pos = opening.name.span().end;
-        let patch = AutofixPatch {
-            description: "Add `rel=\"noopener noreferrer\"` to `<a target=\"_blank\">`".to_string(),
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: insert_pos,
-                    end: insert_pos,
-                },
-                replacement: " rel=\"noopener noreferrer\"".to_string(),
-            }],
-        };
+        let patch = AutofixPatch::insert(
+            "Add `rel=\"noopener noreferrer\"` to `<a target=\"_blank\">`",
+            insert_pos,
+            " rel=\"noopener noreferrer\"",
+        );
         push_semantic_site_with_fix(
             sites,
             RuleId::JsxNoTargetBlank,
@@ -481,17 +469,14 @@ fn check_self_closing_comp(
 ) {
     let opening = &jsx_el.opening_element;
     let replace_start = opening.span.end.saturating_sub(1);
-    let patch = AutofixPatch {
-        description: format!("Convert `<{tag_name}></{tag_name}>` to `<{tag_name} />`"),
-        edits: vec![ByteEdit {
-            file: None,
-            span: ByteSpan {
-                start: replace_start,
-                end: jsx_el.span.end,
-            },
-            replacement: " />".to_string(),
-        }],
-    };
+    let patch = AutofixPatch::replace(
+        format!("Convert `<{tag_name}></{tag_name}>` to `<{tag_name} />`"),
+        ByteSpan {
+            start: replace_start,
+            end: jsx_el.span.end,
+        },
+        " />",
+    );
     push_semantic_site_with_fix(
         sites,
         RuleId::SelfClosingComp,
@@ -550,17 +535,14 @@ fn check_jsx_attributes_builtin(
                 .iter()
                 .find(|&&(bad, _)| bad == attr_name)
         {
-            let patch = AutofixPatch {
-                description: format!("Replace `{attr_name}` with `{standard_name}`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: ident.span.start,
-                        end: ident.span.end,
-                    },
-                    replacement: standard_name.to_string(),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Replace `{attr_name}` with `{standard_name}`"),
+                ByteSpan {
+                    start: ident.span.start,
+                    end: ident.span.end,
+                },
+                standard_name,
+            );
             push_semantic_site_with_fix(
                 sites,
                 RuleId::NoUnknownProperty,
@@ -635,14 +617,11 @@ fn check_jsx_attributes_builtin(
                 .map(Expression::without_parentheses)
             && b.value
         {
-            let patch = AutofixPatch {
-                description: format!("Simplify `{attr_name}={{true}}` to `{attr_name}`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: attr_span,
-                    replacement: attr_name.to_string(),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Simplify `{attr_name}={{true}}` to `{attr_name}`"),
+                attr_span,
+                attr_name,
+            );
             push_semantic_site_with_fix(
                 sites,
                 RuleId::JsxBooleanValue,
@@ -665,17 +644,14 @@ fn check_jsx_attributes_builtin(
             && !s.value.contains('"')
         {
             let s_text = s.span.source_text(semantic.source_text());
-            let patch = AutofixPatch {
-                description: format!("Remove unnecessary curly braces around {s_text}"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: c.span.start,
-                        end: c.span.end,
-                    },
-                    replacement: s_text.to_string(),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Remove unnecessary curly braces around {s_text}"),
+                ByteSpan {
+                    start: c.span.start,
+                    end: c.span.end,
+                },
+                s_text,
+            );
             push_semantic_site_with_fix(
                 sites,
                 RuleId::JsxCurlyBracePresence,
@@ -885,16 +861,15 @@ fn build_useless_fragment_autofix(
     } else {
         None
     };
-    replacement.map(|rep| AutofixPatch {
-        description,
-        edits: vec![ByteEdit {
-            file: None,
-            span: ByteSpan {
+    replacement.map(|rep| {
+        AutofixPatch::replace(
+            description,
+            ByteSpan {
                 start: frag_span.start,
                 end: frag_span.end,
             },
-            replacement: rep,
-        }],
+            rep,
+        )
     })
 }
 
@@ -948,26 +923,22 @@ fn check_jsx_fragments_and_useless_fragment_element(
     }
 
     // 1. `jsx-fragments`: `<React.Fragment>` or `<Fragment>` with no attributes -> `<>...</>`
-    let frag_autofix = jsx_el.closing_element.as_ref().map(|closing| AutofixPatch {
-        description: format!("Replace `<{tag_name}>` with shorthand `<>...</>`"),
-        edits: vec![
-            ByteEdit {
-                file: None,
-                span: ByteSpan {
+    let frag_autofix = jsx_el.closing_element.as_ref().map(|closing| {
+        AutofixPatch::new(format!("Replace `<{tag_name}>` with shorthand `<>...</>`"))
+            .with_edit(
+                ByteSpan {
                     start: opening.span.start,
                     end: opening.span.end,
                 },
-                replacement: "<>".to_string(),
-            },
-            ByteEdit {
-                file: None,
-                span: ByteSpan {
+                "<>",
+            )
+            .with_edit(
+                ByteSpan {
                     start: closing.span.start,
                     end: closing.span.end,
                 },
-                replacement: "</>".to_string(),
-            },
-        ],
+                "</>",
+            )
     });
     push_semantic_site_with_fix(
         sites,

@@ -29,7 +29,10 @@ use crate::{
         react_ast::{find_enclosing_react_node, get_subject_name, is_component_name},
         types::SemanticRuleSite,
     },
-    matchers::{is_global_ident, push_semantic_site, resolve_ident_symbol, unwrap_expr},
+    matchers::{
+        is_global_ident, is_hook_with_deps_call, push_semantic_site, resolve_ident_symbol,
+        unwrap_expr,
+    },
     rules::RuleId,
 };
 
@@ -274,7 +277,7 @@ fn check_rerender_memo_with_default_value(
             }
             match node.kind() {
                 AstKind::CallExpression(call) => {
-                    if is_dep_hook_call(call) {
+                    if is_dep_hook_call(semantic, call) {
                         for arg in &call.arguments {
                             if let Some(Expression::ArrayExpression(arr)) =
                                 arg.as_expression().map(unwrap_expr)
@@ -382,7 +385,10 @@ fn collect_empty_defaults_from_pattern(
     }
 }
 
-fn is_dep_hook_call(call: &CallExpression<'_>) -> bool {
+fn is_dep_hook_call(semantic: &Semantic<'_>, call: &CallExpression<'_>) -> bool {
+    if is_hook_with_deps_call(semantic, call) {
+        return true;
+    }
     match unwrap_expr(&call.callee) {
         Expression::Identifier(id) => DEP_HOOK_NAMES.contains(&id.name.as_str()),
         Expression::StaticMemberExpression(mem) => {

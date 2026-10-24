@@ -16,7 +16,7 @@ use oxc_ast::{
     ast::{JSXChild, JSXElement, Program, VariableDeclarationKind},
 };
 use oxc_semantic::{Semantic, SymbolId};
-use oxc_span::{GetSpan, Span};
+use oxc_span::GetSpan;
 
 use crate::{
     ir::{
@@ -24,7 +24,7 @@ use crate::{
         react_ast::{find_enclosing_react_node, get_subject_name},
         types::{SemanticRuleSite, loc_from_line_starts},
     },
-    matchers::{eval_static_str, push_semantic_site_with_fix},
+    matchers::eval_static_str,
     rules::{AutofixPatch, RuleId},
 };
 
@@ -298,21 +298,16 @@ pub(super) fn push_design_site(
     span: ByteSpan,
     autofix: Option<AutofixPatch>,
 ) {
-    let line_starts = [0_u32];
-    push_semantic_site_with_fix(
-        out,
+    out.push(SemanticRuleSite {
         rule,
         subject_name,
         message_id,
-        target_name,
+        target_name: target_name.to_string(),
         message,
-        &line_starts,
-        Span::new(span.start, span.end),
+        loc,
+        span,
         autofix,
-    );
-    if let Some(site) = out.last_mut() {
-        site.loc = loc;
-    }
+    });
 }
 
 fn classify_icon_library_family(source: &str) -> Option<&str> {

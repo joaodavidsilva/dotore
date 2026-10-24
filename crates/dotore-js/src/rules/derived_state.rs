@@ -3,7 +3,8 @@
 use crate::{
     graph::{MultiEffectCascade, find_multi_effect_cascades},
     ir::{DepRef, DepsSpec, EffectNode, FileIr, SetterCallSite, SubjectIr},
-    rules::types::{AutofixPatch, ByteEdit, Diagnostic, PrescriptionTier, RuleId},
+    matchers::{make_autofix_diag, make_diag, make_diag_for_subject},
+    rules::types::{AutofixPatch, Diagnostic, PrescriptionTier, RuleId},
 };
 
 pub(crate) fn check_no_derived_state(
@@ -20,35 +21,39 @@ pub(crate) fn check_no_derived_state(
                 continue;
             }
             let autofix = build_derived_state_autofix(subject, effect, call);
-            let tier = if autofix.is_some() {
-                PrescriptionTier::Autofix
-            } else {
-                PrescriptionTier::Surgical
-            };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoDerivedState,
-                category: RuleId::NoDerivedState.metadata().category,
-                severity: RuleId::NoDerivedState.metadata().default_severity,
-                message_id: "avoidDerivedState",
-                tier,
-                target_name: call.state_name.clone(),
-                message: format!(
-                    "Avoid storing derived state. Instead, compute {:?} directly during render.",
-                    call.state_name
+            let msg = format!(
+                "Avoid storing derived state. Instead, compute {:?} directly during render.",
+                call.state_name
+            );
+            let base_diag = match autofix {
+                Some(patch) => make_autofix_diag(
+                    RuleId::NoDerivedState,
+                    file.path.clone(),
+                    call.loc,
+                    call.call_span,
+                    msg,
+                    patch,
                 ),
-                docs_url: RuleId::NoDerivedState.docs_url(),
-                loc: call.loc,
-                span: call.call_span,
-                cascade_steps: vec![
-                    "Render #1 (stale derived value)".to_string(),
-                    format!("useEffect runs -> sets {:?}", call.state_name),
-                    "Render #2 (re-renders with derived value)".to_string(),
-                ],
-                caller_sites: Vec::new(),
-                autofix,
-            });
+                None => make_diag(
+                    RuleId::NoDerivedState,
+                    file.path.clone(),
+                    call.loc,
+                    call.call_span,
+                    msg,
+                )
+                .with_tier(PrescriptionTier::Surgical),
+            };
+            out.push(
+                base_diag
+                    .with_subject(subject.name.clone())
+                    .with_message_id("avoidDerivedState")
+                    .with_target_name(call.state_name.clone())
+                    .with_cascade_steps(vec![
+                        "Render #1 (stale derived value)".to_string(),
+                        format!("useEffect runs -> sets {:?}", call.state_name),
+                        "Render #2 (re-renders with derived value)".to_string(),
+                    ]),
+            );
         }
     }
 }
@@ -79,21 +84,13 @@ fn build_derived_state_autofix(
     }
 
     let replacement_decl = format!("const {var_name} = {};", call.arg_text);
-    Some(AutofixPatch {
-        description: format!("Replace useState + useEffect with `{replacement_decl}`"),
-        edits: vec![
-            ByteEdit {
-                file: None,
-                span: decl_span,
-                replacement: replacement_decl,
-            },
-            ByteEdit {
-                file: None,
-                span: eff_stmt_span,
-                replacement: String::new(),
-            },
-        ],
-    })
+    Some(
+        AutofixPatch::new(format!(
+            "Replace useState + useEffect with `{replacement_decl}`"
+        ))
+        .with_edit(decl_span, replacement_decl)
+        .with_edit(eff_stmt_span, String::new()),
+    )
 }
 
 pub(crate) fn check_no_chain_state_updates(
@@ -172,23 +169,20 @@ fn emit_chain_state_diagnostics(
                 ],
             ),
         };
-        out.push(Diagnostic {
-            file: file.path.clone(),
-            subject_name: subject.name.clone(),
-            rule: RuleId::NoChainStateUpdates,
-            category: RuleId::NoChainStateUpdates.metadata().category,
-            severity: RuleId::NoChainStateUpdates.metadata().default_severity,
-            message_id: "avoidChainingStateUpdates",
-            tier: PrescriptionTier::Refactor,
-            target_name: call.state_name.clone(),
-            message,
-            docs_url: RuleId::NoChainStateUpdates.docs_url(),
-            loc: call.loc,
-            span: call.call_span,
-            cascade_steps,
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        out.push(
+            make_diag_for_subject(
+                RuleId::NoChainStateUpdates,
+                file.path.clone(),
+                subject.name.clone(),
+                "avoidChainingStateUpdates",
+                call.state_name.clone(),
+                message,
+                call.loc,
+                call.call_span,
+            )
+            .with_tier(PrescriptionTier::Refactor)
+            .with_cascade_steps(cascade_steps),
+        );
     }
 }
 
@@ -214,30 +208,28 @@ pub(crate) fn check_no_initialize_state(
             } else {
                 PrescriptionTier::Surgical
             };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoInitializeState,
-                category: RuleId::NoInitializeState.metadata().category,
-                severity: RuleId::NoInitializeState.metadata().default_severity,
-                message_id: "avoidInitializingState",
-                tier,
-                target_name: call.state_name.clone(),
-                message: format!(
-                    "Avoid initializing state in an effect. Instead, initialize {:?}'s \"useState()\" with {:?}. For SSR hydration, prefer \"useSyncExternalStore\".",
-                    call.state_name, call.arg_text
-                ),
-                docs_url: RuleId::NoInitializeState.docs_url(),
-                loc: call.loc,
-                span: call.call_span,
-                cascade_steps: vec![
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoInitializeState,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    "avoidInitializingState",
+                    call.state_name.clone(),
+                    format!(
+                        "Avoid initializing state in an effect. Instead, initialize {:?}'s \"useState()\" with {:?}. For SSR hydration, prefer \"useSyncExternalStore\".",
+                        call.state_name, call.arg_text
+                    ),
+                    call.loc,
+                    call.call_span,
+                )
+                .with_autofix(autofix)
+                .with_tier(tier)
+                .with_cascade_steps(vec![
                     format!("Render #1 with uninitialized {:?}", call.state_name),
                     format!("Mount useEffect sets {:?} to {}", call.state_name, call.arg_text),
                     "Render #2 with initialized state".to_string(),
-                ],
-                caller_sites: Vec::new(),
-                autofix,
-            });
+                ]),
+            );
         }
     }
 }
@@ -266,22 +258,12 @@ fn build_initialize_state_autofix(
     }
 
     let replacement_call = format!("useState({})", call.arg_text);
-    Some(AutofixPatch {
-        description: format!(
+    Some(
+        AutofixPatch::new(format!(
             "Initialize {:?} directly in `{replacement_call}` and remove mount useEffect",
             call.state_name
-        ),
-        edits: vec![
-            ByteEdit {
-                file: None,
-                span: slot.call_span,
-                replacement: replacement_call,
-            },
-            ByteEdit {
-                file: None,
-                span: eff_stmt_span,
-                replacement: String::new(),
-            },
-        ],
-    })
+        ))
+        .with_edit(slot.call_span, replacement_call)
+        .with_edit(eff_stmt_span, String::new()),
+    )
 }

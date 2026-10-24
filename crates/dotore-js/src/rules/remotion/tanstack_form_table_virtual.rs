@@ -8,7 +8,7 @@
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, CallExpression, Expression, JSXAttributeItem, JSXAttributeValue,
+        Argument, CallExpression, Expression, JSXAttributeValue,
         ObjectPropertyKind,
     },
 };
@@ -23,6 +23,7 @@ use crate::{
         ByteSpan,
         types::{SemanticRuleSite, loc_from_line_starts},
     },
+    matchers::jsx_has_spread_attr,
     rules::RuleId,
 };
 
@@ -58,10 +59,7 @@ pub(crate) fn check_tanstack_jsx_opening(
     }
 
     // 3. `tanstack-virtual-measure-element-requires-data-index`
-    let has_spread = opening
-        .attributes
-        .iter()
-        .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)));
+    let has_spread = jsx_has_spread_attr(&opening.attributes);
     if !has_spread
         && let Some(ref_attr) = find_jsx_attr(&opening.attributes, "ref")
         && ref_is_virtualizer_measure_element(semantic, ref_attr)

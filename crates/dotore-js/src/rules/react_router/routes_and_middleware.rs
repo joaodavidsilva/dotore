@@ -29,10 +29,11 @@ use super::{
 use crate::{
     ir::{
         ByteSpan,
-        react_ast::{extract_callee_short_name, find_enclosing_react_node, get_subject_name},
+        react_ast::{find_enclosing_react_node, get_subject_name},
         types::SemanticRuleSite,
     },
-    rules::{AutofixPatch, ByteEdit, RuleId},
+    matchers::is_named_hook_call,
+    rules::{AutofixPatch, RuleId},
 };
 
 /// Checks `react-router-no-route-module-environment-suffix`.
@@ -93,17 +94,14 @@ pub(crate) fn check_imports_and_collect_client_symbols(
                 spec.replacen("react-router-dom/", "react-router/", 1)
             };
             let replacement = format!("{quote}{new_spec}{quote}");
-            let autofix = Some(AutofixPatch {
-                description: format!("Replace `{spec}` import with `{new_spec}`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: imp.source.span.start,
-                        end: imp.source.span.end,
-                    },
-                    replacement,
-                }],
-            });
+            let autofix = Some(AutofixPatch::replace(
+                format!("Replace `{spec}` import with `{new_spec}`"),
+                ByteSpan {
+                    start: imp.source.span.start,
+                    end: imp.source.span.end,
+                },
+                replacement,
+            ));
             push_site(
                 sites,
                 line_starts,
@@ -160,7 +158,7 @@ pub(crate) fn collect_subject_router_traits(
                 }
             }
             AstKind::CallExpression(call) => {
-                if extract_callee_short_name(&call.callee) == Some("useOutlet")
+                if is_named_hook_call(call, "useOutlet")
                     && let Some(subj_id) = find_enclosing_react_node(semantic, node_id)
                     && let Some(name) = get_subject_name(semantic, subj_id)
                 {

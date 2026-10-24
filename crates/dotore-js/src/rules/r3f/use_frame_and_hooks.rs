@@ -33,6 +33,7 @@ use super::{
 };
 use crate::{
     ir::{react_ast::find_enclosing_react_node, types::SemanticRuleSite},
+    matchers::jsx_has_spread_attr,
     rules::RuleId,
 };
 
@@ -95,10 +96,7 @@ pub(crate) fn check_jsx_elements(ctx: &FileAnalysisCtx<'_>, sites: &mut Vec<Sema
         let Some(tag) = jsx_opening_tag_name(opening) else {
             continue;
         };
-        let has_spread = opening
-            .attributes
-            .iter()
-            .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)));
+        let has_spread = jsx_has_spread_attr(&opening.attributes);
 
         // 1. Canvas rules (`r3f-cap-device-pixel-ratio`, `r3f-webgpu-canvas-prop-compatibility`, `r3f-webgpu-require-async-init`)
         if tag == "Canvas" {

@@ -79,6 +79,26 @@ fn ascii_box_renders_rounded_single_and_double_layouts_in_plain_and_ansi() {
     let double_ansi = double_box.render(ColorMode::Ansi);
     assert!(double_ansi.contains("\x1b[32;1m╔════════════════════════════════════╗\x1b[0m"));
     assert_eq!(strip_ansi_codes(&double_ansi), double_plain);
+
+    let mut titled_double = AsciiBox::new(BoxBorderStyle::Double, 24)
+        .with_title("DOTORE")
+        .with_border_color("\x1b[36;1m");
+    titled_double.add_titled_divider("FILTER TABS");
+    titled_double.add_open_row(" ▶ ALL (2)");
+    let titled_double_plain = titled_double.render(ColorMode::Plain);
+    assert_eq!(
+        titled_double_plain,
+        concat!(
+            "╔══ DOTORE ══════════════╗\n",
+            "╠══ FILTER TABS ═════════╣\n",
+            "║ ▶ ALL (2)\n",
+            "╚════════════════════════╝\n",
+        )
+    );
+    assert_eq!(
+        strip_ansi_codes(&titled_double.render(ColorMode::Ansi)),
+        titled_double_plain
+    );
 }
 
 #[test]

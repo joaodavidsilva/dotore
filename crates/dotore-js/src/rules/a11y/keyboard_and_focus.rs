@@ -26,7 +26,7 @@ use crate::{
         types::{SemanticRuleSite, loc_from_line_starts},
     },
     matchers::{
-        find_attr, find_attr_ignore_case, get_attr_static_str, get_class_name_str,
+        find_attr, find_jsx_attr_ignore_case, get_attr_static_str, get_class_name_str,
         get_jsx_tag_name, get_style_prop_number, get_style_prop_str,
     },
     rules::RuleId,
@@ -56,14 +56,14 @@ pub(super) fn check_element_keyboard_and_focus_rules(
     if is_html
         && !is_hidden_from_screen_reader(opening, semantic, const_strings)
         && !has_spread
-        && let Some(click_attr) = find_attr_ignore_case(&opening.attributes, "onClick")
-            .or_else(|| find_attr_ignore_case(&opening.attributes, "onClickCapture"))
+        && let Some(click_attr) = find_jsx_attr_ignore_case(&opening.attributes, "onClick")
+            .or_else(|| find_jsx_attr_ignore_case(&opening.attributes, "onClickCapture"))
         && !is_attr_undefined(click_attr)
     {
         let is_focusless_container = matches!(tag, "tr" | "td" | "th" | "canvas");
         let is_interactive = !is_focusless_container
             && is_interactive_element(tag, opening, semantic, const_strings);
-        let role_str = find_attr_ignore_case(&opening.attributes, "role")
+        let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings));
         let is_composite_or_pres = role_str.as_deref().is_some_and(|r| {
             matches!(
@@ -82,11 +82,11 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         });
         let has_key_event = ["onKeyDown", "onKeyUp", "onKeyPress"]
             .iter()
-            .any(|k| find_attr_ignore_case(&opening.attributes, k).is_some());
+            .any(|k| find_jsx_attr_ignore_case(&opening.attributes, k).is_some());
         let is_backdrop_dismiss = is_backdrop_dismiss_handler(click_attr, semantic);
         let is_hover_li = tag == "li"
-            && (find_attr_ignore_case(&opening.attributes, "onMouseEnter").is_some()
-                || find_attr_ignore_case(&opening.attributes, "onMouseOver").is_some());
+            && (find_jsx_attr_ignore_case(&opening.attributes, "onMouseEnter").is_some()
+                || find_jsx_attr_ignore_case(&opening.attributes, "onMouseOver").is_some());
 
         if !is_interactive
             && !is_composite_or_pres
@@ -162,7 +162,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         && !is_interactive_element(tag, opening, semantic, const_strings)
         && !NON_INTERACTIVE_ELEMENTS.contains(&tag)
     {
-        let role_attr = find_attr_ignore_case(&opening.attributes, "role");
+        let role_attr = find_jsx_attr_ignore_case(&opening.attributes, "role");
         let role_val = role_attr.and_then(|a| get_attr_static_str(semantic, a, const_strings));
         let has_valid_role = match (role_attr, role_val.as_deref()) {
             (None, _) => false,
@@ -175,13 +175,13 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         let has_pointer_handler = ["onClick", "onDblClick", "onMouseDown", "onMouseUp"]
             .iter()
             .any(|h| {
-                find_attr_ignore_case(&opening.attributes, h)
+                find_jsx_attr_ignore_case(&opening.attributes, h)
                     .is_some_and(|a| !is_attr_null_or_undefined(a))
             });
         let has_key_handler = ["onKeyDown", "onKeyUp", "onKeyPress"].iter().any(|h| {
-            find_attr_ignore_case(&opening.attributes, h)
+            find_jsx_attr_ignore_case(&opening.attributes, h)
                 .is_some_and(|a| !is_attr_null_or_undefined(a))
-        }) && find_attr_ignore_case(&opening.attributes, "tabIndex")
+        }) && find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
             .is_some();
 
         if !has_valid_role && (has_pointer_handler || has_key_handler) {
@@ -208,8 +208,8 @@ pub(super) fn check_element_keyboard_and_focus_rules(
     {
         let has_mouse_handler = ["onClick", "onMouseDown", "onMouseUp"]
             .iter()
-            .any(|h| find_attr_ignore_case(&opening.attributes, h).is_some());
-        let role_str = find_attr_ignore_case(&opening.attributes, "role")
+            .any(|h| find_jsx_attr_ignore_case(&opening.attributes, h).is_some());
+        let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings));
         let has_interactive_or_pres_role = role_str.as_deref().is_some_and(|r| {
             let first = r.split_whitespace().next().unwrap_or("");
@@ -234,11 +234,11 @@ pub(super) fn check_element_keyboard_and_focus_rules(
     // 14. `no-noninteractive-tabindex`
     if is_html
         && !is_interactive_element(tag, opening, semantic, const_strings)
-        && let Some(tab_attr) = find_attr_ignore_case(&opening.attributes, "tabIndex")
+        && let Some(tab_attr) = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
         && let Some(tab_val) = parse_attr_number(tab_attr)
         && tab_val >= 0.0
     {
-        let role_str = find_attr_ignore_case(&opening.attributes, "role")
+        let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings));
         let is_interactive_role = role_str
             .as_deref()
@@ -246,10 +246,10 @@ pub(super) fn check_element_keyboard_and_focus_rules(
             .is_some_and(|r| INTERACTIVE_ROLES.contains(&r) || r == "tabpanel");
         let has_key_or_focus = ["onKeyDown", "onKeyUp", "onKeyPress", "onFocus", "onBlur"]
             .iter()
-            .any(|h| find_attr_ignore_case(&opening.attributes, h).is_some());
+            .any(|h| find_jsx_attr_ignore_case(&opening.attributes, h).is_some());
         let has_a11y_name = ["aria-label", "aria-labelledby"]
             .iter()
-            .any(|a| find_attr_ignore_case(&opening.attributes, a).is_some());
+            .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some());
         let class_str = get_class_name_str(opening, semantic, const_strings).unwrap_or_default();
         let is_scrollable = class_str.split_whitespace().any(|t| {
             matches!(
@@ -292,7 +292,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         && !is_interactive_element(tag, opening, semantic, const_strings)
         && !is_hidden_from_screen_reader(opening, semantic, const_strings)
         && !is_disabled_element(opening, semantic, const_strings)
-        && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
         && let Some(first_role) = role_str.split_whitespace().next()
         && INTERACTIVE_ROLES.contains(&first_role)
@@ -315,7 +315,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
                 .and_then(|a| a.name.as_identifier())
                 .is_some_and(|id| id.name.starts_with("on") && id.name.len() > 2)
         });
-        let has_tabindex = find_attr_ignore_case(&opening.attributes, "tabIndex").is_some();
+        let has_tabindex = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_some();
         let is_composite_item_with_id = matches!(
             first_role,
             "option"
@@ -325,7 +325,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
                 | "tab"
                 | "treeitem"
                 | "gridcell"
-        ) && find_attr_ignore_case(&opening.attributes, "id")
+        ) && find_jsx_attr_ignore_case(&opening.attributes, "id")
             .is_some();
 
         if has_event && !has_tabindex && !is_composite_item_with_id {
@@ -368,7 +368,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
 
     // 28. `tabindex-no-positive`
     if !is_testlike
-        && let Some(tab_attr) = find_attr_ignore_case(&opening.attributes, "tabIndex")
+        && let Some(tab_attr) = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
         && let Some(val) = parse_attr_number(tab_attr)
         && val > 0.0
     {
@@ -389,7 +389,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
 
     // 29. `no-access-key`
     if !is_testlike
-        && let Some(ak_attr) = find_attr_ignore_case(&opening.attributes, "accessKey")
+        && let Some(ak_attr) = find_jsx_attr_ignore_case(&opening.attributes, "accessKey")
         && ak_attr.value.is_some()
         && !is_attr_undefined(ak_attr)
     {
@@ -418,14 +418,14 @@ pub(super) fn check_no_outline_none(
     span: ByteSpan,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    if find_attr_ignore_case(&opening.attributes, "tabIndex")
+    if find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
         .and_then(parse_attr_number)
         .is_some_and(|v| v < 0.0)
     {
         return;
     }
-    if find_attr_ignore_case(&opening.attributes, "aria-modal").is_some()
-        || find_attr_ignore_case(&opening.attributes, "onFocus").is_some()
+    if find_jsx_attr_ignore_case(&opening.attributes, "aria-modal").is_some()
+        || find_jsx_attr_ignore_case(&opening.attributes, "onFocus").is_some()
     {
         return;
     }
@@ -483,8 +483,8 @@ pub(super) fn check_custom_keyboard_and_focus_rules(
     // 7. `role-button-requires-complete-keyboard-activation`
     if is_html
         && first_role == Some("button")
-        && let Some(kd_attr) = find_attr_ignore_case(&opening.attributes, "onKeyDown")
-            .or_else(|| find_attr_ignore_case(&opening.attributes, "onKeyUp"))
+        && let Some(kd_attr) = find_jsx_attr_ignore_case(&opening.attributes, "onKeyDown")
+            .or_else(|| find_jsx_attr_ignore_case(&opening.attributes, "onKeyUp"))
     {
         let handler_src = kd_attr.span.source_text(semantic.source_text());
         let has_enter = handler_src.contains("\"Enter\"") || handler_src.contains("'Enter'");
@@ -660,8 +660,8 @@ fn is_inside_modal_or_conditional(
             AstKind::JSXElement(el) => {
                 let tag = get_jsx_tag_name(&el.opening_element.name);
                 if tag == "dialog"
-                    || find_attr_ignore_case(&el.opening_element.attributes, "aria-modal").is_some()
-                    || find_attr_ignore_case(&el.opening_element.attributes, "role")
+                    || find_jsx_attr_ignore_case(&el.opening_element.attributes, "aria-modal").is_some()
+                    || find_jsx_attr_ignore_case(&el.opening_element.attributes, "role")
                         .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                         .is_some_and(|r| matches!(r.as_str(), "dialog" | "alertdialog"))
                 {
@@ -677,7 +677,7 @@ fn is_inside_modal_or_conditional(
 fn has_aria_hidden_ancestor(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
         if let AstKind::JSXElement(el) = semantic.nodes().kind(anc_id)
-            && find_attr_ignore_case(&el.opening_element.attributes, "aria-hidden")
+            && find_jsx_attr_ignore_case(&el.opening_element.attributes, "aria-hidden")
                 .is_some_and(is_attr_statically_true_or_true_str)
         {
             return true;
@@ -693,7 +693,7 @@ fn has_role_text_ancestor(
 ) -> bool {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
         if let AstKind::JSXElement(el) = semantic.nodes().kind(anc_id)
-            && find_attr_ignore_case(&el.opening_element.attributes, "role")
+            && find_jsx_attr_ignore_case(&el.opening_element.attributes, "role")
                 .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                 .is_some_and(|r| r.split_whitespace().next() == Some("text"))
         {

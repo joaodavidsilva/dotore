@@ -805,16 +805,10 @@ fn ci_and_install_subcommands_scaffold_workflows_skills_and_hooks() {
 fn modular_cli_progress_and_tui_explorer_render_via_ui_kit() {
     use clap::Parser as _;
     use dotore::{
-        ColorMode,
-        cli::{Cli, Commands, run_cli},
-        progress::{
-            current_scan_progress, format_spinner_frame, set_progress_phase, tick_progress_file,
-        },
-        tui::{
-            TuiGroupMode, TuiState, build_filter_tabs, build_score_gauge,
-            diagnostic_matches_tab_and_search, handle_tui_search_key, render_tui_body_lines,
-            render_tui_frame, strip_ansi_codes, visible_char_width,
-        },
+        Cli, ColorMode, Commands, TuiGroupMode, TuiState, build_filter_tabs, build_score_gauge,
+        current_scan_progress, diagnostic_matches_tab_and_search, format_spinner_frame,
+        handle_tui_search_key, render_tui_body_lines, render_tui_frame, run_cli,
+        set_progress_phase, strip_ansi_codes, tick_progress_file, visible_char_width,
     };
 
     // 1. Progress module delegates to dotore_core::ui

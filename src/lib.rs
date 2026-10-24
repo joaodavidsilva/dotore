@@ -11,7 +11,7 @@ use std::{
 use rayon::prelude::*;
 
 /// Clap command-line argument parser and subcommand execution runners.
-pub mod cli;
+pub(crate) mod cli;
 /// Project configuration loader (`dotore.config.*` / `package.json#dotore`) and **Capability Gate**.
 pub(crate) mod config;
 /// Git diff scopes (`--scope`, `--base`, `--staged`), **Contextual Owner** filtering, and `--baseline` multiset comparison.
@@ -21,7 +21,7 @@ pub(crate) mod fixer;
 /// Deterministic **Root-Cause Grouping**, **Blast Radius**, **Fix Capsules**, and `dotore plan` generator.
 pub(crate) mod planner;
 /// Live terminal progress bar and 30fps spinner animation for workspace scans.
-pub mod progress;
+pub(crate) mod progress;
 /// Terminal and JSON reporters.
 pub(crate) mod report;
 /// Native Chrome DevTools Protocol (CDP) runtime profiler (`dotore scan`).
@@ -33,7 +33,7 @@ pub(crate) mod score;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
 /// Interactive TUI explorer (`hjkl`/arrow navigation, dynamic filter tabs, grouping modes, `/` search, `ESC` exit).
-pub mod tui;
+pub(crate) mod tui;
 
 pub use cli::{Cli, Commands, run_cli};
 pub use config::{
@@ -74,7 +74,7 @@ pub use dotore_core::{
     },
 };
 pub use progress::{
-    LiveProgressBar, LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
+    LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
     format_spinner_frame, set_progress_phase, tick_progress_file,
 };
 #[cfg(feature = "js")]

@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// XSS, SSRF, Next.js App Router, Server Actions, RSC, and supply-chain security rules (`488..=596`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::NoDangerWithChildren,
         "no-danger-with-children",

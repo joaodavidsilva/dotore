@@ -19,7 +19,7 @@ use crate::{
     ir::{
         ByteSpan,
         react_ast::{
-            extract_callee_short_name, find_enclosing_react_node, get_subject_name,
+            callee_name, find_enclosing_react_node, get_subject_name,
             has_import_from, is_direct_render_phase_node, is_inside_use_effect,
         },
         types::{SemanticRuleSite, loc_from_line_starts},
@@ -146,7 +146,7 @@ fn check_zustand_call_rules(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let callee_name = extract_callee_short_name(&call.callee);
+    let callee_name = callee_name(&call.callee);
 
     // 1. `zustand-no-whole-store-destructure`
     if subject_name.is_some()
@@ -225,7 +225,7 @@ fn check_zustand_call_rules(
 
 fn is_use_shallow_wrapped(expr: &Expression<'_>) -> bool {
     if let Expression::CallExpression(c) = expr.without_parentheses() {
-        extract_callee_short_name(&c.callee) == Some("useShallow")
+        callee_name(&c.callee) == Some("useShallow")
     } else {
         false
     }
@@ -422,7 +422,7 @@ fn check_jotai_call_rules(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let callee_name = extract_callee_short_name(&call.callee);
+    let callee_name = callee_name(&call.callee);
 
     // 1. `jotai-select-atom-in-render-body`
     if subject_name.is_some()
@@ -491,7 +491,7 @@ fn check_jotai_call_rules(
 fn is_inside_memo_or_effect(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
         if let AstKind::CallExpression(c) = semantic.nodes().kind(anc_id)
-            && let Some(name) = extract_callee_short_name(&c.callee)
+            && let Some(name) = callee_name(&c.callee)
             && matches!(
                 name,
                 "useMemo" | "useCallback" | "useEffect" | "useLayoutEffect"
@@ -588,7 +588,7 @@ fn is_raw_tanstack_query_atom(
     if let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(decl_id)
         && let Some(init) = &decl.init
         && let Expression::CallExpression(call) = init.without_parentheses()
-        && let Some(callee) = extract_callee_short_name(&call.callee)
+        && let Some(callee) = callee_name(&call.callee)
     {
         return matches!(
             callee,
@@ -648,7 +648,7 @@ fn check_mobx_call_rules(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let callee_name = extract_callee_short_name(&call.callee);
+    let callee_name = callee_name(&call.callee);
 
     // 1. `mobx-reaction-disposer-discarded`
     if matches!(callee_name, Some("autorun" | "reaction"))
@@ -729,7 +729,7 @@ fn is_memo_or_observer_wrapped(semantic: &Semantic<'_>, expr: &Expression<'_>) -
     match expr.without_parentheses() {
         Expression::CallExpression(c) => {
             matches!(
-                extract_callee_short_name(&c.callee),
+                callee_name(&c.callee),
                 Some("memo" | "observer")
             )
         }
@@ -786,7 +786,7 @@ fn check_valtio_call_rules(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    if extract_callee_short_name(&call.callee) != Some("useSnapshot") {
+    if callee_name(&call.callee) != Some("useSnapshot") {
         return;
     }
     let Some(Argument::Identifier(proxy_ident)) = call.arguments.first() else {

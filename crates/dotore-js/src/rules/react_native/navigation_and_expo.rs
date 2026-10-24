@@ -22,7 +22,11 @@ use super::{
 };
 use crate::{
     ir::types::SemanticRuleSite,
-    matchers::push_semantic_site,
+    matchers::{
+        is_identifier_from_package, is_named_import_from as matcher_is_named_import_from,
+        is_namespace_import_from as matcher_is_namespace_import_from, push_semantic_site,
+        resolve_ident_symbol,
+    },
     rules::RuleId,
 };
 
@@ -282,14 +286,25 @@ pub(crate) fn check_bottom_sheet_jsx_rules(
 ) {
     let opening = &jsx_el.opening_element;
 
-    if el_name == "BottomSheetScrollView"
-        && is_named_import_from(
+    let is_gorhom_scroll_view = if let JSXElementName::IdentifierReference(id) = &opening.name {
+        is_identifier_from_package(semantic, id, &["@gorhom/bottom-sheet"])
+            && resolve_ident_symbol(semantic, id).is_some_and(|sym_id| {
+                matcher_is_named_import_from(
+                    semantic,
+                    sym_id,
+                    "BottomSheetScrollView",
+                    &["@gorhom/bottom-sheet"],
+                )
+            })
+    } else {
+        is_named_import_from(
             program,
             "BottomSheetScrollView",
             "BottomSheetScrollView",
             "@gorhom/bottom-sheet",
         )
-    {
+    };
+    if el_name == "BottomSheetScrollView" && is_gorhom_scroll_view {
         for attr_item in &opening.attributes {
             let Some(attr) = attr_item.as_attribute() else {
                 continue;
@@ -394,6 +409,7 @@ pub(crate) fn check_expo_env_destructuring(
 
 pub(crate) fn check_rn_platform_namespace_shaking(
     program: &Program<'_>,
+    semantic: &Semantic<'_>,
     mem: &oxc_ast::ast::StaticMemberExpression<'_>,
     subject_name: &Option<String>,
     line_starts: &[u32],
@@ -401,7 +417,9 @@ pub(crate) fn check_rn_platform_namespace_shaking(
 ) {
     if mem.property.name == "Platform"
         && let Expression::Identifier(obj_id) = mem.object.without_parentheses()
-        && is_namespace_import_from(program, obj_id.name.as_str(), "react-native")
+        && (resolve_ident_symbol(semantic, obj_id).is_some_and(|sym_id| {
+            matcher_is_namespace_import_from(semantic, sym_id, &["react-native"])
+        }) || is_namespace_import_from(program, obj_id.name.as_str(), "react-native"))
     {
         push_semantic_site(
             sites,

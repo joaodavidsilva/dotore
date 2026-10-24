@@ -30,7 +30,7 @@ use crate::{
         react_ast::{find_enclosing_react_node, get_subject_name},
         types::SemanticRuleSite,
     },
-    matchers::{is_global_ident, push_semantic_site, unwrap_expr},
+    matchers::{is_global_ident, jsx_has_spread_attr, push_semantic_site, unwrap_expr},
     rules::RuleId,
 };
 
@@ -384,10 +384,7 @@ pub(super) fn check_jsx_opening_performance_rules(
 
     // 5. `no-srcset-without-sizes`, `no-img-lazy-with-high-fetchpriority`, `rendering-script-defer-async`
     if tag_ident == Some("img") {
-        let has_spread = opening
-            .attributes
-            .iter()
-            .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)));
+        let has_spread = jsx_has_spread_attr(&opening.attributes);
         let mut srcset_attr: Option<(&oxc_ast::ast::JSXAttribute<'_>, &str)> = None;
         let mut has_sizes = false;
         let mut is_loading_lazy = false;

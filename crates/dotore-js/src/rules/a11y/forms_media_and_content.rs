@@ -10,8 +10,7 @@ use std::collections::{HashMap, HashSet};
 use oxc_ast::{
     AstKind,
     ast::{
-        Expression, JSXAttributeItem, JSXAttributeValue, JSXChild, JSXElement, JSXElementName,
-        JSXOpeningElement,
+        Expression, JSXAttributeValue, JSXChild, JSXElement, JSXElementName, JSXOpeningElement,
     },
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
@@ -34,8 +33,8 @@ use crate::{
         types::{SemanticRuleSite, loc_from_line_starts},
     },
     matchers::{
-        find_attr, find_attr_ignore_case, get_attr_static_str, get_class_name_str,
-        get_jsx_tag_name, get_style_prop_str, subtree_has_tag_matching,
+        find_attr, find_jsx_attr_ignore_case, get_attr_static_str, get_class_name_str,
+        get_jsx_tag_name, get_style_prop_str, jsx_has_spread_attr, subtree_has_tag_matching,
     },
     rules::RuleId,
 };
@@ -63,10 +62,10 @@ pub(super) fn check_element_content_media_and_form_rules(
     // 7. `autocomplete-valid`
     if !is_testlike
         && matches!(tag, "input" | "textarea" | "select" | "form")
-        && let Some(ac_attr) = find_attr_ignore_case(&opening.attributes, "autoComplete")
+        && let Some(ac_attr) = find_jsx_attr_ignore_case(&opening.attributes, "autoComplete")
         && let Some(ac_val) = get_attr_static_str(semantic, ac_attr, const_strings)
     {
-        let input_type = find_attr_ignore_case(&opening.attributes, "type")
+        let input_type = find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .unwrap_or_default()
             .to_ascii_lowercase();
@@ -91,7 +90,7 @@ pub(super) fn check_element_content_media_and_form_rules(
 
     // 17. `html-has-lang`, `lang`, `html-xml-lang-mismatch`
     if tag == "html" {
-        if let Some(lang_attr) = find_attr_ignore_case(&opening.attributes, "lang") {
+        if let Some(lang_attr) = find_jsx_attr_ignore_case(&opening.attributes, "lang") {
             if let Some(lang_val) = get_attr_static_str(semantic, lang_attr, const_strings) {
                 if lang_val.trim().is_empty() {
                     push_site(
@@ -119,7 +118,7 @@ pub(super) fn check_element_content_media_and_form_rules(
                         },
                     );
                 } else if let Some(xml_lang_attr) =
-                    find_attr_ignore_case(&opening.attributes, "xml:lang")
+                    find_jsx_attr_ignore_case(&opening.attributes, "xml:lang")
                     && let Some(xml_val) =
                         get_attr_static_str(semantic, xml_lang_attr, const_strings)
                 {
@@ -178,7 +177,7 @@ pub(super) fn check_element_content_media_and_form_rules(
             );
         }
     } else if is_html
-        && let Some(lang_attr) = find_attr_ignore_case(&opening.attributes, "lang")
+        && let Some(lang_attr) = find_jsx_attr_ignore_case(&opening.attributes, "lang")
         && let Some(lang_val) = get_attr_static_str(semantic, lang_attr, const_strings)
         && !is_valid_bcp47_lang(&lang_val)
     {
@@ -203,7 +202,7 @@ pub(super) fn check_element_content_media_and_form_rules(
         && !has_accessible_child(jsx_el)
         && !["aria-label", "aria-labelledby", "dangerouslySetInnerHTML"]
             .iter()
-            .any(|a| find_attr_ignore_case(&opening.attributes, a).is_some())
+            .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some())
         && !has_spread
     {
         push_site(
@@ -220,7 +219,7 @@ pub(super) fn check_element_content_media_and_form_rules(
 
     // 19. `iframe-has-title`
     if tag == "iframe" && !is_hidden_from_screen_reader(opening, semantic, const_strings) {
-        let title_ok = find_attr_ignore_case(&opening.attributes, "title").is_some_and(|attr| {
+        let title_ok = find_jsx_attr_ignore_case(&opening.attributes, "title").is_some_and(|attr| {
             if let Some(s) = get_attr_static_str(semantic, attr, const_strings) {
                 !s.trim().is_empty()
             } else {
@@ -259,10 +258,10 @@ pub(super) fn check_element_content_media_and_form_rules(
 
     // 23. `no-disabled-zoom`
     if tag == "meta"
-        && find_attr_ignore_case(&opening.attributes, "name")
+        && find_jsx_attr_ignore_case(&opening.attributes, "name")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|n| n.eq_ignore_ascii_case("viewport"))
-        && let Some(content_attr) = find_attr_ignore_case(&opening.attributes, "content")
+        && let Some(content_attr) = find_jsx_attr_ignore_case(&opening.attributes, "content")
         && let Some(content_val) = get_attr_static_str(semantic, content_attr, const_strings)
     {
         let lower = content_val.to_ascii_lowercase();
@@ -293,7 +292,7 @@ pub(super) fn check_element_content_media_and_form_rules(
     // 24. `img-redundant-alt`
     if tag == "img"
         && !is_hidden_from_screen_reader(opening, semantic, const_strings)
-        && let Some(alt_attr) = find_attr_ignore_case(&opening.attributes, "alt")
+        && let Some(alt_attr) = find_jsx_attr_ignore_case(&opening.attributes, "alt")
         && let Some(alt_val) = get_attr_static_str(semantic, alt_attr, const_strings)
         && contains_redundant_image_word(&alt_val)
     {
@@ -316,10 +315,10 @@ pub(super) fn check_element_content_media_and_form_rules(
     if matches!(tag, "audio" | "video")
         && !is_hidden_from_screen_reader(opening, semantic, const_strings)
     {
-        let is_muted = find_attr_ignore_case(&opening.attributes, "muted")
+        let is_muted = find_jsx_attr_ignore_case(&opening.attributes, "muted")
             .is_some_and(|a| !is_attr_statically_false(a));
-        let is_ref_only_without_src = find_attr_ignore_case(&opening.attributes, "ref").is_some()
-            && find_attr_ignore_case(&opening.attributes, "src").is_none()
+        let is_ref_only_without_src = find_jsx_attr_ignore_case(&opening.attributes, "ref").is_some()
+            && find_jsx_attr_ignore_case(&opening.attributes, "src").is_none()
             && jsx_el.children.is_empty();
         let has_captions = jsx_el.children.iter().any(|child| {
             if let JSXChild::Element(el) = child {
@@ -373,20 +372,16 @@ pub(super) fn check_alt_text(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     let opening = &jsx_el.opening_element;
-    if opening
-        .attributes
-        .iter()
-        .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)))
-    {
+    if jsx_has_spread_attr(&opening.attributes) {
         return;
     }
 
     match tag {
         "img" => {
-            let has_valid_alt = find_attr_ignore_case(&opening.attributes, "alt")
+            let has_valid_alt = find_jsx_attr_ignore_case(&opening.attributes, "alt")
                 .is_some_and(|a| a.value.is_some() && !is_attr_null_or_undefined(a));
             let has_aria_label = ["aria-label", "aria-labelledby"].iter().any(|k| {
-                find_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val)
+                find_jsx_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val)
             });
             if !has_valid_alt && !has_aria_label {
                 push_site(
@@ -403,7 +398,7 @@ pub(super) fn check_alt_text(
         }
         "area" => {
             let has_name = ["alt", "aria-label", "aria-labelledby"].iter().any(|k| {
-                find_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val)
+                find_jsx_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val)
             });
             if !has_name {
                 push_site(
@@ -422,7 +417,7 @@ pub(super) fn check_alt_text(
             let has_name = ["alt", "aria-label", "aria-labelledby", "title"]
                 .iter()
                 .any(|k| {
-                    find_attr_ignore_case(&opening.attributes, k)
+                    find_jsx_attr_ignore_case(&opening.attributes, k)
                         .is_some_and(has_non_empty_attr_val)
                 })
                 || has_accessible_child(jsx_el);
@@ -441,7 +436,7 @@ pub(super) fn check_alt_text(
         }
         "input" => {
             let is_image_type =
-                find_attr_ignore_case(&opening.attributes, "type").is_some_and(|a| {
+                find_jsx_attr_ignore_case(&opening.attributes, "type").is_some_and(|a| {
                     matches!(
                         &a.value,
                         Some(JSXAttributeValue::StringLiteral(s))
@@ -450,7 +445,7 @@ pub(super) fn check_alt_text(
                 });
             if is_image_type {
                 let has_name = ["alt", "aria-label", "aria-labelledby"].iter().any(|k| {
-                    find_attr_ignore_case(&opening.attributes, k)
+                    find_jsx_attr_ignore_case(&opening.attributes, k)
                         .is_some_and(has_non_empty_attr_val)
                 });
                 if !has_name {
@@ -488,11 +483,8 @@ pub(super) fn check_anchor_rules(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     let opening = &jsx_el.opening_element;
-    let has_spread = opening
-        .attributes
-        .iter()
-        .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)));
-    let href_attr = find_attr_ignore_case(&opening.attributes, "href");
+    let has_spread = jsx_has_spread_attr(&opening.attributes);
+    let href_attr = find_jsx_attr_ignore_case(&opening.attributes, "href");
     let href_str = href_attr.and_then(|a| get_attr_static_str(semantic, a, const_strings));
 
     // 1. `anchor-is-valid`
@@ -509,10 +501,10 @@ pub(super) fn check_anchor_rules(
                         .starts_with("javascript:")
             }
         };
-        let is_widget_anchor = find_attr_ignore_case(&opening.attributes, "role").is_some()
-            && find_attr_ignore_case(&opening.attributes, "tabIndex").is_some()
-            && (find_attr_ignore_case(&opening.attributes, "onKeyDown").is_some()
-                || find_attr_ignore_case(&opening.attributes, "onKeyUp").is_some());
+        let is_widget_anchor = find_jsx_attr_ignore_case(&opening.attributes, "role").is_some()
+            && find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_some()
+            && (find_jsx_attr_ignore_case(&opening.attributes, "onKeyDown").is_some()
+                || find_jsx_attr_ignore_case(&opening.attributes, "onKeyUp").is_some());
         if is_invalid_href && !is_widget_anchor {
             push_site(
                 sites,
@@ -532,7 +524,7 @@ pub(super) fn check_anchor_rules(
         && !has_spread
         && !is_hidden_from_screen_reader(opening, semantic, const_strings)
         && (href_attr.is_some()
-            || find_attr_ignore_case(&opening.attributes, "role")
+            || find_jsx_attr_ignore_case(&opening.attributes, "role")
                 .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                 .is_some_and(|r| r.split_whitespace().next() == Some("link")))
         && !has_accessible_child(jsx_el)
@@ -543,7 +535,7 @@ pub(super) fn check_anchor_rules(
             "dangerouslySetInnerHTML",
         ]
         .iter()
-        .any(|a| find_attr_ignore_case(&opening.attributes, a).is_some())
+        .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some())
     {
         push_site(
             sites,
@@ -559,7 +551,7 @@ pub(super) fn check_anchor_rules(
 
     // 3. `anchor-ambiguous-text`
     if !is_testlike && !is_hidden_from_screen_reader(opening, semantic, const_strings) {
-        let text_opt = find_attr_ignore_case(&opening.attributes, "aria-label")
+        let text_opt = find_jsx_attr_ignore_case(&opening.attributes, "aria-label")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .or_else(|| collect_static_jsx_element_text(jsx_el));
         if let Some(raw_text) = text_opt {
@@ -613,13 +605,13 @@ pub(super) fn check_control_and_label_association(
 
     // 1. `label-has-associated-control`
     if tag == "label" {
-        let has_html_for = find_attr_ignore_case(&opening.attributes, "htmlFor")
+        let has_html_for = find_jsx_attr_ignore_case(&opening.attributes, "htmlFor")
             .is_some_and(has_non_empty_attr_val);
         let has_nested = has_nested_control_in_label(jsx_el);
         let has_text = has_accessible_child(jsx_el)
             || ["aria-label", "aria-labelledby", "alt"]
                 .iter()
-                .any(|a| find_attr_ignore_case(&opening.attributes, a).is_some());
+                .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some());
         if !has_spread && (!has_text || (!has_html_for && !has_nested)) {
             push_site(
                 sites,
@@ -643,16 +635,16 @@ pub(super) fn check_control_and_label_association(
     }
     let class_str = get_class_name_str(opening, semantic, const_strings).unwrap_or_default();
     if tag == "input"
-        && find_attr_ignore_case(&opening.attributes, "type")
+        && find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|t| t.eq_ignore_ascii_case("file"))
         && class_str.split_whitespace().any(|t| t == "hidden")
-        && find_attr_ignore_case(&opening.attributes, "ref").is_some()
+        && find_jsx_attr_ignore_case(&opening.attributes, "ref").is_some()
     {
         return;
     }
 
-    let role_str = find_attr_ignore_case(&opening.attributes, "role")
+    let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
         .and_then(|a| get_attr_static_str(semantic, a, const_strings));
     let is_operable_tag = matches!(
         tag,
@@ -674,12 +666,12 @@ pub(super) fn check_control_and_label_association(
     if tag == "button"
         && jsx_el.closing_element.is_none()
         && opening.attributes.len() == 1
-        && find_attr_ignore_case(&opening.attributes, "onClick").is_some()
+        && find_jsx_attr_ignore_case(&opening.attributes, "onClick").is_some()
     {
         return;
     }
     if tag == "input" {
-        let input_type = find_attr_ignore_case(&opening.attributes, "type")
+        let input_type = find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .unwrap_or_default()
             .to_ascii_lowercase();
@@ -687,13 +679,13 @@ pub(super) fn check_control_and_label_association(
             return;
         }
         if input_type == "button"
-            && find_attr_ignore_case(&opening.attributes, "value")
+            && find_jsx_attr_ignore_case(&opening.attributes, "value")
                 .is_some_and(has_non_empty_attr_val)
         {
             return;
         }
         let has_id_or_file =
-            find_attr_ignore_case(&opening.attributes, "id").is_some() || input_type == "file";
+            find_jsx_attr_ignore_case(&opening.attributes, "id").is_some() || input_type == "file";
         if !has_id_or_file {
             return;
         }
@@ -707,7 +699,7 @@ pub(super) fn check_control_and_label_association(
         "placeholder",
     ]
     .iter()
-    .any(|k| find_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val));
+    .any(|k| find_jsx_attr_ignore_case(&opening.attributes, k).is_some_and(has_non_empty_attr_val));
     if has_label_prop {
         return;
     }
@@ -717,7 +709,7 @@ pub(super) fn check_control_and_label_association(
     if has_enclosing_label_or_hidden_ancestor(semantic, node_id, const_strings) {
         return;
     }
-    if let Some(id_attr) = find_attr_ignore_case(&opening.attributes, "id") {
+    if let Some(id_attr) = find_jsx_attr_ignore_case(&opening.attributes, "id") {
         let keys = extract_attr_match_keys(semantic, id_attr, const_strings);
         if keys.iter().any(|k| label_html_for_ids.contains(k)) {
             return;
@@ -760,7 +752,7 @@ pub(super) fn check_custom_a11y_rules(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     let opening = &jsx_el.opening_element;
-    let role_str = find_attr_ignore_case(&opening.attributes, "role")
+    let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
         .and_then(|a| get_attr_static_str(semantic, a, const_strings));
     let first_role = role_str
         .as_deref()
@@ -768,7 +760,7 @@ pub(super) fn check_custom_a11y_rules(
     let class_str = get_class_name_str(opening, semantic, const_strings).unwrap_or_default();
     let has_a11y_name = ["aria-label", "aria-labelledby", "title"]
         .iter()
-        .any(|a| find_attr_ignore_case(&opening.attributes, a).is_some_and(has_non_empty_attr_val));
+        .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some_and(has_non_empty_attr_val));
 
     // 1, 6, 10–12, 15, 17. ARIA, dialog, status, landmark, and presentation role rules
     check_custom_aria_and_role_rules(
@@ -809,10 +801,10 @@ pub(super) fn check_custom_a11y_rules(
     // 2. `no-autoplay-without-muted`
     if matches!(tag, "video" | "audio")
         && !has_spread
-        && find_attr_ignore_case(&opening.attributes, "autoPlay")
+        && find_jsx_attr_ignore_case(&opening.attributes, "autoPlay")
             .is_some_and(|a| !is_attr_statically_false(a))
     {
-        let muted_ok = find_attr_ignore_case(&opening.attributes, "muted")
+        let muted_ok = find_jsx_attr_ignore_case(&opening.attributes, "muted")
             .is_some_and(|a| !is_attr_statically_false(a));
         if !muted_ok {
             push_site(
@@ -831,12 +823,12 @@ pub(super) fn check_custom_a11y_rules(
     // 3. `no-blocked-paste`
     if tag == "input"
         && !has_spread
-        && let Some(paste_attr) = find_attr_ignore_case(&opening.attributes, "onPaste")
+        && let Some(paste_attr) = find_jsx_attr_ignore_case(&opening.attributes, "onPaste")
     {
-        let is_auth_input = find_attr_ignore_case(&opening.attributes, "type")
+        let is_auth_input = find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|t| t.eq_ignore_ascii_case("password"))
-            || find_attr_ignore_case(&opening.attributes, "autoComplete")
+            || find_jsx_attr_ignore_case(&opening.attributes, "autoComplete")
                 .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                 .is_some_and(|ac| {
                     ac.contains("password")
@@ -862,8 +854,8 @@ pub(super) fn check_custom_a11y_rules(
     }
 
     // 4. `no-broken-image-source`
-    if tag == "img" && !has_spread && find_attr_ignore_case(&opening.attributes, "ref").is_none() {
-        let src_attr = find_attr_ignore_case(&opening.attributes, "src");
+    if tag == "img" && !has_spread && find_jsx_attr_ignore_case(&opening.attributes, "ref").is_none() {
+        let src_attr = find_jsx_attr_ignore_case(&opening.attributes, "src");
         let is_broken = match src_attr {
             None => true,
             Some(a) if a.value.is_none() => true,
@@ -888,11 +880,11 @@ pub(super) fn check_custom_a11y_rules(
     // 5. `no-placeholder-only-field`
     if matches!(tag, "input" | "textarea")
         && !has_spread
-        && find_attr_ignore_case(&opening.attributes, "placeholder")
+        && find_jsx_attr_ignore_case(&opening.attributes, "placeholder")
             .is_some_and(has_non_empty_attr_val)
         && !has_a11y_name
         && !has_enclosing_label_or_hidden_ancestor(semantic, node_id, const_strings)
-        && find_attr_ignore_case(&opening.attributes, "id").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "id").is_none()
     {
         push_site(
             sites,
@@ -996,7 +988,7 @@ pub(super) fn check_custom_a11y_rules(
 
     // 18. `no-server-side-image-map`
     if tag == "img"
-        && let Some(ismap_attr) = find_attr_ignore_case(&opening.attributes, "isMap")
+        && let Some(ismap_attr) = find_jsx_attr_ignore_case(&opening.attributes, "isMap")
         && !is_attr_statically_false(ismap_attr)
     {
         push_site(
@@ -1157,7 +1149,7 @@ pub(super) fn check_custom_a11y_rules(
     }
     if matches!(tag, "input" | "select" | "textarea")
         && !has_spread
-        && find_attr_ignore_case(&opening.attributes, "name").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "name").is_none()
         && has_enclosing_tag(semantic, node_id, "form")
     {
         push_site(
@@ -1173,10 +1165,10 @@ pub(super) fn check_custom_a11y_rules(
     }
     if tag == "input"
         && !has_spread
-        && find_attr_ignore_case(&opening.attributes, "type")
+        && find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|t| t.eq_ignore_ascii_case("radio"))
-        && !find_attr_ignore_case(&opening.attributes, "name").is_some_and(has_non_empty_attr_val)
+        && !find_jsx_attr_ignore_case(&opening.attributes, "name").is_some_and(has_non_empty_attr_val)
     {
         push_site(
             sites,
@@ -1316,7 +1308,7 @@ pub(super) fn check_ui_library_a11y(
 
     // 3. `shadcn-icon-button-requires-label`
     if tag == "Button"
-        && find_attr_ignore_case(&opening.attributes, "size")
+        && find_jsx_attr_ignore_case(&opening.attributes, "size")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|s| s.starts_with("icon"))
         && !has_a11y_name
@@ -1436,7 +1428,7 @@ pub(super) fn collect_subtree_frames_and_ids(
     let opening = &jsx_el.opening_element;
     let tag = get_jsx_tag_name(&opening.name);
     if matches!(tag.as_str(), "iframe" | "frame")
-        && let Some(title_attr) = find_attr_ignore_case(&opening.attributes, "title")
+        && let Some(title_attr) = find_jsx_attr_ignore_case(&opening.attributes, "title")
         && let Some(raw_title) = get_attr_static_str(semantic, title_attr, const_strings)
     {
         let norm = raw_title
@@ -1589,7 +1581,7 @@ fn has_enclosing_label_or_hidden_ancestor(
             if is_hidden_from_screen_reader(&anc_el.opening_element, semantic, const_strings) {
                 return true;
             }
-            if find_attr_ignore_case(&anc_el.opening_element.attributes, "label")
+            if find_jsx_attr_ignore_case(&anc_el.opening_element.attributes, "label")
                 .is_some_and(has_non_empty_attr_val)
             {
                 return true;
@@ -1675,7 +1667,7 @@ fn resolve_jsx_root_import_source(
 }
 
 fn subtree_has_attr(jsx_el: &JSXElement<'_>, attr_name: &str) -> bool {
-    if find_attr_ignore_case(&jsx_el.opening_element.attributes, attr_name).is_some() {
+    if find_jsx_attr_ignore_case(&jsx_el.opening_element.attributes, attr_name).is_some() {
         return true;
     }
     jsx_el.children.iter().any(|child| {

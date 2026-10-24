@@ -31,6 +31,7 @@ use crate::{
         ByteSpan,
         types::{SemanticRuleSite, loc_from_line_starts},
     },
+    matchers::jsx_has_spread_attr,
     rules::RuleId,
 };
 
@@ -339,10 +340,7 @@ fn collect_callback_returned_jsx_missing_key<'a>(
 
 fn jsx_element_missing_key(el: &JSXElement<'_>) -> bool {
     let attrs = &el.opening_element.attributes;
-    if attrs
-        .iter()
-        .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)))
-    {
+    if jsx_has_spread_attr(attrs) {
         return false;
     }
     find_jsx_attr(attrs, "key").is_none()

@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Defensive JS/TS/DOM runtime safety, React Router, Remotion, and correctness rules (`767..=920`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::ActivityWrapsEffectHeavySubtree,
         "activity-wraps-effect-heavy-subtree",

@@ -1,7 +1,7 @@
 //! Diagnostic rules engine gated by **Capability Gate**, user configuration (`dotore.config.*` / `package.json#dotore`),
 //! file context (`test-noise` / `migration-hint`), library role, and inline suppression directives.
 
-pub(crate) use crate::matchers::push_simple_diagnostic;
+pub(crate) use crate::matchers::{make_diag, make_diag_for_subject, push_simple_diagnostic};
 
 pub(crate) mod a11y;
 pub(crate) mod angular;
@@ -215,26 +215,18 @@ pub fn evaluate_project_graph_rules(
             {
                 continue;
             }
-            let meta = RuleId::UnusedFile.metadata();
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: None,
-                rule: RuleId::UnusedFile,
-                category: meta.category,
-                severity: sev,
-                message_id: "unusedFile",
-                tier: meta.default_tier,
-                target_name: file.path.to_string_lossy().to_string(),
-                message:
-                    "No discovered application, package, or framework entry point reaches this file."
-                        .to_string(),
-                docs_url: meta.docs_url,
-                loc,
-                span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag(
+                    RuleId::UnusedFile,
+                    file.path.clone(),
+                    loc,
+                    span,
+                    "No discovered application, package, or framework entry point reaches this file.",
+                )
+                .with_severity(sev)
+                .with_message_id("unusedFile")
+                .with_target_name(file.path.to_string_lossy().to_string()),
+            );
         }
 
         for unused_exp in &graph.unused_exports {
@@ -271,32 +263,27 @@ pub fn evaluate_project_graph_rules(
             {
                 continue;
             }
-            let meta = rule.metadata();
             let (message_id, kind_label) = if unused_exp.is_type_only {
                 ("unusedType", "type export")
             } else {
                 ("unusedExport", "value export")
             };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: None,
-                rule,
-                category: meta.category,
-                severity: sev,
-                message_id,
-                tier: meta.default_tier,
-                target_name: unused_exp.name.clone(),
-                message: format!(
-                    "Unused {kind_label}: `{}` has no importer in the analyzed project graph.",
-                    unused_exp.name
-                ),
-                docs_url: meta.docs_url,
-                loc: unused_exp.loc,
-                span: unused_exp.span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    rule,
+                    file.path.clone(),
+                    None,
+                    message_id,
+                    unused_exp.name.clone(),
+                    format!(
+                        "Unused {kind_label}: `{}` has no importer in the analyzed project graph.",
+                        unused_exp.name
+                    ),
+                    unused_exp.loc,
+                    unused_exp.span,
+                )
+                .with_severity(sev),
+            );
         }
 
         for dep in &graph.unused_dependencies {
@@ -340,23 +327,19 @@ pub fn evaluate_project_graph_rules(
             } else {
                 ("unusedDependency", "dependency")
             };
-            out.push(Diagnostic {
-                file: dep.manifest_path.clone(),
-                subject_name: None,
-                rule,
-                category: meta.category,
-                severity: sev,
-                message_id,
-                tier: meta.default_tier,
-                target_name: dep.package_name.clone(),
-                message: format!("Unused {dep_label}: `{}`", dep.package_name),
-                docs_url: meta.docs_url,
-                loc: dep.loc,
-                span: dep.span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    rule,
+                    dep.manifest_path.clone(),
+                    None,
+                    message_id,
+                    dep.package_name.clone(),
+                    format!("Unused {dep_label}: `{}`", dep.package_name),
+                    dep.loc,
+                    dep.span,
+                )
+                .with_severity(sev),
+            );
         }
     }
 
@@ -391,32 +374,27 @@ pub fn evaluate_project_graph_rules(
         {
             continue;
         }
-        let meta = RuleId::CircularDependency.metadata();
         let cycle_str = cycle
             .cycle_paths
             .iter()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .collect::<Vec<_>>()
             .join(" → ");
-        out.push(Diagnostic {
-            file: file.path.clone(),
-            subject_name: None,
-            rule: RuleId::CircularDependency,
-            category: meta.category,
-            severity: sev,
-            message_id: "circularDependency",
-            tier: meta.default_tier,
-            target_name: cycle_str.clone(),
-            message: format!(
-                "Runtime import cycle: {cycle_str}. Modules in the cycle can observe partially initialized exports."
-            ),
-            docs_url: meta.docs_url,
-            loc,
-            span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        out.push(
+            make_diag_for_subject(
+                RuleId::CircularDependency,
+                file.path.clone(),
+                None,
+                "circularDependency",
+                cycle_str.clone(),
+                format!(
+                    "Runtime import cycle: {cycle_str}. Modules in the cycle can observe partially initialized exports."
+                ),
+                loc,
+                span,
+            )
+            .with_severity(sev),
+        );
     }
 
     for family in &graph.duplicate_jsx_families {
@@ -451,7 +429,7 @@ pub fn evaluate_project_graph_rules(
         {
             continue;
         }
-        let meta = RuleId::DuplicateJsxSubtree.metadata();
+        let _ = RuleId::DuplicateJsxSubtree;
         let file_label = if family.distinct_file_count == 1 {
             "file"
         } else {
@@ -477,29 +455,26 @@ pub fn evaluate_project_graph_rules(
             })
             .collect();
 
-        out.push(Diagnostic {
-            file: primary.path.clone(),
-            subject_name: primary.enclosing_subject.clone(),
-            rule: RuleId::DuplicateJsxSubtree,
-            category: meta.category,
-            severity: sev,
-            message_id: "duplicateJsxSubtree",
-            tier: meta.default_tier,
-            target_name: family.fingerprint.clone(),
-            message: format!(
-                "{} copies of this {}-node JSX tree appear across {} {file_label}, repeating about {} {line_label}. Composition path: {comp_path}.",
-                family.occurrence_count,
-                family.node_count,
-                family.distinct_file_count,
-                family.estimated_removable_line_count
-            ),
-            docs_url: meta.docs_url,
-            loc: primary.loc,
-            span: primary.span,
-            cascade_steps: Vec::new(),
-            caller_sites,
-            autofix: None,
-        });
+        out.push(
+            make_diag_for_subject(
+                RuleId::DuplicateJsxSubtree,
+                primary.path.clone(),
+                primary.enclosing_subject.clone(),
+                "duplicateJsxSubtree",
+                family.fingerprint.clone(),
+                format!(
+                    "{} copies of this {}-node JSX tree appear across {} {file_label}, repeating about {} {line_label}. Composition path: {comp_path}.",
+                    family.occurrence_count,
+                    family.node_count,
+                    family.distinct_file_count,
+                    family.estimated_removable_line_count
+                ),
+                primary.loc,
+                primary.span,
+            )
+            .with_severity(sev)
+            .with_caller_sites(caller_sites),
+        );
     }
 
     r3f::evaluate_cross_file_frame_loop_findings(
@@ -773,29 +748,27 @@ fn evaluate_file_ir_facets<F>(
         }
         if is_active(site.rule).is_some() {
             let meta = site.rule.metadata();
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: site.subject_name.clone(),
-                rule: site.rule,
-                category: meta.category,
-                severity: meta.default_severity,
-                message_id: site.message_id,
-                tier: if site.autofix.is_some() {
-                    PrescriptionTier::Autofix
-                } else if meta.default_tier == PrescriptionTier::Autofix {
-                    PrescriptionTier::Surgical
-                } else {
-                    meta.default_tier
-                },
-                target_name: site.target_name.clone(),
-                message: site.message.clone(),
-                docs_url: meta.docs_url,
-                loc: site.loc,
-                span: site.span,
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: site.autofix.clone(),
-            });
+            let tier = if site.autofix.is_some() {
+                PrescriptionTier::Autofix
+            } else if meta.default_tier == PrescriptionTier::Autofix {
+                PrescriptionTier::Surgical
+            } else {
+                meta.default_tier
+            };
+            out.push(
+                make_diag_for_subject(
+                    site.rule,
+                    file.path.clone(),
+                    site.subject_name.clone(),
+                    site.message_id,
+                    site.target_name.clone(),
+                    site.message.clone(),
+                    site.loc,
+                    site.span,
+                )
+                .with_autofix(site.autofix.clone())
+                .with_tier(tier),
+            );
         }
     }
 }

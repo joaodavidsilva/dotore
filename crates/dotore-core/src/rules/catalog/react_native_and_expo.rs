@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// React Native and Expo mobile architecture, animation, and configuration rules (`597..=655`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::RnAnimateLayoutProperty,
         "rn-animate-layout-property",

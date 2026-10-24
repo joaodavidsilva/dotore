@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Initial Zustand, Jotai, MobX, Valtio, Preact, Ink, and Zod v4 rules (`223..=229`).
-pub const INITIAL_ECOSYSTEM_RULES: &[RuleMetadata] = &[
+pub(crate) const INITIAL_ECOSYSTEM_RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::ZustandNoWholeStoreDestructure,
         "zustand-no-whole-store-destructure",
@@ -131,7 +131,7 @@ pub const INITIAL_ECOSYSTEM_RULES: &[RuleMetadata] = &[
 ];
 
 /// Extended state-store, TanStack, Redux, Preact, Ink, and Zod v4 rules (`656..=692`).
-pub const EXTENDED_ECOSYSTEM_RULES: &[RuleMetadata] = &[
+pub(crate) const EXTENDED_ECOSYSTEM_RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::ZustandNoMutatingState,
         "zustand-no-mutating-state",

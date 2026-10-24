@@ -25,8 +25,8 @@ pub(crate) struct RefEntry {
 }
 
 pub(crate) use crate::matchers::{
-    extract_callee_short_name, has_import_from, is_component_name, is_custom_hook_name,
-    is_react_hook_callee, is_react_hook_node, is_use_effect_call, resolve_import_source,
+    callee_name, has_import_from, is_component_name, is_custom_hook_name, is_react_hook_callee,
+    is_react_hook_node, is_use_effect_call, resolve_import_source,
 };
 
 /// Checks if `node_id` (an identifier or call callee) refers to `useState`.

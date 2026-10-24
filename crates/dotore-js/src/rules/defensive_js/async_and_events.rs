@@ -22,7 +22,7 @@ use crate::{
         types::loc_from_line_starts,
     },
     matchers::{is_react_hook_callee, push_semantic_site, push_semantic_site_with_fix},
-    rules::types::{AutofixPatch, ByteEdit, RuleId},
+    rules::types::{AutofixPatch, RuleId},
 };
 
 // ---------------------------------------------------------------------------
@@ -586,20 +586,17 @@ fn build_keycode_autofix(
                 BinaryOperator::StrictInequality | BinaryOperator::Inequality => "!==",
                 _ => "===",
             };
-            return Some(AutofixPatch {
-                description: format!(
+            return Some(AutofixPatch::replace(
+                format!(
                     "Replace deprecated `{}` check with `{obj_text}.key {op_str} '{key_str}'`",
                     bin.span.source_text(semantic.source_text())
                 ),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: bin.span.start,
-                        end: bin.span.end,
-                    },
-                    replacement: format!("{obj_text}.key {op_str} '{key_str}'"),
-                }],
-            });
+                ByteSpan {
+                    start: bin.span.start,
+                    end: bin.span.end,
+                },
+                format!("{obj_text}.key {op_str} '{key_str}'"),
+            ));
         }
     }
 

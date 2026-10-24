@@ -21,7 +21,7 @@ use crate::{
     format_runtime_scan_report, format_search_json, format_search_text, format_terminal_report,
     format_terminal_report_pretty, format_why_report_text, install_dotore, load_config_from_dir,
     mutate_config_in_dir, plan_project,
-    progress::LiveProgressBar,
+    progress::LiveSpinner,
     prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
     resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols,
     should_highlight_stdout,
@@ -43,7 +43,7 @@ pub struct Cli {
 
     /// Default `check` arguments when no explicit subcommand is passed.
     #[command(flatten)]
-    pub check_args: CheckArgs,
+    pub(crate) check_args: CheckArgs,
 }
 
 /// Subcommands supported by the `dotore` binary.
@@ -258,7 +258,7 @@ pub struct ReportArgs {
 
 /// Output format for `dotore search`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum SearchFormat {
+pub(crate) enum SearchFormat {
     /// Human-readable terminal output.
     Text,
     /// Machine-readable JSON report.
@@ -286,7 +286,7 @@ pub struct SearchArgs {
 
     /// Output format (`text` or `json`).
     #[arg(short = 'f', long = "format", value_enum, default_value_t = SearchFormat::Text, value_name = "FORMAT")]
-    pub format: SearchFormat,
+    pub(crate) format: SearchFormat,
 
     /// Disable ANSI syntax highlighting in text output.
     #[arg(long)]
@@ -318,12 +318,12 @@ pub struct ScanArgs {
 pub struct RulesArgs {
     /// Rules subcommand (`list`, `explain`, `enable`, `disable`, `set`, `category`, `ignore-tag`, `unignore-tag`).
     #[command(subcommand)]
-    pub command: RulesSubcommand,
+    pub(crate) command: RulesSubcommand,
 }
 
 /// Subcommands under `dotore rules`.
 #[derive(Debug, Clone, Subcommand)]
-pub enum RulesSubcommand {
+pub(crate) enum RulesSubcommand {
     /// List all available rules with their effective severities.
     List(RulesListArgs),
     /// Render the rationale, examples, configuration snippet, and Prescription Tier for a rule.
@@ -346,7 +346,7 @@ pub enum RulesSubcommand {
 
 /// CLI arguments for `dotore rules list`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesListArgs {
+pub(crate) struct RulesListArgs {
     /// Filter by category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability`).
     #[arg(long, value_name = "CATEGORY")]
     pub category: Option<String>,
@@ -374,7 +374,7 @@ pub struct RulesListArgs {
 
 /// CLI arguments for `dotore rules explain`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesExplainArgs {
+pub(crate) struct RulesExplainArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias (`effect/<id>`, `react/<id>`).
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -390,7 +390,7 @@ pub struct RulesExplainArgs {
 
 /// CLI arguments for `dotore rules enable`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesEnableArgs {
+pub(crate) struct RulesEnableArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -406,7 +406,7 @@ pub struct RulesEnableArgs {
 
 /// CLI arguments for `dotore rules disable`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesDisableArgs {
+pub(crate) struct RulesDisableArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -418,7 +418,7 @@ pub struct RulesDisableArgs {
 
 /// CLI arguments for `dotore rules set`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesSetArgs {
+pub(crate) struct RulesSetArgs {
     /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
     #[arg(value_name = "RULE")]
     pub rule: String,
@@ -434,7 +434,7 @@ pub struct RulesSetArgs {
 
 /// CLI arguments for `dotore rules category`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesCategoryArgs {
+pub(crate) struct RulesCategoryArgs {
     /// Rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability`).
     #[arg(value_name = "CATEGORY")]
     pub category: String,
@@ -450,7 +450,7 @@ pub struct RulesCategoryArgs {
 
 /// CLI arguments for `dotore rules ignore-tag` and `dotore rules unignore-tag`.
 #[derive(Debug, Clone, Args)]
-pub struct RulesTagArgs {
+pub(crate) struct RulesTagArgs {
     /// Behavioral tag (`design`, `test-noise`, `r3f`, etc.).
     #[arg(value_name = "TAG")]
     pub tag: String,
@@ -481,12 +481,12 @@ pub struct WhyArgs {
 pub struct CiArgs {
     /// CI workflow subcommand (`install`, `upgrade`, `config`).
     #[command(subcommand)]
-    pub command: CiSubcommand,
+    pub(crate) command: CiSubcommand,
 }
 
 /// Subcommands under `dotore ci`.
 #[derive(Debug, Clone, Subcommand)]
-pub enum CiSubcommand {
+pub(crate) enum CiSubcommand {
     /// Generate a CI pull-request workflow (`.github/workflows/dotore.yml` or `.gitlab-ci.yml`).
     Install(CiActionArgs),
     /// Upgrade an existing CI workflow to the latest `dotore` v2 configuration.
@@ -495,9 +495,19 @@ pub enum CiSubcommand {
     Config(CiActionArgs),
 }
 
+impl CiSubcommand {
+    const fn action_args(&self) -> (&'static str, &CiActionArgs) {
+        match self {
+            Self::Install(a) => ("install", a),
+            Self::Upgrade(a) => ("upgrade", a),
+            Self::Config(a) => ("config", a),
+        }
+    }
+}
+
 /// CLI arguments for `dotore ci install`, `dotore ci upgrade`, and `dotore ci config`.
 #[derive(Debug, Clone, Args)]
-pub struct CiActionArgs {
+pub(crate) struct CiActionArgs {
     /// CI provider (`github-actions` or `gitlab-ci`).
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
@@ -596,7 +606,7 @@ fn build_scan_options(
 
 /// Runs `dotore check` (or `dotore score` when `args.score` is `true`).
 #[must_use]
-pub fn run_check(args: &CheckArgs) -> ExitCode {
+pub(crate) fn run_check(args: &CheckArgs) -> ExitCode {
     let Some(scope) = DiffScope::parse(&args.scope) else {
         eprintln!(
             "error: Unknown --scope {:?} (expected full, changed, contextual, or lines)",
@@ -654,7 +664,7 @@ pub fn run_check(args: &CheckArgs) -> ExitCode {
 
     let show_live_spinner = !args.score && !args.json && should_launch_tui(args.no_pager);
     let spinner_guard = if show_live_spinner {
-        LiveProgressBar::start()
+        LiveSpinner::start()
     } else {
         None
     };
@@ -701,29 +711,48 @@ pub fn run_check(args: &CheckArgs) -> ExitCode {
     ExitCode::from(code)
 }
 
-/// Runs `dotore fix`.
-#[must_use]
-pub fn run_fix(args: &FixArgs) -> ExitCode {
+fn scan_workspace_for_subcommand(
+    paths: &[PathBuf],
+    include_tests: bool,
+    tiers: Option<Vec<PrescriptionTier>>,
+    no_inline_disables: bool,
+    custom_rules_only: bool,
+    ignore_tags: &[String],
+    config_path: Option<&PathBuf>,
+) -> Result<(crate::JsonReport, std::collections::HashMap<PathBuf, String>), ExitCode> {
     let options = ScanOptions {
-        paths: args.paths.clone(),
-        include_tests: args.include_tests,
+        paths: paths.to_vec(),
+        include_tests,
         rules: None,
-        tiers: Some(vec![PrescriptionTier::Autofix]),
+        tiers,
     };
     let overrides = CliOverrides {
-        no_inline_disables: args.no_inline_disables,
-        custom_rules_only: args.custom_rules_only,
-        ignore_tags: args.ignore_tags.clone(),
-        config_path: args.config.clone(),
+        no_inline_disables,
+        custom_rules_only,
+        ignore_tags: ignore_tags.to_vec(),
+        config_path: config_path.cloned(),
         ..Default::default()
     };
+    scan_workspace_with_overrides(&options, &overrides).map_err(|err| {
+        eprintln!("error scanning workspace: {err}");
+        ExitCode::from(2)
+    })
+}
 
-    let (report, sources) = match scan_workspace_with_overrides(&options, &overrides) {
+/// Runs `dotore fix`.
+#[must_use]
+pub(crate) fn run_fix(args: &FixArgs) -> ExitCode {
+    let (report, sources) = match scan_workspace_for_subcommand(
+        &args.paths,
+        args.include_tests,
+        Some(vec![PrescriptionTier::Autofix]),
+        args.no_inline_disables,
+        args.custom_rules_only,
+        &args.ignore_tags,
+        args.config.as_ref(),
+    ) {
         Ok(res) => res,
-        Err(err) => {
-            eprintln!("error scanning workspace: {err}");
-            return ExitCode::from(2);
-        }
+        Err(code) => return code,
     };
 
     let results = match apply_autofixes(&report.diagnostics, &sources, args.dry_run) {
@@ -740,27 +769,18 @@ pub fn run_fix(args: &FixArgs) -> ExitCode {
 
 /// Runs `dotore plan`.
 #[must_use]
-pub fn run_plan(args: &PlanArgs) -> ExitCode {
-    let options = ScanOptions {
-        paths: args.paths.clone(),
-        include_tests: args.include_tests,
-        rules: None,
-        tiers: None,
-    };
-    let overrides = CliOverrides {
-        no_inline_disables: args.no_inline_disables,
-        custom_rules_only: args.custom_rules_only,
-        ignore_tags: args.ignore_tags.clone(),
-        config_path: args.config.clone(),
-        ..Default::default()
-    };
-
-    let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
+pub(crate) fn run_plan(args: &PlanArgs) -> ExitCode {
+    let (report, _) = match scan_workspace_for_subcommand(
+        &args.paths,
+        args.include_tests,
+        None,
+        args.no_inline_disables,
+        args.custom_rules_only,
+        &args.ignore_tags,
+        args.config.as_ref(),
+    ) {
         Ok(res) => res,
-        Err(err) => {
-            eprintln!("error scanning workspace: {err}");
-            return ExitCode::from(2);
-        }
+        Err(code) => return code,
     };
 
     match plan_project(&report, &args.out) {
@@ -777,29 +797,19 @@ pub fn run_plan(args: &PlanArgs) -> ExitCode {
 
 /// Runs `dotore report`.
 #[must_use]
-pub fn run_report(args: &ReportArgs) -> ExitCode {
-    let options = ScanOptions {
-        paths: args.paths.clone(),
-        include_tests: args.include_tests,
-        rules: None,
-        tiers: None,
-    };
-    let overrides = CliOverrides {
-        no_inline_disables: args.no_inline_disables,
-        custom_rules_only: args.custom_rules_only,
-        ignore_tags: args.ignore_tags.clone(),
-        config_path: args.config.clone(),
-        ..Default::default()
-    };
-
-    let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
+pub(crate) fn run_report(args: &ReportArgs) -> ExitCode {
+    let (report, _) = match scan_workspace_for_subcommand(
+        &args.paths,
+        args.include_tests,
+        None,
+        args.no_inline_disables,
+        args.custom_rules_only,
+        &args.ignore_tags,
+        args.config.as_ref(),
+    ) {
         Ok(res) => res,
-        Err(err) => {
-            eprintln!("error scanning workspace: {err}");
-            return ExitCode::from(2);
-        }
+        Err(code) => return code,
     };
-
     match write_and_open_html_report(&report, args.output.as_deref(), !args.no_open) {
         Ok(path) => {
             println!("HTML report written to {}", path.display());
@@ -839,7 +849,7 @@ fn parse_symbol_kinds_arg(raw: &str) -> Result<Vec<SymbolKind>, String> {
 
 /// Runs `dotore search`.
 #[must_use]
-pub fn run_search(args: &SearchArgs) -> ExitCode {
+pub(crate) fn run_search(args: &SearchArgs) -> ExitCode {
     let kinds = match args.kind.as_deref() {
         Some(raw) => match parse_symbol_kinds_arg(raw) {
             Ok(parsed) => Some(parsed),
@@ -896,7 +906,7 @@ pub fn run_search(args: &SearchArgs) -> ExitCode {
 
 /// Runs `dotore scan`.
 #[must_use]
-pub fn run_scan(args: &ScanArgs) -> ExitCode {
+pub(crate) fn run_scan(args: &ScanArgs) -> ExitCode {
     let format = match resolve_runtime_scan_format(args.format.as_deref()) {
         Ok(fmt) => fmt,
         Err(err) => {
@@ -977,7 +987,7 @@ pub fn run_scan(args: &ScanArgs) -> ExitCode {
 
 /// Runs `dotore rules`.
 #[must_use]
-pub fn run_rules(args: &RulesArgs) -> ExitCode {
+pub(crate) fn run_rules(args: &RulesArgs) -> ExitCode {
     match &args.command {
         RulesSubcommand::List(list_args) => {
             let config = load_config_from_dir(&list_args.cwd);
@@ -1173,7 +1183,7 @@ fn apply_cli_config_mutation(cwd: &Path, mutation: ConfigMutation, summary: &str
 
 /// Runs `dotore why <file:line>`.
 #[must_use]
-pub fn run_why(args: &WhyArgs) -> ExitCode {
+pub(crate) fn run_why(args: &WhyArgs) -> ExitCode {
     match explain_location(&args.location, &args.cwd) {
         Ok(report) => {
             if args.json {
@@ -1198,7 +1208,7 @@ pub fn run_why(args: &WhyArgs) -> ExitCode {
 
 /// Runs `dotore design`.
 #[must_use]
-pub fn run_design(args: &CheckArgs) -> ExitCode {
+pub(crate) fn run_design(args: &CheckArgs) -> ExitCode {
     let options =
         match build_scan_options(&args.paths, args.include_tests, &args.rules, &args.tiers) {
             Ok(opts) => opts,
@@ -1216,7 +1226,7 @@ pub fn run_design(args: &CheckArgs) -> ExitCode {
     };
     let show_live_spinner = !args.json && should_launch_tui(args.no_pager);
     let spinner_guard = if show_live_spinner {
-        LiveProgressBar::start()
+        LiveSpinner::start()
     } else {
         None
     };
@@ -1257,12 +1267,8 @@ pub fn run_design(args: &CheckArgs) -> ExitCode {
 
 /// Runs `dotore ci`.
 #[must_use]
-pub fn run_ci(args: &CiArgs) -> ExitCode {
-    let (sub_name, act_args) = match &args.command {
-        CiSubcommand::Install(a) => ("install", a),
-        CiSubcommand::Upgrade(a) => ("upgrade", a),
-        CiSubcommand::Config(a) => ("config", a),
-    };
+pub(crate) fn run_ci(args: &CiArgs) -> ExitCode {
+    let (sub_name, act_args) = args.command.action_args();
     let provider = if let Some(raw_prov) = &act_args.provider {
         let Some(parsed) = CiProviderKind::parse(raw_prov) else {
             eprintln!(
@@ -1280,10 +1286,10 @@ pub fn run_ci(args: &CiArgs) -> ExitCode {
         blocking: act_args.blocking.clone(),
         scope: act_args.scope.clone(),
     };
-    let res = match sub_name {
-        "install" => ci_install(&ci_opts),
-        "upgrade" => ci_upgrade(&ci_opts),
-        _ => ci_config(&ci_opts),
+    let res = match &args.command {
+        CiSubcommand::Install(_) => ci_install(&ci_opts),
+        CiSubcommand::Upgrade(_) => ci_upgrade(&ci_opts),
+        CiSubcommand::Config(_) => ci_config(&ci_opts),
     };
     match res {
         Ok(outcome) => {
@@ -1305,7 +1311,7 @@ pub fn run_ci(args: &CiArgs) -> ExitCode {
 
 /// Runs `dotore install`.
 #[must_use]
-pub fn run_install(args: &InstallArgs) -> ExitCode {
+pub(crate) fn run_install(args: &InstallArgs) -> ExitCode {
     match install_dotore(&InstallOptions {
         cwd: args.cwd.clone(),
         yes: args.yes,

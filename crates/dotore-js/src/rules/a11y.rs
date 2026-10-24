@@ -30,7 +30,7 @@ use crate::{
         types::{SemanticRuleSite, classify_file_context, loc_from_line_starts},
     },
     matchers::{
-        eval_numeric_expr, eval_static_str, find_attr, find_attr_ignore_case, find_last_attr,
+        eval_numeric_expr, eval_static_str, find_attr, find_jsx_attr_ignore_case, find_last_attr,
         get_attr_static_str, get_jsx_tag_name, get_style_prop_str, make_diag_for_subject,
     },
     rules::{Diagnostic, RuleId, RuleSeverity},
@@ -505,7 +505,7 @@ pub(super) fn has_nonempty_literal_attr(
     semantic: &Semantic<'_>,
     const_strings: &HashMap<SymbolId, String>,
 ) -> bool {
-    find_attr_ignore_case(&opening.attributes, name)
+    find_jsx_attr_ignore_case(&opening.attributes, name)
         .and_then(|a| get_attr_static_str(semantic, a, const_strings))
         .is_some_and(|s| !s.trim().is_empty())
 }
@@ -515,12 +515,12 @@ pub(super) fn is_hidden_from_screen_reader(
     semantic: &Semantic<'_>,
     const_strings: &HashMap<SymbolId, String>,
 ) -> bool {
-    if find_attr_ignore_case(&opening.attributes, "hidden")
+    if find_jsx_attr_ignore_case(&opening.attributes, "hidden")
         .is_some_and(|a| !is_attr_statically_false(a))
     {
         return true;
     }
-    if find_attr_ignore_case(&opening.attributes, "aria-hidden")
+    if find_jsx_attr_ignore_case(&opening.attributes, "aria-hidden")
         .is_some_and(is_attr_statically_true_or_true_str)
     {
         return true;
@@ -539,9 +539,9 @@ pub(super) fn is_disabled_element(
     _semantic: &Semantic<'_>,
     _const_strings: &HashMap<SymbolId, String>,
 ) -> bool {
-    find_attr_ignore_case(&opening.attributes, "disabled")
+    find_jsx_attr_ignore_case(&opening.attributes, "disabled")
         .is_some_and(|a| !is_attr_statically_false(a))
-        || find_attr_ignore_case(&opening.attributes, "aria-disabled")
+        || find_jsx_attr_ignore_case(&opening.attributes, "aria-disabled")
             .is_some_and(is_attr_statically_true_or_true_str)
 }
 
@@ -554,11 +554,11 @@ pub(super) fn is_interactive_element(
     match tag {
         "audio" | "button" | "canvas" | "datalist" | "embed" | "menuitem" | "option" | "select"
         | "summary" | "td" | "th" | "tr" | "textarea" | "video" => true,
-        "input" => !find_attr_ignore_case(&opening.attributes, "type")
+        "input" => !find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|t| t.eq_ignore_ascii_case("hidden")),
-        "a" | "area" => find_attr_ignore_case(&opening.attributes, "href").is_some(),
-        "img" => find_attr_ignore_case(&opening.attributes, "useMap").is_some(),
+        "a" | "area" => find_jsx_attr_ignore_case(&opening.attributes, "href").is_some(),
+        "img" => find_jsx_attr_ignore_case(&opening.attributes, "useMap").is_some(),
         _ => false,
     }
 }
@@ -573,7 +573,7 @@ pub(super) fn is_focusable_element(
     if is_disabled_element(opening, semantic, const_strings) {
         return false;
     }
-    if let Some(tab_attr) = find_attr_ignore_case(&opening.attributes, "tabIndex")
+    if let Some(tab_attr) = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
         && let Some(v) = parse_attr_number(tab_attr)
     {
         return if include_negative_tabindex {
@@ -584,11 +584,11 @@ pub(super) fn is_focusable_element(
     }
     match tag {
         "button" | "embed" | "select" | "summary" | "textarea" => true,
-        "input" => !find_attr_ignore_case(&opening.attributes, "type")
+        "input" => !find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|t| t.eq_ignore_ascii_case("hidden")),
-        "a" | "area" => find_attr_ignore_case(&opening.attributes, "href").is_some(),
-        "audio" | "video" => find_attr_ignore_case(&opening.attributes, "controls").is_some(),
+        "a" | "area" => find_jsx_attr_ignore_case(&opening.attributes, "href").is_some(),
+        "audio" | "video" => find_jsx_attr_ignore_case(&opening.attributes, "controls").is_some(),
         _ => false,
     }
 }
@@ -598,7 +598,7 @@ pub(super) fn is_content_editable_tabbable(
     semantic: &Semantic<'_>,
     const_strings: &HashMap<SymbolId, String>,
 ) -> bool {
-    find_attr_ignore_case(&opening.attributes, "contentEditable").is_some_and(|a| {
+    find_jsx_attr_ignore_case(&opening.attributes, "contentEditable").is_some_and(|a| {
         if a.value.is_none() {
             return true;
         }
@@ -640,7 +640,7 @@ pub(super) fn has_accessible_label_text_in_children(children: &[JSXChild<'_>]) -
                 if ["aria-label", "aria-labelledby", "alt", "title"]
                     .iter()
                     .any(|a| {
-                        find_attr_ignore_case(&el.opening_element.attributes, a)
+                        find_jsx_attr_ignore_case(&el.opening_element.attributes, a)
                             .is_some_and(has_non_empty_attr_val)
                     })
                 {

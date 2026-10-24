@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Initial React effect, state, and TanStack Start/Query core rules (`0..=35`).
-pub const CORE_INITIAL_RULES: &[RuleMetadata] = &[
+pub(crate) const CORE_INITIAL_RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::NoDerivedState,
         "no-derived-state",
@@ -652,7 +652,7 @@ pub const CORE_INITIAL_RULES: &[RuleMetadata] = &[
 ];
 
 /// Extended React hooks, lifecycle, architecture, and boundary rules (`693..=766`).
-pub const EXTENDED_REACT_RULES: &[RuleMetadata] = &[
+pub(crate) const EXTENDED_REACT_RULES: &[RuleMetadata] = &[
     // --- Ticket 07 rules ---
     rule_meta(
         RuleId::NoSelfUpdatingEffect,
