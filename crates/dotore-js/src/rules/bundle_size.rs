@@ -1062,7 +1062,7 @@ fn relative_path_between_dirs(from_dir: &Path, to_path: &Path) -> String {
         .take_while(|(a, b)| a == b)
         .count();
 
-    let mut parts = Vec::new();
+    let mut parts = Vec::with_capacity((from_comps.len() - common) + (to_comps.len() - common));
     for _ in common..from_comps.len() {
         parts.push("..".to_string());
     }

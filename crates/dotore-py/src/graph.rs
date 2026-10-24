@@ -225,7 +225,7 @@ impl<'a> GraphAstWalker<'a> {
                 let span = text_range_to_byte_span(import_from.range());
                 let loc = loc_from_line_starts(self.line_starts, span.start);
                 let module = import_from.module.as_ref().map(ToString::to_string);
-                let mut names = Vec::new();
+                let mut names = Vec::with_capacity(import_from.names.len());
                 for alias in &import_from.names {
                     let orig = alias.name.to_string();
                     let bound = alias
@@ -593,7 +593,7 @@ fn module_keys_for_path(path: &Path) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut keys = Vec::new();
+    let mut keys = Vec::with_capacity(parts.len());
     for start in 0..parts.len() {
         keys.push(parts[start..].join("."));
     }

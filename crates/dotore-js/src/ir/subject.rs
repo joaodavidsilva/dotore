@@ -56,7 +56,8 @@ pub(super) fn extract_subjects(
         }
     }
 
-    let mut subjects = Vec::new();
+    let mut subjects =
+        Vec::with_capacity(subject_nodes.len() + usize::from(!orphan_effects.is_empty()));
     for subj_id in subject_nodes {
         subjects.push(build_subject_ir(
             semantic,
@@ -438,7 +439,7 @@ fn extract_deps_spec(
         return DepsSpec::MountOnly;
     }
 
-    let mut items = Vec::new();
+    let mut items = Vec::with_capacity(deps_refs.len());
     for dep_ref in deps_refs {
         let name = semantic
             .reference_name(semantic.scoping().get_reference(dep_ref))
