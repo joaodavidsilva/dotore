@@ -91,12 +91,17 @@ crates/
       security.rs         # Python SQL injection and unsafe deserialization/shell rules
   dotore-rs/
     src/
-      lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
+      lib.rs              # RsLanguageAnalyzer (LanguageAnalyzer) and dotore-rs crate root
+      matchers.rs         # shared syn AST, type, attribute, and lexical-scope matchers (RsScopeTracker)
+      manifest.rs         # Cargo.toml Capability Gate discovery and package role classification
       ir.rs               # single-pass syn AST, Subject, SymbolOutline, and suppression extraction
-      rules.rs            # Rust rule activation gating and core safety rule evaluation
-      axum_sqlx_ui_arch.rs# single-pass detectors for Axum, SQLx, Leptos/Dioxus UI signals, and boolean params
       graph.rs            # Rust crate ProjectGraph analysis (rs-arch-no-unused-pub-crate-items)
-      tokio_perf.rs       # single-pass Tokio async hazard and Rust allocation performance detectors
+      rules.rs            # Rust rule activation gating and rule pipeline dispatcher
+      safety.rs           # single-pass detectors for the 5 core production Rust safety rules
+      tokio_async.rs      # single-pass detectors for Tokio async concurrency hazards
+      perf.rs             # single-pass detectors for Rust allocation and hot-loop performance rules
+      axum_sqlx.rs        # single-pass detectors for Axum shared state contention and SQLx query hazards
+      ui_signals.rs       # single-pass detectors for Leptos/Dioxus reactive signals and boolean params
 src/
   main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API

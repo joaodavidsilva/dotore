@@ -1,13 +1,13 @@
-//! Rule activation gating and evaluation for `dotore-rs` core safety rules.
+//! Rule activation gating and evaluation dispatcher for `dotore-rs`.
 
 use std::path::Path;
 
 use dotore_core::{
     CapabilityGate, Diagnostic, DotoreConfig, ExtractedFile, FileContext, PackageAnalysisResult,
-    PrescriptionTier, RuleId, RuleSeverity, RuleTag, WorkspacePackage,
+    RuleId, RuleSeverity, RuleTag, WorkspacePackage,
 };
 
-use crate::ir::{RsCandidateFinding, RsFileIr};
+use crate::{ir::RsFileIr, matchers::RsCandidateFinding};
 
 /// All 5 core Rust safety rules evaluated by `dotore-rs`.
 pub const CORE_RUST_SAFETY_RULES: &[RuleId] = &[
@@ -81,15 +81,10 @@ pub fn evaluate_rs_file(
         ) else {
             continue;
         };
-        if config.respect_inline_disables
-            && (file.is_suppressed(finding.rule, finding.loc.line, finding.span)
-                || file
-                    .suppressions
-                    .matches_line_or_block(finding.rule, finding.loc.line))
-        {
+        if is_finding_suppressed(file, finding, config) {
             continue;
         }
-        out.push(candidate_to_diagnostic(&file.path, finding, severity));
+        out.push(finding.to_diagnostic(&file.path, severity));
     }
 }
 
@@ -136,12 +131,7 @@ fn emit_rs_finding_if_active(
     else {
         return;
     };
-    if config.respect_inline_disables
-        && (file.is_suppressed(finding.rule, finding.loc.line, finding.span)
-            || file
-                .suppressions
-                .matches_line_or_block(finding.rule, finding.loc.line))
-    {
+    if is_finding_suppressed(file, finding, config) {
         return;
     }
     if out
@@ -150,7 +140,19 @@ fn emit_rs_finding_if_active(
     {
         return;
     }
-    out.push(candidate_to_diagnostic(&file.path, finding, severity));
+    out.push(finding.to_diagnostic(&file.path, severity));
+}
+
+fn is_finding_suppressed(
+    file: &ExtractedFile,
+    finding: &RsCandidateFinding,
+    config: &DotoreConfig,
+) -> bool {
+    config.respect_inline_disables
+        && (file.is_suppressed(finding.rule, finding.loc.line, finding.span)
+            || file
+                .suppressions
+                .matches_line_or_block(finding.rule, finding.loc.line))
 }
 
 const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
@@ -175,35 +177,6 @@ const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
             | RuleId::RsPerfPreferVecWithCapacity
             | RuleId::RsPerfNoUnnecessaryFormat
     )
-}
-
-fn candidate_to_diagnostic(
-    file_path: &Path,
-    finding: &RsCandidateFinding,
-    severity: RuleSeverity,
-) -> Diagnostic {
-    let meta = finding.rule.metadata();
-    Diagnostic {
-        file: file_path.to_path_buf(),
-        subject_name: finding.subject_name.clone(),
-        rule: finding.rule,
-        category: meta.category,
-        severity,
-        message_id: finding.message_id,
-        tier: if finding.autofix.is_some() {
-            PrescriptionTier::Autofix
-        } else {
-            meta.default_tier
-        },
-        target_name: finding.target_name.clone(),
-        message: finding.message.clone(),
-        docs_url: meta.docs_url,
-        loc: finding.loc,
-        span: finding.span,
-        cascade_steps: Vec::new(),
-        caller_sites: Vec::new(),
-        autofix: finding.autofix.clone(),
-    }
 }
 
 fn resolve_rs_rule_activation(
