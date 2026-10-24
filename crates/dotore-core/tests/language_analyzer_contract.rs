@@ -18,11 +18,15 @@ use std::{
 use dotore_core::{
     AutofixPatch, ByteEdit, ByteSpan, Capability, CapabilityGate, CapabilityPredicate,
     ChangedFileLineRanges, Diagnostic, DiffScope, ExtractedFile, LanguageAnalyzer, LanguageId,
-    LineDisableDirective, PackageAnalysisResult, PrescriptionTier, RuleCategory, RuleId,
-    RuleSeverity, SourceLoc, SymbolKind, SymbolOutline, WorkspacePackage,
-    apply_patches_to_source_with_analyzers, build_extracted_report_with_packages,
-    compute_line_starts, diagnostic_intersects_changed_lines, filter_diagnostics_by_scope,
-    loc_from_line_starts, search_extracted_files,
+    LineDisableDirective, PackageAnalysisResult, PrescriptionTier, ResolvedCallerSite,
+    RuleCategory, RuleId, RuleSeverity, SourceLoc, SuppressionDirectiveKind, SymbolKind,
+    SymbolOutline, WorkspacePackage, apply_patches_to_source_with_analyzers,
+    build_extracted_report_with_packages, compute_line_starts,
+    diagnostic_intersects_changed_lines, extract_c_style_comment_suppressions,
+    extract_normalized_signature_header, filter_diagnostics_by_scope, loc_from_line_starts,
+    map_rust_allow_lint_to_rules, parse_comment_disable_directive,
+    parse_python_suppression_directive, rule_registry, search_extracted_files,
+    tokenize_suppression_rules,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,4 +457,341 @@ fn language_analyzer_contract_handles_extraction_payload_downcast_planning_diff_
         apply_patches_to_source_with_analyzers(bad_rs, &[invalid_patch_diag], analyzers);
     assert!(rejected.is_empty());
     assert_eq!(untouched, bad_rs);
+}
+
+#[test]
+fn diagnostic_and_autofix_patch_fluent_builders_populate_rule_metadata_and_chain_overrides() {
+    let loc = SourceLoc {
+        line: 14,
+        column: 5,
+    };
+    let span = ByteSpan {
+        start: 120,
+        end: 185,
+    };
+    let meta = RuleId::NoDerivedState.metadata();
+
+    let diag = Diagnostic::new(
+        RuleId::NoDerivedState,
+        "src/UserProfile.tsx",
+        loc,
+        span,
+        "fullName",
+        "Derived state `fullName` computed inside `useEffect`.",
+    );
+    assert_eq!(diag.file, PathBuf::from("src/UserProfile.tsx"));
+    assert_eq!(diag.subject_name, None);
+    assert_eq!(diag.rule, RuleId::NoDerivedState);
+    assert_eq!(diag.category, meta.category);
+    assert_eq!(diag.severity, meta.default_severity);
+    assert_eq!(diag.tier, meta.default_tier);
+    assert_eq!(diag.docs_url, meta.docs_url);
+    assert_eq!(diag.message_id, "");
+    assert_eq!(diag.target_name, "fullName");
+    assert_eq!(
+        diag.message,
+        "Derived state `fullName` computed inside `useEffect`."
+    );
+    assert_eq!(diag.loc, loc);
+    assert_eq!(diag.span, span);
+    assert!(diag.cascade_steps.is_empty());
+    assert!(diag.caller_sites.is_empty());
+    assert!(diag.autofix.is_none());
+
+    let builder_diag = Diagnostic::builder(
+        RuleId::NoDerivedState,
+        "src/UserProfile.tsx",
+        loc,
+        span,
+        "fullName",
+        "Derived state `fullName` computed inside `useEffect`.",
+    );
+    assert_eq!(builder_diag, diag);
+
+    let caller_site = ResolvedCallerSite {
+        caller_file: PathBuf::from("src/App.tsx"),
+        parent_subject_name: Some("App".to_string()),
+        component_name: "UserProfile".to_string(),
+        loc: SourceLoc { line: 8, column: 9 },
+        span: ByteSpan { start: 60, end: 95 },
+        has_key: false,
+        passed_props: vec!["userId".to_string()],
+    };
+
+    let patch = AutofixPatch::replace(
+        "Compute `fullName` inline during render",
+        span,
+        "const fullName = `${first} ${last}`;",
+    )
+    .with_edit(ByteSpan { start: 40, end: 80 }, "")
+    .with_file_edit(
+        "src/App.tsx",
+        ByteSpan { start: 60, end: 95 },
+        "<UserProfile key={userId} userId={userId} />",
+    )
+    .with_byte_edit(ByteEdit::delete(ByteSpan { start: 10, end: 20 }))
+    .with_edits([ByteEdit::insert(0, "// header\n").in_file("src/App.tsx")]);
+
+    assert_eq!(patch.description, "Compute `fullName` inline during render");
+    assert_eq!(patch.edits.len(), 5);
+    assert_eq!(
+        patch.edits[0],
+        ByteEdit {
+            file: None,
+            span,
+            replacement: "const fullName = `${first} ${last}`;".to_string(),
+        }
+    );
+    assert_eq!(
+        patch.edits[2],
+        ByteEdit {
+            file: Some(PathBuf::from("src/App.tsx")),
+            span: ByteSpan { start: 60, end: 95 },
+            replacement: "<UserProfile key={userId} userId={userId} />".to_string(),
+        }
+    );
+    assert_eq!(
+        patch.edits[3],
+        ByteEdit {
+            file: None,
+            span: ByteSpan { start: 10, end: 20 },
+            replacement: String::new(),
+        }
+    );
+    assert_eq!(
+        patch.edits[4],
+        ByteEdit {
+            file: Some(PathBuf::from("src/App.tsx")),
+            span: ByteSpan { start: 0, end: 0 },
+            replacement: "// header\n".to_string(),
+        }
+    );
+
+    let delete_patch = AutofixPatch::delete("Remove unused state", ByteSpan { start: 5, end: 15 });
+    assert_eq!(delete_patch.edits.len(), 1);
+    assert_eq!(delete_patch.edits[0].replacement, "");
+
+    let insert_patch = AutofixPatch::insert("Add import", 0, "import React from 'react';\n");
+    assert_eq!(insert_patch.edits.len(), 1);
+    assert_eq!(insert_patch.edits[0].span, ByteSpan { start: 0, end: 0 });
+
+    // `for_rule` defaults `target_name` to `rule.as_str()` and `.with_patch(...)` promotes tier to `Autofix`
+    let rule_diag = Diagnostic::for_rule(
+        RuleId::RsNoUnwrapInProduction,
+        "src/lib.rs",
+        loc,
+        span,
+        "Avoid `.unwrap()` in production.",
+    )
+    .with_subject_name("parse_header")
+    .with_message_id("rsNoUnwrapInProduction")
+    .with_severity(RuleSeverity::Error)
+    .with_category(RuleCategory::Bugs)
+    .with_docs_url("https://example.com/docs")
+    .with_cascade_step("initial render")
+    .with_cascade_step("effect setState")
+    .with_caller_site(caller_site.clone())
+    .with_patch(patch.clone());
+
+    assert_eq!(rule_diag.target_name, "rs-no-unwrap-in-production");
+    assert_eq!(rule_diag.subject_name.as_deref(), Some("parse_header"));
+    assert_eq!(rule_diag.message_id, "rsNoUnwrapInProduction");
+    assert_eq!(rule_diag.severity, RuleSeverity::Error);
+    assert_eq!(rule_diag.category, RuleCategory::Bugs);
+    assert_eq!(rule_diag.docs_url, "https://example.com/docs");
+    assert_eq!(rule_diag.tier, PrescriptionTier::Autofix);
+    assert_eq!(
+        rule_diag.cascade_steps,
+        vec!["initial render".to_string(), "effect setState".to_string()]
+    );
+    assert_eq!(rule_diag.caller_sites, vec![caller_site]);
+    assert_eq!(rule_diag.autofix, Some(patch));
+}
+
+#[test]
+fn shared_suppression_parser_handles_c_style_python_noqa_and_rust_allow_directives() {
+    // 1. Rule list tokenizer strips `-- explanation` tail and splits commas/whitespace
+    assert_eq!(
+        tokenize_suppression_rules("no-derived-state, react/jsx-key -- legacy reason"),
+        vec!["no-derived-state".to_string(), "react/jsx-key".to_string()]
+    );
+    assert!(tokenize_suppression_rules("-- blanket disable").is_empty());
+
+    // 2. Comment directive parser supports dotore-disable*, dotore-ignore*, eslint-disable*, oxlint-disable*, JSX `}`, and Python `:`
+    let prefixes = &["dotore", "eslint", "oxlint"];
+    assert_eq!(
+        parse_comment_disable_directive(
+            "dotore-disable-next-line no-derived-state -- intentional}",
+            prefixes
+        ),
+        Some((
+            SuppressionDirectiveKind::DisableNextLine,
+            vec!["no-derived-state".to_string()]
+        ))
+    );
+    assert_eq!(
+        parse_comment_disable_directive("dotore-ignore-next-line: py-no-mutable-default-arg", prefixes),
+        Some((
+            SuppressionDirectiveKind::DisableNextLine,
+            vec!["py-no-mutable-default-arg".to_string()]
+        ))
+    );
+    assert_eq!(
+        parse_comment_disable_directive("eslint-disable-line react-hooks/exhaustive-deps", prefixes),
+        Some((
+            SuppressionDirectiveKind::DisableLine,
+            vec!["react-hooks/exhaustive-deps".to_string()]
+        ))
+    );
+
+    // 3. Python `# noqa` and `# ruff: noqa` parser
+    assert_eq!(
+        parse_python_suppression_directive("noqa: B006, E722"),
+        Some((
+            SuppressionDirectiveKind::DisableLine,
+            vec!["B006".to_string(), "E722".to_string()]
+        ))
+    );
+    assert_eq!(
+        parse_python_suppression_directive("ruff: noqa: F401"),
+        Some((
+            SuppressionDirectiveKind::BlockDisable,
+            vec!["F401".to_string()]
+        ))
+    );
+
+    // 4. Rust `#[allow(...)]` / `#[expect(...)]` lint mapping
+    assert_eq!(
+        map_rust_allow_lint_to_rules("clippy::unwrap_used"),
+        vec!["rs-no-unwrap-in-production".to_string()]
+    );
+    assert_eq!(
+        map_rust_allow_lint_to_rules("dotore::rs_tokio_no_std_lock_across_await"),
+        vec!["rs-tokio-no-std-lock-across-await".to_string()]
+    );
+
+    // 5. Quote-aware C-style comment scanner with stacked next-line and partial block enable
+    let js_source = r#"const literal = "// dotore-disable-line no-derived-state";
+// dotore-disable-next-line no-derived-state
+// eslint-disable-next-line no-chain-state-updates
+const derived = compute();
+/* dotore-disable no-derived-state, no-event-handler */
+const insideBoth = 1;
+/* dotore-enable no-derived-state */
+const onlyEventHandlerDisabled = 2;
+/* dotore-enable */
+const allEnabledAgain = 3;
+"#;
+    let supps = extract_c_style_comment_suppressions(js_source, prefixes);
+    // Line 1 is inside a string literal so it must NOT suppress line 1
+    assert!(!supps.matches_line_or_block(RuleId::NoDerivedState, 1));
+    // Stacked disable-next-line comments on lines 2 & 3 both target line 4
+    assert!(supps.matches_line_or_block(RuleId::NoDerivedState, 4));
+    assert!(supps.matches_line_or_block(RuleId::NoChainStateUpdates, 4));
+    // Line 6 has both rules disabled
+    assert!(supps.matches_line_or_block(RuleId::NoDerivedState, 6));
+    assert!(supps.matches_line_or_block(RuleId::NoEventHandler, 6));
+    // Line 8 re-enabled NoDerivedState on line 7, but NoEventHandler stays disabled until line 9
+    assert!(!supps.matches_line_or_block(RuleId::NoDerivedState, 8));
+    assert!(supps.matches_line_or_block(RuleId::NoEventHandler, 8));
+    // Line 10 has all block ranges closed
+    assert!(!supps.matches_line_or_block(RuleId::NoEventHandler, 10));
+}
+
+#[test]
+fn symbol_outline_builder_and_normalized_signature_header_extractor() {
+    let source = "/// Renders a button.\nexport function Button(\n    props: ButtonProps,\n): JSX.Element {\n    return <button />;\n}\n";
+    let line_starts = compute_line_starts(source);
+    let decl_start = u32::try_from(source.find("export function").unwrap_or(0)).unwrap_or(0);
+    let body_start = u32::try_from(source.find('{').unwrap_or(0)).unwrap_or(0);
+    let decl_end = u32::try_from(source.len()).unwrap_or(0);
+
+    let (sig, sig_end_line) = extract_normalized_signature_header(
+        source,
+        &line_starts,
+        decl_start,
+        decl_end,
+        Some(body_start),
+    );
+    assert_eq!(sig, "export function Button( props: ButtonProps, ): JSX.Element");
+    assert_eq!(sig_end_line, 4);
+
+    let id_offset = u32::try_from(source.find("Button(").unwrap_or(0)).unwrap_or(0);
+    let loc = loc_from_line_starts(&line_starts, id_offset);
+    let outline = SymbolOutline::new(
+        "Button",
+        SymbolKind::Function,
+        sig,
+        ByteSpan {
+            start: decl_start,
+            end: decl_end,
+        },
+        loc,
+        6,
+    )
+    .with_exported(true)
+    .with_parent_name("UI")
+    .with_doc_comment(Some("Renders a button.".to_string()), Some(1))
+    .with_signature_end_line(sig_end_line);
+
+    assert_eq!(outline.name, "Button");
+    assert_eq!(outline.kind, SymbolKind::Function);
+    assert!(outline.exported);
+    assert_eq!(outline.parent_name.as_deref(), Some("UI"));
+    assert_eq!(outline.doc_comment.as_deref(), Some("Renders a button."));
+    assert_eq!(outline.comment_start_line, Some(1));
+    assert_eq!(outline.signature_end_line, 4);
+    assert_eq!(outline.loc.line, 2);
+    assert_eq!(outline.end_line, 6);
+}
+
+#[test]
+fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submodules() {
+    use dotore_core::rules::catalog::{
+        a11y_and_design, defensive_and_correctness, ecosystem, performance_and_bundle, polyglot,
+        react_core, react_native_and_expo, security_and_server, three_r3f_webgl,
+    };
+
+    assert_eq!(react_core::CORE_INITIAL_RULES.len(), 36);
+    assert_eq!(three_r3f_webgl::RULES.len(), 187);
+    assert_eq!(ecosystem::INITIAL_ECOSYSTEM_RULES.len(), 7);
+    assert_eq!(a11y_and_design::RULES.len(), 192);
+    assert_eq!(performance_and_bundle::RULES.len(), 66);
+    assert_eq!(security_and_server::RULES.len(), 109);
+    assert_eq!(react_native_and_expo::RULES.len(), 59);
+    assert_eq!(ecosystem::EXTENDED_ECOSYSTEM_RULES.len(), 37);
+    assert_eq!(react_core::EXTENDED_REACT_RULES.len(), 74);
+    assert_eq!(defensive_and_correctness::RULES.len(), 154);
+    assert_eq!(polyglot::RULES.len(), 44);
+
+    let registry = rule_registry();
+    assert_eq!(registry.len(), 965);
+
+    for (idx, meta) in registry.iter().enumerate() {
+        assert_eq!(meta.id as usize, idx, "Rule {:?} out of discriminant order", meta.id);
+        assert_eq!(meta.id.metadata(), meta);
+        assert_eq!(RuleId::parse(meta.canonical_id), Some(meta.id));
+        assert_eq!(RuleId::parse(meta.qualified_key), Some(meta.id));
+        for &alias in meta.legacy_aliases {
+            assert_eq!(RuleId::parse(alias), Some(meta.id));
+            assert!(meta.id.matches_key(alias));
+        }
+    }
+
+    assert_eq!(
+        RuleId::NoDerivedState.metadata().capability_gate,
+        CapabilityPredicate::REACT_ONLY
+    );
+    assert_eq!(
+        RuleId::AngularNoSignalWriteInEffect.metadata().capability_gate,
+        CapabilityPredicate::ANGULAR_ONLY
+    );
+    assert_eq!(
+        RuleId::PyNoMutableDefaultArg.metadata().capability_gate,
+        CapabilityPredicate::PYTHON_ONLY
+    );
+    assert_eq!(
+        RuleId::RsPerfNoUnnecessaryFormat.metadata().capability_gate,
+        CapabilityPredicate::RUST_ONLY
+    );
 }
