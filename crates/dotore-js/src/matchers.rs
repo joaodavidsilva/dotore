@@ -46,13 +46,6 @@ pub(crate) const fn span_to_byte_span(span: Span) -> ByteSpan {
 
 /// Converts a 0-based byte offset into a 1-based [`SourceLoc`] using precomputed `line_starts`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn offset_to_loc(line_starts: &[u32], byte_offset: u32) -> SourceLoc {
     loc_from_line_starts(line_starts, byte_offset)
 }
@@ -476,13 +469,6 @@ pub(crate) fn resolve_ident_symbol(
 
 /// Returns `true` if `ident` has no local lexical binding in `semantic` (i.e. refers to a global).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_global_ident(semantic: &Semantic<'_>, ident: &IdentifierReference<'_>) -> bool {
     resolve_ident_symbol(semantic, ident).is_none()
 }

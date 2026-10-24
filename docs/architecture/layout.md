@@ -77,17 +77,47 @@ crates/
         prop_sync.rs      # full state reset and partial state adjustment on prop change
         parent_flow.rs    # event-handler effects and upward parent callback notifications
         external_sync.rs  # external store subscriptions and effect data fetching
-        a11y.rs           # WCAG and ARIA accessibility rules
+        a11y.rs           # WCAG and ARIA accessibility rules root and cross-file anchor verification
+        a11y/
+          tables.rs       # ARIA roles, properties, HTML tag classifications, autofill, and BCP-47 tables
+          aria_and_roles.rs # ARIA attributes, roles, landmarks, dialogs, and semantic element rules
+          keyboard_and_focus.rs # keyboard activation, focusability, tabindex, outline, and focus effect rules
+          forms_media_and_content.rs # labels, form controls, alt text, anchors, media, headings, tables, and UI primitives
         angular.rs        # Angular Signals, RxJS teardown, OnPush autofix, @for track, lifecycle, and DOM rules
-        architecture.rs   # Subject size/complexity, props, inline HOCs, hoisting, and context/boundary rules
+        architecture.rs   # Subject architecture rules root and cross-file ProjectGraph context/boundary dispatcher
+        architecture/
+          hoisting_and_compiler.rs # module-scope static/pure hoisting autofixes, nested components, and React Compiler memoization
+          context_and_boundaries.rs # Context.Provider/useContext extraction, overloaded providers, and ancestral Suspense/ErrorBoundary checks
+          component_contracts.rs # Subject size/complexity, boolean props, handler names, inline HOCs, and deprecated React APIs
         bundle_size.rs    # barrel imports, heavy packages, and dynamic import rules
         correctness.rs    # unstable keys, numeric && render, DOM nesting, and input rules
-        defensive_js.rs   # defensive JS/TS/DOM runtime safety, optional chaining, and parse guards
-        design.rs         # opt-in UI design, aesthetic heuristics, and Tailwind layout rules
+        defensive_js.rs   # defensive JS/TS/DOM runtime safety rules root and shared guard inspectors
+        defensive_js/
+          nullish_and_collections.rs # optional chaining, array bounds/find, non-null assertions, and object/template guards
+          async_and_events.rs # async event handler re-entry, IME guards, request error collapse, finally resets, and predicates
+          parsing_and_selectors.rs # querySelector, dynamic RegExp, numeric input parse, JSON.parse, and throwing URL/URI guards
+        design.rs         # opt-in UI design and aesthetic heuristics rules root
+        design/
+          tailwind_and_styles.rs # Tailwind class fragments/shorthands, inline style heuristics, and WCAG contrast helpers
+          typography_and_controls.rs # button labels, typography scale, touch targets, and media control rules
+          surfaces_and_interactions.rs # card/surface composition, shadows, dark mode, and interaction state rules
+          page_composition.rs # page-level landmark composition, hero/section hierarchy, and marketing copy anti-patterns
         ecosystem_ui.rs   # Preact, Ink terminal UI, and Zod v4 rules
-        effect_teardown.rs# Effect Node listener/observer/RAF/timer teardown and React correctness rules
-        js_performance.rs # loop, hot-path JavaScript allocation, and immutable sort/early-exit rules
-        performance.rs    # React re-render, transition loading, hydration, and CSS/SVG motion performance rules
+        effect_teardown.rs# Effect Node teardown and React correctness rules root
+        effect_teardown/
+          dom_and_timer_teardown.rs # DOM listener, observer, RAF, timer, and promise cleanup verification
+          hook_and_state_correctness.rs # hook dependency purity, reducer mutation, render-phase calls, and functional state updates
+          jsx_and_lint_parity.rs # module-scope purity, class lifecycles, TypeScript JSX types, and JSX DOM attribute rules
+        js_performance.rs # JavaScript runtime performance rules root
+        js_performance/
+          async_waterfalls.rs # sequential await waterfalls, loop awaits, deferred awaits, and async reduce rules
+          dom_and_browser.rs # sync XHR, passive listeners, flushSync, View Transitions, storage caching, and DOM CSS batching
+          collections_and_loops.rs # reduce spread, JSON clone, loop hoisting (Intl/RegExp/Map/Set), and immutable sort/early-exit rules
+        performance.rs    # React re-render, hydration, and motion performance rules root
+        performance/
+          rerender_and_hooks.rs # memoization, derived hook state, JSX hoisting, state initializers, and useTransition loading
+          animation_and_jsx.rs # SVG wrapper animation, layout property transitions, WAAPI/RAF/scroll loops, and motion springs
+          hydration_and_routing.rs # hydration mismatch/flicker, SSR browser globals, locale formatting, and React Router loader fetches
         r3f.rs            # Three.js, WebGL, and React Three Fiber 60fps frame-loop module root
         r3f/
           three_lifecycle.rs # Three.js geometry/material/texture constructors, disposal lifecycle, and scene contracts
@@ -100,7 +130,11 @@ crates/
           animations_and_styles.rs # Reanimated 4, StyleSheet, Dimensions, Detox, and Pressable/GestureDetector rules
           navigation_and_expo.rs # React Native and Expo module imports, bottom sheets, and process.env/Platform rules
           platform_and_config.rs # package.json, Babel, Metro, Gradle, app.json, lockfile, and .gitignore rules
-        react_builtins.rs # exhaustive-deps, rules-of-hooks, JSX/fragment built-ins, class lifecycles, and inline prop gating
+        react_builtins.rs # React built-in rules root and cross-file ProjectGraph inline prop gating
+        react_builtins/
+          hooks.rs        # exhaustive-deps, rules-of-hooks, and useState naming symmetry rules
+          jsx_props_and_fragments.rs # button type, controlled inputs, target=_blank, fragments, PascalCase, JSX depth, and inline props
+          components_and_classes.rs # Fast Refresh only-export-components, nested components, and legacy class component rules
         react_router.rs   # React Router v7/v8 module root
         react_router/
           loaders_and_actions.rs # loaders, actions, sessions, cookies, handleError, meta, and error UI rules
@@ -113,7 +147,11 @@ crates/
           remotion_video.rs # Remotion media elements, CSS animation/transition/url, calculateMetadata, and delayRender rules
           tanstack_form_table_virtual.rs # TanStack Form, Table, and Virtual rules
           redux_and_ui_primitives.rs # Redux useSelector and Radix/Base UI/shadcn/styled-components primitive rules
-        security.rs       # XSS, eval, SSRF, and trust-boundary security rules
+        security.rs       # XSS, eval, SSRF, and trust-boundary security rules root
+        security/
+          dom_and_client.rs # dangerous HTML sinks, window.open, client secrets, web storage tokens, eval, and CSP/sandbox rules
+          injection_and_baas.rs # SQL/NoSQL/command/path injection, redirects, JWT/crypto/cookies, Supabase RLS, Firebase, and MCP/agent rules
+          artifacts_and_runtime.rs # build artifact leaks, RPC/native bridges, SSR/MDX execution, and repository secret rules
         server_nextjs.rs  # Server Actions, RSC, and Next.js App Router rules
         state_and_effects.rs # state/effect loop, render setState, async/timer refs, and lazy init rules
         stores.rs         # Zustand, Jotai, MobX, and Valtio state-store rules
