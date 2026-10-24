@@ -795,3 +795,298 @@ fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submod
         CapabilityPredicate::RUST_ONLY
     );
 }
+
+#[test]
+fn decomposed_config_submodules_expose_workspace_capability_gate_loader_and_mutator() {
+    use dotore_core::config::{
+        capability_gate::{Capability, PackageRole, content_enables_react_compiler},
+        loader::{DotoreConfig, load_config_from_dir, load_local_config_in_dir},
+        mutator::{ConfigMutation, ConfigTargetKind, mutate_config_in_dir},
+        workspace::{
+            discover_workspace_packages, resolve_package_for_file, strip_jsonc,
+            strip_source_extension,
+        },
+    };
+    use dotore_core::rules::RuleSeverityOverride;
+
+    assert_eq!(strip_source_extension("src/App.tsx"), "src/App");
+    assert!(content_enables_react_compiler("babel-plugin-react-compiler"));
+    let clean = strip_jsonc("{\n  // comment\n  \"warnings\": false,\n}");
+    let cfg = DotoreConfig::from_json_str(&clean).unwrap();
+    assert!(!cfg.warnings);
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-cfg-submodules-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(
+        temp_dir.join("package.json"),
+        r#"{"name": "demo-app", "private": true, "dependencies": {"react": "^19.0.0", "next": "^15.0.0"}}"#,
+    )
+    .unwrap();
+
+    let pkgs = discover_workspace_packages(&temp_dir);
+    assert_eq!(pkgs.len(), 1);
+    assert_eq!(pkgs[0].capability_gate.package_role, PackageRole::Application);
+    assert!(pkgs[0].capability_gate.has(Capability::React));
+    assert!(pkgs[0].capability_gate.has(Capability::Nextjs));
+    let resolved = resolve_package_for_file(&temp_dir.join("src/App.tsx"), &pkgs).unwrap();
+    assert_eq!(resolved.root_dir, temp_dir);
+
+    assert!(load_local_config_in_dir(&temp_dir).is_none());
+    let mut_res = mutate_config_in_dir(
+        &temp_dir,
+        ConfigMutation::SetRuleSeverity {
+            rule: RuleId::NoDerivedState,
+            severity: RuleSeverityOverride::Warn,
+        },
+    )
+    .unwrap();
+    assert!(mut_res.created);
+    assert_eq!(mut_res.target_kind, ConfigTargetKind::JsonFile);
+    let loaded = load_config_from_dir(&temp_dir);
+    assert_eq!(
+        loaded.explicit_rule_override(RuleId::NoDerivedState),
+        Some(RuleSeverityOverride::Warn)
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn decomposed_diff_submodules_expose_patch_contextual_owner_and_baseline() {
+    use dotore_core::diff::{
+        baseline::{
+            BaselineDiagnosticEntry, compare_baseline_diagnostics, compute_diagnostic_fingerprint,
+            compute_diagnostic_id, compute_structural_fingerprint, normalize_ast_tokens,
+            parse_baseline_report_str,
+        },
+        contextual_owner::{
+            ContextualSpanProvider, diagnostic_intersects_changed_lines,
+            filter_diagnostics_by_scope,
+        },
+        patch::{
+            BlockingLevel, ChangedFileLineRanges, DiffScope, ScanMode, parse_changed_line_ranges,
+            resolve_scan_exit_code, validate_git_revision, validate_warning_exit_code,
+        },
+    };
+
+    assert_eq!(DiffScope::parse("contextual"), Some(DiffScope::Contextual));
+    assert_eq!(ScanMode::Baseline.as_str(), "baseline");
+    assert_eq!(BlockingLevel::parse("warn"), Some(BlockingLevel::Warning));
+    assert_eq!(validate_warning_exit_code(2), Ok(2));
+    assert!(validate_git_revision("main..HEAD").is_ok());
+    assert!(validate_git_revision("--evil").is_err());
+
+    let patch = "diff --git a/src/App.tsx b/src/App.tsx\n--- a/src/App.tsx\n+++ b/src/App.tsx\n@@ -3,1 +3,1 @@\n";
+    let ranges = parse_changed_line_ranges(patch, true);
+    assert_eq!(
+        ranges,
+        vec![ChangedFileLineRanges {
+            file: PathBuf::from("src/App.tsx"),
+            ranges: vec![(3, 3)],
+            deletion_lines: Vec::new(),
+        }]
+    );
+
+    let src = "fn app() {\n    let x = Some(1).unwrap();\n}\n";
+    let analyzer = MockRustLanguageAnalyzer;
+    let extracted = analyzer.extract_file(Path::new("src/App.tsx"), src);
+    assert_eq!(extracted.file_path(), Path::new("src/App.tsx"));
+
+    let diag = Diagnostic::for_rule(
+        RuleId::NoDerivedState,
+        "src/App.tsx",
+        SourceLoc { line: 2, column: 21 },
+        ByteSpan { start: 23, end: 32 },
+        "Avoid `.unwrap()` in production.",
+    )
+    .with_subject_name("app");
+
+    assert!(!diagnostic_intersects_changed_lines(
+        &diag,
+        Some(&extracted),
+        Some(src),
+        &ranges[0],
+        false,
+    ));
+    assert!(diagnostic_intersects_changed_lines(
+        &diag,
+        Some(&extracted),
+        Some(src),
+        &ranges[0],
+        true,
+    ));
+    let mut sources = HashMap::new();
+    sources.insert(PathBuf::from("src/App.tsx"), src.to_string());
+    let filtered = filter_diagnostics_by_scope(
+        vec![diag.clone()],
+        DiffScope::Contextual,
+        Path::new("."),
+        &[PathBuf::from("src/App.tsx")],
+        &ranges,
+        &[extracted],
+        &sources,
+    );
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(
+        resolve_scan_exit_code(&filtered, BlockingLevel::Warning, None),
+        1
+    );
+
+    let id = compute_diagnostic_id(&diag, None);
+    assert!(id.contains("src/App.tsx::2:21::dotore/no-derived-state::"));
+    let fp = compute_diagnostic_fingerprint(&diag, Some(src));
+    let sfp = compute_structural_fingerprint(&diag);
+    assert!(fp.starts_with("fp::no-derived-state::"));
+    assert!(sfp.starts_with("fp::no-derived-state::"));
+    assert_eq!(normalize_ast_tokens("a  +  'b' // comment"), "a + \"b\"");
+
+    let base_entry = BaselineDiagnosticEntry::from_diagnostic(&diag, Some(src));
+    let delta = compare_baseline_diagnostics(&[diag], &sources, &[base_entry], "baseline.json");
+    assert_eq!(delta.summary.preexisting_count, 1);
+    assert_eq!(delta.summary.introduced_count, 0);
+    let parsed_base = parse_baseline_report_str(
+        r#"{"diagnostics": [{"rule": "no-derived-state", "file": "src/App.tsx", "message": "Avoid `.unwrap()` in production.", "loc": {"line": 2, "column": 21}}]}"#,
+    )
+    .unwrap();
+    assert_eq!(parsed_base.len(), 1);
+}
+
+#[test]
+fn decomposed_report_submodules_expose_json_terminal_html_rules_why_and_ci_install() {
+    use dotore_core::config::DotoreConfig;
+    use dotore_core::fixer::FileFixResult;
+    use dotore_core::report::{
+        ci_install::{
+            CiOptions, CiProviderKind, InstallOptions, ci_config, ci_install, ci_upgrade,
+            format_install_report, install_dotore,
+        },
+        html::render_html_report,
+        json::{JSON_REPORT_SCHEMA_VERSION, build_extracted_report},
+        rules::{
+            RulesListOptions, build_rule_catalog, explain_rule, format_rule_catalog_text,
+            format_rule_explanation_text,
+        },
+        terminal::{
+            format_design_report, format_design_report_pretty, format_fix_report,
+            format_terminal_report, format_terminal_report_pretty,
+        },
+        why::{
+            explain_location_with_analyzers, format_why_report_text, parse_why_location,
+            render_code_frame,
+        },
+    };
+
+    let src = "pub fn handle() {\n    let v = Some(1).unwrap();\n}\n";
+    let analyzer = MockRustLanguageAnalyzer;
+    let extracted = analyzer.extract_file(Path::new("src/lib.rs"), src);
+    let diag = Diagnostic::for_rule(
+        RuleId::NoDerivedState,
+        "src/lib.rs",
+        SourceLoc { line: 2, column: 21 },
+        ByteSpan { start: 30, end: 39 },
+        "Avoid `.unwrap()` in production.",
+    )
+    .with_tier(PrescriptionTier::Surgical)
+    .with_subject_name("handle")
+    .with_cascade_step("Some(1).unwrap()")
+    .with_cascade_step("panic");
+
+    let mut sources = HashMap::new();
+    sources.insert(PathBuf::from("src/lib.rs"), src.to_string());
+    let report = build_extracted_report(&[extracted], vec![diag], &sources);
+    assert_eq!(report.schema_version, JSON_REPORT_SCHEMA_VERSION);
+
+    let term_plain = format_terminal_report(&report);
+    assert!(term_plain.contains("[no-derived-state] (surgical)"));
+    assert!(term_plain.contains("cascade: Some(1).unwrap() -> panic"));
+    assert!(term_plain.contains("flow:    ┌─► [Some(1).unwrap()] ──► [panic] ──► ↻ re-render"));
+    assert!(term_plain.contains("dotore  score:"));
+
+    let term_ansi = format_terminal_report_pretty(&report, true);
+    assert!(term_ansi.contains("\x1b["));
+
+    let design_plain = format_design_report(&report);
+    assert!(design_plain.contains("DOTORE DESIGN AUDIT"));
+    assert!(design_plain.contains("dotore design  files: 1"));
+    let design_ansi = format_design_report_pretty(&report, true);
+    assert!(design_ansi.contains("\x1b["));
+
+    let fix_out = format_fix_report(
+        &[FileFixResult {
+            file: PathBuf::from("src/lib.rs"),
+            patches_applied: 1,
+            descriptions: vec!["Replace unwrap".to_string()],
+            new_source: src.to_string(),
+        }],
+        true,
+    );
+    assert!(fix_out.contains("[dry-run] src/lib.rs (1 patch(es))"));
+
+    let html = render_html_report(&report);
+    assert!(html.contains("<!DOCTYPE html>"));
+    assert!(html.contains("no-derived-state"));
+
+    let catalog = build_rule_catalog(
+        &DotoreConfig::default(),
+        &RulesListOptions {
+            framework: Some("rust".to_string()),
+            ..RulesListOptions::default()
+        },
+    );
+    assert_eq!(catalog.len(), 15);
+    let cat_text = format_rule_catalog_text(&catalog);
+    assert!(cat_text.contains("dotore/rs-perf-no-unnecessary-format"));
+    let explained = explain_rule("no-derived-state", &DotoreConfig::default()).unwrap();
+    let exp_text = format_rule_explanation_text(&explained);
+    assert!(exp_text.contains("dotore/no-derived-state"));
+
+    let loc = parse_why_location("src/lib.rs:2:5").unwrap();
+    assert_eq!(loc.line, 2);
+    assert_eq!(loc.column, Some(5));
+    let frame = render_code_frame(src, 2);
+    assert!(frame.contains(">    2 |     let v = Some(1).unwrap();"));
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-report-submodules-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(temp_dir.join("src")).unwrap();
+    std::fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    std::fs::write(temp_dir.join("src/lib.rs"), src).unwrap();
+
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&analyzer];
+    let why_rep = explain_location_with_analyzers("src/lib.rs:2", &temp_dir, analyzers).unwrap();
+    assert_eq!(why_rep.entries.len(), 1);
+    let why_text = format_why_report_text(&why_rep);
+    assert!(why_text.contains("[active] dotore/no-derived-state"));
+
+    let ci_opts = CiOptions {
+        cwd: temp_dir.clone(),
+        provider: Some(CiProviderKind::GithubActions),
+        blocking: Some("error".to_string()),
+        scope: Some("contextual".to_string()),
+    };
+    let ci_res = ci_install(&ci_opts).unwrap();
+    assert_eq!(ci_res.status, "created");
+    let ci_up = ci_upgrade(&ci_opts).unwrap();
+    assert_eq!(ci_up.status, "not-needed");
+    let ci_cfg = ci_config(&CiOptions {
+        blocking: Some("warning".to_string()),
+        ..ci_opts
+    })
+    .unwrap();
+    assert_eq!(ci_cfg.status, "updated");
+
+    let inst_res = install_dotore(&InstallOptions {
+        cwd: temp_dir.clone(),
+        yes: true,
+        dry_run: true,
+        agent_hooks: true,
+    })
+    .unwrap();
+    let inst_text = format_install_report(&inst_res);
+    assert!(inst_text.contains("[dry-run] Installed /dotore skill:"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
