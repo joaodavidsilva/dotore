@@ -67,6 +67,7 @@ pub fn collect_source_files_with_extensions(
             if is_supported_file_with_extensions(&root, true, extensions)
                 && !is_explicit_file_ignored(&root)
             {
+                crate::ui::tick_discovery_file(&root);
                 files.push(root);
             }
             continue;
@@ -94,6 +95,7 @@ pub fn collect_source_files_with_extensions(
             let path = result.path();
             if path.is_file() && is_supported_file_with_extensions(path, include_tests, extensions)
             {
+                crate::ui::tick_discovery_file(path);
                 files.push(path.to_path_buf());
             }
         }

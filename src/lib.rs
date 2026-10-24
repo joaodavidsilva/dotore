@@ -73,7 +73,7 @@ pub use dotore_core::{
         self, AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH,
         FilterTabBar, FilterTabItem, FlowDiagram, GaugeBar, StatusBar, TuiFilterKind,
         build_filter_tabs, classify_style_bucket, strip_ansi_codes, style_bucket_color,
-        visible_char_width,
+        truncate_ansi_to_width, visible_char_width,
     },
 };
 #[cfg(feature = "js")]
@@ -97,7 +97,8 @@ pub use planner::{
 };
 pub use progress::{
     LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
-    format_spinner_frame, set_progress_phase, tick_progress_file,
+    format_spinner_frame, format_spinner_frame_with_width, set_progress_phase, tick_discovery_file,
+    tick_progress_file,
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
@@ -146,8 +147,8 @@ pub use search::{
 };
 pub use tui::{
     TuiFilterTab, TuiGroupMode, TuiState, build_score_gauge, diagnostic_matches_tab_and_search,
-    draw_tui_frame, handle_tui_search_key, render_tui_body_lines, render_tui_frame,
-    run_interactive_tui, should_launch_tui,
+    draw_tui_frame, handle_tui_search_key, render_tui_body_lines, render_tui_body_lines_for_width,
+    render_tui_frame, run_interactive_tui, should_launch_tui,
 };
 
 use diff::{collect_git_diff, load_baseline_entries};
@@ -629,15 +630,51 @@ fn analyze_polyglot_sources(
         set_progress_phase(3, total_to_extract);
 
         #[cfg(feature = "py")]
-        if !py_pairs.is_empty() {
+        let py_extracted: Vec<ExtractedFile> = if !py_pairs.is_empty() {
             let py = PyLanguageAnalyzer::new();
-            let py_extracted: Vec<ExtractedFile> = py_pairs
+            py_pairs
                 .into_par_iter()
                 .map(|(path, source)| {
                     tick_progress_file(&path);
                     py.extract_file(&path, &source)
                 })
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        #[cfg(feature = "rs")]
+        let rs_extracted: Vec<ExtractedFile> = if !rs_pairs.is_empty() {
+            rs_pairs
+                .into_par_iter()
+                .map(|(path, source)| {
+                    tick_progress_file(&path);
+                    RsLanguageAnalyzer.extract_file(&path, &source)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        #[cfg(feature = "js")]
+        let js_extracted: Vec<ExtractedFile> = if !js_pairs.is_empty() {
+            let js_analyzer = JsLanguageAnalyzer;
+            js_pairs
+                .into_par_iter()
+                .map(|(path, source)| {
+                    tick_progress_file(&path);
+                    js_analyzer.extract_file(&path, &source)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        set_progress_phase(4, total_to_extract);
+
+        #[cfg(feature = "py")]
+        if !py_extracted.is_empty() {
+            let py = PyLanguageAnalyzer::new();
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
             for file in py_extracted {
@@ -657,14 +694,7 @@ fn analyze_polyglot_sources(
         }
 
         #[cfg(feature = "rs")]
-        if !rs_pairs.is_empty() {
-            let rs_extracted: Vec<ExtractedFile> = rs_pairs
-                .into_par_iter()
-                .map(|(path, source)| {
-                    tick_progress_file(&path);
-                    RsLanguageAnalyzer.extract_file(&path, &source)
-                })
-                .collect();
+        if !rs_extracted.is_empty() {
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
             for file in rs_extracted {
@@ -684,16 +714,8 @@ fn analyze_polyglot_sources(
         }
 
         #[cfg(feature = "js")]
-        let js_graph_opt = if !js_pairs.is_empty() || !manifests.is_empty() {
+        let js_graph_opt = if !js_extracted.is_empty() || !manifests.is_empty() {
             let js_analyzer = JsLanguageAnalyzer;
-            let js_extracted: Vec<ExtractedFile> = js_pairs
-                .into_par_iter()
-                .map(|(path, source)| {
-                    tick_progress_file(&path);
-                    js_analyzer.extract_file(&path, &source)
-                })
-                .collect();
-            set_progress_phase(4, js_extracted.len());
             let graph = js_analyzer.build_graph_from_extracted(&js_extracted, manifests);
             let mut js_diags = evaluate_project_with_packages(&graph, packages, enabled_rules);
             enrich_cross_file_autofixes(&graph, &mut js_diags, sources);
@@ -1288,10 +1310,12 @@ fn scan_design_js(
             js_analyzer.extract_file(&path, &source)
         })
         .collect();
+    set_progress_phase(4, extracted_files.len());
     let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
 
     let mut diagnostics = Vec::new();
     for file in &graph.files {
+        tick_progress_file(&file.path);
         let Some(pkg) = resolve_package_for_file(&file.path, &packages) else {
             continue;
         };

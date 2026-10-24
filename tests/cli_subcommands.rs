@@ -940,3 +940,157 @@ fn modular_cli_progress_and_tui_explorer_render_via_ui_kit() {
     assert_eq!(run_cli(check_cli), std::process::ExitCode::SUCCESS);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn tui_frame_and_progress_bar_fit_any_terminal_width_and_align_borders() {
+    use dotore::{
+        ColorMode, FilterTabItem, RuleId, ScanOptions, TuiFilterKind, TuiGroupMode,
+        build_filter_tabs, current_scan_progress, diagnostic_matches_tab_and_search,
+        format_spinner_frame_with_width, render_tui_body_lines_for_width, render_tui_frame,
+        scan_workspace, strip_ansi_codes, visible_char_width,
+    };
+
+    // 1. Real filesystem scan updates completed_files, total_files, and current_file
+    let dir = unique_temp_dir("progress-real-scan");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/App.tsx"),
+        "import { useState, useEffect } from 'react';\nexport function App({ a }: { a: string }) { const [v, setV] = useState(''); useEffect(() => { setV(a); }, [a]); return <div>{v}</div>; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/service.py"),
+        "import requests\ndef load():\n    return requests.get('https://example.com').text\n",
+    )
+    .unwrap();
+
+    let (mut report, _) = scan_workspace(&ScanOptions {
+        paths: vec![dir.clone()],
+        include_tests: false,
+        rules: None,
+        tiers: None,
+    })
+    .unwrap();
+    let snap = current_scan_progress();
+    assert!(
+        snap.total_files >= 2,
+        "Expected total_files >= 2, got: {snap:?}"
+    );
+    assert_eq!(
+        snap.completed_files, snap.total_files,
+        "Expected completed == total, got: {snap:?}"
+    );
+    assert!(
+        !snap.current_file.is_empty(),
+        "Expected current_file to be populated, got: {snap:?}"
+    );
+
+    for cols in [80usize, 100, 120] {
+        let spinner_line =
+            format_spinner_frame_with_width(&snap, 2, 0.8, ColorMode::Plain, cols - 2);
+        assert!(
+            visible_char_width(&spinner_line) <= cols - 2,
+            "Spinner frame exceeded {} cols: {} ({spinner_line})",
+            cols - 2,
+            visible_char_width(&spinner_line)
+        );
+        assert!(spinner_line.contains(&format!("({}/{})", snap.completed_files, snap.total_files)));
+        assert!(
+            spinner_line.contains("App.tsx") || spinner_line.contains("service.py"),
+            "Spinner frame must display the current file name: {spinner_line}"
+        );
+    }
+
+    // 2. Build a large tab list like the user's 38-tab screenshot and verify 80, 100, and 120 col TUI frames
+    report.summary.files_scanned = 322;
+    report.summary.subjects_scanned = 45;
+    report.summary.affected_file_count = 287;
+    report.summary.warning_count = 582;
+    report.summary.surgical_count = 293;
+    report.summary.refactor_count = 289;
+    report.summary.health_score = 39;
+    report.summary.score_label = "Critical".to_string();
+
+    let mut tabs = build_filter_tabs(&report);
+    for extra in [
+        ("UNUSED", 256),
+        ("ASYNC & STREAMS", 19),
+        ("PERF & LOOPS", 27),
+        ("SAFETY & GUARDS", 84),
+        ("JSX & A11Y", 1),
+        ("SECURITY", 39),
+        ("IMPORTS & ARCH", 44),
+    ] {
+        tabs.push(FilterTabItem::new(
+            extra.0,
+            extra.1,
+            "\x1b[38;5;75;1m",
+            TuiFilterKind::StyleBucket(extra.0),
+        ));
+    }
+    for i in 0..30 {
+        tabs.push(FilterTabItem::new(
+            format!("#rule-{i}"),
+            5,
+            "\x1b[38;5;117;1m",
+            TuiFilterKind::Rule(RuleId::NoDerivedState),
+        ));
+    }
+
+    let filtered: Vec<&dotore::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| diagnostic_matches_tab_and_search(d, &tabs[0], ""))
+        .collect();
+
+    for cols in [80usize, 100, 120] {
+        let body_lines =
+            render_tui_body_lines_for_width(&filtered, TuiGroupMode::ByRuleStyle, cols);
+        let frame = render_tui_frame(
+            &report,
+            &tabs,
+            0,
+            TuiGroupMode::ByRuleStyle,
+            "",
+            false,
+            &body_lines,
+            0,
+            26,
+            cols,
+            false,
+        );
+        let plain = strip_ansi_codes(&frame)
+            .replace("\x1b[H", "")
+            .replace("\x1b[2K", "");
+        if cols == 100 {
+            println!("=== 100-COL TUI FRAME ===\n{plain}\n=========================");
+        }
+        let frame_lines: Vec<&str> = plain.lines().collect();
+        // Header box is the first 7 lines (top border, 2 summary rows, titled divider, tab row, search row, bottom border)
+        for (idx, line) in frame_lines.iter().enumerate() {
+            let w = visible_char_width(line);
+            assert!(
+                w < cols,
+                "Line {idx} at cols={cols} has width {w} >= {cols}: {line:?}"
+            );
+        }
+        for header_line in &frame_lines[..7] {
+            assert_eq!(
+                visible_char_width(header_line),
+                cols - 1,
+                "Header box line must have exact width {}: {header_line:?}",
+                cols - 1
+            );
+            let trimmed = header_line.trim_end();
+            assert!(
+                trimmed.ends_with('╗')
+                    || trimmed.ends_with('║')
+                    || trimmed.ends_with('╣')
+                    || trimmed.ends_with('╝'),
+                "Header box line missing right border at cols={cols}: {header_line:?}"
+            );
+        }
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}

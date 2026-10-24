@@ -104,8 +104,9 @@ pub use ui::{
     AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FilterTabBar,
     FilterTabItem, FlowDiagram, GaugeBar, LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES,
     StatusBar, TuiFilterKind, build_filter_tabs, classify_style_bucket, current_scan_progress,
-    format_spinner_frame, set_progress_phase, strip_ansi_codes, style_bucket_color,
-    tick_progress_file, visible_char_width,
+    format_spinner_frame, format_spinner_frame_with_width, set_progress_phase, strip_ansi_codes,
+    style_bucket_color, tick_discovery_file, tick_progress_file, truncate_ansi_to_width,
+    visible_char_width,
 };
 
 /// Options for scanning a project or file list.

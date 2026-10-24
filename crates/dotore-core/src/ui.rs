@@ -137,7 +137,25 @@ pub fn strip_ansi_codes(input: &str) -> String {
     out
 }
 
-/// Computes the visible character count of `input`, ignoring embedded ANSI CSI escape sequences.
+const fn char_display_width(ch: char) -> usize {
+    if matches!(
+        ch,
+        '\u{1100}'..='\u{115F}'
+            | '\u{2E80}'..='\u{303E}'
+            | '\u{3040}'..='\u{A4CF}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE10}'..='\u{FE6F}'
+            | '\u{FF00}'..='\u{FF60}'
+            | '\u{1F300}'..='\u{1FAFF}'
+    ) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Computes the visible terminal column width of `input`, ignoring embedded ANSI CSI escape sequences.
 #[must_use]
 pub fn visible_char_width(input: &str) -> usize {
     let mut count = 0usize;
@@ -151,12 +169,56 @@ pub fn visible_char_width(input: &str) -> usize {
                 }
             }
         } else {
-            count += 1;
+            count += char_display_width(ch);
         }
     }
     count
 }
 
+/// Truncates `input` (preserving ANSI CSI escape sequences) so its visible column width does not exceed `max_width`.
+///
+/// When truncation occurs and `max_width >= 1`, appends `…` (and `\x1b[0m` if `input` contained ANSI sequences).
+#[must_use]
+pub fn truncate_ansi_to_width(input: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if visible_char_width(input) <= max_width {
+        return input.to_string();
+    }
+    let target_width = max_width.saturating_sub(1);
+    let mut out = String::with_capacity(input.len());
+    let mut width = 0usize;
+    let mut saw_ansi = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            saw_ansi = true;
+            out.push(ch);
+            if let Some(bracket) = chars.next() {
+                out.push(bracket);
+            }
+            for c in chars.by_ref() {
+                out.push(c);
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            let ch_w = char_display_width(ch);
+            if width + ch_w > target_width {
+                break;
+            }
+            out.push(ch);
+            width += ch_w;
+        }
+    }
+    out.push('…');
+    if saw_ansi {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
 /// Border glyph style for [`AsciiBox`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BoxBorderStyle {
@@ -319,7 +381,7 @@ impl AsciiBox {
 
         // Top border
         let top_inner = if let Some(title) = &self.title {
-            let rendered_title = if mode.is_ansi() {
+            let raw_title = if mode.is_ansi() {
                 title.clone()
             } else {
                 strip_ansi_codes(title)
@@ -329,6 +391,9 @@ impl AsciiBox {
             } else {
                 g.horizontal.to_string()
             };
+            let lead_cols = visible_char_width(&lead) + 2;
+            let max_title_cols = self.width.saturating_sub(lead_cols.min(self.width));
+            let rendered_title = truncate_ansi_to_width(&raw_title, max_title_cols);
             let prefix = format!("{lead} {rendered_title} ");
             let prefix_len = visible_char_width(&prefix);
             let rem = self.width.saturating_sub(prefix_len);
@@ -348,11 +413,12 @@ impl AsciiBox {
         for row in &self.rows {
             match row {
                 BoxRow::Closed(content) => {
-                    let rendered_content = if mode.is_ansi() {
+                    let raw_content = if mode.is_ansi() {
                         content.clone()
                     } else {
                         strip_ansi_codes(content)
                     };
+                    let rendered_content = truncate_ansi_to_width(&raw_content, self.width);
                     let vis_len = visible_char_width(&rendered_content);
                     let pad = " ".repeat(self.width.saturating_sub(vis_len));
                     if mode.is_ansi() && !bcol.is_empty() && rendered_content.contains("\x1b[") {
@@ -394,11 +460,13 @@ impl AsciiBox {
                     ));
                 }
                 BoxRow::TitledDivider(title) => {
-                    let rendered_title = if mode.is_ansi() {
+                    let raw_title = if mode.is_ansi() {
                         title.clone()
                     } else {
                         strip_ansi_codes(title)
                     };
+                    let max_title_cols = self.width.saturating_sub(4);
+                    let rendered_title = truncate_ansi_to_width(&raw_title, max_title_cols);
                     let prefix = format!("{}{} {} ", g.horizontal, g.horizontal, rendered_title);
                     let prefix_len = visible_char_width(&prefix);
                     let rem = self.width.saturating_sub(prefix_len);
@@ -1053,6 +1121,8 @@ pub struct FilterTabBar<'a> {
     pub active_index: usize,
     /// Maximum number of tabs visible in the sliding window (defaults to `8`).
     pub max_visible: usize,
+    /// Optional maximum character width for the rendered tab strip (`0` = unbounded).
+    pub max_width: usize,
 }
 
 impl<'a> FilterTabBar<'a> {
@@ -1063,6 +1133,7 @@ impl<'a> FilterTabBar<'a> {
             tabs,
             active_index,
             max_visible: 8,
+            max_width: 0,
         }
     }
 
@@ -1073,6 +1144,13 @@ impl<'a> FilterTabBar<'a> {
         self
     }
 
+    /// Constrains the rendered tab strip to at most `max_width` visible characters (`0` = unbounded).
+    #[must_use]
+    pub const fn with_max_width(mut self, max_width: usize) -> Self {
+        self.max_width = max_width;
+        self
+    }
+
     /// Renders the horizontal tab strip for the given [`ColorMode`].
     #[must_use]
     pub fn render(&self, mode: ColorMode) -> String {
@@ -1080,8 +1158,13 @@ impl<'a> FilterTabBar<'a> {
             return String::new();
         }
         let active_idx = self.active_index.min(self.tabs.len().saturating_sub(1));
-        let window_start = active_idx.saturating_sub(3);
-        let window_end = (window_start + self.max_visible.max(1)).min(self.tabs.len());
+        let (window_start, window_end) = if self.max_width == 0 {
+            let start = active_idx.saturating_sub(3);
+            let end = (start + self.max_visible.max(1)).min(self.tabs.len());
+            (start, end)
+        } else {
+            self.compute_fitted_window(active_idx)
+        };
 
         let mut out = String::new();
         if window_start > 0 {
@@ -1106,7 +1189,52 @@ impl<'a> FilterTabBar<'a> {
             let more = format!("» (+{} more)", self.tabs.len() - window_end);
             out.push_str(&mode.paint("\x1b[38;5;244m", &more));
         }
-        out
+        if self.max_width > 0 {
+            truncate_ansi_to_width(&out, self.max_width)
+        } else {
+            out
+        }
+    }
+
+    fn compute_fitted_window(&self, active_idx: usize) -> (usize, usize) {
+        let tab_width = |idx: usize| -> usize {
+            let tab = &self.tabs[idx];
+            if idx == active_idx {
+                visible_char_width(&format!(" ▶ {} ({})  ", tab.label, tab.count))
+            } else {
+                visible_char_width(&format!("[ {} ({}) ] ", tab.label, tab.count))
+            }
+        };
+        let mut start = active_idx;
+        let mut end = active_idx + 1;
+        let mut used = tab_width(active_idx);
+        let max_tabs = self.max_visible.max(1);
+
+        while (end - start) < max_tabs {
+            let reserve_left = if start > 0 { 2 } else { 0 };
+            let reserve_right = if end < self.tabs.len() { 13 } else { 0 };
+            // Prefer adding to the right first, then to the left
+            if end < self.tabs.len() {
+                let w = tab_width(end);
+                let next_right_reserve = if end + 1 < self.tabs.len() { 13 } else { 0 };
+                if reserve_left + used + w + next_right_reserve <= self.max_width {
+                    used += w;
+                    end += 1;
+                    continue;
+                }
+            }
+            if start > 0 {
+                let w = tab_width(start - 1);
+                let next_left_reserve = if start - 1 > 0 { 2 } else { 0 };
+                if next_left_reserve + used + w + reserve_right <= self.max_width {
+                    used += w;
+                    start -= 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        (start, end)
     }
 }
 
@@ -1323,21 +1451,55 @@ static PROGRESS_COMPLETED: AtomicUsize = AtomicUsize::new(0);
 static PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static PROGRESS_CURRENT_FILE: Mutex<String> = Mutex::new(String::new());
 
+fn normalize_progress_display_path(path: &Path) -> String {
+    let raw = if let Ok(cwd) = std::env::current_dir()
+        && let Ok(stripped) = path.strip_prefix(&cwd)
+    {
+        stripped.to_string_lossy().into_owned()
+    } else {
+        path.to_string_lossy().into_owned()
+    };
+    let clean = raw.replace('\\', "/");
+    clean
+        .strip_prefix("./")
+        .unwrap_or(clean.as_str())
+        .to_string()
+}
+
+fn set_current_progress_file(path: &Path) {
+    let formatted = normalize_progress_display_path(path);
+    if !formatted.is_empty()
+        && let Ok(mut guard) = PROGRESS_CURRENT_FILE.try_lock()
+    {
+        *guard = formatted;
+    }
+}
+
 /// Updates the active workspace scan phase code (`1..=4`) and resets the completed file counter.
 pub fn set_progress_phase(code: usize, total: usize) {
     PROGRESS_PHASE_CODE.store(code, Ordering::Relaxed);
     PROGRESS_COMPLETED.store(0, Ordering::Relaxed);
     PROGRESS_TOTAL.store(total, Ordering::Relaxed);
-}
-
-/// Increments the completed file counter and samples `path` into the lock-free progress snapshot.
-pub fn tick_progress_file(path: &Path) {
-    let done = PROGRESS_COMPLETED.fetch_add(1, Ordering::Relaxed) + 1;
-    if (done & 3) == 1
+    if code <= 1
+        && total == 0
         && let Ok(mut guard) = PROGRESS_CURRENT_FILE.try_lock()
     {
-        *guard = path.display().to_string();
+        guard.clear();
     }
+}
+
+/// Records a newly discovered source file during Phase 1 (`Discovering workspace & files`),
+/// incrementing both the discovered total and completed counters and updating `current_file`.
+pub fn tick_discovery_file(path: &Path) {
+    let total = PROGRESS_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    PROGRESS_COMPLETED.store(total, Ordering::Relaxed);
+    set_current_progress_file(path);
+}
+
+/// Increments the completed file counter and updates `path` in the lock-free progress snapshot.
+pub fn tick_progress_file(path: &Path) {
+    PROGRESS_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    set_current_progress_file(path);
 }
 
 /// Returns a lock-free snapshot of the current workspace scan progress.
@@ -1372,6 +1534,18 @@ pub fn format_spinner_frame(
     elapsed_secs: f32,
     mode: ColorMode,
 ) -> String {
+    format_spinner_frame_with_width(snap, tick, elapsed_secs, mode, 140)
+}
+
+/// Formats a single 30fps [`LiveSpinner`] progress line fitted to `max_cols` terminal columns.
+#[must_use]
+pub fn format_spinner_frame_with_width(
+    snap: &LiveScanProgressSnapshot,
+    tick: usize,
+    elapsed_secs: f32,
+    mode: ColorMode,
+    max_cols: usize,
+) -> String {
     let frame_ch = SPINNER_FRAMES[tick % SPINNER_FRAMES.len()];
     let total = snap.total_files.max(1);
     let done = snap.completed_files.min(snap.total_files);
@@ -1380,7 +1554,24 @@ pub fn format_spinner_frame(
     } else {
         0
     };
-    let bar_width = 22usize;
+    let bar_width = if max_cols > 0 && max_cols < 90 {
+        10usize
+    } else if max_cols > 0 && max_cols < 115 {
+        14usize
+    } else {
+        22usize
+    };
+    let phase_label = if max_cols > 0 && max_cols < 115 {
+        match snap.phase {
+            "Discovering workspace & files" => "Discovering",
+            "Reading source files" => "Reading",
+            "Extracting AST & IR (parallel)" => "Parsing",
+            "Evaluating ProjectGraph & Rules" => "Analyzing",
+            other => other,
+        }
+    } else {
+        snap.phase
+    };
     let bar = if snap.total_files > 0 {
         GaugeBar::new(done, total, bar_width).render_unbracketed()
     } else {
@@ -1389,12 +1580,24 @@ pub fn format_spinner_frame(
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     };
 
-    let short_file = if snap.current_file.chars().count() > 48 {
+    let prefix_plain = format!(
+        " {frame_ch} DOTORE  [{bar}] {pct:>3}% ({done}/{}) · {elapsed_secs:.1}s · {phase_label}  ",
+        snap.total_files
+    );
+    let prefix_cols = visible_char_width(&prefix_plain);
+    let file_budget = if max_cols > prefix_cols + 8 {
+        (max_cols - prefix_cols).min(48)
+    } else {
+        24
+    };
+
+    let short_file = if snap.current_file.chars().count() > file_budget {
+        let keep = file_budget.saturating_sub(1).max(8);
         let tail: String = snap
             .current_file
             .chars()
             .rev()
-            .take(45)
+            .take(keep)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -1405,14 +1608,40 @@ pub fn format_spinner_frame(
     };
 
     let ansi = format!(
-        " \x1b[38;5;51;1m{frame_ch} DOTORE\x1b[0m  \x1b[38;5;48;1m[{bar}]\x1b[0m \x1b[38;5;255;1m{pct:>3}%\x1b[0m \x1b[38;5;245m({done}/{})\x1b[0m · \x1b[38;5;220;1m{elapsed_secs:.1}s\x1b[0m · \x1b[38;5;141;1m{}\x1b[0m  \x1b[38;5;243m{short_file}\x1b[0m",
-        snap.total_files, snap.phase
+        " \x1b[38;5;51;1m{frame_ch} DOTORE\x1b[0m  \x1b[38;5;48;1m[{bar}]\x1b[0m \x1b[38;5;255;1m{pct:>3}%\x1b[0m \x1b[38;5;245m({done}/{})\x1b[0m · \x1b[38;5;220;1m{elapsed_secs:.1}s\x1b[0m · \x1b[38;5;141;1m{phase_label}\x1b[0m  \x1b[38;5;117;1m{short_file}\x1b[0m",
+        snap.total_files
     );
-    if mode.is_ansi() {
+    let rendered = if mode.is_ansi() {
         ansi
     } else {
         strip_ansi_codes(&ansi)
+    };
+    if max_cols > 0 {
+        truncate_ansi_to_width(&rendered, max_cols)
+    } else {
+        rendered
     }
+}
+
+fn query_tty_cols() -> usize {
+    if let Ok(tty_in) = OpenOptions::new().read(true).open("/dev/tty")
+        && let Ok(out) = std::process::Command::new("stty")
+            .arg("size")
+            .stdin(std::process::Stdio::from(tty_in))
+            .output()
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let mut parts = s.split_whitespace();
+        let _ = parts.next();
+        if let Some(c) = parts.next()
+            && let Ok(cols) = c.parse::<usize>()
+            && cols >= 40
+        {
+            return cols;
+        }
+    }
+    120
 }
 
 /// Lock-free ~30fps (`30ms` interval) background `/dev/tty` spinner and progress bar RAII guard.
@@ -1432,12 +1661,22 @@ impl LiveSpinner {
         let handle = thread::spawn(move || {
             let start = Instant::now();
             let mut tick = 0usize;
+            let mut cols = query_tty_cols();
             let _ = write!(tty, "\x1b[?25l");
             let _ = tty.flush();
             while !stop_clone.load(Ordering::Relaxed) {
+                if tick.is_multiple_of(10) {
+                    cols = query_tty_cols();
+                }
                 let snap = current_scan_progress();
                 let elapsed = start.elapsed().as_secs_f32();
-                let frame = format_spinner_frame(&snap, tick, elapsed, ColorMode::Ansi);
+                let frame = format_spinner_frame_with_width(
+                    &snap,
+                    tick,
+                    elapsed,
+                    ColorMode::Ansi,
+                    cols.saturating_sub(2),
+                );
                 let _ = write!(tty, "\r\x1b[2K{frame}");
                 let _ = tty.flush();
                 tick += 1;

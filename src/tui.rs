@@ -16,7 +16,7 @@ use dotore_core::{
     rules::{BlastRadiusTier, Diagnostic, PrescriptionTier, RuleSeverity},
     ui::{
         AsciiBox, Badge, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FilterTabBar, FlowDiagram,
-        GaugeBar, StatusBar,
+        GaugeBar, StatusBar, truncate_ansi_to_width, visible_char_width,
     },
 };
 
@@ -247,7 +247,7 @@ impl TtyRawGuard {
 
         let tty_in = OpenOptions::new().read(true).open("/dev/tty").ok()?;
         let status = Command::new("stty")
-            .args(["-icanon", "-echo", "min", "1", "time", "0"])
+            .args(["-icanon", "-echo", "min", "0", "time", "1"])
             .stdin(Stdio::from(tty_in))
             .status()
             .ok()?;
@@ -305,14 +305,105 @@ fn query_terminal_size() -> (usize, usize) {
     (36, 120)
 }
 
+fn split_oversized_word(word: &str, limit: usize, wrapped: &mut Vec<String>) -> (String, usize) {
+    let mut chunk = String::new();
+    let mut chunk_len = 0usize;
+    for ch in word.chars() {
+        let ch_w = visible_char_width(&ch.to_string());
+        if chunk_len + ch_w > limit && !chunk.is_empty() {
+            wrapped.push(chunk);
+            chunk = String::new();
+            chunk_len = 0;
+        }
+        chunk.push(ch);
+        chunk_len += ch_w;
+    }
+    (chunk, chunk_len)
+}
+
+fn wrap_plain_text(text: &str, max_width: usize) -> Vec<String> {
+    let limit = max_width.max(16);
+    if visible_char_width(text) <= limit {
+        return vec![text.to_string()];
+    }
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    for word in text.split_whitespace() {
+        let word_len = visible_char_width(word);
+        if current.is_empty() {
+            if word_len <= limit {
+                current.push_str(word);
+                current_len = word_len;
+            } else {
+                let (rem, rem_len) = split_oversized_word(word, limit, &mut wrapped);
+                current = rem;
+                current_len = rem_len;
+            }
+        } else if current_len + 1 + word_len <= limit {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+        } else {
+            wrapped.push(current);
+            current = word.to_string();
+            current_len = word_len;
+        }
+    }
+    if !current.is_empty() {
+        wrapped.push(current);
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
+}
+
+fn append_diag_detail_rows(
+    target_box: &mut AsciiBox,
+    diag: &Diagnostic,
+    text_wrap_width: usize,
+    include_flow: bool,
+) {
+    for msg_line in wrap_plain_text(&diag.message, text_wrap_width) {
+        target_box.add_closed_row(format!("      \x1b[38;5;254m{msg_line}\x1b[0m"));
+    }
+    if include_flow && !diag.cascade_steps.is_empty() {
+        let flow_plain = FlowDiagram::new(&diag.cascade_steps).render(ColorMode::Plain);
+        for flow_line in wrap_plain_text(&flow_plain, text_wrap_width) {
+            target_box.add_closed_row(format!("      \x1b[38;5;201m{flow_line}\x1b[0m"));
+        }
+    }
+    if let Some(fix) = &diag.autofix {
+        let fix_width = text_wrap_width.saturating_sub(12);
+        for fix_line in wrap_plain_text(&fix.description, fix_width) {
+            target_box.add_closed_row(format!(
+                "      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{fix_line}\x1b[0m"
+            ));
+        }
+    }
+}
+
 /// Renders the scrollable TUI viewport body lines for `filtered` diagnostics under `group_mode`.
 #[must_use]
 pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode) -> Vec<String> {
+    render_tui_body_lines_for_width(filtered, group_mode, DEFAULT_BOX_WIDTH + 4)
+}
+
+/// Renders the scrollable TUI viewport body lines fitted dynamically to `cols` terminal columns.
+#[must_use]
+pub fn render_tui_body_lines_for_width(
+    filtered: &[&Diagnostic],
+    group_mode: TuiGroupMode,
+    cols: usize,
+) -> Vec<String> {
+    let box_width = cols.saturating_sub(4).max(46);
+    let text_wrap_width = box_width.saturating_sub(8).max(24);
     let mut lines = Vec::new();
     if filtered.is_empty() {
         lines.push(String::new());
-        let mut empty_box = AsciiBox::new(BoxBorderStyle::Double, 74)
-            .with_indent("  ")
+        let mut empty_box = AsciiBox::new(BoxBorderStyle::Double, box_width.min(78))
+            .with_indent(" ")
             .with_border_color("\x1b[38;5;48;1m");
         empty_box.add_closed_row("  ✔  Zero findings match this filter!");
         lines.extend(empty_box.render_lines(ColorMode::Ansi));
@@ -336,7 +427,7 @@ pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode)
                 let bucket_badge = Badge::style_bucket(bucket).render(ColorMode::Ansi);
                 let tier_badge = Badge::tier(first.tier).render_pill(ColorMode::Ansi);
                 let sev_badge = Badge::severity(first.severity).render(ColorMode::Ansi);
-                let mut rule_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+                let mut rule_box = AsciiBox::new(BoxBorderStyle::Rounded, box_width)
                     .with_indent(" ")
                     .with_border_color("\x1b[38;5;240m")
                     .with_title(format!(
@@ -344,31 +435,18 @@ pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode)
                         items.len(),
                         if items.len() == 1 { "" } else { "s" }
                     ));
-                rule_box.add_open_row(format!(
-                    "    \x1b[38;5;245m{}\x1b[0m",
-                    first.rule.metadata().title
-                ));
+                for line in wrap_plain_text(first.rule.metadata().title, text_wrap_width) {
+                    rule_box.add_closed_row(format!("  \x1b[38;5;245m{line}\x1b[0m"));
+                }
                 for d in &items {
                     let subj = d.subject_name.as_deref().unwrap_or("<module>");
-                    rule_box.add_open_row(format!(
+                    rule_box.add_closed_row(format!(
                         "  ▸ \x1b[38;5;153;1m{}:{}:{}\x1b[0m \x1b[38;5;244min\x1b[0m \x1b[38;5;219m`{subj}`\x1b[0m",
                         d.file.display(),
                         d.loc.line,
                         d.loc.column
                     ));
-                    rule_box.add_open_row(format!("      \x1b[38;5;254m{}\x1b[0m", d.message));
-                    if !d.cascade_steps.is_empty() {
-                        let flow = FlowDiagram::new(&d.cascade_steps)
-                            .with_color("\x1b[38;5;201m")
-                            .render(ColorMode::Ansi);
-                        rule_box.add_open_row(format!("      {flow}"));
-                    }
-                    if let Some(fix) = &d.autofix {
-                        rule_box.add_open_row(format!(
-                            "      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{}\x1b[0m",
-                            fix.description
-                        ));
-                    }
+                    append_diag_detail_rows(&mut rule_box, d, text_wrap_width, true);
                 }
                 lines.extend(rule_box.render_lines(ColorMode::Ansi));
                 lines.push(String::new());
@@ -383,11 +461,11 @@ pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode)
                     .push(*d);
             }
             for (file_path, items) in by_file {
-                let mut file_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+                let mut file_box = AsciiBox::new(BoxBorderStyle::Rounded, box_width)
                     .with_indent(" ")
                     .with_border_color("\x1b[38;5;240m")
                     .with_title(format!(
-                        "\x1b[38;5;117;1m📁 {file_path}\x1b[0m  \x1b[38;5;252;1m({} finding{})\x1b[0m",
+                        "\x1b[38;5;117;1m▸ {file_path}\x1b[0m  \x1b[38;5;252;1m({} finding{})\x1b[0m",
                         items.len(),
                         if items.len() == 1 { "" } else { "s" }
                     ));
@@ -396,18 +474,12 @@ pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode)
                     let bucket_badge = Badge::style_bucket(bucket).render(ColorMode::Ansi);
                     let rule_badge = Badge::rule(d.rule).render(ColorMode::Ansi);
                     let subj = d.subject_name.as_deref().unwrap_or("<module>");
-                    file_box.add_open_row(format!(
+                    file_box.add_closed_row(format!(
                         "  ▸ \x1b[38;5;228;1mL{}:{}\x1b[0m {bucket_badge} {rule_badge} \x1b[38;5;244min\x1b[0m \x1b[38;5;219m`{subj}`\x1b[0m",
                         d.loc.line,
                         d.loc.column
                     ));
-                    file_box.add_open_row(format!("      \x1b[38;5;254m{}\x1b[0m", d.message));
-                    if let Some(fix) = &d.autofix {
-                        file_box.add_open_row(format!(
-                            "      \x1b[38;5;48;1m⚙ autofix:\x1b[0m \x1b[38;5;121m{}\x1b[0m",
-                            fix.description
-                        ));
-                    }
+                    append_diag_detail_rows(&mut file_box, d, text_wrap_width, false);
                 }
                 lines.extend(file_box.render_lines(ColorMode::Ansi));
                 lines.push(String::new());
@@ -420,7 +492,7 @@ pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode)
                 let rule_badge = Badge::rule(d.rule).render(ColorMode::Ansi);
                 let tier_badge = Badge::tier(d.tier).render(ColorMode::Ansi);
                 let subj = d.subject_name.as_deref().unwrap_or("<module>");
-                let mut card_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+                let mut card_box = AsciiBox::new(BoxBorderStyle::Rounded, box_width)
                     .with_indent(" ")
                     .with_border_color("\x1b[38;5;240m")
                     .with_title(format!(
@@ -429,18 +501,20 @@ pub fn render_tui_body_lines(filtered: &[&Diagnostic], group_mode: TuiGroupMode)
                         d.loc.line,
                         d.loc.column
                     ));
-                card_box.add_open_row(format!("  {}", d.message));
+                for msg_line in wrap_plain_text(&d.message, text_wrap_width) {
+                    card_box.add_closed_row(format!("  {msg_line}"));
+                }
                 if !d.cascade_steps.is_empty() {
                     let flow = FlowDiagram::new(&d.cascade_steps).render(ColorMode::Plain);
-                    card_box.add_open_row(format!("  \x1b[38;5;201mflow:    {flow}\x1b[0m"));
+                    card_box.add_closed_row(format!("  \x1b[38;5;201mflow:    {flow}\x1b[0m"));
                 }
                 if let Some(fix) = &d.autofix {
-                    card_box.add_open_row(format!(
+                    card_box.add_closed_row(format!(
                         "  \x1b[38;5;48;1mautofix:\x1b[0m {}",
                         fix.description
                     ));
                 }
-                card_box.add_open_row(format!("  \x1b[38;5;244mdocs:    {}\x1b[0m", d.docs_url));
+                card_box.add_closed_row(format!("  \x1b[38;5;244mdocs:    {}\x1b[0m", d.docs_url));
                 lines.extend(card_box.render_lines(ColorMode::Ansi));
                 lines.push(String::new());
             }
@@ -460,7 +534,7 @@ pub fn build_score_gauge(score: u32, width: usize) -> String {
 }
 
 /// Renders a complete TUI frame (header banner, [`FilterTabBar`], body viewport, and [`StatusBar`] footer)
-/// as an ANSI string.
+/// as an ANSI string fitted to `(rows, cols)`.
 #[must_use]
 #[expect(
     clippy::too_many_arguments,
@@ -480,9 +554,9 @@ pub fn render_tui_frame(
     design_mode: bool,
 ) -> String {
     let s = &report.summary;
-    let header_rows = 8usize;
-    let footer_rows = 2usize;
-    let viewport_height = rows.saturating_sub(header_rows + footer_rows).max(4);
+    let effective_cols = cols.max(52);
+    let box_inner_width = effective_cols.saturating_sub(4).max(46);
+    let line_cap = effective_cols.saturating_sub(1);
 
     let p0 = report
         .root_cause_groups
@@ -503,12 +577,13 @@ pub fn render_tui_frame(
     let mut frame = String::with_capacity(16384);
     frame.push_str("\x1b[H");
 
+    let gauge_cells = if box_inner_width < 88 { 10 } else { 16 };
     let score_gauge = if design_mode {
         "\x1b[38;5;219;1mUI DESIGN AUDIT\x1b[0m".to_string()
     } else {
         format!(
             "{} \x1b[38;5;248m({})\x1b[0m",
-            build_score_gauge(s.health_score, 18),
+            build_score_gauge(s.health_score, gauge_cells),
             s.score_label
         )
     };
@@ -517,15 +592,18 @@ pub fn render_tui_frame(
     let p1_badge = Badge::blast_radius_count(BlastRadiusTier::P1, p1).render_pill(ColorMode::Ansi);
     let p2_badge = Badge::blast_radius_count(BlastRadiusTier::P2, p2).render_pill(ColorMode::Ansi);
 
-    let mut header_box = AsciiBox::new(BoxBorderStyle::Double, 96)
+    let mut header_box = AsciiBox::new(BoxBorderStyle::Double, box_inner_width)
         .with_indent(" ")
         .with_border_color("\x1b[38;5;51;1m")
         .with_title(format!(
-            "DOTORE\x1b[0m \x1b[38;5;245m· Polyglot Static Analyzer\x1b[0m   {score_gauge}   \x1b[38;5;196;1m✖ {} err\x1b[0m  \x1b[38;5;220;1m▲ {} warn\x1b[0m  \x1b[38;5;48;1m⚙ {} autofix\x1b[0m  \x1b[38;5;220;1m✎ {} surgical\x1b[0m  \x1b[38;5;203;1m⇄ {} refactor\x1b[0m",
-            s.error_count, s.warning_count, s.autofix_count, s.surgical_count, s.refactor_count
+            "DOTORE\x1b[0m \x1b[38;5;245m· Polyglot Static Analyzer\x1b[0m   {score_gauge}"
         ));
-    header_box.add_open_row(format!(
-        "  \x1b[38;5;250mScope:\x1b[0m {} files · {} subjects · {} effects · {} affected files   \x1b[38;5;250mBlast Radius:\x1b[0m {p0_badge} {p1_badge} {p2_badge}   \x1b[38;5;250mView:\x1b[0m \x1b[38;5;219;1m{}\x1b[0m",
+    header_box.add_closed_row(format!(
+        " \x1b[38;5;196;1m✖ {} err\x1b[0m  \x1b[38;5;220;1m▲ {} warn\x1b[0m │ \x1b[38;5;48;1m⚙ {} autofix\x1b[0m  \x1b[38;5;220;1m✎ {} surgical\x1b[0m  \x1b[38;5;203;1m⇄ {} refactor\x1b[0m │ \x1b[38;5;250mBlast:\x1b[0m {p0_badge} {p1_badge} {p2_badge}",
+        s.error_count, s.warning_count, s.autofix_count, s.surgical_count, s.refactor_count
+    ));
+    header_box.add_closed_row(format!(
+        "  \x1b[38;5;250mScope:\x1b[0m {} files · {} subjects · {} effects · {} affected files   \x1b[38;5;250mView:\x1b[0m \x1b[38;5;219;1m{}\x1b[0m",
         s.files_scanned,
         s.subjects_scanned,
         s.effects_scanned,
@@ -534,8 +612,10 @@ pub fn render_tui_frame(
     ));
     header_box.add_titled_divider("FILTER TABS (h/l or ←/→ or Tab to switch)");
 
-    let tab_strip = FilterTabBar::new(tabs, active_tab_idx).render(ColorMode::Ansi);
-    header_box.add_open_row(format!(" {tab_strip}"));
+    let tab_strip = FilterTabBar::new(tabs, active_tab_idx)
+        .with_max_width(box_inner_width.saturating_sub(2))
+        .render(ColorMode::Ansi);
+    header_box.add_closed_row(format!(" {tab_strip}"));
 
     let search_row = if in_search_input {
         format!(
@@ -552,18 +632,25 @@ pub fn render_tui_frame(
             active.badge_ansi, active.label, active.count
         )
     };
-    header_box.add_open_row(search_row);
+    header_box.add_closed_row(search_row);
 
-    for line in header_box.render_lines(ColorMode::Ansi) {
-        let _ = writeln!(frame, "\x1b[2K{line}");
+    let header_rendered = header_box.render_lines(ColorMode::Ansi);
+    for line in &header_rendered {
+        let fitted = truncate_ansi_to_width(line, line_cap);
+        let _ = writeln!(frame, "\x1b[2K{fitted}");
     }
     let _ = writeln!(frame, "\x1b[2K");
+
+    let header_rows = header_rendered.len() + 1;
+    let footer_rows = 2usize;
+    let viewport_height = rows.saturating_sub(header_rows + footer_rows).max(2);
 
     let total_lines = body_lines.len().max(1);
     for row_idx in 0..viewport_height {
         let line_idx = scroll_offset + row_idx;
         if let Some(line) = body_lines.get(line_idx) {
-            let _ = writeln!(frame, "\x1b[2K{line}");
+            let fitted = truncate_ansi_to_width(line, line_cap);
+            let _ = writeln!(frame, "\x1b[2K{fitted}");
         } else {
             let _ = writeln!(frame, "\x1b[2K \x1b[38;5;237m~\x1b[0m");
         }
@@ -583,12 +670,13 @@ pub fn render_tui_frame(
     );
     let footer_lines = footer.render_lines(ColorMode::Ansi);
     if let Some(row1) = footer_lines.first() {
-        let _ = writeln!(frame, "\x1b[2K{row1}");
+        let fitted1 = truncate_ansi_to_width(row1, line_cap);
+        let _ = writeln!(frame, "\x1b[2K{fitted1}");
     }
     if let Some(row2) = footer_lines.get(1) {
-        let _ = write!(frame, "\x1b[2K{row2}");
+        let fitted2 = truncate_ansi_to_width(row2, line_cap);
+        let _ = write!(frame, "\x1b[2K{fitted2}");
     }
-    let _ = cols;
 
     frame
 }
@@ -631,6 +719,7 @@ pub fn draw_tui_frame(
 
 /// Runs the interactive `/dev/tty` TUI explorer loop (`hjkl`/arrows, filter tabs, grouping modes, `/` search, `ESC` exit).
 ///
+/// Automatically detects terminal resize events and reflows all boxes, tabs, and cards in real time.
 /// Returns `true` if `/dev/tty` was available and the TUI ran, or `false` to fall back to static terminal output.
 pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
     let Ok(mut tty) = OpenOptions::new().read(true).open("/dev/tty") else {
@@ -642,47 +731,63 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
 
     let tabs = build_filter_tabs(report);
     let mut state = TuiState::new(tabs.len());
+    let mut last_size = (0usize, 0usize);
+    let mut needs_redraw = true;
+    let mut cached_body_lines: Vec<String> = Vec::new();
 
     loop {
         let (rows, cols) = query_terminal_size();
-        let viewport_height = rows.saturating_sub(10).max(4);
-        let active_tab = &tabs[state.active_tab_idx];
-        let filtered: Vec<&Diagnostic> = report
-            .diagnostics
-            .iter()
-            .filter(|d| diagnostic_matches_tab_and_search(d, active_tab, &state.search_query))
-            .collect();
-        let body_lines = render_tui_body_lines(&filtered, state.group_mode);
-        let max_scroll = body_lines.len().saturating_sub(viewport_height);
-        if state.scroll_offset > max_scroll {
-            state.scroll_offset = max_scroll;
+        if (rows, cols) != last_size {
+            last_size = (rows, cols);
+            needs_redraw = true;
+            let mut stdout = io::stdout();
+            let _ = write!(stdout, "\x1b[2J\x1b[H");
+            let _ = stdout.flush();
         }
 
-        draw_tui_frame(
-            report,
-            &tabs,
-            state.active_tab_idx,
-            state.group_mode,
-            &state.search_query,
-            state.in_search_input,
-            &body_lines,
-            state.scroll_offset,
-            rows,
-            cols,
-            design_mode,
-        );
+        let viewport_height = rows.saturating_sub(10).max(2);
+        if needs_redraw {
+            let active_tab = &tabs[state.active_tab_idx];
+            let filtered: Vec<&Diagnostic> = report
+                .diagnostics
+                .iter()
+                .filter(|d| diagnostic_matches_tab_and_search(d, active_tab, &state.search_query))
+                .collect();
+            cached_body_lines = render_tui_body_lines_for_width(&filtered, state.group_mode, cols);
+            let max_scroll = cached_body_lines.len().saturating_sub(viewport_height);
+            if state.scroll_offset > max_scroll {
+                state.scroll_offset = max_scroll;
+            }
+
+            draw_tui_frame(
+                report,
+                &tabs,
+                state.active_tab_idx,
+                state.group_mode,
+                &state.search_query,
+                state.in_search_input,
+                &cached_body_lines,
+                state.scroll_offset,
+                rows,
+                cols,
+                design_mode,
+            );
+            needs_redraw = false;
+        }
 
         let mut buf = [0u8; 16];
         let Ok(n) = tty.read(&mut buf) else {
             break;
         };
         if n == 0 {
-            break;
+            continue;
         }
 
+        let max_scroll = cached_body_lines.len().saturating_sub(viewport_height);
         if state.handle_key(&buf[..n], viewport_height, max_scroll) {
             break;
         }
+        needs_redraw = true;
     }
 
     true

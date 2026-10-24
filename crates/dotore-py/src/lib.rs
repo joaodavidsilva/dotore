@@ -74,6 +74,7 @@ impl LanguageAnalyzer for PyLanguageAnalyzer {
         let mut subjects_scanned = 0;
 
         for file in files {
+            dotore_core::ui::tick_progress_file(&file.path);
             if package
                 .config
                 .is_file_ignored(&file.path, &package.root_dir)

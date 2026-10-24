@@ -85,6 +85,7 @@ pub fn evaluate_project_with_packages(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for file in &graph.files {
+        dotore_core::ui::tick_progress_file(&file.path);
         let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
             continue;
         };

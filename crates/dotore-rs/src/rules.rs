@@ -34,6 +34,7 @@ pub fn evaluate_rs_package(
     let mut effects_scanned = 0;
 
     for file in files {
+        dotore_core::ui::tick_progress_file(&file.path);
         subjects_scanned += file.subjects_count;
         effects_scanned += file.effects_count;
         evaluate_rs_file(
