@@ -403,6 +403,88 @@ pub fn safe_perf_patterns(
 }
 
 #[test]
+fn rs_perf_prefer_vec_with_capacity_skips_guard_clause_filter_loops_and_unsized_iterators() {
+    let src = r#"
+use std::path::Path;
+
+pub fn filter_with_if_continue(items: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    for item in items {
+        if item.is_empty() {
+            continue;
+        }
+        out.push(item.as_str());
+    }
+    out
+}
+
+pub fn filter_with_let_else_continue(items: &[Option<u32>]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for item in items {
+        let Some(val) = item else {
+            continue;
+        };
+        out.push(*val);
+    }
+    out
+}
+
+pub fn take_until_break(items: &[String]) -> Vec<&str> {
+    let mut guards = Vec::new();
+    for item in items {
+        if item == "stop" {
+            break;
+        }
+        guards.push(item.as_str());
+    }
+    guards
+}
+
+pub fn ancestors_until_git(path: &Path) -> Vec<&Path> {
+    let mut ancestors = Vec::new();
+    for ancestor in path.ancestors() {
+        ancestors.push(ancestor);
+        if ancestor.join(".git").exists() {
+            break;
+        }
+    }
+    ancestors
+}
+
+pub fn split_unbounded(raw: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    for part in raw.split(',') {
+        parts.push(part);
+    }
+    parts
+}
+
+pub fn genuine_unconditional_with_early_err_return(items: &[&str]) -> Result<Vec<usize>, &'static str> {
+    let mut lengths = Vec::new();
+    for item in items {
+        if item.is_empty() {
+            return Err("empty item");
+        }
+        lengths.push(item.len());
+    }
+    Ok(lengths)
+}
+"#;
+
+    let diags = analyze_source(
+        Path::new("src/vec_capacity_filters.rs"),
+        src,
+        Some(&[RuleId::RsPerfPreferVecWithCapacity]),
+    );
+    assert_eq!(
+        diags.len(),
+        1,
+        "Expected only genuine_unconditional_with_early_err_return (`lengths`) to be flagged, got: {diags:#?}"
+    );
+    assert_eq!(diags[0].target_name, "lengths");
+}
+
+#[test]
 fn rs_perf_no_clone_in_loop_ignores_copy_primitives_and_flags_heap_types() {
     let src = r#"
 pub fn clone_precision_check(count: usize, flag: bool, ratio: f64, shared_slice: &[u8], text: String) {
