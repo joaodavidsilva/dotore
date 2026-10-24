@@ -758,7 +758,7 @@ fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submod
     use dotore_core::rules::catalog::{RULE_REGISTRY, TOTAL_RULES};
 
     let registry = rule_registry();
-    assert_eq!(TOTAL_RULES, 974);
+    assert_eq!(TOTAL_RULES, 976);
     assert_eq!(RULE_REGISTRY.len(), TOTAL_RULES);
     assert_eq!(registry.len(), TOTAL_RULES);
 
@@ -1047,7 +1047,7 @@ fn decomposed_report_submodules_expose_json_terminal_html_rules_why_and_ci_insta
             ..RulesListOptions::default()
         },
     );
-    assert_eq!(catalog.len(), 17);
+    assert_eq!(catalog.len(), 19);
     let cat_text = format_rule_catalog_text(&catalog);
     assert!(cat_text.contains("dotore/rs-perf-no-unnecessary-format"));
     let explained = explain_rule("no-derived-state", &DotoreConfig::default()).unwrap();

@@ -1,4 +1,4 @@
-//! Decomposed 974-rule static [`RuleMetadata`] catalog assembled at compile time.
+//! Decomposed 976-rule static [`RuleMetadata`] catalog assembled at compile time.
 
 use crate::rules::types::RuleMetadata;
 
@@ -10,7 +10,7 @@ pub(crate) mod defensive_and_correctness;
 pub(crate) mod ecosystem;
 /// React re-render, hydration, bundle size, and motion performance rule metadata (`422..=487`).
 pub(crate) mod performance_and_bundle;
-/// Angular, Python, Rust, and cross-language architecture rule metadata (`921..=973`).
+/// Angular, Python, Rust, and cross-language architecture rule metadata (`921..=975`).
 pub(crate) mod polyglot;
 /// React core **Effect Node**, **State Slot**, hooks, lifecycle, and architecture rule metadata (`0..=35`, `693..=766`).
 pub(crate) mod react_core;
@@ -36,7 +36,7 @@ const SLICES: &[&[RuleMetadata]] = &[
 ];
 
 /// Total number of registered rules in `dotore`.
-pub const TOTAL_RULES: usize = 974;
+pub const TOTAL_RULES: usize = 976;
 
 static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
     let mut out = [react_core::CORE_INITIAL_RULES[0]; TOTAL_RULES];
@@ -58,5 +58,5 @@ static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
     out
 };
 
-/// Static slice of all 974 registered [`RuleMetadata`] entries in [`crate::rules::RuleId`] discriminant order.
+/// Static slice of all 976 registered [`RuleMetadata`] entries in [`crate::rules::RuleId`] discriminant order.
 pub const RULE_REGISTRY: &[RuleMetadata] = &RULE_REGISTRY_ARRAY;

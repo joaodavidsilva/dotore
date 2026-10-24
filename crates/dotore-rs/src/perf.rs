@@ -9,9 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
-    Block, Expr, ExprCall, ExprForLoop, ExprLoop, ExprMethodCall, ExprWhile, File, FnArg,
-    ImplItemFn, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, Lit, Macro, Pat, Signature, Stmt,
-    Token, TraitItemFn,
+    Attribute, Block, Expr, ExprCall, ExprForLoop, ExprLoop, ExprMethodCall, ExprWhile, Fields,
+    File, FnArg, GenericArgument, ImplItemFn, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod,
+    ItemStatic, ItemStruct, Lit, Macro, Pat, PathArguments, Signature, Stmt, Token, TraitItemFn,
+    Type,
     parse::Parser,
     punctuated::Punctuated,
     spanned::Spanned,
@@ -24,7 +25,7 @@ use crate::matchers::{
     is_format_macro_path, loc_at, path_to_string, span_to_bytes,
 };
 
-/// All 7 Tokio async hazard and Rust allocation performance rules (`tokio_async` + `perf`).
+/// All 9 Tokio async hazard, Rust allocation performance, and deterministic serialization rules.
 pub const TOKIO_AND_PERF_RULES: &[RuleId] = &[
     RuleId::RsTokioNoStdLockAcrossAwait,
     RuleId::RsTokioNoBlockingInAsync,
@@ -33,6 +34,8 @@ pub const TOKIO_AND_PERF_RULES: &[RuleId] = &[
     RuleId::RsPerfHoistRegexToLazylock,
     RuleId::RsPerfPreferVecWithCapacity,
     RuleId::RsPerfNoUnnecessaryFormat,
+    RuleId::RsPerfNoSyscallInLoop,
+    RuleId::RsNoUnorderedCollectionInSerialize,
 ];
 
 /// Runs single-pass Rust allocation performance detectors on the parsed [`syn::File`].
@@ -46,6 +49,7 @@ pub(crate) fn extract_perf_findings(
         findings,
         scope: RsScopeTracker::for_file(file),
         cheap_clone_vars: HashSet::new(),
+        in_iter_closure: 0,
     };
     visitor.visit_file(file);
 }
@@ -55,6 +59,7 @@ struct PerfVisitor<'a> {
     findings: &'a mut Vec<RsCandidateFinding>,
     scope: RsScopeTracker,
     cheap_clone_vars: HashSet<String>,
+    in_iter_closure: u32,
 }
 
 impl PerfVisitor<'_> {
@@ -157,6 +162,92 @@ impl PerfVisitor<'_> {
         }
     }
 
+    fn check_syscall_in_loop(&mut self, node: &ExprCall) {
+        if self.scope.in_test()
+            || (!self.scope.in_loop() && self.in_iter_closure == 0)
+            || self.scope.in_static_or_lazy_init > 0
+        {
+            return;
+        }
+        let Expr::Path(expr_path) = node.func.as_ref() else {
+            return;
+        };
+        let path_str = path_to_string(&expr_path.path);
+        let is_zero_arg_env_syscall = node.args.is_empty()
+            && matches!(
+                path_str.as_str(),
+                "env::current_dir"
+                    | "std::env::current_dir"
+                    | "env::temp_dir"
+                    | "std::env::temp_dir"
+                    | "env::current_exe"
+                    | "std::env::current_exe"
+            );
+        let is_const_env_var_syscall = node.args.len() == 1
+            && matches!(
+                path_str.as_str(),
+                "env::var" | "std::env::var" | "env::var_os" | "std::env::var_os"
+            )
+            && matches!(
+                node.args.first(),
+                Some(Expr::Lit(syn::ExprLit {
+                    lit: Lit::Str(_),
+                    ..
+                }))
+            );
+        if is_zero_arg_env_syscall || is_const_env_var_syscall {
+            let span = self.span_to_bytes(node.span());
+            let loc = self.loc_at(span.start);
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsPerfNoSyscallInLoop,
+                self.scope.subject_name(),
+                path_str.clone(),
+                "rsPerfNoSyscallInLoop",
+                format!(
+                    "`{path_str}(...)` queries OS process/environment state inside a loop or iterator closure; hoist the lookup once before the loop and reuse the cached value."
+                ),
+                loc,
+                span,
+            ));
+        }
+    }
+
+    fn check_serializable_fields(&mut self, type_name: &str, fields: &Fields) {
+        if self.scope.in_test() {
+            return;
+        }
+        for field in fields {
+            if field_has_deterministic_or_skip_serde_attr(&field.attrs) {
+                continue;
+            }
+            let Some(coll_kind) = unordered_collection_type_name(&field.ty) else {
+                continue;
+            };
+            let replacement = if coll_kind == "HashSet" {
+                "BTreeSet"
+            } else {
+                "BTreeMap"
+            };
+            let field_label = field
+                .ident
+                .as_ref()
+                .map_or_else(|| type_name.to_string(), ToString::to_string);
+            let span = self.span_to_bytes(field.span());
+            let loc = self.loc_at(span.start);
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsNoUnorderedCollectionInSerialize,
+                Some(type_name.to_string()),
+                field_label.clone(),
+                "rsNoUnorderedCollectionInSerialize",
+                format!(
+                    "`{type_name}.{field_label}` serializes `{coll_kind}` with non-deterministic per-process `RandomState` iteration order; use `{replacement}` or annotate with `#[serde(serialize_with = ...)]` for deterministic output."
+                ),
+                loc,
+                span,
+            ));
+        }
+    }
+
     fn inspect_stmt_for_vec_capacity(
         &mut self,
         stmt: &Stmt,
@@ -233,6 +324,31 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         let snap = self.scope.enter_mod(i);
         visit::visit_item_mod(self, i);
         self.scope.exit(snap);
+    }
+
+    fn visit_item_struct(&mut self, i: &'ast ItemStruct) {
+        if !self.scope.in_test()
+            && !crate::matchers::attrs_indicate_test_context(&i.attrs)
+            && attrs_derive_serialize(&i.attrs)
+        {
+            self.check_serializable_fields(&i.ident.to_string(), &i.fields);
+        }
+        visit::visit_item_struct(self, i);
+    }
+
+    fn visit_item_enum(&mut self, i: &'ast ItemEnum) {
+        if !self.scope.in_test()
+            && !crate::matchers::attrs_indicate_test_context(&i.attrs)
+            && attrs_derive_serialize(&i.attrs)
+        {
+            let enum_name = i.ident.to_string();
+            for variant in &i.variants {
+                if !field_has_deterministic_or_skip_serde_attr(&variant.attrs) {
+                    self.check_serializable_fields(&enum_name, &variant.fields);
+                }
+            }
+        }
+        visit::visit_item_enum(self, i);
     }
 
     fn visit_item_static(&mut self, i: &'ast ItemStatic) {
@@ -330,6 +446,7 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         self.check_regex_new_in_fn(node);
+        self.check_syscall_in_loop(node);
 
         let is_lazy_init = is_lazy_lock_init_call(node);
         if is_lazy_init {
@@ -371,10 +488,39 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
             method_name.as_str(),
             "get_or_init" | "get_or_try_init" | "call_once"
         );
+        let is_iter_adapter = matches!(
+            method_name.as_str(),
+            "map"
+                | "filter"
+                | "filter_map"
+                | "flat_map"
+                | "for_each"
+                | "any"
+                | "all"
+                | "find"
+                | "find_map"
+                | "position"
+                | "max_by_key"
+                | "min_by_key"
+                | "sort_by"
+                | "sort_by_key"
+        ) && node.args.iter().any(|arg| matches!(arg, Expr::Closure(_)));
         if is_once_init {
             self.scope.in_static_or_lazy_init += 1;
         }
-        visit::visit_expr_method_call(self, node);
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.receiver);
+        if is_iter_adapter {
+            self.in_iter_closure += 1;
+        }
+        for arg in &node.args {
+            self.visit_expr(arg);
+        }
+        if is_iter_adapter {
+            self.in_iter_closure -= 1;
+        }
         if is_once_init {
             self.scope.in_static_or_lazy_init -= 1;
         }
@@ -484,4 +630,76 @@ fn is_single_trivial_placeholder(s: &str) -> bool {
         && !inner.contains('}')
         && !inner.contains(':')
         && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn attrs_derive_serialize(attrs: &[Attribute]) -> bool {
+    let mut has_serialize = false;
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "Serialize")
+            {
+                has_serialize = true;
+            }
+            Ok(())
+        });
+    }
+    has_serialize
+}
+
+fn field_has_deterministic_or_skip_serde_attr(attrs: &[Attribute]) -> bool {
+    let mut safe = false;
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("serialize_with")
+                || meta.path.is_ident("with")
+                || meta.path.is_ident("skip")
+                || meta.path.is_ident("skip_serializing")
+                || meta.path.is_ident("into")
+            {
+                safe = true;
+            }
+            if meta.input.peek(Token![=]) {
+                let _: Token![=] = meta.input.parse()?;
+                let _: syn::Expr = meta.input.parse()?;
+            }
+            Ok(())
+        });
+    }
+    safe
+}
+
+fn unordered_collection_type_name(ty: &Type) -> Option<&'static str> {
+    let Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    let ident_str = last.ident.to_string();
+    if ident_str == "HashSet" {
+        return Some("HashSet");
+    }
+    if ident_str == "HashMap" {
+        return Some("HashMap");
+    }
+    if matches!(ident_str.as_str(), "Option" | "Vec" | "Box" | "Arc" | "Rc")
+        && let PathArguments::AngleBracketed(args) = &last.arguments
+    {
+        for arg in &args.args {
+            if let GenericArgument::Type(inner_ty) = arg
+                && let Some(found) = unordered_collection_type_name(inner_ty)
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }

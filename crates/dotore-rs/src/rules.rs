@@ -197,6 +197,8 @@ const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
             | RuleId::RsPerfHoistRegexToLazylock
             | RuleId::RsPerfPreferVecWithCapacity
             | RuleId::RsPerfNoUnnecessaryFormat
+            | RuleId::RsPerfNoSyscallInLoop
+            | RuleId::RsNoUnorderedCollectionInSerialize
             | RuleId::ArchThinEntrypoint
             | RuleId::ArchNoMixedIoAndPresentation
             | RuleId::ArchSeparateStaticCatalogFromTypes

@@ -19,7 +19,7 @@ crates/
       rules.rs            # unified rule registry module root
       rules/
         types.rs          # RuleId, RuleMetadata, PrescriptionTier, Diagnostic, AutofixPatch, FixCapsule
-        catalog.rs        # 974-rule static metadata catalog assembled across domain submodules
+        catalog.rs        # 976-rule static metadata catalog assembled across domain submodules
         catalog/
           react_core.rs   # React Effect Node, State Slot, hooks, lifecycle, and architecture rule metadata
           three_r3f_webgl.rs # Three.js, WebGL, and React Three Fiber 60fps frame-loop rule metadata

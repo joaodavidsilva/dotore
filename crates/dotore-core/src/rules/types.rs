@@ -2205,6 +2205,10 @@ pub enum RuleId {
     RsArchPreferPubCrateModules,
     /// Legacy `<dir>/mod.rs` directory module file used instead of modern `<dir>.rs` layout.
     RsArchNoLegacyModRs,
+    /// Loop-invariant OS environment or process query (`std::env::current_dir`, `temp_dir`, `var`) executed inside a loop or iterator closure.
+    RsPerfNoSyscallInLoop,
+    /// `#[derive(Serialize)]` struct or enum contains an unannotated `HashSet` or `HashMap` field with non-deterministic iteration order.
+    RsNoUnorderedCollectionInSerialize,
 }
 
 /// Static catalog metadata for a registered diagnostic rule.

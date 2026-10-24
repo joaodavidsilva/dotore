@@ -24,6 +24,8 @@ const TICKET_16_RULES: &[RuleId] = &[
     RuleId::RsPerfHoistRegexToLazylock,
     RuleId::RsPerfPreferVecWithCapacity,
     RuleId::RsPerfNoUnnecessaryFormat,
+    RuleId::RsPerfNoSyscallInLoop,
+    RuleId::RsNoUnorderedCollectionInSerialize,
 ];
 
 #[test]
@@ -483,5 +485,92 @@ pub async fn poll_endpoint(d: Duration) {
     assert!(
         remaining.is_empty(),
         "Expected 0 remaining diagnostics after Autofix round-trip, got: {remaining:#?}"
+    );
+}
+
+#[test]
+fn rs_perf_no_syscall_in_loop_and_rs_no_unordered_collection_in_serialize_detect_violations_and_allow_safe_patterns()
+ {
+    let src = r#"
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BadCachePayload {
+    pub capabilities: HashSet<String>,
+    pub dependencies: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GoodCachePayload {
+    pub ordered_set: BTreeSet<String>,
+    pub ordered_map: BTreeMap<String, String>,
+    #[serde(serialize_with = "serialize_sorted")]
+    pub custom_set: HashSet<String>,
+    #[serde(skip)]
+    pub transient_map: HashMap<String, String>,
+}
+
+pub fn bad_resolve_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        if let Ok(cwd) = std::env::current_dir() {
+            out.push(cwd.join(p));
+        }
+    }
+    paths
+        .iter()
+        .filter(|p| std::env::var("DOTORE_FILTER").is_ok() && p.is_relative())
+        .cloned()
+        .collect()
+}
+
+pub fn good_resolve_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().ok();
+    let filter_on = std::env::var("DOTORE_FILTER").is_ok();
+    paths
+        .iter()
+        .filter(|p| filter_on && p.is_relative())
+        .map(|p| match &cwd {
+            Some(c) => c.join(p),
+            None => p.clone(),
+        })
+        .collect()
+}
+"#;
+
+    let diags = analyze_source(
+        Path::new("src/cache_and_paths.rs"),
+        src,
+        Some(&[
+            RuleId::RsPerfNoSyscallInLoop,
+            RuleId::RsNoUnorderedCollectionInSerialize,
+        ]),
+    );
+    let syscall_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == RuleId::RsPerfNoSyscallInLoop)
+        .collect();
+    let serialize_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == RuleId::RsNoUnorderedCollectionInSerialize)
+        .collect();
+
+    assert_eq!(
+        syscall_diags.len(),
+        2,
+        "Expected 2 RsPerfNoSyscallInLoop diagnostics (for loop + .filter closure), got: {syscall_diags:#?}"
+    );
+    assert_eq!(
+        serialize_diags.len(),
+        2,
+        "Expected 2 RsNoUnorderedCollectionInSerialize diagnostics on BadCachePayload fields, got: {serialize_diags:#?}"
+    );
+    assert!(
+        serialize_diags
+            .iter()
+            .all(|d| d.subject_name.as_deref() == Some("BadCachePayload")),
+        "GoodCachePayload must not be flagged: {serialize_diags:#?}"
     );
 }

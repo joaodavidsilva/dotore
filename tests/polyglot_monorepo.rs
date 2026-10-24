@@ -926,7 +926,7 @@ pub fn execute_order_match(id: u64) -> bool {
     // 3. Verify `build_rule_catalog` and `explain_rule` support all language & ecosystem frameworks
     let cfg = DotoreConfig::default();
     let all_catalog = build_rule_catalog(&cfg, &RulesListOptions::default());
-    assert_eq!(all_catalog.len(), 974);
+    assert_eq!(all_catalog.len(), 976);
 
     for (fw, expected_rule_id) in [
         ("angular", "angular-no-signal-write-in-effect"),
@@ -1106,8 +1106,8 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
     let registry = rule_registry();
     assert_eq!(
         registry.len(),
-        974,
-        "Expected 974 total rules (928 React/TS/universal + 7 Angular + 19 Python + 20 Rust)"
+        976,
+        "Expected 976 total rules (928 React/TS/universal + 7 Angular + 19 Python + 22 Rust)"
     );
 
     let angular_count = registry
@@ -1127,7 +1127,7 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
     assert_eq!(js_react_count, 928, "Expected 928 React/TS/universal rules");
     assert_eq!(angular_count, 7, "Expected 7 Angular rules");
     assert_eq!(py_count, 19, "Expected 19 Python rules");
-    assert_eq!(rs_count, 20, "Expected 20 Rust rules");
+    assert_eq!(rs_count, 22, "Expected 22 Rust rules");
 
     // Collect all detector source text across `crates/dotore-js/src`, `crates/dotore-py/src`, and `crates/dotore-rs/src`
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"));
