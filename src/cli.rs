@@ -11,20 +11,21 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::{
     BlockingLevel, BuildRuntimeScanReportInput, CiOptions, CiProviderKind, CliOverrides,
-    ConfigMutation, DiffScope, InstallOptions, PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS,
-    RecordRuntimeTraceInput, RuleCategory, RuleId, RuleSeverity, RuleSeverityOverride, RuleTag,
-    RulesListOptions, RuntimeScanFormat, ScanOptions, SearchOptions, SymbolKind, apply_autofixes,
-    build_rule_catalog, build_runtime_scan_report, ci_config, ci_install, ci_upgrade,
-    detect_local_runtime_urls, explain_location, explain_rule, format_design_report,
+    ConfigMutation, DiffScope, HandoffTarget, InstallOptions, PrescriptionTier,
+    RUNTIME_SCAN_LOCAL_DEV_PORTS, RecordRuntimeTraceInput, RuleCategory, RuleId, RuleSeverity,
+    RuleSeverityOverride, RuleTag, RulesListOptions, RuntimeScanFormat, ScanOptions, SearchOptions,
+    SymbolKind, apply_autofixes, build_rule_catalog, build_runtime_scan_report, ci_config,
+    ci_install, ci_upgrade, detect_available_coding_agents, detect_local_runtime_urls,
+    execute_handoff, explain_location, explain_rule, format_design_report,
     format_design_report_pretty, format_fix_report, format_install_report, format_plan_report,
     format_rule_catalog_text, format_rule_explanation_text, format_runtime_scan_error_report,
     format_runtime_scan_report, format_search_json, format_search_text, format_terminal_report,
     format_terminal_report_pretty, format_why_report_text, install_dotore, load_config_from_dir,
-    mutate_config_in_dir, plan_project,
+    load_preferred_handoff_target, mutate_config_in_dir, plan_project,
     progress::LiveSpinner,
-    prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
-    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols_with_cache,
-    should_highlight_stdout,
+    prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_dotore_home_dir,
+    resolve_runtime_scan_format, resolve_scan_exit_code, scan_design,
+    scan_workspace_with_overrides, search_symbols_with_cache, should_highlight_stdout,
     tui::{run_interactive_tui, should_launch_tui},
     validate_warning_exit_code, write_and_open_html_report, write_diagnostics_bundle,
     write_json_report,
@@ -167,6 +168,15 @@ pub struct CheckArgs {
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
     pub projects: Vec<String>,
+
+    /// Hand off findings to a coding agent or output (`print`, `clipboard`, `claude`, `codex`, `cursor`, `amp`, `opencode`).
+    #[arg(
+        long = "handoff",
+        value_name = "TARGET",
+        num_args = 0..=1,
+        default_missing_value = "auto"
+    )]
+    pub handoff: Option<String>,
 }
 
 /// CLI arguments for `dotore fix`.
@@ -751,6 +761,48 @@ fn build_scan_options(
     })
 }
 
+fn resolve_auto_handoff_target() -> HandoffTarget {
+    let available = detect_available_coding_agents();
+    if let Some(preferred) = load_preferred_handoff_target() {
+        match preferred {
+            HandoffTarget::Print | HandoffTarget::Clipboard => return preferred,
+            HandoffTarget::Claude
+            | HandoffTarget::Codex
+            | HandoffTarget::Cursor
+            | HandoffTarget::Amp
+            | HandoffTarget::Opencode => {
+                if available.contains(&preferred) {
+                    return preferred;
+                }
+            }
+        }
+    }
+    available.first().copied().unwrap_or(HandoffTarget::Print)
+}
+
+fn resolve_check_handoff_and_paths(
+    args: &CheckArgs,
+) -> Result<(Option<HandoffTarget>, Vec<PathBuf>), String> {
+    let mut effective_paths = args.paths.clone();
+    let Some(raw_target) = args.handoff.as_deref() else {
+        return Ok((None, effective_paths));
+    };
+    if raw_target.eq_ignore_ascii_case("auto") {
+        return Ok((Some(resolve_auto_handoff_target()), effective_paths));
+    }
+    if let Some(parsed) = HandoffTarget::parse(raw_target) {
+        return Ok((Some(parsed), effective_paths));
+    }
+    let candidate_path = Path::new(raw_target);
+    if candidate_path.exists() {
+        effective_paths.insert(0, candidate_path.to_path_buf());
+        return Ok((Some(resolve_auto_handoff_target()), effective_paths));
+    }
+    Err(format!(
+        "Unknown --handoff target {raw_target:?} (expected print, clipboard, claude, codex, cursor, amp, or opencode)"
+    ))
+}
+
 /// Runs `dotore check` (or `dotore score` when `args.score` is `true`).
 #[must_use]
 fn run_check(args: &CheckArgs) -> ExitCode {
@@ -789,8 +841,16 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         None => None,
     };
 
+    let (resolved_handoff, effective_paths) = match resolve_check_handoff_and_paths(args) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+
     let options = match build_scan_options(
-        &args.paths,
+        &effective_paths,
         args.include_tests,
         &args.rules,
         &args.categories,
@@ -816,7 +876,8 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         projects: args.projects.clone(),
     };
 
-    let show_live_spinner = !args.score && !args.json && should_launch_tui(args.no_pager);
+    let show_live_spinner =
+        !args.score && !args.json && resolved_handoff.is_none() && should_launch_tui(args.no_pager);
     let spinner_guard = if show_live_spinner {
         LiveSpinner::start()
     } else {
@@ -839,7 +900,18 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    if args.score {
+    if let Some(target) = resolved_handoff {
+        let bundle_dir = resolve_dotore_home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("handoff-bundle");
+        match execute_handoff(&report, target, &bundle_dir) {
+            Ok(output) => print!("{output}"),
+            Err(err) => {
+                eprintln!("error executing handoff: {err}");
+                return ExitCode::from(2);
+            }
+        }
+    } else if args.score {
         println!("{}", report.summary.health_score);
     } else if args.json {
         match serde_json::to_string_pretty(&report) {

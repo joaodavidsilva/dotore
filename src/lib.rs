@@ -92,10 +92,13 @@ pub use fixer::{
     apply_patches_to_source_with_validator,
 };
 pub use planner::{
-    DiagnosticsBundle, MIGRATION_BUCKET_MIN_FILES, MigrationRuleBucket, PlanResult, PlannerContext,
-    build_agent_handoff_prompt, build_fix_capsule, build_root_cause_groups_and_capsules,
-    compute_root_cause_group_id, detect_migration_rule_buckets, format_plan_report, plan_project,
-    render_rule_bundle_summary_text, write_diagnostics_bundle,
+    DiagnosticsBundle, HandoffTarget, MIGRATION_BUCKET_MIN_FILES, MigrationRuleBucket, PlanResult,
+    PlannerContext, build_agent_handoff_prompt, build_fix_capsule,
+    build_root_cause_groups_and_capsules, compute_root_cause_group_id, copy_to_clipboard,
+    detect_available_coding_agents, detect_migration_rule_buckets, execute_handoff,
+    filter_report_for_diagnostics, format_plan_report, load_preferred_handoff_target, plan_project,
+    render_rule_bundle_summary_text, resolve_agent_binary_path, save_preferred_handoff_target,
+    write_diagnostics_bundle,
 };
 pub use progress::{
     LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
@@ -153,7 +156,7 @@ pub use search::{
 pub use tui::{
     TuiFilterTab, TuiGroupMode, TuiState, build_score_gauge, diagnostic_matches_tab_and_search,
     draw_tui_frame, handle_tui_search_key, render_tui_body_lines, render_tui_body_lines_for_width,
-    render_tui_frame, run_interactive_tui, should_launch_tui,
+    render_tui_frame, render_tui_frame_with_state, run_interactive_tui, should_launch_tui,
 };
 
 use diff::{collect_git_diff, load_baseline_entries};

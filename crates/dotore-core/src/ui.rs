@@ -1401,7 +1401,7 @@ impl StatusBar {
                 let ansi_row1 = format!(
                     "\x1b[48;5;235;38;5;255;1m DOTORE \x1b[48;5;238;38;5;51;1m {active_tab_label} ({active_tab_count}) \x1b[48;5;235;38;5;250m  Mode: {mode_label}  │  Lines {start_line}-{end_line} / {clamped_total} ({pct}%)  │  Score: {health_score}/100 ({score_label}) \x1b[0m"
                 );
-                let ansi_row2 = "\x1b[48;5;234;38;5;252m \x1b[38;5;51;1m[h/l or ←/→]\x1b[38;5;252m Filter Tab  \x1b[38;5;51;1m[j/k or ↑/↓]\x1b[38;5;252m Scroll  \x1b[38;5;51;1m[Space/b]\x1b[38;5;252m Page  \x1b[38;5;51;1m[g/G]\x1b[38;5;252m Top/End  \x1b[38;5;51;1m[v]\x1b[38;5;252m Group Mode  \x1b[38;5;51;1m[/]\x1b[38;5;252m Search  \x1b[38;5;196;1m[ESC / q]\x1b[38;5;252m Quit \x1b[0m".to_string();
+                let ansi_row2 = "\x1b[48;5;234;38;5;252m \x1b[38;5;51;1m[h/l or ←/→]\x1b[38;5;252m Filter Tab \x1b[38;5;51;1m[j/k]\x1b[38;5;252m Scroll \x1b[38;5;51;1m[v]\x1b[38;5;252m Group \x1b[38;5;51;1m[/]\x1b[38;5;252m Search \x1b[38;5;51;1m[p]\x1b[38;5;252m Packages \x1b[38;5;51;1m[y]\x1b[38;5;252m Copy Handoff \x1b[38;5;51;1m[a]\x1b[38;5;252m Launch Agent \x1b[38;5;196;1m[ESC/q]\x1b[38;5;252m Quit\x1b[0m".to_string();
                 if mode.is_ansi() {
                     vec![ansi_row1, ansi_row2]
                 } else {

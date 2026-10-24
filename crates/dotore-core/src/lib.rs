@@ -65,12 +65,14 @@ pub use ir::{
     tokenize_suppression_rules,
 };
 pub use planner::{
-    DiagnosticsBundle, MIGRATION_BUCKET_MIN_FILES, MigrationRuleBucket, PlanResult, PlannerContext,
-    build_agent_handoff_prompt, build_caller_site_excerpt, build_fix_capsule,
-    build_root_cause_groups_and_capsules, compute_root_cause_group_id,
-    detect_migration_rule_buckets, excerpt_from_span, find_architecture_exemplar_from_facets,
-    format_plan_report, plan_project, render_rule_bundle_summary_text, slice_span, spans_intersect,
-    write_diagnostics_bundle,
+    DiagnosticsBundle, HandoffTarget, MIGRATION_BUCKET_MIN_FILES, MigrationRuleBucket, PlanResult,
+    PlannerContext, build_agent_handoff_prompt, build_caller_site_excerpt, build_fix_capsule,
+    build_root_cause_groups_and_capsules, compute_root_cause_group_id, copy_to_clipboard,
+    detect_available_coding_agents, detect_migration_rule_buckets, excerpt_from_span,
+    execute_handoff, filter_report_for_diagnostics, find_architecture_exemplar_from_facets,
+    format_plan_report, load_preferred_handoff_target, plan_project,
+    render_rule_bundle_summary_text, resolve_agent_binary_path, save_preferred_handoff_target,
+    slice_span, spans_intersect, write_diagnostics_bundle,
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,

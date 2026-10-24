@@ -6,23 +6,27 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
-    fs, io,
+    fs,
+    io::{self, Write as _},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::resolve_dotore_home_dir,
     ir::{
         ArchitectureFileFacets, ByteSpan, ExtractedFile, LanguageId, ResolvedCallerSite,
         compute_line_starts, loc_from_line_starts,
     },
-    report::{JsonReport, write_json_report},
+    report::{JsonReport, ReportSummary, write_json_report},
     rules::{
         BlastRadius, BlastRadiusTier, Diagnostic, FixCapsule, PrescriptionTier, RenderFrequency,
         RootCauseGroup, RuleCategory, RuleId, RuleSeverity, RuleTag, SourceExcerpt,
     },
+    score::compute_local_health_score,
 };
 
 /// Provides project/language graph context for **Blast Radius**, **Subject** excerpt,
@@ -1685,11 +1689,7 @@ pub fn render_rule_bundle_summary_text(rule: RuleId, report: &JsonReport) -> Str
             d.message
         );
         if !d.cascade_steps.is_empty() {
-            let _ = writeln!(
-                out,
-                "    Render Cascade: {}",
-                d.cascade_steps.join(" -> ")
-            );
+            let _ = writeln!(out, "    Render Cascade: {}", d.cascade_steps.join(" -> "));
         }
     }
 
@@ -1830,7 +1830,11 @@ fn render_handoff_migration_section(
     for bucket in migration_buckets {
         let summary_ref = bundle_dir.map_or_else(
             || format!("{}.txt", bucket.rule.as_str()),
-            |dir| dir.join(format!("{}.txt", bucket.rule.as_str())).display().to_string(),
+            |dir| {
+                dir.join(format!("{}.txt", bucket.rule.as_str()))
+                    .display()
+                    .to_string()
+            },
         );
         let files_preview: Vec<String> = bucket
             .affected_files
@@ -1864,11 +1868,7 @@ fn render_handoff_migration_section(
     );
 }
 
-fn render_handoff_groups_section(
-    md: &mut String,
-    report: &JsonReport,
-    bundle_dir: Option<&Path>,
-) {
+fn render_handoff_groups_section(md: &mut String, report: &JsonReport, bundle_dir: Option<&Path>) {
     let _ = writeln!(
         md,
         "## Top Root-Cause Groups ({})\n",
@@ -1891,7 +1891,11 @@ fn render_handoff_groups_section(
             md,
             "### {ordinal}. `{}` in `{}` (`{}:{}`)\n",
             group.rule.as_str(),
-            if subject.is_empty() { "<module>" } else { subject },
+            if subject.is_empty() {
+                "<module>"
+            } else {
+                subject
+            },
             group.file.display(),
             group.loc.line
         );
@@ -1937,7 +1941,11 @@ fn render_handoff_groups_section(
                     d.message
                 );
                 if !d.cascade_steps.is_empty() {
-                    let _ = writeln!(md, "    - Render Cascade: `{}`", d.cascade_steps.join(" -> "));
+                    let _ = writeln!(
+                        md,
+                        "    - Render Cascade: `{}`",
+                        d.cascade_steps.join(" -> ")
+                    );
                 }
             }
         }
@@ -2050,4 +2058,445 @@ pub fn write_diagnostics_bundle(
         migration_buckets,
         prompt_markdown,
     })
+}
+
+/// Supported coding agent or output targets for `--handoff` and TUI handoff actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HandoffTarget {
+    /// Print the handoff prompt to stdout.
+    Print,
+    /// Copy the handoff prompt to the system clipboard.
+    Clipboard,
+    /// Anthropic Claude Code CLI (`claude`).
+    Claude,
+    /// OpenAI Codex CLI (`codex`).
+    Codex,
+    /// Cursor Agent CLI (`cursor`).
+    Cursor,
+    /// Sourcegraph Amp CLI (`amp`).
+    Amp,
+    /// OpenCode CLI (`opencode`).
+    Opencode,
+}
+
+impl HandoffTarget {
+    /// All coding agent CLI targets in detection priority order.
+    pub const AGENT_CLIS: &'static [Self] = &[
+        Self::Claude,
+        Self::Codex,
+        Self::Cursor,
+        Self::Amp,
+        Self::Opencode,
+    ];
+
+    /// Parses a handoff target identifier (`"print"`, `"clipboard"`, `"claude"`, `"codex"`, `"cursor"`, `"amp"`, `"opencode"`).
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "print" | "stdout" => Some(Self::Print),
+            "clipboard" | "copy" | "pbcopy" => Some(Self::Clipboard),
+            "claude" | "claude-code" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "cursor" | "cursor-agent" => Some(Self::Cursor),
+            "amp" => Some(Self::Amp),
+            "opencode" | "open-code" => Some(Self::Opencode),
+            _ => None,
+        }
+    }
+
+    /// Canonical kebab-case target name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Print => "print",
+            Self::Clipboard => "clipboard",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Amp => "amp",
+            Self::Opencode => "opencode",
+        }
+    }
+
+    /// Binary name on `PATH` for agent CLI targets (`None` for `Print` and `Clipboard`).
+    #[must_use]
+    pub const fn binary_name(self) -> Option<&'static str> {
+        match self {
+            Self::Print | Self::Clipboard => None,
+            Self::Claude => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::Cursor => Some("cursor"),
+            Self::Amp => Some("amp"),
+            Self::Opencode => Some("opencode"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct UserPreferencesFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preferred_handoff_target: Option<HandoffTarget>,
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn find_executable_in_dir(dir: &Path, bin_name: &str) -> Option<PathBuf> {
+    let direct = dir.join(bin_name);
+    if is_executable_file(&direct) {
+        return Some(direct);
+    }
+    #[cfg(windows)]
+    {
+        for ext in [".exe", ".cmd", ".bat"] {
+            let candidate = dir.join(format!("{bin_name}{ext}"));
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Resolves the executable binary path for a coding agent [`HandoffTarget`], checking
+/// `DOTORE_AGENT_BIN_DIR` when set, or `PATH` otherwise.
+#[must_use]
+pub fn resolve_agent_binary_path(target: HandoffTarget) -> Option<PathBuf> {
+    let bin_name = target.binary_name()?;
+    if let Some(custom_dirs) = std::env::var_os("DOTORE_AGENT_BIN_DIR")
+        && !custom_dirs.is_empty()
+    {
+        for dir in std::env::split_paths(&custom_dirs) {
+            if let Some(found) = find_executable_in_dir(&dir, bin_name) {
+                return Some(found);
+            }
+        }
+        return None;
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        if let Some(found) = find_executable_in_dir(&dir, bin_name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Detects which coding agent CLIs (`claude`, `codex`, `cursor`, `amp`, `opencode`) are executable
+/// in `DOTORE_AGENT_BIN_DIR` or `PATH`.
+#[must_use]
+pub fn detect_available_coding_agents() -> Vec<HandoffTarget> {
+    HandoffTarget::AGENT_CLIS
+        .iter()
+        .copied()
+        .filter(|&target| resolve_agent_binary_path(target).is_some())
+        .collect()
+}
+
+/// Loads the user's saved preferred [`HandoffTarget`] from `~/.dotore/preferences.json`.
+#[must_use]
+pub fn load_preferred_handoff_target() -> Option<HandoffTarget> {
+    let prefs_path = resolve_dotore_home_dir()?.join("preferences.json");
+    let raw = fs::read_to_string(prefs_path).ok()?;
+    let parsed: UserPreferencesFile = serde_json::from_str(&raw).ok()?;
+    parsed.preferred_handoff_target
+}
+
+/// Saves the user's preferred [`HandoffTarget`] to `~/.dotore/preferences.json`.
+///
+/// # Errors
+/// Returns an `io::Error` if writing the preferences file fails.
+pub fn save_preferred_handoff_target(target: HandoffTarget) -> io::Result<()> {
+    let Some(home_dir) = resolve_dotore_home_dir() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not resolve ~/.dotore home directory",
+        ));
+    };
+    fs::create_dir_all(&home_dir)?;
+    let prefs_path = home_dir.join("preferences.json");
+    let prefs = UserPreferencesFile {
+        preferred_handoff_target: Some(target),
+    };
+    let payload = serde_json::to_string_pretty(&prefs)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let tmp_path = home_dir.join(format!(
+        ".preferences.json.tmp-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::write(&tmp_path, format!("{payload}\n"))?;
+    fs::rename(&tmp_path, &prefs_path)
+}
+
+fn pipe_stdin_to_command(prog: &str, args: &[&str], text: &str) -> Result<(), String> {
+    let mut child = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn clipboard command '{prog}': {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("Failed to write to clipboard command '{prog}': {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed waiting for clipboard command '{prog}': {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Clipboard command '{prog}' exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ))
+    }
+}
+
+/// Copies `text` to the system clipboard (or pipes to `DOTORE_CLIPBOARD_CMD` when set).
+///
+/// # Errors
+/// Returns an error message if no clipboard utility is available or the command fails.
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    if let Ok(custom_cmd) = std::env::var("DOTORE_CLIPBOARD_CMD") {
+        let trimmed = custom_cmd.trim();
+        if !trimmed.is_empty() {
+            if Path::new(trimmed).is_file() {
+                return pipe_stdin_to_command(trimmed, &[], text);
+            }
+            #[cfg(windows)]
+            {
+                return pipe_stdin_to_command("cmd", &["/C", trimmed], text);
+            }
+            #[cfg(not(windows))]
+            {
+                return pipe_stdin_to_command("sh", &["-c", trimmed], text);
+            }
+        }
+    }
+
+    let candidates: &[(&str, &[&str])] = &[
+        ("pbcopy", &[]),
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("clip", &[]),
+        ("clip.exe", &[]),
+    ];
+    for &(prog, args) in candidates {
+        if pipe_stdin_to_command(prog, args, text).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(
+        "No system clipboard utility available (tried pbcopy, wl-copy, xclip, xsel, clip)"
+            .to_string(),
+    )
+}
+
+/// Builds a filtered [`JsonReport`] containing only `selected_diagnostics` and their corresponding
+/// [`RootCauseGroup`]s, [`FixCapsule`]s, and summary counts (used by TUI `y`/`a` handoff).
+#[must_use]
+pub fn filter_report_for_diagnostics(
+    report: &JsonReport,
+    selected_diagnostics: &[&Diagnostic],
+) -> JsonReport {
+    let mut diagnostics = Vec::with_capacity(selected_diagnostics.len());
+    let mut old_to_new: HashMap<usize, usize> = HashMap::with_capacity(selected_diagnostics.len());
+
+    for &sel in selected_diagnostics {
+        let new_idx = diagnostics.len();
+        if let Some(old_idx) = report
+            .diagnostics
+            .iter()
+            .position(|d| std::ptr::eq(d, sel) || d == sel)
+        {
+            old_to_new.entry(old_idx).or_insert(new_idx);
+        }
+        diagnostics.push(sel.clone());
+    }
+
+    let mut root_cause_groups = Vec::new();
+    let mut kept_group_ids: BTreeSet<String> = BTreeSet::new();
+    for group in &report.root_cause_groups {
+        let remapped: Vec<usize> = group
+            .diagnostic_indices
+            .iter()
+            .filter_map(|old_idx| old_to_new.get(old_idx).copied())
+            .collect();
+        if !remapped.is_empty() {
+            let mut cloned_group = group.clone();
+            cloned_group.blast_radius.site_count = remapped.len();
+            cloned_group.diagnostic_indices = remapped;
+            kept_group_ids.insert(cloned_group.id.clone());
+            root_cause_groups.push(cloned_group);
+        }
+    }
+
+    let fix_capsules: Vec<FixCapsule> = report
+        .fix_capsules
+        .iter()
+        .filter(|c| kept_group_ids.contains(&c.root_cause_group_id))
+        .cloned()
+        .collect();
+
+    let mut error_count = 0usize;
+    let mut warning_count = 0usize;
+    let mut autofix_count = 0usize;
+    let mut surgical_count = 0usize;
+    let mut refactor_count = 0usize;
+    let mut affected_files: BTreeSet<&Path> = BTreeSet::new();
+
+    for d in &diagnostics {
+        match d.severity {
+            RuleSeverity::Error => error_count += 1,
+            RuleSeverity::Warning => warning_count += 1,
+        }
+        match d.tier {
+            PrescriptionTier::Autofix => autofix_count += 1,
+            PrescriptionTier::Surgical => surgical_count += 1,
+            PrescriptionTier::Refactor => refactor_count += 1,
+        }
+        affected_files.insert(d.file.as_path());
+    }
+
+    let hs = compute_local_health_score(
+        &root_cause_groups,
+        report.summary.files_scanned,
+        report.summary.subjects_scanned,
+    );
+
+    let summary = ReportSummary {
+        files_scanned: report.summary.files_scanned,
+        subjects_scanned: report.summary.subjects_scanned,
+        effects_scanned: report.summary.effects_scanned,
+        total_diagnostics: diagnostics.len(),
+        error_count,
+        warning_count,
+        affected_file_count: affected_files.len(),
+        autofix_count,
+        surgical_count,
+        refactor_count,
+        health_score: hs.score,
+        score_label: hs.label,
+    };
+
+    JsonReport {
+        schema_version: report.schema_version,
+        mode: report.mode,
+        summary,
+        projects: report.projects.clone(),
+        diagnostics,
+        root_cause_groups,
+        fix_capsules,
+        diagnostic_fingerprints: report.diagnostic_fingerprints.clone(),
+        diff: report.diff.clone(),
+        baseline: report.baseline.clone(),
+        baseline_degraded: report.baseline_degraded,
+    }
+}
+
+/// Executes a handoff of `report` to `target`, writing the diagnostics bundle to `bundle_dir`.
+///
+/// # Errors
+/// Returns an error message if bundle writing, clipboard copy, or agent CLI invocation fails.
+pub fn execute_handoff(
+    report: &JsonReport,
+    target: HandoffTarget,
+    bundle_dir: &Path,
+) -> Result<String, String> {
+    let bundle = write_diagnostics_bundle(report, bundle_dir).map_err(|e| {
+        format!(
+            "Failed to write diagnostics bundle to {}: {e}",
+            bundle_dir.display()
+        )
+    })?;
+    let _ = save_preferred_handoff_target(target);
+
+    match target {
+        HandoffTarget::Print => Ok(bundle.prompt_markdown),
+        HandoffTarget::Clipboard => {
+            copy_to_clipboard(&bundle.prompt_markdown)?;
+            Ok(format!(
+                "Copied handoff prompt ({} findings, bundle: {}) to clipboard.\n",
+                report.diagnostics.len(),
+                bundle_dir.display()
+            ))
+        }
+        HandoffTarget::Claude
+        | HandoffTarget::Codex
+        | HandoffTarget::Cursor
+        | HandoffTarget::Amp
+        | HandoffTarget::Opencode => {
+            let Some(bin_path) = resolve_agent_binary_path(target) else {
+                return Err(format!(
+                    "Coding agent CLI '{}' was not found on PATH",
+                    target.as_str()
+                ));
+            };
+            let pipe_stdin = std::env::var("DOTORE_AGENT_STDIN")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            let mut cmd = Command::new(&bin_path);
+            cmd.arg(&bundle.prompt_markdown)
+                .env("DOTORE_BUNDLE_DIR", bundle_dir)
+                .stdin(if pipe_stdin {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("Failed to launch '{}': {e}", bin_path.display()))?;
+            if pipe_stdin && let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(bundle.prompt_markdown.as_bytes());
+            }
+            let output = child
+                .wait_with_output()
+                .map_err(|e| format!("Failed waiting for '{}': {e}", target.as_str()))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!(
+                    "Coding agent '{}' exited with {}: {}",
+                    target.as_str(),
+                    output.status,
+                    stderr.trim()
+                ));
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            if stdout.trim().is_empty() {
+                Ok(format!(
+                    "Handed off {} findings to {} (bundle: {}).\n",
+                    report.diagnostics.len(),
+                    target.as_str(),
+                    bundle_dir.display()
+                ))
+            } else {
+                Ok(stdout)
+            }
+        }
+    }
 }

@@ -12,6 +12,11 @@ use std::{
 
 pub use dotore_core::ui::{FilterTabItem, TuiFilterKind, build_filter_tabs, classify_style_bucket};
 use dotore_core::{
+    config::resolve_dotore_home_dir,
+    planner::{
+        build_agent_handoff_prompt, copy_to_clipboard, detect_available_coding_agents,
+        execute_handoff, filter_report_for_diagnostics, load_preferred_handoff_target,
+    },
     report::JsonReport,
     rules::{BlastRadiusTier, Diagnostic, PrescriptionTier, RuleSeverity},
     ui::{
@@ -72,6 +77,11 @@ pub struct TuiState {
     pub in_search_input: bool,
     /// Current vertical scroll line offset.
     pub scroll_offset: usize,
+    /// Whether the workspace package picker overlay (`p`) is currently open.
+    pub in_package_picker: bool,
+    /// Transient status bar confirmation or error message from TUI actions (`y`, `a`, `p`).
+    pub status_message: Option<String>,
+    report_snapshot: Option<(JsonReport, Vec<TuiFilterTab>)>,
 }
 
 impl TuiState {
@@ -85,9 +95,93 @@ impl TuiState {
             search_query: String::new(),
             in_search_input: false,
             scroll_offset: 0,
+            in_package_picker: false,
+            status_message: None,
+            report_snapshot: None,
         }
     }
 
+    /// Creates a [`TuiState`] initialized with `report` and `tabs` so TUI handoff actions (`y`/`a`)
+    /// can synthesize filtered handoff prompts directly.
+    #[must_use]
+    pub fn from_report(report: &JsonReport, tabs: &[TuiFilterTab]) -> Self {
+        let mut state = Self::new(tabs.len());
+        state.report_snapshot = Some((report.clone(), tabs.to_vec()));
+        state
+    }
+
+    fn active_filtered_report(&self) -> (JsonReport, usize) {
+        if let Some((report, tabs)) = &self.report_snapshot {
+            let active_idx = self.active_tab_idx.min(tabs.len().saturating_sub(1));
+            let filtered: Vec<&Diagnostic> = if let Some(active_tab) = tabs.get(active_idx) {
+                report
+                    .diagnostics
+                    .iter()
+                    .filter(|d| {
+                        diagnostic_matches_tab_and_search(d, active_tab, &self.search_query)
+                    })
+                    .collect()
+            } else {
+                report.diagnostics.iter().collect()
+            };
+            let count = filtered.len();
+            (filter_report_for_diagnostics(report, &filtered), count)
+        } else {
+            let empty = dotore_core::report::build_extracted_report(
+                &[],
+                Vec::new(),
+                &std::collections::HashMap::new(),
+            );
+            (empty, 0)
+        }
+    }
+
+    /// Copies the active filter's coding-agent handoff prompt to the system clipboard and updates `status_message`.
+    pub fn copy_active_handoff_to_clipboard(&mut self) {
+        let (filtered_report, count) = self.active_filtered_report();
+        let prompt = build_agent_handoff_prompt(&filtered_report, None);
+        match copy_to_clipboard(&prompt) {
+            Ok(()) => {
+                self.status_message = Some(format!(
+                    "✔ Copied handoff prompt ({count} findings) to clipboard"
+                ));
+            }
+            Err(err) => {
+                self.status_message = Some(format!("✖ Clipboard copy failed: {err}"));
+            }
+        }
+    }
+
+    /// Launches the preferred or first available coding agent CLI with the active filter's handoff bundle,
+    /// or sets a status bar prompt if no coding agent CLI is detected on `PATH`.
+    pub fn launch_active_coding_agent(&mut self) {
+        let available = detect_available_coding_agents();
+        let selected_agent = load_preferred_handoff_target()
+            .filter(|t| available.contains(t))
+            .or_else(|| available.first().copied());
+        let Some(agent) = selected_agent else {
+            self.status_message = Some(
+                "No coding agent CLI detected on PATH (claude, codex, cursor, amp, opencode)"
+                    .to_string(),
+            );
+            return;
+        };
+        let (filtered_report, count) = self.active_filtered_report();
+        let bundle_dir = resolve_dotore_home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("handoff-bundle");
+        match execute_handoff(&filtered_report, agent, &bundle_dir) {
+            Ok(_) => {
+                self.status_message = Some(format!(
+                    "✔ Handed off {count} findings to {}",
+                    agent.as_str()
+                ));
+            }
+            Err(err) => {
+                self.status_message = Some(format!("✖ Failed launching {}: {err}", agent.as_str()));
+            }
+        }
+    }
     /// Processes a single raw key sequence (`key_bytes`), updating scroll, tab, group mode, or search state.
     ///
     /// Returns `true` when the user requested a clean exit (`ESC`, `q`, `Q`, or `Ctrl+C`).
@@ -164,6 +258,14 @@ impl TuiState {
             [b'c'] | [b'C'] => {
                 self.search_query.clear();
                 self.scroll_offset = 0;
+            }
+            // 'y' -> copy active filter's handoff prompt to clipboard
+            [b'y'] | [b'Y'] => {
+                self.copy_active_handoff_to_clipboard();
+            }
+            // 'a' -> launch preferred or detected coding agent CLI
+            [b'a'] | [b'A'] => {
+                self.launch_active_coding_agent();
             }
             // '1'..'9' quick filter tab jump
             [ch @ b'1'..=b'9'] => {
@@ -534,25 +636,22 @@ pub fn build_score_gauge(score: u32, width: usize) -> String {
 }
 
 /// Renders a complete TUI frame (header banner, [`FilterTabBar`], body viewport, and [`StatusBar`] footer)
-/// as an ANSI string fitted to `(rows, cols)`.
+/// as an ANSI string fitted to `(rows, cols)` using `state`.
 #[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "TUI frame renderer takes viewport dimensions and current UI state directly"
-)]
-pub fn render_tui_frame(
+pub fn render_tui_frame_with_state(
     report: &JsonReport,
     tabs: &[TuiFilterTab],
-    active_tab_idx: usize,
-    group_mode: TuiGroupMode,
-    search_query: &str,
-    in_search_input: bool,
+    state: &TuiState,
     body_lines: &[String],
-    scroll_offset: usize,
     rows: usize,
     cols: usize,
     design_mode: bool,
 ) -> String {
+    let active_tab_idx = state.active_tab_idx.min(tabs.len().saturating_sub(1));
+    let group_mode = state.group_mode;
+    let search_query = state.search_query.as_str();
+    let in_search_input = state.in_search_input;
+    let scroll_offset = state.scroll_offset;
     let s = &report.summary;
     let effective_cols = cols.max(52);
     let box_inner_width = effective_cols.saturating_sub(4).max(46);
@@ -621,6 +720,12 @@ pub fn render_tui_frame(
         format!(
             " \x1b[48;5;236;38;5;226;1m SEARCH / \x1b[0m \x1b[38;5;255;1m{search_query}█\x1b[0m  \x1b[38;5;244m(Enter to lock, ESC to clear)\x1b[0m"
         )
+    } else if let Some(status_msg) = state.status_message.as_deref() {
+        let active = &tabs[active_tab_idx];
+        format!(
+            " \x1b[38;5;48;1m{status_msg}\x1b[0m   \x1b[38;5;245mActive Filter:\x1b[0m {}{} ({} matching)\x1b[0m",
+            active.badge_ansi, active.label, active.count
+        )
     } else if !search_query.is_empty() {
         format!(
             " \x1b[48;5;236;38;5;48;1m FILTER / \x1b[0m \x1b[38;5;255;1m\"{search_query}\"\x1b[0m  \x1b[38;5;244m(press / to edit, c to clear search)\x1b[0m"
@@ -681,6 +786,35 @@ pub fn render_tui_frame(
     frame
 }
 
+/// Renders a complete TUI frame (header banner, [`FilterTabBar`], body viewport, and [`StatusBar`] footer)
+/// as an ANSI string fitted to `(rows, cols)`.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "TUI frame renderer takes viewport dimensions and current UI state directly"
+)]
+pub fn render_tui_frame(
+    report: &JsonReport,
+    tabs: &[TuiFilterTab],
+    active_tab_idx: usize,
+    group_mode: TuiGroupMode,
+    search_query: &str,
+    in_search_input: bool,
+    body_lines: &[String],
+    scroll_offset: usize,
+    rows: usize,
+    cols: usize,
+    design_mode: bool,
+) -> String {
+    let mut state = TuiState::new(tabs.len());
+    state.active_tab_idx = active_tab_idx;
+    state.group_mode = group_mode;
+    state.search_query = search_query.to_string();
+    state.in_search_input = in_search_input;
+    state.scroll_offset = scroll_offset;
+    render_tui_frame_with_state(report, tabs, &state, body_lines, rows, cols, design_mode)
+}
+
 /// Renders and flushes a TUI frame to `stdout`.
 #[expect(
     clippy::too_many_arguments,
@@ -730,7 +864,7 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
     };
 
     let tabs = build_filter_tabs(report);
-    let mut state = TuiState::new(tabs.len());
+    let mut state = TuiState::from_report(report, &tabs);
     let mut last_size = (0usize, 0usize);
     let mut needs_redraw = true;
     let mut cached_body_lines: Vec<String> = Vec::new();
@@ -759,19 +893,18 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
                 state.scroll_offset = max_scroll;
             }
 
-            draw_tui_frame(
+            let frame = render_tui_frame_with_state(
                 report,
                 &tabs,
-                state.active_tab_idx,
-                state.group_mode,
-                &state.search_query,
-                state.in_search_input,
+                &state,
                 &cached_body_lines,
-                state.scroll_offset,
                 rows,
                 cols,
                 design_mode,
             );
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(frame.as_bytes());
+            let _ = stdout.flush();
             needs_redraw = false;
         }
 
