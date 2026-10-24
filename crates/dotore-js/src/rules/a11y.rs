@@ -41,6 +41,22 @@ use self::{
     keyboard_and_focus::{check_call_a11y, check_conditional_a11y},
 };
 
+struct JsxElementA11yCtx<'a, 'b> {
+    is_testlike: bool,
+    semantic: &'a Semantic<'b>,
+    node_id: NodeId,
+    jsx_el: &'a JSXElement<'b>,
+    opening: &'a JSXOpeningElement<'b>,
+    tag: &'a str,
+    is_html: bool,
+    has_spread: bool,
+    subject_name: &'a Option<String>,
+    const_strings: &'a HashMap<SymbolId, String>,
+    loc: SourceLoc,
+    span: ByteSpan,
+    line_starts: &'a [u32],
+}
+
 /// Extracts all single-pass `a11y` rule sites and static DOM `id`s from `semantic`.
 #[must_use]
 pub(crate) fn extract_a11y_sites_and_dom_ids(

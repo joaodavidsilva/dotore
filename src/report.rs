@@ -289,7 +289,8 @@ fn explain_js_location(
                     diag.rule.as_str()
                 )
             };
-            let mut cascade_steps = diag.cascade_steps.clone();
+            let mut cascade_steps = Vec::with_capacity(diag.cascade_steps.len());
+            cascade_steps.extend_from_slice(&diag.cascade_steps);
             append_js_architecture_signals(
                 target_file_ir,
                 diag,
@@ -344,7 +345,8 @@ fn explain_js_location(
                     &pkg.capability_gate,
                     &pkg.config,
                 );
-                let mut cascade_steps = diag.cascade_steps.clone();
+                let mut cascade_steps = Vec::with_capacity(diag.cascade_steps.len());
+                cascade_steps.extend_from_slice(&diag.cascade_steps);
                 append_js_architecture_signals(
                     target_file_ir,
                     diag,

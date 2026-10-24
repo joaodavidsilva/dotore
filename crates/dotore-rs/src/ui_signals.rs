@@ -13,8 +13,7 @@ use syn::{
 };
 
 use crate::matchers::{
-    RsCandidateFinding, RsScopeTracker, extract_receiver_ident, is_bool_type, is_pub, loc_at,
-    span_to_bytes,
+    RsCandidateFinding, RsScopeTracker, extract_receiver_ident, is_bool_type, loc_at, span_to_bytes,
 };
 
 /// Extracts candidate findings for Leptos/Dioxus UI signal and boolean parameter architecture rules from `ast`.
@@ -77,29 +76,22 @@ impl UiSignalsAndArchVisitor<'_> {
         }
     }
 
-    fn check_many_boolean_params(&mut self, sig: &Signature, is_public_api: bool) {
+    fn check_many_boolean_params(&mut self, sig: &Signature) {
         if self.scope.in_test() {
             return;
         }
         let mut bool_count = 0usize;
-        let mut consecutive_bools = 0usize;
-        let mut max_consecutive_bools = 0usize;
 
         for input in &sig.inputs {
             let FnArg::Typed(pat_type) = input else {
-                consecutive_bools = 0;
                 continue;
             };
             if is_bool_type(&pat_type.ty) {
                 bool_count += 1;
-                consecutive_bools += 1;
-                max_consecutive_bools = max_consecutive_bools.max(consecutive_bools);
-            } else {
-                consecutive_bools = 0;
             }
         }
 
-        if bool_count >= 3 || (is_public_api && max_consecutive_bools >= 2) {
+        if bool_count >= 3 {
             let span = self.span_to_bytes(sig.span());
             let ident_span = self.span_to_bytes(sig.ident.span());
             let loc = self.loc_at(ident_span.start);
@@ -134,21 +126,21 @@ impl<'ast> Visit<'ast> for UiSignalsAndArchVisitor<'_> {
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let snap = self.scope.enter_fn(i);
-        self.check_many_boolean_params(&i.sig, is_pub(&i.vis));
+        self.check_many_boolean_params(&i.sig);
         visit::visit_item_fn(self, i);
         self.scope.exit(snap);
     }
 
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
         let snap = self.scope.enter_method(i);
-        self.check_many_boolean_params(&i.sig, is_pub(&i.vis));
+        self.check_many_boolean_params(&i.sig);
         visit::visit_impl_item_fn(self, i);
         self.scope.exit(snap);
     }
 
     fn visit_trait_item_fn(&mut self, i: &'ast TraitItemFn) {
         let snap = self.scope.enter_trait_fn(i);
-        self.check_many_boolean_params(&i.sig, true);
+        self.check_many_boolean_params(&i.sig);
         visit::visit_trait_item_fn(self, i);
         self.scope.exit(snap);
     }

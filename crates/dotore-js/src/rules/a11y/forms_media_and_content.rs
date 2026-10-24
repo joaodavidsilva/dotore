@@ -9,11 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
     AstKind,
-    ast::{Expression, JSXAttributeValue, JSXChild, JSXElement, JSXElementName, JSXOpeningElement},
+    ast::{Expression, JSXAttributeValue, JSXChild, JSXElement, JSXElementName},
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 
 use super::{
+    JsxElementA11yCtx,
     aria_and_roles::check_custom_aria_and_role_rules,
     extract_attr_match_keys, has_accessible_child, has_accessible_label_text_in_children,
     has_non_empty_attr_val, is_attr_null_or_undefined, is_attr_statically_false,
@@ -37,26 +38,25 @@ use crate::{
     rules::RuleId,
 };
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates core JSX element content, language, heading, iframe, media, and table scope rules"
-)]
 pub(super) fn check_element_content_media_and_form_rules(
-    is_testlike: bool,
-    semantic: &Semantic<'_>,
-    _node_id: NodeId,
-    jsx_el: &JSXElement<'_>,
-    opening: &JSXOpeningElement<'_>,
-    tag: &str,
-    is_html: bool,
-    has_spread: bool,
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
-    loc: SourceLoc,
-    span: ByteSpan,
-    line_starts: &[u32],
+    ctx: &JsxElementA11yCtx<'_, '_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
+    let JsxElementA11yCtx {
+        is_testlike,
+        semantic,
+        jsx_el,
+        opening,
+        tag,
+        is_html,
+        has_spread,
+        subject_name,
+        const_strings,
+        loc,
+        span,
+        line_starts,
+        ..
+    } = *ctx;
     // 7. `autocomplete-valid`
     if !is_testlike
         && matches!(tag, "input" | "textarea" | "select" | "form")
@@ -730,30 +730,28 @@ pub(super) fn check_control_and_label_association(
     );
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates all remaining custom a11y rules in a single pass over the JSXElement"
-)]
 pub(super) fn check_custom_a11y_rules(
-    _path: &std::path::Path,
-    is_testlike: bool,
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    jsx_el: &JSXElement<'_>,
-    tag: &str,
-    is_html: bool,
-    has_spread: bool,
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
+    ctx: &JsxElementA11yCtx<'_, '_>,
     imported_sources: &HashMap<SymbolId, String>,
     main_landmarks_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
     unlabeled_navs_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
-    loc: SourceLoc,
-    span: ByteSpan,
-    line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let opening = &jsx_el.opening_element;
+    let JsxElementA11yCtx {
+        semantic,
+        node_id,
+        jsx_el,
+        opening,
+        tag,
+        is_html,
+        has_spread,
+        subject_name,
+        const_strings,
+        loc,
+        span,
+        line_starts,
+        ..
+    } = *ctx;
     let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
         .and_then(|a| get_attr_static_str(semantic, a, const_strings));
     let first_role = role_str
@@ -766,22 +764,11 @@ pub(super) fn check_custom_a11y_rules(
 
     // 1, 6, 10–12, 15, 17. ARIA, dialog, status, landmark, and presentation role rules
     check_custom_aria_and_role_rules(
-        is_testlike,
-        semantic,
-        node_id,
-        opening,
-        tag,
-        is_html,
-        has_spread,
+        ctx,
         first_role,
         has_a11y_name,
-        subject_name,
-        const_strings,
         main_landmarks_by_root,
         unlabeled_navs_by_root,
-        loc,
-        span,
-        line_starts,
         sites,
     );
 

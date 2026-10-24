@@ -2,6 +2,7 @@
 //! grouping modes, `/` search, and `ESC` clean exit) built on `dotore_core::ui`.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     env,
     fmt::Write as _,
@@ -1438,16 +1439,16 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
 
         let viewport_height = rows.saturating_sub(10).max(2);
         if needs_redraw {
-            let effective_tabs: Vec<TuiFilterTab> = if state.has_active_package_filter() {
+            let effective_tabs: Cow<'_, [TuiFilterTab]> = if state.has_active_package_filter() {
                 let pkg_diags: Vec<&Diagnostic> = report
                     .diagnostics
                     .iter()
                     .filter(|d| state.is_file_in_active_packages(&d.file))
                     .collect();
                 let pkg_report = filter_report_for_diagnostics(report, &pkg_diags);
-                build_filter_tabs(&pkg_report)
+                Cow::Owned(build_filter_tabs(&pkg_report))
             } else {
-                tabs.clone()
+                Cow::Borrowed(&tabs)
             };
             state.tab_count = effective_tabs.len().max(1);
             if state.active_tab_idx >= state.tab_count {

@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fmt::Write as _,
     fs::OpenOptions,
@@ -413,10 +414,10 @@ impl AsciiBox {
         for row in &self.rows {
             match row {
                 BoxRow::Closed(content) => {
-                    let raw_content = if mode.is_ansi() {
-                        content.clone()
+                    let raw_content: Cow<'_, str> = if mode.is_ansi() {
+                        Cow::Borrowed(content.as_str())
                     } else {
-                        strip_ansi_codes(content)
+                        Cow::Owned(strip_ansi_codes(content))
                     };
                     let rendered_content = truncate_ansi_to_width(&raw_content, self.width);
                     let vis_len = visible_char_width(&rendered_content);
@@ -434,10 +435,10 @@ impl AsciiBox {
                     }
                 }
                 BoxRow::Open(content) => {
-                    let rendered_content = if mode.is_ansi() {
-                        content.clone()
+                    let rendered_content: Cow<'_, str> = if mode.is_ansi() {
+                        Cow::Borrowed(content.as_str())
                     } else {
-                        strip_ansi_codes(content)
+                        Cow::Owned(strip_ansi_codes(content))
                     };
                     lines.push(format!(
                         "{}{bcol}{}{reset}{rendered_content}",
@@ -445,10 +446,10 @@ impl AsciiBox {
                     ));
                 }
                 BoxRow::Unbordered(content) => {
-                    let rendered_content = if mode.is_ansi() {
-                        content.clone()
+                    let rendered_content: Cow<'_, str> = if mode.is_ansi() {
+                        Cow::Borrowed(content.as_str())
                     } else {
-                        strip_ansi_codes(content)
+                        Cow::Owned(strip_ansi_codes(content))
                     };
                     lines.push(format!("{}{rendered_content}", self.indent));
                 }
@@ -460,10 +461,10 @@ impl AsciiBox {
                     ));
                 }
                 BoxRow::TitledDivider(title) => {
-                    let raw_title = if mode.is_ansi() {
-                        title.clone()
+                    let raw_title: Cow<'_, str> = if mode.is_ansi() {
+                        Cow::Borrowed(title.as_str())
                     } else {
-                        strip_ansi_codes(title)
+                        Cow::Owned(strip_ansi_codes(title))
                     };
                     let max_title_cols = self.width.saturating_sub(4);
                     let rendered_title = truncate_ansi_to_width(&raw_title, max_title_cols);

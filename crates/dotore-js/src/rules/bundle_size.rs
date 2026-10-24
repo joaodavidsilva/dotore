@@ -999,7 +999,7 @@ fn resolve_barrel_export_file_path(
         {
             let target_file = &graph.files[target_idx];
             if is_barrel_index_file(target_file) {
-                let mut sub_visited = visited.clone();
+                let mut sub_visited: HashSet<usize> = visited.iter().copied().collect();
                 if let Some(nested) = resolve_barrel_export_file_path(
                     graph,
                     target_idx,

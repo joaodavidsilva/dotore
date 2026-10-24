@@ -63,19 +63,21 @@ enum Origin {
 }
 
 impl Origin {
-    fn member(self, member_name: &str) -> Self {
+    fn member(&self, member_name: &str) -> Self {
         match self {
-            Self::Known(ev) => Self::Known(classify_motion_member(ev, member_name)),
+            Self::Known(ev) => Self::Known(classify_motion_member(*ev, member_name)),
             Self::Pending {
                 module_source,
                 imported_name,
-                mut member_chain,
+                member_chain,
             } => {
-                member_chain.push(member_name.to_string());
+                let mut next_chain = Vec::with_capacity(member_chain.len() + 1);
+                next_chain.extend_from_slice(member_chain);
+                next_chain.push(member_name.to_string());
                 Self::Pending {
-                    module_source,
-                    imported_name,
-                    member_chain,
+                    module_source: module_source.clone(),
+                    imported_name: imported_name.clone(),
+                    member_chain: next_chain,
                 }
             }
             Self::None => Self::None,
@@ -424,7 +426,7 @@ pub(crate) fn extract_script_motion_ir(
                             if let BindingPattern::BindingIdentifier(id) = &prop.value
                                 && let Some(sym_id) = id.symbol_id.get()
                             {
-                                let member_origin = init_origin.clone().member(key_str);
+                                let member_origin = init_origin.member(key_str);
                                 if !matches!(member_origin, Origin::None) {
                                     sym_origins.insert(sym_id, member_origin);
                                 }

@@ -340,6 +340,15 @@ pub fn deploy_release(
     let _ = (env_name, dry_run, force_push, skip_hooks, notify_slack);
     1
 }
+
+pub fn should_highlight_search(
+    no_color_flag: bool,
+    is_tty: bool,
+    env_vars: &[(String, String)],
+) -> bool {
+    let _ = env_vars;
+    !no_color_flag && is_tty
+}
 "#;
 
     let lib_rs = r#"mod helpers;
@@ -348,6 +357,7 @@ use crate::helpers::{UsedInternalConfig, used_cross_module_helper};
 
 pub fn execute_workflow(dry_run: bool) -> usize {
     let cfg = UsedInternalConfig { max_retries: 3 };
+    let _ = helpers::should_highlight_search(dry_run, true, &[]);
     used_cross_module_helper(&cfg, dry_run)
 }
 "#;
@@ -397,6 +407,35 @@ pub fn execute_workflow(dry_run: bool) -> usize {
     assert!(unused_targets.contains(&"UNUSED_CRATE_CONST"));
     assert!(!unused_targets.contains(&"used_cross_module_helper"));
     assert!(!unused_targets.contains(&"UsedInternalConfig"));
+}
+
+#[test]
+fn self_hosting_workspace_has_zero_unused_pub_crate_and_many_boolean_param_diagnostics() {
+    use dotore::ScanOptions;
+    use std::path::Path;
+
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (report, _sources) = dotore::scan_workspace(&ScanOptions {
+        paths: vec![workspace_root.to_path_buf()],
+        include_tests: false,
+        rules: Some(vec![
+            RuleId::RsArchNoUnusedPubCrateItems,
+            RuleId::RsArchNoManyBooleanParams,
+        ]),
+        tiers: None,
+    })
+    .expect("Failed to scan dotore workspace");
+
+    assert!(
+        report.diagnostics.is_empty(),
+        "Expected 0 diagnostics for rs-arch-no-unused-pub-crate-items and rs-arch-no-many-boolean-params, got {}:\n{:#?}",
+        report.diagnostics.len(),
+        report
+            .diagnostics
+            .iter()
+            .map(|d| (&d.file, d.loc.line, d.rule, &d.target_name, &d.message))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
