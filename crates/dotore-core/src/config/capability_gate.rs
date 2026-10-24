@@ -926,7 +926,7 @@ pub fn content_enables_react_compiler(content: &str) -> bool {
         return true;
     }
     content.find("reactCompiler").is_some_and(|idx| {
-        let after = &content[idx + "reactCompiler".len()..];
+        let after = content.get(idx + "reactCompiler".len()..).unwrap_or_default();
         let trimmed = after.trim_start_matches([':', ' ', '\t', '\n', '\r', '"', '\'']);
         trimmed.starts_with("true") || trimmed.starts_with('{')
     })

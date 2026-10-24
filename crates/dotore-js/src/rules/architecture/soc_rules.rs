@@ -681,7 +681,9 @@ fn check_arch_no_mixed_domain_monolith(
         return;
     }
 
-    let primary_sym = top_level_symbols[0];
+    let Some(&primary_sym) = top_level_symbols.first() else {
+        return;
+    };
     let loc = primary_sym.loc;
     let span = primary_sym.span;
     if is_soc_rule_suppressed(
@@ -949,7 +951,10 @@ fn is_js_entrypoint_path(path: &Path, source: &str, module: &ModuleIr) -> bool {
             None => true,
             Some("src") => {
                 // Allow `src/index.ts` and `packages/foo/src/index.ts`, but reject `src/src/index.ts`
-                !components[..components.len() - 2].contains(&"src")
+                !components
+                    .get(..components.len().saturating_sub(2))
+                    .unwrap_or_default()
+                    .contains(&"src")
             }
             Some(_) => components.len() == 2,
         },
@@ -2117,7 +2122,10 @@ fn evaluate_duplicated_helpers_for_package<F>(
             continue;
         }
 
-        let first_name = &occurrences[0].1.name;
+        let Some(first_occ) = occurrences.first() else {
+            continue;
+        };
+        let first_name = &first_occ.1.name;
         let all_same_name = occurrences.iter().all(|(_, h)| &h.name == first_name);
         let shared_target_name = if all_same_name {
             first_name.clone()

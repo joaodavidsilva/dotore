@@ -88,7 +88,10 @@ fn flush_async_parallel_run(
         }
     }
 
-    let first_span = run[0].span();
+    let Some(first_stmt) = run.first() else {
+        return;
+    };
+    let first_span = first_stmt.span();
     let subject_name = find_enclosing_react_node(semantic, block_node_id)
         .and_then(|id| get_subject_name(semantic, id));
     push_semantic_site(

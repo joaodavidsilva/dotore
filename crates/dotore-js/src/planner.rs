@@ -386,11 +386,11 @@ fn extract_jsx_prop_raw_value(opening_text: &str, prop_name: &str) -> Option<Str
     let mut pos = 0;
 
     while pos + needle.len() < bytes.len() {
-        let Some(rel) = opening_text[pos..].find(prop_name) else {
+        let Some(rel) = opening_text.get(pos..).and_then(|s| s.find(prop_name)) else {
             break;
         };
         let idx = pos + rel;
-        let before_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace();
+        let before_ok = idx == 0 || bytes.get(idx - 1).is_some_and(u8::is_ascii_whitespace);
         let after_idx = idx + needle.len();
         if before_ok && bytes.get(after_idx) == Some(&b'=') {
             let rest = opening_text.get(after_idx + 1..)?;
@@ -417,6 +417,6 @@ fn parse_jsx_attr_value_slice(rest: &str) -> Option<String> {
         return None;
     }
     let quote = rest.chars().next().filter(|&c| c == '"' || c == '\'')?;
-    let end_quote = rest[1..].find(quote)?;
-    Some(rest[..=end_quote + 1].to_string())
+    let end_quote = rest.get(1..)?.find(quote)?;
+    rest.get(..=end_quote + 1).map(str::to_string)
 }

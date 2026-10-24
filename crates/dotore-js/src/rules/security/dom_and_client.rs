@@ -62,7 +62,10 @@ pub(super) fn check_dangerous_html_sink(
         };
 
         // Ignore `<style dangerouslySetInnerHTML=...>`
-        if line[..col_offset].contains("<style") {
+        if line
+            .get(..col_offset)
+            .is_some_and(|prefix| prefix.contains("<style"))
+        {
             continue;
         }
 
@@ -112,15 +115,15 @@ fn extract_html_sink_value_expr(src: &str, line_idx: usize, col_offset: usize) -
     let after_sink = &window[col_offset.min(window.len())..];
 
     if let Some(html_pos) = after_sink.find("__html") {
-        let after_key = &after_sink[html_pos + "__html".len()..];
+        let after_key = after_sink.get(html_pos + "__html".len()..)?;
         let colon = after_key.find(':')?;
-        let val_tail = after_key[colon + 1..].trim_start();
+        let val_tail = after_key.get(colon + 1..)?.trim_start();
         return Some(slice_until_sink_terminator(val_tail));
     }
     if let Some(ias_pos) = after_sink.find("insertAdjacentHTML(") {
-        let after_open = &after_sink[ias_pos + "insertAdjacentHTML(".len()..];
+        let after_open = after_sink.get(ias_pos + "insertAdjacentHTML(".len()..)?;
         let comma = after_open.find(',')?;
-        let val_tail = after_open[comma + 1..].trim_start();
+        let val_tail = after_open.get(comma + 1..)?.trim_start();
         return Some(slice_until_sink_terminator(val_tail));
     }
     for call_prefix in [
@@ -355,7 +358,9 @@ fn is_helper_body_safe_html(
     if let Some(catch_pos) = fn_body.find("catch") {
         let catch_tail = &fn_body[catch_pos..];
         if let Some(ret_pos) = catch_tail.find("return ") {
-            let ret_expr = catch_tail[ret_pos + "return ".len()..]
+            let ret_expr = catch_tail
+                .get(ret_pos + "return ".len()..)
+                .unwrap_or_default()
                 .split([';', '}'])
                 .next()
                 .unwrap_or("")
@@ -382,7 +387,9 @@ fn call_args_have_unsafe_katex_options(args_str: &str) -> bool {
         return true;
     }
     if let Some(trust_pos) = compact.find("trust:") {
-        let after = &compact[trust_pos + "trust:".len()..];
+        let after = compact
+            .get(trust_pos + "trust:".len()..)
+            .unwrap_or_default();
         if !after.starts_with("false") && !after.starts_with("undefined") {
             return true;
         }
@@ -416,7 +423,7 @@ pub(super) fn check_window_open_without_noopener(
             continue;
         };
 
-        let before = line[..col_offset].trim_end();
+        let before = line.get(..col_offset).unwrap_or_default().trim_end();
         // If handle is captured (`const win = window.open(...)`, `w = window.open(...)`, `return window.open(...)`), skip
         if before.ends_with('=') && !before.ends_with("=>") && !before.ends_with("==") {
             continue;
@@ -432,11 +439,11 @@ pub(super) fn check_window_open_without_noopener(
             continue;
         }
 
-        let after_callee = &line[col_offset..];
+        let after_callee = line.get(col_offset..).unwrap_or_default();
         let Some(open_paren_rel) = after_callee.find('(') else {
             continue;
         };
-        let args_tail = &after_callee[open_paren_rel + 1..];
+        let args_tail = after_callee.get(open_paren_rel + 1..).unwrap_or_default();
         let Some((args_inside, after_close)) = split_balanced_parens(args_tail) else {
             continue;
         };
@@ -607,7 +614,10 @@ fn is_nullish_url_expr(expr: &str) -> bool {
 fn is_same_origin_or_protocol_url(url: &str) -> bool {
     let trimmed = url.trim();
     for scheme in ["mailto:", "tel:", "sms:", "file:"] {
-        if trimmed.len() >= scheme.len() && trimmed[..scheme.len()].eq_ignore_ascii_case(scheme) {
+        if trimmed
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        {
             return true;
         }
     }
@@ -666,7 +676,9 @@ pub(super) fn check_unsafe_json_in_html(
         if !is_in_html_or_script {
             continue;
         }
-        let after = &line[json_pos + "JSON.stringify(".len()..];
+        let after = line
+            .get(json_pos + "JSON.stringify(".len()..)
+            .unwrap_or_default();
         let Some((arg_inside, after_close)) = split_balanced_parens(after) else {
             continue;
         };
@@ -812,9 +824,9 @@ pub(super) fn check_public_env_secret_name(
 pub(crate) fn find_suspicious_public_env_in_line(line: &str) -> Option<(usize, &str)> {
     for prefix in ["NEXT_PUBLIC_", "VITE_", "REACT_APP_", "EXPO_PUBLIC_"] {
         let mut search_from = 0;
-        while let Some(rel) = line[search_from..].find(prefix) {
+        while let Some(rel) = line.get(search_from..).and_then(|s| s.find(prefix)) {
             let start = search_from + rel;
-            let rest = &line[start..];
+            let rest = line.get(start..).unwrap_or_default();
             let len = rest
                 .bytes()
                 .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
@@ -1021,7 +1033,9 @@ pub(super) fn check_no_path_prefix_containment(
         let Some(sw_pos) = line.find(".startsWith(") else {
             continue;
         };
-        let after = &line[sw_pos + ".startsWith(".len()..];
+        let after = line
+            .get(sw_pos + ".startsWith(".len()..)
+            .unwrap_or_default();
         let Some((arg_inside, _)) = split_balanced_parens(after) else {
             continue;
         };

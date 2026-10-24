@@ -98,8 +98,12 @@ pub(super) fn detect_duplicate_jsx_families(files: &[FileIr]) -> Vec<DuplicateJs
             .then_with(|| b.distinct_file_count.cmp(&a.distinct_file_count))
             .then_with(|| b.node_count.cmp(&a.node_count))
             .then_with(|| {
-                let oa = &a.occurrences[0];
-                let ob = &b.occurrences[0];
+                let Some(oa) = a.occurrences.first() else {
+                    return std::cmp::Ordering::Equal;
+                };
+                let Some(ob) = b.occurrences.first() else {
+                    return std::cmp::Ordering::Equal;
+                };
                 (&oa.path, oa.span.start).cmp(&(&ob.path, ob.span.start))
             })
     });

@@ -235,11 +235,11 @@ impl CdpWebSocketClient {
                 break pos + 4;
             }
         };
-        let header_str = String::from_utf8_lossy(&buf[..header_end]);
+        let header_str = String::from_utf8_lossy(buf.get(..header_end).unwrap_or_default());
         if !header_str.starts_with("HTTP/1.1 101") {
             return Err(format!("CDP WebSocket upgrade failed: {header_str}"));
         }
-        let leftover = buf[header_end..].to_vec();
+        let leftover = buf.get(header_end..).unwrap_or_default().to_vec();
         Ok(Self {
             stream,
             read_buf: leftover,
@@ -258,7 +258,11 @@ impl CdpWebSocketClient {
                 let avail = self.read_buf.len() - self.read_pos;
                 let need = count - out.len();
                 let take = avail.min(need);
-                out.extend_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
+                out.extend_from_slice(
+                    self.read_buf
+                        .get(self.read_pos..self.read_pos + take)
+                        .unwrap_or_default(),
+                );
                 self.read_pos += take;
                 if self.read_pos == self.read_buf.len() {
                     self.read_buf.clear();

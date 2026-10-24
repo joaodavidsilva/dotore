@@ -435,8 +435,9 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
     }
 
     fn subject_spans_for_file(&self, file: &Path) -> Vec<(Option<String>, ByteSpan)> {
-        if let Some(&idx) = self.extracted_index_by_path.get(file) {
-            let f = &self.extracted_files[idx];
+        if let Some(&idx) = self.extracted_index_by_path.get(file)
+            && let Some(f) = self.extracted_files.get(idx)
+        {
             if !f.subject_spans.is_empty() {
                 return f
                     .subject_spans
@@ -502,8 +503,10 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
     }
 
     fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
-        if let Some(&idx) = self.extracted_index_by_path.get(file) {
-            return Some(&self.extracted_files[idx].architecture_facets);
+        if let Some(&idx) = self.extracted_index_by_path.get(file)
+            && let Some(f) = self.extracted_files.get(idx)
+        {
+            return Some(&f.architecture_facets);
         }
         #[cfg(feature = "js")]
         if let Some(g) = self.js_graph
@@ -710,8 +713,10 @@ fn analyze_polyglot_sources(
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
             for file in py_extracted {
-                if let Some(idx) = resolve_package_index_for_file(&file.path, packages) {
-                    buckets[idx].push(file);
+                if let Some(idx) = resolve_package_index_for_file(&file.path, packages)
+                    && let Some(bucket) = buckets.get_mut(idx)
+                {
+                    bucket.push(file);
                 } else {
                     all_extracted.push(file);
                 }
@@ -730,8 +735,10 @@ fn analyze_polyglot_sources(
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
             for file in rs_extracted {
-                if let Some(idx) = resolve_package_index_for_file(&file.path, packages) {
-                    buckets[idx].push(file);
+                if let Some(idx) = resolve_package_index_for_file(&file.path, packages)
+                    && let Some(bucket) = buckets.get_mut(idx)
+                {
+                    bucket.push(file);
                 } else {
                     all_extracted.push(file);
                 }

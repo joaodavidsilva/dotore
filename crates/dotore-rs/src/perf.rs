@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
-    Attribute, Block, Expr, ExprBreak, ExprCall, ExprField, ExprForLoop, ExprLoop, ExprMethodCall,
-    ExprReturn, ExprStruct, ExprTuple, ExprWhile, Fields, File, FnArg, GenericArgument, ImplItemFn,
-    ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemStruct, Lit, Local, Macro, Pat,
-    PathArguments, Signature, Stmt, Token, TraitItemFn, Type,
+    Attribute, Block, Expr, ExprBreak, ExprCall, ExprField, ExprForLoop, ExprIf, ExprLet, ExprLoop,
+    ExprMatch, ExprMethodCall, ExprReturn, ExprStruct, ExprTuple, ExprWhile, Fields, File, FnArg,
+    GenericArgument, ImplItemFn, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic,
+    ItemStruct, Lit, Local, Macro, Pat, PathArguments, Signature, Stmt, Token, TraitItemFn, Type,
     parse::Parser,
     punctuated::Punctuated,
     spanned::Spanned,
@@ -50,9 +50,12 @@ pub(crate) fn extract_perf_findings(
         scope: RsScopeTracker::for_file(file),
         cheap_clone_vars: HashSet::new(),
         loop_scoped_vars: Vec::new(),
+        direct_for_loop_vars: Vec::new(),
         in_iter_closure: 0,
         in_diverging_expr: 0,
         in_owned_record_sink: 0,
+        in_record_assembly_sink: 0,
+        in_conditional_guard: 0,
         in_borrow_query_arg: 0,
     };
     visitor.visit_file(file);
@@ -64,9 +67,12 @@ struct PerfVisitor<'a> {
     scope: RsScopeTracker,
     cheap_clone_vars: HashSet<String>,
     loop_scoped_vars: Vec<HashSet<String>>,
+    direct_for_loop_vars: Vec<HashSet<String>>,
     in_iter_closure: u32,
     in_diverging_expr: u32,
     in_owned_record_sink: u32,
+    in_record_assembly_sink: u32,
+    in_conditional_guard: u32,
     in_borrow_query_arg: u32,
 }
 
@@ -131,26 +137,38 @@ impl PerfVisitor<'_> {
             }
             Expr::MethodCall(mc) => {
                 let method = mc.method.to_string();
-                if matches!(method.as_str(), "chars" | "char_indices" | "bytes") {
-                    return true;
-                }
                 if matches!(
                     method.as_str(),
                     "peekable" | "fuse" | "enumerate" | "copied" | "cloned"
                 ) {
                     return self.is_cheap_clone_receiver(&mc.receiver);
                 }
-                false
+                is_cheap_clone_ctor(receiver)
             }
             _ => false,
         }
     }
 
-    fn is_per_element_ownership_transfer(&self) -> bool {
+    fn is_per_element_ownership_transfer(&self, receiver: &Expr) -> bool {
         if self.in_borrow_query_arg > 0 {
             return false;
         }
-        self.in_owned_record_sink > 0
+        if self.in_record_assembly_sink > 0 {
+            return true;
+        }
+        if self.in_owned_record_sink == 0 {
+            return false;
+        }
+        self.in_conditional_guard > 0 || self.receiver_depends_on_loop_var(receiver)
+    }
+
+    fn receiver_depends_on_loop_var(&self, receiver: &Expr) -> bool {
+        let Some(root) = extract_root_ident(receiver) else {
+            return true;
+        };
+        self.loop_scoped_vars
+            .iter()
+            .any(|vars| vars.contains(&root))
     }
 
     fn check_regex_new_in_fn(&mut self, node: &ExprCall) {
@@ -447,10 +465,10 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
 
         for stmt in &b.stmts {
             self.inspect_stmt_for_vec_capacity(stmt, &mut unreserved_vecs);
-            self.visit_stmt(stmt);
             if let Stmt::Local(local) = stmt {
                 self.record_local_stmt_bindings(local);
             }
+            self.visit_stmt(stmt);
         }
     }
 
@@ -498,9 +516,11 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         }
         self.visit_path(&i.path);
         self.in_owned_record_sink += 1;
+        self.in_record_assembly_sink += 1;
         for field in &i.fields {
             self.visit_field_value(field);
         }
+        self.in_record_assembly_sink -= 1;
         self.in_owned_record_sink -= 1;
         if let Some(rest) = &i.rest {
             self.visit_expr(rest);
@@ -512,9 +532,11 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
             self.visit_attribute(attr);
         }
         self.in_owned_record_sink += 1;
+        self.in_record_assembly_sink += 1;
         for elem in &i.elems {
             self.visit_expr(elem);
         }
+        self.in_record_assembly_sink -= 1;
         self.in_owned_record_sink -= 1;
     }
 
@@ -525,11 +547,15 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         self.visit_pat(&i.pat);
         self.visit_expr(&i.expr);
         let mut loop_vars = HashSet::new();
+        let mut direct_loop_vars = HashSet::new();
         collect_pat_idents(&i.pat, &mut loop_vars);
+        collect_pat_idents(&i.pat, &mut direct_loop_vars);
         self.loop_scoped_vars.push(loop_vars);
+        self.direct_for_loop_vars.push(direct_loop_vars);
         let snap = self.scope.enter_loop();
         self.visit_block(&i.body);
         self.scope.exit(snap);
+        self.direct_for_loop_vars.pop();
         self.loop_scoped_vars.pop();
     }
 
@@ -558,6 +584,57 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         self.loop_scoped_vars.pop();
     }
 
+    fn visit_expr_let(&mut self, i: &'ast ExprLet) {
+        if let Some(loop_vars) = self.loop_scoped_vars.last_mut() {
+            collect_pat_idents(&i.pat, loop_vars);
+        }
+        visit::visit_expr_let(self, i);
+    }
+
+    fn visit_expr_if(&mut self, i: &'ast ExprIf) {
+        for attr in &i.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&i.cond);
+        self.in_conditional_guard += 1;
+        self.visit_block(&i.then_branch);
+        if let Some((_, else_expr)) = &i.else_branch {
+            self.visit_expr(else_expr);
+        }
+        self.in_conditional_guard -= 1;
+    }
+
+    fn visit_expr_match(&mut self, i: &'ast ExprMatch) {
+        for attr in &i.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&i.expr);
+        for arm in &i.arms {
+            if let Some(loop_vars) = self.loop_scoped_vars.last_mut() {
+                collect_pat_idents(&arm.pat, loop_vars);
+            }
+            for attr in &arm.attrs {
+                self.visit_attribute(attr);
+            }
+            self.visit_pat(&arm.pat);
+            if let Some((_, guard)) = &arm.guard {
+                self.visit_expr(guard);
+            }
+            self.in_conditional_guard += 1;
+            self.visit_expr(&arm.body);
+            self.in_conditional_guard -= 1;
+        }
+    }
+
+    fn visit_expr_closure(&mut self, i: &'ast syn::ExprClosure) {
+        if let Some(loop_vars) = self.loop_scoped_vars.last_mut() {
+            for input in &i.inputs {
+                collect_pat_idents(input, loop_vars);
+            }
+        }
+        visit::visit_expr_closure(self, i);
+    }
+
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         self.check_regex_new_in_fn(node);
         self.check_syscall_in_loop(node);
@@ -570,9 +647,16 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
             self.visit_attribute(attr);
         }
         self.visit_expr(&node.func);
+        let is_record_assembly = node.args.len() >= 2;
         self.in_owned_record_sink += 1;
+        if is_record_assembly {
+            self.in_record_assembly_sink += 1;
+        }
         for arg in &node.args {
             self.visit_expr(arg);
+        }
+        if is_record_assembly {
+            self.in_record_assembly_sink -= 1;
         }
         self.in_owned_record_sink -= 1;
         if is_lazy_init {
@@ -589,7 +673,7 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
             && method_name == "clone"
             && node.args.is_empty()
             && !self.is_cheap_clone_receiver(&node.receiver)
-            && !self.is_per_element_ownership_transfer()
+            && !self.is_per_element_ownership_transfer(&node.receiver)
         {
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
@@ -635,17 +719,28 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         for attr in &node.attrs {
             self.visit_attribute(attr);
         }
+        let is_option_fallback_adapter = matches!(
+            method_name.as_str(),
+            "unwrap_or_else" | "unwrap_or" | "map_or_else" | "map_or" | "or_else"
+        );
+        if is_option_fallback_adapter {
+            self.in_owned_record_sink += 1;
+        }
         self.visit_expr(&node.receiver);
+        if is_option_fallback_adapter {
+            self.in_owned_record_sink -= 1;
+        }
         if is_iter_adapter {
             self.in_iter_closure += 1;
         }
         let is_collection_whole_item_push =
             matches!(method_name.as_str(), "push" | "push_back" | "push_front")
                 && node.args.len() == 1
+                && is_bare_ident_receiver(&node.receiver)
                 && node
                     .args
                     .first()
-                    .is_some_and(|arg| is_bare_loop_item_clone(arg, &self.loop_scoped_vars));
+                    .is_some_and(|arg| is_bare_loop_item_clone(arg, &self.direct_for_loop_vars));
         let is_borrow_query_method = matches!(
             method_name.as_str(),
             "contains"
@@ -656,8 +751,14 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
                 | "remove"
                 | "remove_entry"
         );
+        let is_record_assembly_method = node.args.len() >= 2
+            || method_name.starts_with("with_")
+            || matches!(method_name.as_str(), "unwrap_or_else" | "map_or_else");
         if !is_collection_whole_item_push && !is_borrow_query_method {
             self.in_owned_record_sink += 1;
+        }
+        if is_record_assembly_method && !is_borrow_query_method {
+            self.in_record_assembly_sink += 1;
         }
         if is_borrow_query_method {
             self.in_borrow_query_arg += 1;
@@ -667,6 +768,9 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         }
         if is_borrow_query_method {
             self.in_borrow_query_arg -= 1;
+        }
+        if is_record_assembly_method && !is_borrow_query_method {
+            self.in_record_assembly_sink -= 1;
         }
         if !is_collection_whole_item_push && !is_borrow_query_method {
             self.in_owned_record_sink -= 1;

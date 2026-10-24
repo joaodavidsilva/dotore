@@ -123,7 +123,9 @@ fn collect_subclassed_class_names(semantic: &Semantic<'_>) -> HashSet<String> {
         if let AstKind::Class(cls) = node.kind() {
             let header = Span::new(cls.span.start, cls.body.span.start).source_text(source);
             if let Some(ext_idx) = header.find("extends ") {
-                let super_name = header[ext_idx + "extends ".len()..]
+                let super_name = header
+                    .get(ext_idx + "extends ".len()..)
+                    .unwrap_or_default()
                     .split([' ', '<', '{'])
                     .next()
                     .unwrap_or("")
@@ -759,7 +761,10 @@ fn is_inside_inherited_or_subclassed_class(
             let header =
                 Span::new(cls.span.start, cls.body.span.start).source_text(semantic.source_text());
             if let Some(ext_idx) = header.find("extends ") {
-                let after = header[ext_idx + "extends ".len()..].trim();
+                let after = header
+                    .get(ext_idx + "extends ".len()..)
+                    .unwrap_or_default()
+                    .trim();
                 if !after.starts_with("null") {
                     return true;
                 }

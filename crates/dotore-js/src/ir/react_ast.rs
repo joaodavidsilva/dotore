@@ -78,7 +78,10 @@ pub(crate) fn is_react_component_class(cls: &oxc_ast::ast::Class<'_>, source: &s
     let Some(ext_idx) = header.find("extends ") else {
         return false;
     };
-    let after_extends = header[ext_idx + "extends ".len()..].trim();
+    let after_extends = header
+        .get(ext_idx + "extends ".len()..)
+        .unwrap_or_default()
+        .trim();
     let base_name = after_extends
         .split(['<', '{', ' ', '\n', '\r', '\t'])
         .next()

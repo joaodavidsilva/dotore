@@ -1199,7 +1199,9 @@ impl<'a> FilterTabBar<'a> {
 
     fn compute_fitted_window(&self, active_idx: usize) -> (usize, usize) {
         let tab_width = |idx: usize| -> usize {
-            let tab = &self.tabs[idx];
+            let Some(tab) = self.tabs.get(idx) else {
+                return 0;
+            };
             if idx == active_idx {
                 visible_char_width(&format!(" ▶ {} ({})  ", tab.label, tab.count))
             } else {

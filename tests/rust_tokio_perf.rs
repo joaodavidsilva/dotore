@@ -578,12 +578,15 @@ pub fn build_owned_records_and_maps(
     (out, map, seen)
 }
 
+pub fn consume(_s: String) {}
+
 pub fn bad_clone_patterns(
     items: &[Item],
     shared_prefix: String,
     used_pairs: &HashSet<(usize, String)>,
-) -> Vec<Item> {
+) -> (Vec<Item>, Vec<String>) {
     let mut out = Vec::with_capacity(items.len());
+    let mut prefixes = Vec::with_capacity(items.len());
     for item in items {
         // 1. Direct whole-item clone into collection
         out.push(item.clone());
@@ -594,12 +597,15 @@ pub fn bad_clone_patterns(
         }
         // 3. Loop-invariant outer heap variable cloned on every iteration without ownership sink
         let _prefix = shared_prefix.clone();
-        // 4. Cloning field just to query HashSet::contains
+        // 4. Loop-invariant outer heap variable cloned into collection push or single-arg call
+        prefixes.push(shared_prefix.clone());
+        consume(shared_prefix.clone());
+        // 5. Cloning field just to query HashSet::contains
         if used_pairs.contains(&(0, item.name.clone())) {
             let _ = &item.id;
         }
     }
-    out
+    (out, prefixes)
 }
 "#;
     let diags = analyze_source(
@@ -614,9 +620,11 @@ pub fn bad_clone_patterns(
             "item.clone()",
             "item.name.clone()",
             "shared_prefix.clone()",
+            "shared_prefix.clone()",
+            "shared_prefix.clone()",
             "item.name.clone()",
         ],
-        "Expected only the 4 genuine hot-loop heap clones in `bad_clone_patterns` to be flagged, got: {diags:#?}"
+        "Expected all 6 genuine hot-loop heap clones in `bad_clone_patterns` to be flagged, got: {diags:#?}"
     );
 }
 

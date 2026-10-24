@@ -473,7 +473,7 @@ fn strip_trailing_colon(header: &str) -> &str {
         let code_part = last.split('#').next().unwrap_or("").trim_end();
         if let Some(before_colon) = code_part.strip_suffix(':') {
             let prefix_len = header.len() - last.len() + before_colon.len();
-            return header[..prefix_len].trim_end();
+            return header.get(..prefix_len).unwrap_or(header).trim_end();
         }
         if code_part.is_empty() {
             lines.pop();

@@ -185,8 +185,9 @@ fn check_server_fn_chain_rules(
             if let Some(prev_idx) = last_idx
                 && curr_idx < prev_idx
             {
-                if own_method == "handler" {
-                    let expected_before = TANSTACK_MIDDLEWARE_METHOD_ORDER[prev_idx];
+                if own_method == "handler"
+                    && let Some(&expected_before) = TANSTACK_MIDDLEWARE_METHOD_ORDER.get(prev_idx)
+                {
                     push_semantic_site(
                         sites,
                         RuleId::TanstackStartServerFnMethodOrder,

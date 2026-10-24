@@ -288,13 +288,10 @@ fn strip_yaml_inline_comment(raw_value: &str) -> &str {
 }
 
 fn unquote_yaml_scalar(s: &str) -> &str {
-    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
-        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
-    {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    }
+    s.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|inner| inner.strip_suffix('\'')))
+        .unwrap_or(s)
 }
 
 fn check_react_server_components_advisory(
@@ -837,9 +834,9 @@ fn locate_dependency_key(
         );
     };
     let block_start = sec_pos + section_needle.len() + open_brace_rel;
-    let block_slice = &pkg_raw[block_start..];
+    let block_slice = pkg_raw.get(block_start..).unwrap_or_default();
     let end_rel = find_matching_close_brace(block_slice);
-    let section_body = &block_slice[..end_rel];
+    let section_body = block_slice.get(..end_rel).unwrap_or_default();
     let mut search_from = 0;
     while let Some(rel) = section_body[search_from..].find(&key_needle) {
         let hit = search_from + rel;

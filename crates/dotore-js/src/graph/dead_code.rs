@@ -136,15 +136,20 @@ pub(super) fn discover_entrypoints_and_roots(
 
     for pkg in pkg_manifests {
         for idx in resolve_package_entry_indices(pkg, targets) {
-            is_entry_point[idx] = true;
-            packages_with_entrypoints.insert(pkg.norm_root.clone());
+            if let Some(slot) = is_entry_point.get_mut(idx) {
+                *slot = true;
+                packages_with_entrypoints.insert(pkg.norm_root.clone());
+            }
         }
-        for cmd in &pkg.script_commands {
-            for token in extract_script_file_tokens(cmd) {
-                let candidate = pkg.root_dir.join(&token);
-                let stem = normalize_module_stem(&candidate);
-                for idx in match_stem_against_targets(&stem, targets) {
-                    is_entry_point[idx] = true;
+        for token in pkg
+            .script_commands
+            .iter()
+            .flat_map(|cmd| extract_script_file_tokens(cmd))
+        {
+            let stem = normalize_module_stem(&pkg.root_dir.join(&token));
+            for idx in match_stem_against_targets(&stem, targets) {
+                if let Some(slot) = is_entry_point.get_mut(idx) {
+                    *slot = true;
                     packages_with_entrypoints.insert(pkg.norm_root.clone());
                 }
             }
@@ -155,7 +160,9 @@ pub(super) fn discover_entrypoints_and_roots(
         if spec.starts_with('.') || spec.starts_with('/') {
             let stem = normalize_module_stem(&dir.join(spec));
             for idx in match_stem_against_targets(&stem, targets) {
-                is_entry_point[idx] = true;
+                if let Some(slot) = is_entry_point.get_mut(idx) {
+                    *slot = true;
+                }
             }
         }
     }
@@ -174,14 +181,19 @@ pub(super) fn discover_entrypoints_and_roots(
                 ts_mappings,
                 pkg_manifests,
             ) {
-                is_entry_point[idx] = true;
+                if let Some(slot) = is_entry_point.get_mut(idx) {
+                    *slot = true;
+                }
             }
         }
     }
 
     for (idx, file) in files.iter().enumerate() {
-        let pkg_root = find_enclosing_package_root(&targets[idx].norm_path, pkg_manifests);
-        let rel_path = strip_package_root_prefix(&targets[idx].norm_path, &pkg_root);
+        let Some(target) = targets.get(idx) else {
+            continue;
+        };
+        let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
+        let rel_path = strip_package_root_prefix(&target.norm_path, &pkg_root);
         let rel_stem = strip_source_extension(&rel_path);
         let (base_rel_stem, _) = strip_platform_suffix(&rel_stem);
 
@@ -382,8 +394,10 @@ pub(super) fn trace_reachability(
 ) -> Vec<bool> {
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); total_modules];
     for edge in edges {
-        if edge.source < total_modules && edge.target < total_modules {
-            adj[edge.source].push(edge.target);
+        if edge.target < total_modules
+            && let Some(edges_out) = adj.get_mut(edge.source)
+        {
+            edges_out.push(edge.target);
         }
     }
 
@@ -391,23 +405,33 @@ pub(super) fn trace_reachability(
     let mut queue = VecDeque::new();
 
     for idx in 0..total_modules {
-        if is_entry_point[idx] || is_root_or_excluded[idx] {
-            visited[idx] = true;
+        let is_entry = is_entry_point.get(idx).copied().unwrap_or(false);
+        let is_root = is_root_or_excluded.get(idx).copied().unwrap_or(false);
+        if (is_entry || is_root)
+            && let Some(slot) = visited.get_mut(idx)
+        {
+            *slot = true;
             queue.push_back(idx);
         }
     }
 
     while let Some(curr) = queue.pop_front() {
-        for &next in &adj[curr] {
-            if !visited[next] {
-                visited[next] = true;
-                queue.push_back(next);
+        if let Some(neighbors) = adj.get(curr) {
+            for &next in neighbors {
+                if let Some(slot) = visited.get_mut(next)
+                    && !*slot
+                {
+                    *slot = true;
+                    queue.push_back(next);
+                }
             }
         }
         if let Some(sibs) = platform_siblings.get(&curr) {
             for &sib in sibs {
-                if !visited[sib] {
-                    visited[sib] = true;
+                if let Some(slot) = visited.get_mut(sib)
+                    && !*slot
+                {
+                    *slot = true;
                     queue.push_back(sib);
                 }
             }
@@ -436,11 +460,16 @@ pub(super) fn detect_orphan_files(
     }
     let mut orphans = Vec::new();
     for idx in 0..files.len() {
-        if is_reachable[idx] || is_entry_point[idx] || is_root_or_excluded[idx] {
+        if is_reachable.get(idx).copied().unwrap_or(false)
+            || is_entry_point.get(idx).copied().unwrap_or(false)
+            || is_root_or_excluded.get(idx).copied().unwrap_or(false)
+        {
             continue;
         }
-        if !pkg_manifests.is_empty() {
-            let pkg_root = find_enclosing_package_root(&targets[idx].norm_path, pkg_manifests);
+        if !pkg_manifests.is_empty()
+            && let Some(target) = targets.get(idx)
+        {
+            let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
             if !packages_with_entrypoints.contains(&pkg_root) {
                 continue;
             }
@@ -504,7 +533,9 @@ pub(super) fn detect_dead_exports(
         if edge.is_re_export {
             continue;
         }
-        let source_file = &files[edge.source];
+        let Some(source_file) = files.get(edge.source) else {
+            continue;
+        };
 
         if edge.is_dynamic || edge.is_side_effect || edge.imported_symbols.is_empty() {
             mark_all_exports_used_recursive(
@@ -533,11 +564,16 @@ pub(super) fn detect_dead_exports(
 
     let mut findings = Vec::new();
     for (idx, file) in files.iter().enumerate() {
-        if !is_reachable[idx] || is_entry_point[idx] || is_root_or_excluded[idx] {
+        if !is_reachable.get(idx).copied().unwrap_or(false)
+            || is_entry_point.get(idx).copied().unwrap_or(false)
+            || is_root_or_excluded.get(idx).copied().unwrap_or(false)
+        {
             continue;
         }
-        if !pkg_manifests.is_empty() {
-            let pkg_root = find_enclosing_package_root(&targets[idx].norm_path, pkg_manifests);
+        if !pkg_manifests.is_empty()
+            && let Some(target) = targets.get(idx)
+        {
+            let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
             if !packages_with_entrypoints.contains(&pkg_root) {
                 continue;
             }
@@ -621,8 +657,10 @@ fn mark_all_exports_used_recursive(
         }
         let entry = used_exports.entry(idx).or_default();
         entry.insert("*".to_string());
-        for exp in &files[idx].module.exports {
-            entry.insert(exp.name.clone());
+        if let Some(f) = files.get(idx) {
+            for exp in &f.module.exports {
+                entry.insert(exp.name.clone());
+            }
         }
         let Some(re_edges) = re_export_edges_by_source.get(&idx) else {
             continue;
@@ -916,7 +954,7 @@ fn content_mentions_quoted_package(content: &str, pkg_name: &str) -> bool {
         }
     }
     for (idx, _) in content.match_indices(&dq).chain(content.match_indices(&sq)) {
-        let after = content[idx + dq.len()..].trim_start();
+        let after = content.get(idx + dq.len()..).unwrap_or_default().trim_start();
         if !after.starts_with(':') {
             return true;
         }
@@ -962,8 +1000,11 @@ pub(super) fn detect_circular_dependencies(
         if is_compile_time_erased_edge(edge, files) {
             continue;
         }
-        if edge.source < n && edge.target < n && edge.source != edge.target {
-            adj_sets[edge.source].insert(edge.target);
+        if edge.target < n
+            && edge.source != edge.target
+            && let Some(set) = adj_sets.get_mut(edge.source)
+        {
+            set.insert(edge.target);
         }
     }
 
@@ -999,22 +1040,27 @@ pub(super) fn detect_circular_dependencies(
     }
 
     all_cycles.sort_by(|a, b| {
-        a.len()
-            .cmp(&b.len())
-            .then_with(|| files[a[0]].path.cmp(&files[b[0]].path))
+        a.len().cmp(&b.len()).then_with(|| {
+            let pa = a.first().and_then(|&i| files.get(i)).map(|f| &f.path);
+            let pb = b.first().and_then(|&i| files.get(i)).map(|f| &f.path);
+            pa.cmp(&pb)
+        })
     });
 
     all_cycles
         .into_iter()
-        .map(|cycle| {
-            let primary_file_index = cycle[0];
-            let mut cycle_paths: Vec<PathBuf> =
-                cycle.iter().map(|&idx| files[idx].path.clone()).collect();
-            cycle_paths.push(files[primary_file_index].path.clone());
-            CircularDependencyFinding {
+        .filter_map(|cycle| {
+            let &primary_file_index = cycle.first()?;
+            let primary_file = files.get(primary_file_index)?;
+            let mut cycle_paths: Vec<PathBuf> = cycle
+                .iter()
+                .filter_map(|&idx| files.get(idx).map(|f| f.path.clone()))
+                .collect();
+            cycle_paths.push(primary_file.path.clone());
+            Some(CircularDependencyFinding {
                 primary_file_index,
                 cycle_paths,
-            }
+            })
         })
         .collect()
 }
@@ -1060,27 +1106,40 @@ fn tarjan_sccs(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
     fn strongconnect(v: usize, adj: &[Vec<usize>], state: &mut TarjanState) {
         let v_idx = state.index;
-        state.indices[v] = Some(v_idx);
-        state.lowlink[v] = v_idx;
+        if let Some(slot) = state.indices.get_mut(v) {
+            *slot = Some(v_idx);
+        }
+        if let Some(slot) = state.lowlink.get_mut(v) {
+            *slot = v_idx;
+        }
         state.index += 1;
         state.stack.push(v);
-        state.on_stack[v] = true;
+        if let Some(slot) = state.on_stack.get_mut(v) {
+            *slot = true;
+        }
 
-        for &w in &adj[v] {
-            if state.indices[w].is_none() {
+        let neighbors = adj.get(v).map_or(&[][..], Vec::as_slice);
+        for &w in neighbors {
+            if state.indices.get(w).copied().flatten().is_none() {
                 strongconnect(w, adj, state);
-                state.lowlink[v] = state.lowlink[v].min(state.lowlink[w]);
-            } else if state.on_stack[w]
-                && let Some(w_idx) = state.indices[w]
+                let w_low = state.lowlink.get(w).copied().unwrap_or(v_idx);
+                if let Some(v_low) = state.lowlink.get_mut(v) {
+                    *v_low = (*v_low).min(w_low);
+                }
+            } else if state.on_stack.get(w).copied().unwrap_or(false)
+                && let Some(w_idx) = state.indices.get(w).copied().flatten()
+                && let Some(v_low) = state.lowlink.get_mut(v)
             {
-                state.lowlink[v] = state.lowlink[v].min(w_idx);
+                *v_low = (*v_low).min(w_idx);
             }
         }
 
-        if state.lowlink[v] == v_idx {
+        if state.lowlink.get(v).copied() == Some(v_idx) {
             let mut scc = Vec::new();
             while let Some(w) = state.stack.pop() {
-                state.on_stack[w] = false;
+                if let Some(slot) = state.on_stack.get_mut(w) {
+                    *slot = false;
+                }
                 scc.push(w);
                 if w == v {
                     break;
@@ -1101,7 +1160,7 @@ fn tarjan_sccs(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
     };
 
     for v in 0..n {
-        if state.indices[v].is_none() {
+        if state.indices.get(v).copied().flatten().is_none() {
             strongconnect(v, adj, &mut state);
         }
     }
@@ -1113,10 +1172,12 @@ fn enumerate_elementary_cycles(
     adj: &[Vec<usize>],
     files: &[FileIr],
 ) -> Vec<Vec<usize>> {
-    if scc_nodes.len() == 2 {
-        let a = scc_nodes[0];
-        let b = scc_nodes[1];
-        return if files[a].path <= files[b].path {
+    if let [a, b] = *scc_nodes {
+        let a_le_b = files
+            .get(a)
+            .zip(files.get(b))
+            .is_none_or(|(fa, fb)| fa.path <= fb.path);
+        return if a_le_b {
             vec![vec![a, b]]
         } else {
             vec![vec![b, a]]
@@ -1167,7 +1228,10 @@ fn dfs_cycles(
     if out.len() >= MAX_CYCLES_PER_SCC {
         return;
     }
-    for &next in &adj[curr] {
+    let Some(neighbors) = adj.get(curr) else {
+        return;
+    };
+    for &next in neighbors {
         if !scc_set.contains(&next) {
             continue;
         }
@@ -1192,13 +1256,19 @@ fn dfs_cycles(
 fn canonicalize_cycle(cycle: &[usize], files: &[FileIr]) -> Vec<usize> {
     let mut min_pos = 0;
     for (idx, &node) in cycle.iter().enumerate().skip(1) {
-        if files[node].path < files[cycle[min_pos]].path {
+        let min_node = cycle.get(min_pos).copied().unwrap_or(node);
+        if files
+            .get(node)
+            .zip(files.get(min_node))
+            .is_some_and(|(fa, fb)| fa.path < fb.path)
+        {
             min_pos = idx;
         }
     }
+    let (before, from_min) = cycle.split_at(min_pos.min(cycle.len()));
     let mut out = Vec::with_capacity(cycle.len());
-    out.extend_from_slice(&cycle[min_pos..]);
-    out.extend_from_slice(&cycle[..min_pos]);
+    out.extend_from_slice(from_min);
+    out.extend_from_slice(before);
     out
 }
 

@@ -1367,7 +1367,7 @@ pub(crate) fn eval_static_array_len(expr: &Expression<'_>) -> Option<usize> {
             let first = new_expr.arguments.first()?.as_expression()?;
             match first.without_parentheses() {
                 Expression::NumericLiteral(n) if n.value >= 0.0 && n.value.fract() == 0.0 => {
-                    format!("{:.0}", n.value).parse::<usize>().ok()
+                    n.raw.as_ref().and_then(|r| r.as_str().parse::<usize>().ok())
                 }
                 Expression::ArrayExpression(arr) => Some(arr.elements.len()),
                 _ => None,

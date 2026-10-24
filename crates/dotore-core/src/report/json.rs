@@ -290,7 +290,7 @@ fn build_project_coverage_metadata(
     let mut pkg_files: Vec<Vec<PathBuf>> = (0..packages.len()).map(|_| Vec::new()).collect();
     let mut pkg_subjects: Vec<usize> = vec![0; packages.len()];
     let mut pkg_diag_counts: Vec<usize> = vec![0; packages.len()];
-    let mut pkg_groups: Vec<Vec<RootCauseGroup>> =
+    let mut pkg_groups: Vec<Vec<&RootCauseGroup>> =
         (0..packages.len()).map(|_| Vec::new()).collect();
 
     let resolve_idx = |path: &Path| -> Option<usize> {
@@ -303,8 +303,12 @@ fn build_project_coverage_metadata(
     for (file_path, subj_count) in file_subject_counts {
         if let Some(idx) = resolve_idx(file_path) {
             file_to_pkg_idx.insert(file_path.as_path(), idx);
-            pkg_files[idx].push(file_path.to_path_buf());
-            pkg_subjects[idx] += *subj_count;
+            if let Some(files) = pkg_files.get_mut(idx) {
+                files.push(file_path.to_path_buf());
+            }
+            if let Some(subjs) = pkg_subjects.get_mut(idx) {
+                *subjs += *subj_count;
+            }
         }
     }
 
@@ -315,7 +319,9 @@ fn build_project_coverage_metadata(
             .or_else(|| resolve_idx(&diag.file));
         if let Some(idx) = idx_opt {
             file_to_pkg_idx.entry(diag.file.as_path()).or_insert(idx);
-            pkg_diag_counts[idx] += 1;
+            if let Some(cnt) = pkg_diag_counts.get_mut(idx) {
+                *cnt += 1;
+            }
         }
     }
 
@@ -326,20 +332,9 @@ fn build_project_coverage_metadata(
             .or_else(|| resolve_idx(&group.file));
         if let Some(idx) = idx_opt {
             file_to_pkg_idx.entry(group.file.as_path()).or_insert(idx);
-            pkg_groups[idx].push(RootCauseGroup {
-                id: group.id.clone(),
-                rule: group.rule,
-                category: group.category,
-                severity: group.severity,
-                tier: group.tier,
-                file: group.file.clone(),
-                subject_name: group.subject_name.clone(),
-                target_name: group.target_name.clone(),
-                loc: group.loc,
-                message: group.message.clone(),
-                blast_radius: group.blast_radius.clone(),
-                diagnostic_indices: group.diagnostic_indices.clone(),
-            });
+            if let Some(groups) = pkg_groups.get_mut(idx) {
+                groups.push(group);
+            }
         }
     }
 
@@ -347,13 +342,17 @@ fn build_project_coverage_metadata(
         .iter()
         .enumerate()
         .map(|(idx, pkg)| {
-            let mut analyzed_files = std::mem::take(&mut pkg_files[idx]);
+            let mut analyzed_files = pkg_files.get_mut(idx).map(std::mem::take).unwrap_or_default();
             analyzed_files.sort();
             let analyzed_file_count = analyzed_files.len();
-            let subjects_scanned = pkg_subjects[idx];
-            let diagnostic_count = pkg_diag_counts[idx];
+            let subjects_scanned = pkg_subjects.get(idx).copied().unwrap_or(0);
+            let diagnostic_count = pkg_diag_counts.get(idx).copied().unwrap_or(0);
+            let groups_owned: Vec<RootCauseGroup> = pkg_groups
+                .get(idx)
+                .map(|g| g.iter().copied().cloned().collect())
+                .unwrap_or_default();
             let health =
-                compute_local_health_score(&pkg_groups[idx], analyzed_file_count, subjects_scanned);
+                compute_local_health_score(&groups_owned, analyzed_file_count, subjects_scanned);
             let mut capabilities: Vec<Capability> =
                 pkg.capability_gate.capabilities.iter().copied().collect();
             capabilities.sort_by_key(|c| c.as_str());

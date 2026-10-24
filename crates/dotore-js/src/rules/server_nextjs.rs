@@ -931,10 +931,14 @@ fn check_nextjs_async_dynamic_api_not_awaited(
         // Check namespace calls `nextHeaders.headers().get(...)` or `nextHeaders["headers"]().get(...)` or `nextHeaders[apiName]().get(...)`
         for ns in &namespace_imports {
             if let Some(ns_pos) = line.find(ns.as_str()) {
-                let after_ns = &line[ns_pos + ns.len()..];
+                let after_ns = line.get(ns_pos + ns.len()..).unwrap_or_default();
                 if (after_ns.starts_with('.') || after_ns.starts_with('['))
                     && after_ns.contains("().")
-                    && !line[..ns_pos].trim_end().ends_with("await")
+                    && !line
+                        .get(..ns_pos)
+                        .unwrap_or_default()
+                        .trim_end()
+                        .ends_with("await")
                 {
                     emit_dynamic_api_diag(out, file, ns, idx, line, line_starts);
                     line_flagged = true;
@@ -1407,7 +1411,10 @@ fn check_nextjs_async_client_component(
     }
     for (idx, line) in file.source.lines().enumerate() {
         if let Some(pos) = line.find("async function ") {
-            let after = line[pos + "async function ".len()..].trim();
+            let after = line
+                .get(pos + "async function ".len()..)
+                .unwrap_or_default()
+                .trim();
             let fn_name: String = after
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -1823,9 +1830,9 @@ fn extract_string_after_key(src: &str, key: &str) -> Option<String> {
     if quote != b'"' && quote != b'\'' {
         return None;
     }
-    let rest = &after[1..];
+    let rest = after.get(1..)?;
     let end = rest.find(char::from(quote))?;
-    Some(rest[..end].to_string())
+    rest.get(..end).map(str::to_string)
 }
 
 fn expression_mentions_identifier(expr: &str, ident: &str) -> bool {

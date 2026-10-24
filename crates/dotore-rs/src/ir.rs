@@ -1338,17 +1338,13 @@ fn extract_struct_literal_fields(
     let mut field_names = Vec::with_capacity(fields.len());
     let mut default_or_literal_fields = Vec::new();
     for fv in fields {
-        if fv.colon_token.is_some() && is_boilerplate_default_expr(&fv.expr) {
-            let fname = match &fv.member {
-                Member::Named(id) => id.to_string(),
-                Member::Unnamed(idx) => idx.index.to_string(),
-            };
-            default_or_literal_fields.push(fname);
-        }
         let fname = match &fv.member {
             Member::Named(id) => id.to_string(),
             Member::Unnamed(idx) => idx.index.to_string(),
         };
+        if fv.colon_token.is_some() && is_boilerplate_default_expr(&fv.expr) {
+            default_or_literal_fields.push(fname.clone());
+        }
         field_names.push(fname);
     }
     (field_names, default_or_literal_fields)

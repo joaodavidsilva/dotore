@@ -614,7 +614,7 @@ fn collect_module_call_facts(
 
 fn parse_ts_import_type_text(raw: &str) -> Option<(String, Option<String>)> {
     let import_idx = raw.find("import(")?;
-    let after_open = &raw[import_idx + "import(".len()..];
+    let after_open = raw.get(import_idx + "import(".len()..)?;
     let close_idx = after_open.find(')')?;
     let inside = after_open[..close_idx].trim();
     let specifier = inside
