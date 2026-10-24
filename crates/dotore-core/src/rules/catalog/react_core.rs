@@ -1804,7 +1804,7 @@ pub(crate) const EXTENDED_REACT_RULES: &[RuleMetadata] = &[
         RuleId::NoGiantComponent,
         "no-giant-component",
         "dotore/no-giant-component",
-        &[],
+        &["giant-component"],
         "Component exceeds maintainable line threshold",
         RuleCategory::Maintainability,
         RuleSeverity::Warning,

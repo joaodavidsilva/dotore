@@ -135,28 +135,28 @@ pub struct CheckArgs {
     #[arg(long)]
     pub custom_rules_only: bool,
 
-    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
-    #[arg(long = "ignore-tag", value_name = "TAG")]
+    /// Ignore rules carrying the specified tag (repeatable or comma-separated, e.g. `--ignore-tag design`).
+    #[arg(long = "ignore-tag", value_name = "TAG", value_delimiter = ',')]
     pub ignore_tags: Vec<String>,
 
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Filter by rule ID or legacy alias (repeatable, e.g. `--rule no-derived-state`).
-    #[arg(long = "rule", value_name = "RULE_ID")]
+    /// Filter by rule ID or legacy alias (repeatable or comma-separated, e.g. `--rule no-derived-state`).
+    #[arg(long = "rule", value_name = "RULE_ID", value_delimiter = ',')]
     pub rules: Vec<String>,
 
     /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
-    #[arg(long = "category", value_name = "CATEGORY")]
+    #[arg(long = "category", value_name = "CATEGORY", value_delimiter = ',')]
     pub categories: Vec<String>,
 
-    /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.).
-    #[arg(long = "only", value_name = "FILTER")]
+    /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.; repeatable or comma-separated).
+    #[arg(long = "only", value_name = "FILTER", value_delimiter = ',')]
     pub only: Vec<String>,
 
-    /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`).
-    #[arg(long = "tier", value_name = "TIER")]
+    /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
+    #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
     pub tiers: Vec<String>,
 
     /// Disable the interactive TUI explorer when running in a terminal.
@@ -587,7 +587,12 @@ fn resolve_enabled_rules(
 ) -> Result<Option<Vec<RuleId>>, String> {
     let mut rules: Vec<RuleId> = Vec::new();
 
-    for r in rule_strs {
+    for r in rule_strs
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let Some(parsed) = RuleId::parse(r) else {
             return Err(format!("Unknown rule ID: {r:?}"));
         };
@@ -596,8 +601,12 @@ fn resolve_enabled_rules(
         }
     }
 
-    for cat_raw in category_strs {
-        let trimmed = cat_raw.trim();
+    for trimmed in category_strs
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if trimmed.eq_ignore_ascii_case("arch") || trimmed.eq_ignore_ascii_case("architecture") {
             for meta in crate::rule_registry() {
                 if (meta.category == RuleCategory::Maintainability
@@ -615,13 +624,17 @@ fn resolve_enabled_rules(
             }
         } else {
             return Err(format!(
-                "Unknown rule category: {cat_raw:?} (expected Bugs, Performance, Accessibility, Security, Maintainability, or Architecture)"
+                "Unknown rule category: {trimmed:?} (expected Bugs, Performance, Accessibility, Security, Maintainability, or Architecture)"
             ));
         }
     }
 
-    for filter_raw in only_strs {
-        let trimmed = filter_raw.trim();
+    for trimmed in only_strs
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let lower = trimmed.to_ascii_lowercase();
         if let Some(exact) = RuleId::parse(trimmed) {
             if !rules.contains(&exact) {
@@ -659,10 +672,9 @@ fn resolve_enabled_rules(
             }
         }
         if !matched_prefix {
-            return Err(format!("Unknown --only filter: {filter_raw:?}"));
+            return Err(format!("Unknown --only filter: {trimmed:?}"));
         }
     }
-
     Ok((!rules.is_empty()).then_some(rules))
 }
 
