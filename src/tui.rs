@@ -415,15 +415,23 @@ impl TuiState {
     /// or sets a status bar prompt if no coding agent CLI is detected on `PATH`.
     pub fn launch_active_coding_agent(&mut self) {
         let available = detect_available_coding_agents();
-        let selected_agent = load_preferred_handoff_target()
-            .filter(|t| available.contains(t))
-            .or_else(|| available.first().copied());
+        let preferred = load_preferred_handoff_target().filter(|t| available.contains(t));
+        let selected_agent = preferred.or_else(|| available.first().copied());
         let Some(agent) = selected_agent else {
             self.status_message = Some(
                 "No coding agent CLI detected on PATH (claude, codex, cursor, amp, opencode)"
                     .to_string(),
             );
             return;
+        };
+        let multi_agent_hint = if preferred.is_none() && available.len() > 1 {
+            let names: Vec<&str> = available.iter().map(|t| t.as_str()).collect();
+            format!(
+                " (available: {} — set preferred via --handoff <agent>)",
+                names.join(", ")
+            )
+        } else {
+            String::new()
         };
         let (filtered_report, count) = self.active_filtered_report();
         let bundle_dir = resolve_dotore_home_dir()
@@ -432,7 +440,7 @@ impl TuiState {
         match execute_handoff(&filtered_report, agent, &bundle_dir) {
             Ok(_) => {
                 self.status_message = Some(format!(
-                    "✔ Handed off {count} findings to {}",
+                    "✔ Handed off {count} findings to {}{multi_agent_hint}",
                     agent.as_str()
                 ));
             }
@@ -1176,7 +1184,20 @@ pub fn render_tui_frame_with_state(
     cols: usize,
     design_mode: bool,
 ) -> String {
-    let active_tab_idx = state.active_tab_idx.min(tabs.len().saturating_sub(1));
+    let effective_tabs: Vec<TuiFilterTab> = if state.has_active_package_filter() {
+        let pkg_diags: Vec<&Diagnostic> = report
+            .diagnostics
+            .iter()
+            .filter(|d| state.is_file_in_active_packages(&d.file))
+            .collect();
+        let pkg_report = filter_report_for_diagnostics(report, &pkg_diags);
+        build_filter_tabs(&pkg_report)
+    } else {
+        tabs.to_vec()
+    };
+    let active_tab_idx = state
+        .active_tab_idx
+        .min(effective_tabs.len().saturating_sub(1));
     let group_mode = state.group_mode;
     let search_query = state.search_query.as_str();
     let in_search_input = state.in_search_input;
@@ -1232,7 +1253,7 @@ pub fn render_tui_frame_with_state(
     ));
     header_box.add_titled_divider("FILTER TABS (h/l or ←/→ or Tab to switch)");
 
-    let tab_strip = FilterTabBar::new(tabs, active_tab_idx)
+    let tab_strip = FilterTabBar::new(&effective_tabs, active_tab_idx)
         .with_max_width(box_inner_width.saturating_sub(2))
         .render(ColorMode::Ansi);
     header_box.add_closed_row(format!(" {tab_strip}"));
@@ -1242,7 +1263,7 @@ pub fn render_tui_frame_with_state(
             " \x1b[48;5;236;38;5;226;1m SEARCH / \x1b[0m \x1b[38;5;255;1m{search_query}█\x1b[0m  \x1b[38;5;244m(Enter to lock, ESC to clear)\x1b[0m"
         )
     } else if let Some(status_msg) = state.status_message.as_deref() {
-        let active = &tabs[active_tab_idx];
+        let active = &effective_tabs[active_tab_idx];
         format!(
             " \x1b[38;5;48;1m{status_msg}\x1b[0m   \x1b[38;5;245mActive Filter:\x1b[0m {}{} ({} matching)\x1b[0m",
             active.badge_ansi, active.label, active.count
@@ -1252,9 +1273,9 @@ pub fn render_tui_frame_with_state(
             " \x1b[48;5;236;38;5;48;1m FILTER / \x1b[0m \x1b[38;5;255;1m\"{search_query}\"\x1b[0m  \x1b[38;5;244m(press / to edit, c to clear search)\x1b[0m"
         )
     } else {
-        let active = &tabs[active_tab_idx];
+        let active = &effective_tabs[active_tab_idx];
         format!(
-            " \x1b[38;5;245mActive Filter:\x1b[0m {}{} ({} matching)\x1b[0m   \x1b[38;5;244mPress `/` to search by file, rule, or component\x1b[0m",
+            " \x1b[38;5;245mActive Filter:\x1b[0m {}{} ({} matching)\x1b[0m   \x1b[38;5;244mPress `/` to search by file, rule, or Subject\x1b[0m",
             active.badge_ansi, active.label, active.count
         )
     };
@@ -1296,7 +1317,7 @@ pub fn render_tui_frame_with_state(
     }
 
     let end_line = (scroll_offset + viewport_height).min(total_lines);
-    let active_tab = &tabs[active_tab_idx];
+    let active_tab = &effective_tabs[active_tab_idx];
     let footer = StatusBar::tui_footer(
         &active_tab.label,
         active_tab.count,
@@ -1415,7 +1436,22 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
 
         let viewport_height = rows.saturating_sub(10).max(2);
         if needs_redraw {
-            let active_tab = &tabs[state.active_tab_idx];
+            let effective_tabs: Vec<TuiFilterTab> = if state.has_active_package_filter() {
+                let pkg_diags: Vec<&Diagnostic> = report
+                    .diagnostics
+                    .iter()
+                    .filter(|d| state.is_file_in_active_packages(&d.file))
+                    .collect();
+                let pkg_report = filter_report_for_diagnostics(report, &pkg_diags);
+                build_filter_tabs(&pkg_report)
+            } else {
+                tabs.clone()
+            };
+            state.tab_count = effective_tabs.len().max(1);
+            if state.active_tab_idx >= state.tab_count {
+                state.active_tab_idx = state.tab_count - 1;
+            }
+            let active_tab = &effective_tabs[state.active_tab_idx];
             let filtered: Vec<&Diagnostic> = report
                 .diagnostics
                 .iter()
@@ -1524,8 +1560,14 @@ pub fn handle_tui_picker_key(state: &mut TuiState, key_bytes: &[u8]) -> bool {
             }
             return false;
         }
-        // 'a', 'A', or Ctrl-A toggles all packages
-        [b'a' | b'A' | 0x01] => {
+        // Ctrl-A always toggles all packages; bare 'a'/'A' toggles all when picker_query is empty
+        [0x01] => {
+            let all_selected =
+                !state.picker_selected.is_empty() && state.picker_selected.iter().all(|&b| b);
+            state.picker_selected.fill(!all_selected);
+            return false;
+        }
+        [b'a' | b'A'] if state.picker_query.is_empty() => {
             let all_selected =
                 !state.picker_selected.is_empty() && state.picker_selected.iter().all(|&b| b);
             state.picker_selected.fill(!all_selected);

@@ -22,5 +22,5 @@ pub use workspace::{
     WorkspacePackage, discover_workspace_packages, discover_workspace_packages_with_analyzers,
     filter_workspace_packages, find_nearest_ancestor_file, is_cache_disabled, normalize_path_buf,
     normalize_rel_path_str, relative_forward_slash, resolve_dotore_home_dir,
-    resolve_package_for_file, strip_jsonc, strip_source_extension,
+    resolve_package_for_file, strip_jsonc, strip_source_extension, write_file_atomically,
 };

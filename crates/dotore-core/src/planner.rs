@@ -10,13 +10,12 @@ use std::{
     io::{self, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::resolve_dotore_home_dir,
+    config::{resolve_dotore_home_dir, write_file_atomically},
     ir::{
         ArchitectureFileFacets, ByteSpan, ExtractedFile, LanguageId, ResolvedCallerSite,
         compute_line_starts, loc_from_line_starts,
@@ -2229,22 +2228,13 @@ pub fn save_preferred_handoff_target(target: HandoffTarget) -> io::Result<()> {
             "Could not resolve ~/.dotore home directory",
         ));
     };
-    fs::create_dir_all(&home_dir)?;
     let prefs_path = home_dir.join("preferences.json");
     let prefs = UserPreferencesFile {
         preferred_handoff_target: Some(target),
     };
     let payload = serde_json::to_string_pretty(&prefs)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let tmp_path = home_dir.join(format!(
-        ".preferences.json.tmp-{}-{nanos}",
-        std::process::id()
-    ));
-    fs::write(&tmp_path, format!("{payload}\n"))?;
-    fs::rename(&tmp_path, &prefs_path)
+    write_file_atomically(&prefs_path, format!("{payload}\n").as_bytes())
 }
 
 fn pipe_stdin_to_command(prog: &str, args: &[&str], text: &str) -> Result<(), String> {

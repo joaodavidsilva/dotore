@@ -5,11 +5,8 @@ use std::{
     env, fs,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
-    sync::{
-        RwLock,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    sync::RwLock,
+    time::UNIX_EPOCH,
 };
 
 use rayon::prelude::*;
@@ -18,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::{
         is_cache_disabled, normalize_path_buf, relative_forward_slash, resolve_dotore_home_dir,
+        write_file_atomically,
     },
     ir::{
         ExtractedFile, FNV1A_64_OFFSET_BASIS, LanguageAnalyzer, SymbolKind, SymbolOutline,
@@ -56,8 +54,6 @@ const MAX_LINE_CHARS: usize = 120;
 
 /// Current schema version for `symbols.json`.
 pub const SYMBOL_INDEX_SCHEMA_VERSION: u32 = 1;
-
-static CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Cached Symbol Outline entry for a single source file inside [`SymbolIndexCache`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,26 +113,8 @@ pub fn load_symbol_index_cache(cache_path: &Path) -> Option<SymbolIndexCache> {
 /// # Errors
 /// Returns an `io::Error` if creating parent directories, serializing, or writing fails.
 pub fn save_symbol_index_cache(cache_path: &Path, cache: &SymbolIndexCache) -> io::Result<()> {
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(cache).map_err(io::Error::other)?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let pid = std::process::id();
-    let seq = CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let file_name = cache_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("symbols.json");
-    let tmp_path = cache_path.with_file_name(format!(".{file_name}.tmp-{pid}-{nanos}-{seq}"));
-    fs::write(&tmp_path, json)?;
-    if let Err(err) = fs::rename(&tmp_path, cache_path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err);
-    }
-    Ok(())
+    write_file_atomically(cache_path, json.as_bytes())
 }
 
 fn canonicalize_or_normalize(path: &Path) -> PathBuf {
@@ -619,6 +597,17 @@ where
 
     let mut cache_dirty = existing_cache.is_none();
     let mut new_files = BTreeMap::new();
+    if options.paths.iter().any(|p| p.is_file())
+        && let Some(prev) = &existing_cache
+    {
+        for (rel_key, cached_entry) in &prev.files {
+            if canonical_root.join(rel_key).is_file() {
+                new_files.insert(rel_key.clone(), cached_entry.clone());
+            } else {
+                cache_dirty = true;
+            }
+        }
+    }
     let mut file_outlines = Vec::with_capacity(discovered.len());
     let mut sources = HashMap::new();
 

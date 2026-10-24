@@ -81,7 +81,7 @@ pub enum Commands {
 
 /// Output format for `dotore check`, `dotore design`, and `dotore report`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable terminal output.
     Text,
     /// Machine-readable JSON report.
@@ -103,97 +103,97 @@ pub enum OutputFormat {
 pub struct CheckArgs {
     /// Files or directories to scan (defaults to current directory).
     #[arg(value_name = "PATH")]
-    pub paths: Vec<PathBuf>,
+    pub(crate) paths: Vec<PathBuf>,
 
     /// Emit machine-readable JSON output for agents and skills.
     #[arg(long)]
-    pub json: bool,
+    pub(crate) json: bool,
 
     /// Output format (`text`, `json`, `html`, or `github-pr-comment` / `pr-comment`).
     #[arg(long = "format", value_enum, value_name = "FORMAT")]
-    pub format: Option<OutputFormat>,
+    pub(crate) format: Option<OutputFormat>,
     /// Write the versioned machine-readable JSON report to a file on disk.
     #[arg(long = "json-out", value_name = "FILE")]
-    pub json_out: Option<PathBuf>,
+    pub(crate) json_out: Option<PathBuf>,
 
     /// Print only the numeric `0..=100` Health Score to stdout.
     #[arg(long)]
-    pub score: bool,
+    pub(crate) score: bool,
 
     /// Git diff scan scope (`full`, `changed`, `contextual`, `lines`).
     #[arg(long, default_value = "full", value_name = "SCOPE")]
-    pub scope: String,
+    pub(crate) scope: String,
 
     /// Base git branch, revision, or commit range (`A..B`, `A...B`) for diff scopes.
     #[arg(long = "base", value_name = "REF")]
-    pub base_ref: Option<String>,
+    pub(crate) base_ref: Option<String>,
 
     /// Restrict scan to staged git index changes (`git diff --cached`).
     #[arg(long)]
-    pub staged: bool,
+    pub(crate) staged: bool,
 
     /// Compare against a saved baseline JSON report or git revision as a fingerprint multiset.
     #[arg(long, value_name = "REPORT_JSON")]
-    pub baseline: Option<PathBuf>,
+    pub(crate) baseline: Option<PathBuf>,
 
     /// Severity threshold that blocks CI (`error`, `warning`, `none`).
     #[arg(long, value_name = "LEVEL")]
-    pub blocking: Option<String>,
+    pub(crate) blocking: Option<String>,
 
     /// Custom exit code (`2..=255`) returned when warnings are present and no blocking errors occurred.
     #[arg(long = "warning-exit-code", value_name = "CODE")]
-    pub warning_exit_code: Option<u32>,
+    pub(crate) warning_exit_code: Option<u32>,
 
     /// Exit with code 0 even when diagnostics are found (alias for `--blocking none`).
     #[arg(long)]
-    pub no_fail: bool,
+    pub(crate) no_fail: bool,
 
     /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
     #[arg(long)]
-    pub include_tests: bool,
+    pub(crate) include_tests: bool,
 
     /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
     #[arg(long)]
-    pub no_inline_disables: bool,
+    pub(crate) no_inline_disables: bool,
 
     /// Disable rules originally ported from external plugins unless explicitly enabled in config.
     #[arg(long)]
-    pub custom_rules_only: bool,
+    pub(crate) custom_rules_only: bool,
 
     /// Ignore rules carrying the specified tag (repeatable or comma-separated, e.g. `--ignore-tag design`).
     #[arg(long = "ignore-tag", value_name = "TAG", value_delimiter = ',')]
-    pub ignore_tags: Vec<String>,
+    pub(crate) ignore_tags: Vec<String>,
 
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
 
     /// Filter by rule ID or legacy alias (repeatable or comma-separated, e.g. `--rule no-derived-state`).
     #[arg(long = "rule", value_name = "RULE_ID", value_delimiter = ',')]
-    pub rules: Vec<String>,
+    pub(crate) rules: Vec<String>,
 
     /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
     #[arg(long = "category", value_name = "CATEGORY", value_delimiter = ',')]
-    pub categories: Vec<String>,
+    pub(crate) categories: Vec<String>,
 
     /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.; repeatable or comma-separated).
     #[arg(long = "only", value_name = "FILTER", value_delimiter = ',')]
-    pub only: Vec<String>,
+    pub(crate) only: Vec<String>,
 
     /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
     #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
-    pub tiers: Vec<String>,
+    pub(crate) tiers: Vec<String>,
 
     /// Disable the interactive TUI explorer when running in a terminal.
     #[arg(long = "no-pager")]
-    pub no_pager: bool,
+    pub(crate) no_pager: bool,
 
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
-    pub no_cache: bool,
+    pub(crate) no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub projects: Vec<String>,
+    pub(crate) projects: Vec<String>,
 
     /// Hand off findings to a coding agent or output (`print`, `clipboard`, `claude`, `codex`, `cursor`, `amp`, `opencode`).
     #[arg(
@@ -202,7 +202,7 @@ pub struct CheckArgs {
         num_args = 0..=1,
         default_missing_value = "auto"
     )]
-    pub handoff: Option<String>,
+    pub(crate) handoff: Option<String>,
 }
 
 /// CLI arguments for `dotore fix`.
@@ -210,38 +210,38 @@ pub struct CheckArgs {
 pub struct FixArgs {
     /// Files or directories to scan and fix (defaults to current directory).
     #[arg(value_name = "PATH")]
-    pub paths: Vec<PathBuf>,
+    pub(crate) paths: Vec<PathBuf>,
 
     /// Preview planned fixes without writing to disk.
     #[arg(long)]
-    pub dry_run: bool,
+    pub(crate) dry_run: bool,
 
     /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
     #[arg(long)]
-    pub include_tests: bool,
+    pub(crate) include_tests: bool,
 
     /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
     #[arg(long)]
-    pub no_inline_disables: bool,
+    pub(crate) no_inline_disables: bool,
 
     /// Disable rules originally ported from external plugins unless explicitly enabled in config.
     #[arg(long)]
-    pub custom_rules_only: bool,
+    pub(crate) custom_rules_only: bool,
 
     /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
     #[arg(long = "ignore-tag", value_name = "TAG")]
-    pub ignore_tags: Vec<String>,
+    pub(crate) ignore_tags: Vec<String>,
 
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
 
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
-    pub no_cache: bool,
+    pub(crate) no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub projects: Vec<String>,
+    pub(crate) projects: Vec<String>,
 }
 
 /// CLI arguments for `dotore plan`.
@@ -249,46 +249,46 @@ pub struct FixArgs {
 pub struct PlanArgs {
     /// Files or directories to scan and plan (defaults to current directory).
     #[arg(value_name = "PATH")]
-    pub paths: Vec<PathBuf>,
+    pub(crate) paths: Vec<PathBuf>,
 
     /// Output directory for generated `NNN-<slug>.md` plans and `README.md` index.
     #[arg(short, long = "out", default_value = "plans", value_name = "DIR")]
-    pub out: PathBuf,
+    pub(crate) out: PathBuf,
 
     /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
     #[arg(long)]
-    pub include_tests: bool,
+    pub(crate) include_tests: bool,
 
     /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
     #[arg(long)]
-    pub no_inline_disables: bool,
+    pub(crate) no_inline_disables: bool,
 
     /// Disable rules originally ported from external plugins unless explicitly enabled in config.
     #[arg(long)]
-    pub custom_rules_only: bool,
+    pub(crate) custom_rules_only: bool,
 
     /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
     #[arg(long = "ignore-tag", value_name = "TAG")]
-    pub ignore_tags: Vec<String>,
+    pub(crate) ignore_tags: Vec<String>,
 
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
 
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
-    pub no_cache: bool,
+    pub(crate) no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub projects: Vec<String>,
+    pub(crate) projects: Vec<String>,
 
     /// Synthesize a coding-agent handoff prompt and write a diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`).
     #[arg(long)]
-    pub handoff: bool,
+    pub(crate) handoff: bool,
 
     /// Explicit directory for the diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`, defaults to `--out`).
     #[arg(long = "bundle-dir", value_name = "DIR")]
-    pub bundle_dir: Option<PathBuf>,
+    pub(crate) bundle_dir: Option<PathBuf>,
 }
 
 /// CLI arguments for `dotore report`.
@@ -296,61 +296,61 @@ pub struct PlanArgs {
 pub struct ReportArgs {
     /// Files or directories to scan (defaults to current directory).
     #[arg(value_name = "PATH")]
-    pub paths: Vec<PathBuf>,
+    pub(crate) paths: Vec<PathBuf>,
 
     /// Output HTML file path (defaults to a fresh temp directory).
     #[arg(short, long, value_name = "FILE")]
-    pub output: Option<PathBuf>,
+    pub(crate) output: Option<PathBuf>,
 
     /// Output format (`html`, `json`, `text`, or `github-pr-comment` / `pr-comment`).
     #[arg(long = "format", value_enum, value_name = "FORMAT")]
-    pub format: Option<OutputFormat>,
+    pub(crate) format: Option<OutputFormat>,
     /// Do not open the generated HTML file in the system browser.
     #[arg(long)]
-    pub no_open: bool,
+    pub(crate) no_open: bool,
 
     /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
     #[arg(long)]
-    pub include_tests: bool,
+    pub(crate) include_tests: bool,
 
     /// Bypass inline disable comments.
     #[arg(long)]
-    pub no_inline_disables: bool,
+    pub(crate) no_inline_disables: bool,
 
     /// Disable rules originally ported from external plugins unless explicitly enabled in config.
     #[arg(long)]
-    pub custom_rules_only: bool,
+    pub(crate) custom_rules_only: bool,
 
     /// Ignore rules carrying the specified tag (repeatable or comma-separated, e.g. `--ignore-tag design`).
     #[arg(long = "ignore-tag", value_name = "TAG", value_delimiter = ',')]
-    pub ignore_tags: Vec<String>,
+    pub(crate) ignore_tags: Vec<String>,
 
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
 
     /// Filter by rule ID or legacy alias (repeatable or comma-separated).
     #[arg(long = "rule", value_name = "RULE_ID", value_delimiter = ',')]
-    pub rules: Vec<String>,
+    pub(crate) rules: Vec<String>,
 
     /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
     #[arg(long = "category", value_name = "CATEGORY", value_delimiter = ',')]
-    pub categories: Vec<String>,
+    pub(crate) categories: Vec<String>,
 
     /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.; repeatable or comma-separated).
     #[arg(long = "only", value_name = "FILTER", value_delimiter = ',')]
-    pub only: Vec<String>,
+    pub(crate) only: Vec<String>,
 
     /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
     #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
-    pub tiers: Vec<String>,
+    pub(crate) tiers: Vec<String>,
 
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
-    pub no_cache: bool,
+    pub(crate) no_cache: bool,
     /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
     #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub projects: Vec<String>,
+    pub(crate) projects: Vec<String>,
 }
 
 /// Output format for `dotore search`.
@@ -367,19 +367,19 @@ enum SearchFormat {
 pub struct SearchArgs {
     /// Fuzzy query string matched against symbol names.
     #[arg(value_name = "QUERY")]
-    pub query: String,
+    pub(crate) query: String,
 
     /// Files or directories to search (defaults to current directory).
     #[arg(value_name = "PATH")]
-    pub paths: Vec<PathBuf>,
+    pub(crate) paths: Vec<PathBuf>,
 
     /// Comma-separated symbol kinds to include (default: class,enum,function,interface,method,property,type).
     #[arg(short = 'k', long = "kind", value_name = "KINDS")]
-    pub kind: Option<String>,
+    pub(crate) kind: Option<String>,
 
     /// Maximum number of ranked matches to return.
     #[arg(short = 'l', long = "limit", default_value_t = 50, value_name = "N")]
-    pub limit: usize,
+    pub(crate) limit: usize,
 
     /// Output format (`text` or `json`).
     #[arg(short = 'f', long = "format", value_enum, default_value_t = SearchFormat::Text, value_name = "FORMAT")]
@@ -387,11 +387,11 @@ pub struct SearchArgs {
 
     /// Disable ANSI syntax highlighting in text output.
     #[arg(long)]
-    pub no_color: bool,
+    pub(crate) no_color: bool,
 
     /// Bypass reading and writing the persistent per-project Symbol Outline disk cache.
     #[arg(long = "no-cache")]
-    pub no_cache: bool,
+    pub(crate) no_cache: bool,
 }
 
 /// CLI arguments for `dotore scan`.
@@ -399,19 +399,19 @@ pub struct SearchArgs {
 pub struct ScanArgs {
     /// Target `http://` or `https://` URL to profile (optional in interactive terminals).
     #[arg(value_name = "URL")]
-    pub url: Option<String>,
+    pub(crate) url: Option<String>,
 
     /// Connect to an existing debug-enabled Chrome instance (`ws://...` or `http://...`).
     #[arg(long, value_name = "URL")]
-    pub cdp: Option<String>,
+    pub(crate) cdp: Option<String>,
 
     /// Output path for the compressed `.json.gz` DevTools trace.
     #[arg(long = "trace-out", value_name = "FILE")]
-    pub trace_out: Option<PathBuf>,
+    pub(crate) trace_out: Option<PathBuf>,
 
     /// Output format (`text`, `json`, or `jsonl`).
     #[arg(long, value_name = "FORMAT")]
-    pub format: Option<String>,
+    pub(crate) format: Option<String>,
 }
 
 /// CLI arguments for `dotore rules`.
@@ -566,15 +566,15 @@ struct RulesTagArgs {
 pub struct WhyArgs {
     /// Source location (`<file:line>` or `<file:line:column>`).
     #[arg(value_name = "FILE:LINE")]
-    pub location: String,
+    pub(crate) location: String,
 
     /// Emit machine-readable JSON output.
     #[arg(long)]
-    pub json: bool,
+    pub(crate) json: bool,
 
     /// Working directory for resolving project configuration and cross-file callers.
     #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
 }
 
 /// CLI arguments for `dotore ci`.
@@ -643,19 +643,19 @@ struct CiActionArgs {
 pub struct InstallArgs {
     /// Accept all setup steps non-interactively (skill, script, git hook, agent hooks).
     #[arg(short = 'y', long)]
-    pub yes: bool,
+    pub(crate) yes: bool,
 
     /// Print planned file operations without writing to disk.
     #[arg(long)]
-    pub dry_run: bool,
+    pub(crate) dry_run: bool,
 
     /// Install agent stop hooks (`.claude/settings.json` and `.claude/hooks/dotore.mjs`).
     #[arg(long)]
-    pub agent_hooks: bool,
+    pub(crate) agent_hooks: bool,
 
     /// Target project root directory.
     #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
 }
 
 /// Dispatches a parsed [`Cli`] invocation to its corresponding subcommand runner and returns the process [`ExitCode`].
@@ -809,21 +809,17 @@ fn build_scan_options(
 
 fn resolve_auto_handoff_target() -> HandoffTarget {
     let available = detect_available_coding_agents();
-    if let Some(preferred) = load_preferred_handoff_target() {
-        match preferred {
-            HandoffTarget::Print | HandoffTarget::Clipboard => return preferred,
-            HandoffTarget::Claude
-            | HandoffTarget::Codex
-            | HandoffTarget::Cursor
-            | HandoffTarget::Amp
-            | HandoffTarget::Opencode => {
-                if available.contains(&preferred) {
-                    return preferred;
-                }
-            }
-        }
+    let preferred = load_preferred_handoff_target();
+    if let Some(pref) = preferred
+        && pref.binary_name().is_some()
+        && available.contains(&pref)
+    {
+        return pref;
     }
-    available.first().copied().unwrap_or(HandoffTarget::Print)
+    if let Some(&first_agent) = available.first() {
+        return first_agent;
+    }
+    preferred.unwrap_or(HandoffTarget::Print)
 }
 
 fn resolve_check_handoff_and_paths(

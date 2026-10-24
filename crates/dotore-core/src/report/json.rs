@@ -447,28 +447,7 @@ fn write_scan_result_cache_atomic(
     cache_path: &Path,
     cache: &ScanResultCacheFile,
 ) -> io::Result<()> {
-    if let Some(parent) = cache_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(cache)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file_name = cache_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("scan-results.json");
-    let tmp_path = cache_path.with_file_name(format!(".{file_name}.tmp-{pid}-{nanos}-{seq}"));
-    fs::write(&tmp_path, format!("{json}\n"))?;
-    if let Err(err) = fs::rename(&tmp_path, cache_path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err);
-    }
-    Ok(())
+    crate::config::write_file_atomically(cache_path, format!("{json}\n").as_bytes())
 }

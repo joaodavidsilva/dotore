@@ -35,13 +35,14 @@ pub(crate) mod search;
 /// Interactive TUI explorer (`hjkl`/arrow navigation, dynamic filter tabs, grouping modes, `/` search, `ESC` exit).
 pub(crate) mod tui;
 
-pub use cli::{Cli, Commands, OutputFormat, run_cli};
+pub use cli::{Cli, Commands, run_cli};
 pub use config::{
     ArchitectureThresholdsConfig, Capability, CapabilityGate, CapabilityPredicate, ConfigMutation,
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, discover_workspace_packages,
     discover_workspace_packages_with_analyzers, filter_workspace_packages, is_cache_disabled,
     load_config_from_dir, mutate_config_in_dir, resolve_dotore_home_dir, resolve_package_for_file,
+    write_file_atomically,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -1063,45 +1064,8 @@ pub fn scan_workspace_with_overrides(
     register_active_core_hooks();
     set_progress_phase(1, 0);
     let analyzers = default_analyzers();
-    let workspace_root = determine_workspace_root(&options.paths);
-    let all_packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
-    let mut packages =
-        filter_workspace_packages(&all_packages, &workspace_root, &overrides.projects)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
-        let content = fs::read_to_string(cfg_path)?;
-        Some(
-            DotoreConfig::from_config_file_str(cfg_path, &content)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        )
-    } else {
-        None
-    };
-
-    for pkg in &mut packages {
-        if let Some(cfg) = &explicit_cfg {
-            pkg.config = cfg.clone();
-        }
-        apply_cli_overrides_to_config(&mut pkg.config, overrides);
-    }
-
-    let raw_paths =
-        collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
-    let paths: Vec<PathBuf> = raw_paths
-        .into_iter()
-        .filter(|p| {
-            resolve_package_for_file(p, &all_packages).is_none_or(|resolved_pkg| {
-                packages
-                    .iter()
-                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
-                    && !resolved_pkg
-                        .config
-                        .is_file_ignored(p, &resolved_pkg.root_dir)
-            })
-        })
-        .collect();
-
+    let (workspace_root, all_packages, packages, paths) =
+        discover_filtered_workspace_packages_and_paths(options, overrides, analyzers)?;
     set_progress_phase(2, paths.len());
     #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
     let mut pairs: Vec<(PathBuf, String)> = paths
@@ -1534,45 +1498,8 @@ fn scan_design_js(
     }
     let js_analyzer = JsLanguageAnalyzer;
     let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
-    let workspace_root = determine_workspace_root(&options.paths);
-    let all_packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
-    let mut packages =
-        filter_workspace_packages(&all_packages, &workspace_root, &overrides.projects)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
-        let content = fs::read_to_string(cfg_path)?;
-        Some(
-            DotoreConfig::from_config_file_str(cfg_path, &content)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        )
-    } else {
-        None
-    };
-
-    for pkg in &mut packages {
-        if let Some(cfg) = &explicit_cfg {
-            pkg.config = cfg.clone();
-        }
-        apply_cli_overrides_to_config(&mut pkg.config, overrides);
-    }
-
-    let raw_paths =
-        collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
-    let paths: Vec<PathBuf> = raw_paths
-        .into_iter()
-        .filter(|p| {
-            resolve_package_for_file(p, &all_packages).is_none_or(|resolved_pkg| {
-                packages
-                    .iter()
-                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
-                    && !resolved_pkg
-                        .config
-                        .is_file_ignored(p, &resolved_pkg.root_dir)
-            })
-        })
-        .collect();
-
+    let (_, _, packages, paths) =
+        discover_filtered_workspace_packages_and_paths(options, overrides, analyzers)?;
     set_progress_phase(2, paths.len());
     let pairs: Vec<(PathBuf, String)> = paths
         .into_par_iter()
@@ -1647,6 +1574,59 @@ fn scan_design_js(
         proj.score_label = "Excellent".to_string();
     }
     Ok((report, sources))
+}
+type DiscoveredWorkspaceSelection = (
+    PathBuf,
+    Vec<WorkspacePackage>,
+    Vec<WorkspacePackage>,
+    Vec<PathBuf>,
+);
+
+fn discover_filtered_workspace_packages_and_paths(
+    options: &ScanOptions,
+    overrides: &CliOverrides,
+    analyzers: &[&dyn LanguageAnalyzer],
+) -> io::Result<DiscoveredWorkspaceSelection> {
+    let workspace_root = determine_workspace_root(&options.paths);
+    let all_packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
+    let mut packages =
+        filter_workspace_packages(&all_packages, &workspace_root, &overrides.projects)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
+        let content = fs::read_to_string(cfg_path)?;
+        Some(
+            DotoreConfig::from_config_file_str(cfg_path, &content)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        )
+    } else {
+        None
+    };
+
+    for pkg in &mut packages {
+        if let Some(cfg) = &explicit_cfg {
+            pkg.config = cfg.clone();
+        }
+        apply_cli_overrides_to_config(&mut pkg.config, overrides);
+    }
+
+    let raw_paths =
+        collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
+    let paths: Vec<PathBuf> = raw_paths
+        .into_iter()
+        .filter(|p| {
+            resolve_package_for_file(p, &all_packages).is_none_or(|resolved_pkg| {
+                packages
+                    .iter()
+                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
+                    && !resolved_pkg
+                        .config
+                        .is_file_ignored(p, &resolved_pkg.root_dir)
+            })
+        })
+        .collect();
+
+    Ok((workspace_root, all_packages, packages, paths))
 }
 
 fn determine_workspace_root(paths: &[PathBuf]) -> PathBuf {

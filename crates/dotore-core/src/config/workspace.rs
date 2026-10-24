@@ -547,3 +547,34 @@ pub fn is_cache_disabled(no_cache_flag: bool) -> bool {
             || trimmed.eq_ignore_ascii_case("yes")
     })
 }
+
+/// Writes `content` to `target_path` atomically by writing to a unique sibling temporary file
+/// (`.{file_name}.tmp-{pid}-{nanos}-{seq}`) and renaming it over `target_path`.
+///
+/// # Errors
+/// Returns an `io::Error` if creating parent directories, writing the temporary file, or renaming fails.
+pub fn write_file_atomically(target_path: &Path, content: &[u8]) -> std::io::Result<()> {
+    static ATOMIC_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    if let Some(parent) = target_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = ATOMIC_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = target_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp_path = target_path.with_file_name(format!(".{file_name}.tmp-{pid}-{nanos}-{seq}"));
+    fs::write(&tmp_path, content)?;
+    if let Err(err) = fs::rename(&tmp_path, target_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
