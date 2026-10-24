@@ -13,6 +13,7 @@ use oxc_ast::{
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 
 use super::{
+    JsxElementA11yCtx,
     forms_media_and_content::{
         check_alt_text, check_anchor_rules, check_control_and_label_association,
         check_custom_a11y_rules, check_element_content_media_and_form_rules,
@@ -105,7 +106,7 @@ pub(super) fn check_jsx_attribute_a11y(
     reason = "Single-pass JSX element dispatcher evaluates all element-level a11y rules together"
 )]
 pub(super) fn check_jsx_element_a11y(
-    path: &std::path::Path,
+    _path: &std::path::Path,
     is_testlike: bool,
     semantic: &Semantic<'_>,
     node_id: NodeId,
@@ -126,6 +127,21 @@ pub(super) fn check_jsx_element_a11y(
     let is_html = HTML_TAGS.contains(&tag.as_str());
     let has_spread = jsx_has_spread_attr(&opening.attributes);
 
+    let elem_ctx = JsxElementA11yCtx {
+        is_testlike,
+        semantic,
+        node_id,
+        jsx_el,
+        opening,
+        tag: &tag,
+        is_html,
+        has_spread,
+        subject_name,
+        const_strings,
+        loc,
+        span,
+        line_starts,
+    };
     // 1. `alt-text`
     check_alt_text(jsx_el, &tag, subject_name, loc, span, sites);
 
@@ -146,40 +162,10 @@ pub(super) fn check_jsx_element_a11y(
     );
 
     // 7, 17–21, 23–25, 27. Autocomplete, lang, headings, iframes, anchors, distracting, viewport, redundant alt, media, scope
-    check_element_content_media_and_form_rules(
-        is_testlike,
-        semantic,
-        node_id,
-        jsx_el,
-        opening,
-        &tag,
-        is_html,
-        has_spread,
-        subject_name,
-        const_strings,
-        loc,
-        span,
-        line_starts,
-        sites,
-    );
+    check_element_content_media_and_form_rules(&elem_ctx, sites);
 
     // 8–10, 13–16, 28–29. Keyboard events, static/noninteractive interactions, tabindex, focus, accessKey
-    check_element_keyboard_and_focus_rules(
-        is_testlike,
-        semantic,
-        node_id,
-        jsx_el,
-        opening,
-        &tag,
-        is_html,
-        has_spread,
-        subject_name,
-        const_strings,
-        loc,
-        span,
-        line_starts,
-        sites,
-    );
+    check_element_keyboard_and_focus_rules(&elem_ctx, sites);
 
     // 11–12. Interactive/noninteractive role transitions
     check_element_role_transition_rules(
@@ -263,22 +249,10 @@ pub(super) fn check_jsx_element_a11y(
 
     // 33. Remaining custom a11y rules
     check_custom_a11y_rules(
-        path,
-        is_testlike,
-        semantic,
-        node_id,
-        jsx_el,
-        &tag,
-        is_html,
-        has_spread,
-        subject_name,
-        const_strings,
+        &elem_ctx,
         imported_sources,
         main_landmarks_by_root,
         unlabeled_navs_by_root,
-        loc,
-        span,
-        line_starts,
         sites,
     );
 }
@@ -688,29 +662,30 @@ fn check_role_aria_props(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates custom ARIA, dialog, status, landmark, and presentation role rules together"
-)]
 pub(super) fn check_custom_aria_and_role_rules(
-    is_testlike: bool,
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    opening: &JSXOpeningElement<'_>,
-    tag: &str,
-    is_html: bool,
-    has_spread: bool,
+    ctx: &JsxElementA11yCtx<'_, '_>,
     first_role: Option<&str>,
     has_a11y_name: bool,
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
     main_landmarks_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
     unlabeled_navs_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
-    loc: SourceLoc,
-    span: ByteSpan,
-    line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
+    let JsxElementA11yCtx {
+        is_testlike,
+        semantic,
+        node_id,
+        opening,
+        tag,
+        is_html,
+        has_spread,
+        subject_name,
+        const_strings,
+        loc,
+        span,
+        line_starts,
+        ..
+    } = *ctx;
+
     // 1. `dialog-has-accessible-name` & `prefer-html-dialog`
     if !is_testlike && is_html && !has_spread {
         let is_dialog_role = matches!(first_role, Some("dialog" | "alertdialog"));

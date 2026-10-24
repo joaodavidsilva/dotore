@@ -163,7 +163,7 @@ impl RsScopeTracker {
 
     /// Captures a snapshot of the current lexical scope state.
     #[must_use]
-    pub(crate) fn snapshot(&self) -> RsScopeSnapshot {
+    fn snapshot(&self) -> RsScopeSnapshot {
         RsScopeSnapshot {
             in_test_context: self.in_test_context,
             current_subject_name: self.current_subject_name.clone(),
