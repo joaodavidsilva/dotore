@@ -91,10 +91,17 @@ crates/
         tanstack.rs       # TanStack Query and TanStack Start loader/query rules
   dotore-py/
     src/
-      lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer), pyproject.toml capability gate, and Python safety rules
-      web_orm_security.rs # Pydantic, FastAPI, SQLAlchemy/Django ORM N+1, and SQL/shell/deserialization security rules
-      async_perf_arch.rs  # asyncio concurrency hazards, regex hoisting autofix, and loop membership performance rules
+      lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer) facade and dotore-py crate root
+      matchers.rs         # shared Python AST matchers, PyScopeTracker, rule gating, and Diagnostic/Autofix builders
+      manifest.rs         # pyproject.toml and requirements.txt Capability Gate inference
+      ir.rs               # PyFileIr, single-pass Subject, SymbolOutline, ContextualOwnerSpansIr, and suppression extraction
       graph.rs            # Python package ProjectGraph analysis (circular imports, unused exports, unawaited coroutines)
+      safety.rs           # Python runtime and resource safety rules
+      asyncio.rs          # asyncio concurrency hazard rules
+      perf.rs             # hot-loop regex hoisting autofix and linear membership performance rules
+      fastapi_pydantic.rs # FastAPI route/auth and Pydantic default_factory rules
+      orm.rs              # SQLAlchemy and Django ORM N+1 loop query rule
+      security.rs         # Python SQL injection and unsafe deserialization/shell rules
   dotore-rs/
     src/
       lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
