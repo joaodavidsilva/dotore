@@ -800,3 +800,154 @@ fn ci_and_install_subcommands_scaffold_workflows_skills_and_hooks() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn modular_cli_progress_and_tui_explorer_render_via_ui_kit() {
+    use clap::Parser as _;
+    use dotore::{
+        ColorMode,
+        cli::{Cli, Commands, run_cli},
+        progress::{
+            current_scan_progress, format_spinner_frame, set_progress_phase, tick_progress_file,
+        },
+        tui::{
+            TuiGroupMode, TuiState, build_filter_tabs, build_score_gauge,
+            diagnostic_matches_tab_and_search, handle_tui_search_key, render_tui_body_lines,
+            render_tui_frame, strip_ansi_codes, visible_char_width,
+        },
+    };
+
+    // 1. Progress module delegates to dotore_core::ui
+    set_progress_phase(3, 10);
+    tick_progress_file(std::path::Path::new("src/UserForm.tsx"));
+    let snap = current_scan_progress();
+    assert_eq!(snap.phase, "Extracting AST & IR (parallel)");
+    assert_eq!(snap.completed_files, 1);
+    assert_eq!(snap.total_files, 10);
+    let spinner_plain = format_spinner_frame(&snap, 0, 1.2, ColorMode::Plain);
+    assert!(spinner_plain.contains("DOTORE"));
+    assert!(spinner_plain.contains("(1/10)"));
+
+    // 2. Build a real report with a Render Cascade diagnostic and an Autofix diagnostic
+    let report = dotore::analyze_project_sources(
+        vec![(
+            PathBuf::from("src/Form.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function Form({ first, last }: { first: string; last: string }) {
+                const [full, setFull] = useState('');
+                const [ready, setReady] = useState();
+                useEffect(() => {
+                    setFull(first + ' ' + last);
+                }, [first, last]);
+                useEffect(() => {
+                    setReady(true);
+                }, []);
+                return <div>{full}{String(ready)}</div>;
+            }
+            "#
+            .to_string(),
+        )],
+        None,
+    );
+    assert!(report.diagnostics.len() >= 2);
+
+    // 3. TUI filter tabs, body rendering across all 3 grouping modes, and frame rendering
+    let tabs = build_filter_tabs(&report);
+    assert!(tabs.len() >= 3);
+    assert_eq!(tabs[0].label, "ALL");
+
+    let all_refs: Vec<&dotore::Diagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| diagnostic_matches_tab_and_search(d, &tabs[0], ""))
+        .collect();
+    assert_eq!(all_refs.len(), report.diagnostics.len());
+
+    let by_rule_lines = render_tui_body_lines(&all_refs, TuiGroupMode::ByRuleStyle);
+    let by_rule_plain = strip_ansi_codes(&by_rule_lines.join("\n"));
+    assert!(by_rule_plain.contains("[EFFECTS & STATE]"));
+    assert!(by_rule_plain.contains("no-derived-state"));
+    assert!(by_rule_plain.contains("┌─►"));
+
+    let by_file_lines = render_tui_body_lines(&all_refs, TuiGroupMode::ByFile);
+    let by_file_plain = strip_ansi_codes(&by_file_lines.join("\n"));
+    assert!(by_file_plain.contains("src/Form.tsx"));
+
+    let card_lines = render_tui_body_lines(&all_refs, TuiGroupMode::DetailedCards);
+    let card_plain = strip_ansi_codes(&card_lines.join("\n"));
+    assert!(card_plain.contains("flow:    ┌─►"));
+    assert!(card_plain.contains("docs:    https://react.dev/learn/you-might-not-need-an-effect"));
+
+    let empty_lines = render_tui_body_lines(&[], TuiGroupMode::ByRuleStyle);
+    let empty_plain = strip_ansi_codes(&empty_lines.join("\n"));
+    assert!(empty_plain.contains("Zero findings match this filter!"));
+
+    let gauge = build_score_gauge(92, 18);
+    assert_eq!(visible_char_width(&gauge), 27);
+
+    let frame = render_tui_frame(
+        &report,
+        &tabs,
+        0,
+        TuiGroupMode::ByRuleStyle,
+        "",
+        false,
+        &by_rule_lines,
+        0,
+        28,
+        120,
+        false,
+    );
+    let frame_plain = strip_ansi_codes(&frame);
+    assert!(frame_plain.contains("╔══ DOTORE · Polyglot Static Analyzer"));
+    assert!(frame_plain.contains("╠══ FILTER TABS"));
+    assert!(frame_plain.contains("▶ ALL"));
+    assert!(frame_plain.contains("[h/l or ←/→] Filter Tab"));
+
+    // 4. TUI interactive state machine: hjkl, tab switch, group mode `v`, `/` search, ESC exit
+    let mut state = TuiState::new(tabs.len());
+    assert!(!state.handle_key(b"l", 10, 5));
+    assert_eq!(state.active_tab_idx, 1);
+    assert!(!state.handle_key(b"h", 10, 5));
+    assert_eq!(state.active_tab_idx, 0);
+    assert!(!state.handle_key(b"j", 10, 5));
+    assert_eq!(state.scroll_offset, 1);
+    assert!(!state.handle_key(b"k", 10, 5));
+    assert_eq!(state.scroll_offset, 0);
+    assert!(!state.handle_key(b"v", 10, 5));
+    assert_eq!(state.group_mode, TuiGroupMode::ByFile);
+    assert!(!state.handle_key(b"/", 10, 5));
+    assert!(state.in_search_input);
+    handle_tui_search_key(
+        b"derived",
+        &mut state.search_query,
+        &mut state.in_search_input,
+        &mut state.scroll_offset,
+    );
+    assert_eq!(state.search_query, "derived");
+    handle_tui_search_key(
+        b"\n",
+        &mut state.search_query,
+        &mut state.in_search_input,
+        &mut state.scroll_offset,
+    );
+    assert!(!state.in_search_input);
+    assert!(state.handle_key(&[0x1b], 10, 5));
+
+    // 5. CLI parser & runner seam
+    let parsed = Cli::try_parse_from(["dotore", "score", "--no-fail"]).expect("valid CLI args");
+    assert!(matches!(parsed.command, Some(Commands::Score(_))));
+    let dir = unique_temp_dir("modular-cli-run");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("index.ts"), "export const x = 1;\n").unwrap();
+    let check_cli = Cli::try_parse_from([
+        "dotore",
+        "score",
+        dir.to_str().unwrap(),
+        "--no-fail",
+    ])
+    .unwrap();
+    assert_eq!(run_cli(check_cli), std::process::ExitCode::SUCCESS);
+    let _ = fs::remove_dir_all(&dir);
+}

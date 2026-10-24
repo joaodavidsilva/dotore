@@ -116,8 +116,11 @@ crates/
       axum_sqlx.rs        # single-pass detectors for Axum shared state contention and SQLx query hazards
       ui_signals.rs       # single-pass detectors for Leptos/Dioxus reactive signals and boolean params
 src/
-  main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
+  main.rs                 # thin CLI adapter: parses args and returns process exit code
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API
+  cli.rs                  # Clap CLI definitions and subcommand execution runners
+  progress.rs             # live terminal progress bar and 30fps spinner animation (dotore_core::ui::LiveSpinner)
+  tui.rs                  # interactive TUI explorer (hjkl/arrows, filter tabs, grouping modes, / search, ESC exit)
   scanner.rs              # parallel gitignore-aware file discovery facade
   config.rs               # dotore.config.* / package.json loader and Capability Gate facade
   fixer.rs                # surgical single- and cross-file byte-range auto-fixer facade (dotore fix)
@@ -125,7 +128,13 @@ src/
   search.rs               # native fuzzy AST Symbol Outline search facade (dotore search)
   diff.rs                 # git diff, Contextual Owner filtering, and baseline multiset comparison facade
   score.rs                # deterministic local 0-100 health score and P0-P3 tier calculation facade
-  runtime_scan.rs         # native CDP WebSocket runtime profiler (dotore scan)
+  runtime_scan.rs         # native CDP WebSocket runtime profiler root (dotore scan)
+  runtime_scan/
+    transport.rs          # TCP, HTTP /json/version, RFC 6455 WebSocket transport, JSON-RPC multiplexing, and GzipStoredWriter
+    probe.rs              # local HTTP port discovery, interactive URL prompt, browser probe, and snapshot relay scripts
+    capture.rs            # Chrome binary discovery, isolated process launcher, CDP target selection, and trace capture
+    analysis.rs           # snapshot validation, multi-navigation merging, React/LoAF/interaction hotspot aggregation, and report builder
+    report.rs             # terminal, JSON, and JSONL report formatters for RuntimeScanReport
   report.rs               # terminal, JSON, why/explain, and self-contained HTML reporters facade
 docs/
   adr/                    # architecture decision records
