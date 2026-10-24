@@ -520,6 +520,107 @@ pub fn clone_precision_check(count: usize, flag: bool, ratio: f64, shared_slice:
 }
 
 #[test]
+fn rs_perf_no_clone_in_loop_allows_diverging_returns_iterator_clones_and_field_ownership_while_flagging_redundant_loop_clones() {
+    let src = r#"
+use std::collections::{HashMap, HashSet};
+
+pub struct Item {
+    pub id: String,
+    pub url: String,
+    pub name: String,
+}
+
+pub struct OutputRecord {
+    pub id: String,
+    pub label: String,
+}
+
+pub fn find_first_matching_url(items: &[Item], target_id: &str) -> Result<Option<String>, String> {
+    for item in items {
+        if item.id == target_id {
+            return Ok(Some(item.url.clone()));
+        }
+    }
+    Ok(None)
+}
+
+pub fn strip_trailing_commas(line: &str) -> usize {
+    let mut it = line.chars().peekable();
+    let mut total = 0usize;
+    while let Some(c) = it.next() {
+        if c == ',' {
+            total += it.clone().take_while(|ch| ch.is_whitespace()).count();
+        }
+    }
+    total
+}
+
+pub fn build_owned_records_and_maps(
+    borrowed: &[Item],
+    pairs: &[(String, String)],
+    subject_name: Option<String>,
+) -> (Vec<OutputRecord>, HashMap<String, String>, HashSet<String>) {
+    let mut out = Vec::with_capacity(borrowed.len());
+    let mut seen = HashSet::new();
+    for item in borrowed {
+        seen.insert(item.id.clone());
+        out.push(OutputRecord {
+            id: item.id.clone(),
+            label: subject_name.clone().unwrap_or_else(|| item.name.clone()),
+        });
+    }
+
+    let mut map = HashMap::new();
+    for (k, v) in pairs {
+        map.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+
+    (out, map, seen)
+}
+
+pub fn bad_clone_patterns(
+    items: &[Item],
+    shared_prefix: String,
+    used_pairs: &HashSet<(usize, String)>,
+) -> Vec<Item> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        // 1. Direct whole-item clone into collection
+        out.push(item.clone());
+        // 2. Unconditional local clone binding before guard
+        let local_copy = item.name.clone();
+        if local_copy.len() > 3 {
+            let _ = &local_copy;
+        }
+        // 3. Loop-invariant outer heap variable cloned on every iteration without ownership sink
+        let _prefix = shared_prefix.clone();
+        // 4. Cloning field just to query HashSet::contains
+        if used_pairs.contains(&(0, item.name.clone())) {
+            let _ = &item.id;
+        }
+    }
+    out
+}
+"#;
+    let diags = analyze_source(
+        Path::new("src/clone_refinement.rs"),
+        src,
+        Some(&[RuleId::RsPerfNoCloneInLoop]),
+    );
+    let targets: Vec<&str> = diags.iter().map(|d| d.target_name.as_str()).collect();
+    assert_eq!(
+        targets,
+        vec![
+            "item.clone()",
+            "item.name.clone()",
+            "shared_prefix.clone()",
+            "item.name.clone()",
+        ],
+        "Expected only the 4 genuine hot-loop heap clones in `bad_clone_patterns` to be flagged, got: {diags:#?}"
+    );
+}
+
+#[test]
 fn autofix_rewrites_std_thread_sleep_to_tokio_time_sleep_await() {
     let source = r#"use std::time::Duration;
 

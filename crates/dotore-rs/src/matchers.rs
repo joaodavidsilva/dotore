@@ -614,6 +614,20 @@ pub(crate) fn is_cheap_clone_type(ty: &Type) -> bool {
                     | "Span"
                     | "Channel"
                     | "Router"
+                    | "Chars"
+                    | "CharIndices"
+                    | "Bytes"
+                    | "Peekable"
+                    | "SourceLoc"
+                    | "ByteSpan"
+                    | "RuleId"
+                    | "ConcernBucket"
+                    | "SymbolKind"
+                    | "PrescriptionTier"
+                    | "RuleCategory"
+                    | "RuleSeverity"
+                    | "LanguageId"
+                    | "FileContext"
             )
         }),
         _ => false,
@@ -646,6 +660,19 @@ pub(crate) fn is_cheap_clone_ctor(expr: &Expr) -> bool {
                     || full.ends_with("Rc::clone")
                     || full.ends_with("Client::new")
                     || full.starts_with("Duration::");
+            }
+            false
+        }
+        Expr::MethodCall(mc) => {
+            let method = mc.method.to_string();
+            if matches!(method.as_str(), "chars" | "char_indices" | "bytes") {
+                return true;
+            }
+            if matches!(
+                method.as_str(),
+                "peekable" | "fuse" | "enumerate" | "copied" | "cloned"
+            ) {
+                return is_cheap_clone_ctor(&mc.receiver);
             }
             false
         }
