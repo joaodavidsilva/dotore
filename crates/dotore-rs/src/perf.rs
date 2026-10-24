@@ -276,6 +276,9 @@ impl PerfVisitor<'_> {
                 }
             }
             Stmt::Expr(Expr::ForLoop(for_loop), _) => {
+                if is_unsized_loop_iterator(&for_loop.expr) {
+                    return;
+                }
                 let mut pushed_vars = Vec::new();
                 collect_unconditional_pushed_vecs(&for_loop.body, &mut pushed_vars);
                 for vec_name in pushed_vars {
@@ -581,8 +584,83 @@ fn is_empty_vec_init(expr: &Expr) -> bool {
     }
 }
 
+fn is_unsized_loop_iterator(expr: &Expr) -> bool {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; inspects method call chains for unsized/filter iterators"
+    )]
+    match expr {
+        Expr::Paren(p) => is_unsized_loop_iterator(&p.expr),
+        Expr::Group(g) => is_unsized_loop_iterator(&g.expr),
+        Expr::Reference(r) => is_unsized_loop_iterator(&r.expr),
+        Expr::MethodCall(mc) => {
+            let method = mc.method.to_string();
+            if matches!(
+                method.as_str(),
+                "ancestors"
+                    | "split"
+                    | "split_whitespace"
+                    | "split_ascii_whitespace"
+                    | "split_terminator"
+                    | "split_inclusive"
+                    | "rsplit"
+                    | "lines"
+                    | "chars"
+                    | "char_indices"
+                    | "filter"
+                    | "filter_map"
+                    | "flat_map"
+                    | "flatten"
+                    | "take_while"
+                    | "skip_while"
+            ) {
+                return true;
+            }
+            is_unsized_loop_iterator(&mc.receiver)
+        }
+        _ => false,
+    }
+}
+
+struct LoopControlFlowChecker {
+    has_continue: bool,
+    has_break: bool,
+}
+
+impl<'ast> Visit<'ast> for LoopControlFlowChecker {
+    fn visit_expr_for_loop(&mut self, _i: &'ast ExprForLoop) {}
+    fn visit_expr_while(&mut self, _i: &'ast ExprWhile) {}
+    fn visit_expr_loop(&mut self, _i: &'ast ExprLoop) {}
+    fn visit_expr_closure(&mut self, _i: &'ast syn::ExprClosure) {}
+    fn visit_item(&mut self, _i: &'ast syn::Item) {}
+
+    fn visit_expr_continue(&mut self, _i: &'ast syn::ExprContinue) {
+        self.has_continue = true;
+    }
+
+    fn visit_expr_break(&mut self, _i: &'ast syn::ExprBreak) {
+        self.has_break = true;
+    }
+}
+
+fn stmt_has_continue_or_break(stmt: &Stmt) -> (bool, bool) {
+    let mut checker = LoopControlFlowChecker {
+        has_continue: false,
+        has_break: false,
+    };
+    checker.visit_stmt(stmt);
+    (checker.has_continue, checker.has_break)
+}
+
 fn collect_unconditional_pushed_vecs(block: &Block, out: &mut Vec<String>) {
+    if block.stmts.iter().any(|s| stmt_has_continue_or_break(s).1) {
+        return;
+    }
     for stmt in &block.stmts {
+        let (has_continue, has_break) = stmt_has_continue_or_break(stmt);
+        if has_continue || has_break {
+            break;
+        }
         if let Stmt::Expr(expr, _) = stmt
             && let Expr::MethodCall(mc) = expr
             && mc.method == "push"
