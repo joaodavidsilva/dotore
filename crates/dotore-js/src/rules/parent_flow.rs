@@ -2,6 +2,7 @@
 
 use crate::{
     ir::{FileIr, SubjectIr, SubjectKind},
+    matchers::make_diag_for_subject,
     rules::types::{Diagnostic, PrescriptionTier, RuleId},
 };
 
@@ -50,23 +51,20 @@ pub(crate) fn check_no_event_handler(
                     ],
                 )
             };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoEventHandler,
-                category: RuleId::NoEventHandler.metadata().category,
-                severity: RuleId::NoEventHandler.metadata().default_severity,
-                message_id,
-                tier,
-                target_name: guard.identifier_name.clone(),
-                message,
-                docs_url: RuleId::NoEventHandler.docs_url(),
-                loc: guard.loc,
-                span: guard.span,
-                cascade_steps,
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoEventHandler,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    message_id,
+                    guard.identifier_name.clone(),
+                    message,
+                    guard.loc,
+                    guard.span,
+                )
+                .with_tier(tier)
+                .with_cascade_steps(cascade_steps),
+            );
         }
     }
 }
@@ -104,27 +102,24 @@ pub(crate) fn check_no_pass_live_state_to_parent(
                     ),
                 ),
             };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoPassLiveStateToParent,
-                category: RuleId::NoPassLiveStateToParent.metadata().category,
-                severity: RuleId::NoPassLiveStateToParent.metadata().default_severity,
-                message_id,
-                tier: PrescriptionTier::Refactor,
-                target_name: target_name.clone(),
-                message,
-                docs_url: RuleId::NoPassLiveStateToParent.docs_url(),
-                loc: call.loc,
-                span: call.call_span,
-                cascade_steps: vec![
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoPassLiveStateToParent,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    message_id,
+                    target_name.clone(),
+                    message,
+                    call.loc,
+                    call.call_span,
+                )
+                .with_tier(PrescriptionTier::Refactor)
+                .with_cascade_steps(vec![
                     format!("Render #1 updates local state ({target_name})"),
                     format!("useEffect runs -> calls prop `{}`", call.prop_name),
                     "Parent re-renders and cascades back down".to_string(),
-                ],
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+                ]),
+            );
         }
     }
 }
@@ -162,27 +157,24 @@ pub(crate) fn check_no_pass_data_to_parent(
                     ),
                 ),
             };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoPassDataToParent,
-                category: RuleId::NoPassDataToParent.metadata().category,
-                severity: RuleId::NoPassDataToParent.metadata().default_severity,
-                message_id,
-                tier: PrescriptionTier::Refactor,
-                target_name: target_name.clone(),
-                message,
-                docs_url: RuleId::NoPassDataToParent.docs_url(),
-                loc: call.loc,
-                span: call.call_span,
-                cascade_steps: vec![
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoPassDataToParent,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    message_id,
+                    target_name.clone(),
+                    message,
+                    call.loc,
+                    call.call_span,
+                )
+                .with_tier(PrescriptionTier::Refactor)
+                .with_cascade_steps(vec![
                     format!("Render #1 receives data ({target_name})"),
                     format!("useEffect runs -> calls prop `{}`", call.prop_name),
                     "Parent re-renders with passed data".to_string(),
-                ],
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+                ]),
+            );
         }
     }
 }

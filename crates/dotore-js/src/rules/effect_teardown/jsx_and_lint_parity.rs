@@ -28,10 +28,10 @@ use crate::{
         },
     },
     matchers::{
-        is_component_name, is_custom_hook_name, is_global_ident, is_react_hook_callee,
-        resolve_ident_symbol, span_to_byte_span,
+        is_component_name, is_custom_hook_name, is_global_ident, is_hook_name,
+        is_react_hook_callee, resolve_ident_symbol, span_to_byte_span,
     },
-    rules::types::{AutofixPatch, ByteEdit, RuleId},
+    rules::types::{AutofixPatch, RuleId},
 };
 
 use super::{
@@ -222,8 +222,7 @@ fn check_hook_import_rename(
     if imported == local {
         return;
     }
-    let is_imported_hook = is_custom_hook_name(imported) || imported == "use";
-    if !is_imported_hook {
+    if !is_hook_name(imported) {
         return;
     }
     let loses_prefix = !is_custom_hook_name(local);
@@ -960,14 +959,11 @@ fn check_jsx_element_rules(
             } else {
                 format!("<{tag_name} {} />", kept_attrs.join(" "))
             };
-            let autofix = Some(AutofixPatch {
-                description: format!("Remove children from void element `<{tag_name} />`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: span_to_byte_span(jsx_el.span),
-                    replacement,
-                }],
-            });
+            let autofix = Some(AutofixPatch::replace(
+                format!("Remove children from void element `<{tag_name} />`"),
+                span_to_byte_span(jsx_el.span),
+                replacement,
+            ));
             push_site_with_fix(
                 sites,
                 RuleId::VoidDomElementsNoChildren,
@@ -1128,16 +1124,13 @@ fn check_jsx_opening_attributes(
                         _ => None,
                     };
                     if let Some((bool_val, val_span)) = str_bool {
-                        let autofix = Some(AutofixPatch {
-                            description: format!(
+                        let autofix = Some(AutofixPatch::replace(
+                            format!(
                                 "Replace string `{attr_name}=\"{bool_val}\"` with boolean `{attr_name}={{{bool_val}}}`"
                             ),
-                            edits: vec![ByteEdit {
-                                file: None,
-                                span: span_to_byte_span(val_span),
-                                replacement: format!("{{{bool_val}}}"),
-                            }],
-                        });
+                            span_to_byte_span(val_span),
+                            format!("{{{bool_val}}}"),
+                        ));
                         push_site_with_fix(
                             sites,
                             RuleId::NoStringFalseOnBooleanAttribute,
@@ -1179,14 +1172,11 @@ fn check_jsx_opening_attributes(
                     && let Some(val_str) = s.value.as_str()
                     && let Some(rounded) = round_svg_precision_string(val_str)
                 {
-                    let autofix = Some(AutofixPatch {
-                        description: format!("Round `{attr_name}` coordinates to at most 2 decimal places"),
-                        edits: vec![ByteEdit {
-                            file: None,
-                            span: span_to_byte_span(s.span),
-                            replacement: format!("\"{rounded}\""),
-                        }],
-                    });
+                    let autofix = Some(AutofixPatch::replace(
+                        format!("Round `{attr_name}` coordinates to at most 2 decimal places"),
+                        span_to_byte_span(s.span),
+                        format!("\"{rounded}\""),
+                    ));
                     push_site_with_fix(
                         sites,
                         RuleId::RenderingSvgPrecision,

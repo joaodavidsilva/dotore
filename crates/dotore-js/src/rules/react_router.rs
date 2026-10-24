@@ -21,11 +21,13 @@ use oxc_semantic::{NodeId, Semantic};
 use oxc_span::Span;
 
 use crate::{
-    ir::{react_ast::extract_callee_short_name, types::SemanticRuleSite},
+    ir::{react_ast::callee_name, types::SemanticRuleSite},
     matchers::{
         find_jsx_attr, get_object_prop as matcher_get_object_prop,
-        get_object_prop_bool as matcher_get_object_prop_bool, jsx_attr_string_value,
-        push_semantic_site_with_fix,
+        get_object_prop_bool as matcher_get_object_prop_bool,
+        get_object_prop_static_str as matcher_get_object_prop_static_str,
+        has_jsx_attr as matcher_has_jsx_attr, jsx_attr_expr as matcher_jsx_attr_expr,
+        jsx_attr_string_value, push_semantic_site_with_fix,
     },
     rules::{AutofixPatch, RuleId},
 };
@@ -237,7 +239,7 @@ pub(crate) fn get_object_prop_static_str(
     obj: &ObjectExpression<'_>,
     name: &str,
 ) -> Option<String> {
-    get_object_prop_static_str_with_span(obj, name).map(|(s, _)| s)
+    matcher_get_object_prop_static_str(obj, name).map(str::to_string)
 }
 
 pub(crate) fn get_object_prop_static_str_with_span(
@@ -325,28 +327,14 @@ pub(crate) fn get_jsx_attr_static_str(
 }
 
 pub(crate) fn has_jsx_attr(opening: &JSXOpeningElement<'_>, attr_name: &str) -> bool {
-    find_jsx_attr(&opening.attributes, attr_name).is_some()
+    matcher_has_jsx_attr(&opening.attributes, attr_name)
 }
 
 pub(crate) fn get_jsx_attr_expr<'a>(
     opening: &'a JSXOpeningElement<'a>,
     attr_name: &str,
 ) -> Option<&'a Expression<'a>> {
-    for item in &opening.attributes {
-        let JSXAttributeItem::Attribute(attr) = item else {
-            continue;
-        };
-        let JSXAttributeName::Identifier(id) = &attr.name else {
-            continue;
-        };
-        if id.name != attr_name {
-            continue;
-        }
-        if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value {
-            return c.expression.as_expression();
-        }
-    }
-    None
+    matcher_jsx_attr_expr(&opening.attributes, attr_name)
 }
 
 pub(crate) fn has_jsx_truthy_attr(opening: &JSXOpeningElement<'_>, attr_name: &str) -> bool {
@@ -467,9 +455,7 @@ pub(crate) fn find_member_call_in_expr(
 pub(crate) fn expr_calls_function(expr: &Expression<'_>, fn_name: &str) -> bool {
     match expr.without_parentheses() {
         Expression::AwaitExpression(aw) => expr_calls_function(&aw.argument, fn_name),
-        Expression::CallExpression(call) => {
-            extract_callee_short_name(&call.callee) == Some(fn_name)
-        }
+        Expression::CallExpression(call) => callee_name(&call.callee) == Some(fn_name),
         _ => false,
     }
 }

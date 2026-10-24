@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// React re-render, hydration, bundle size, and motion performance rules (`422..=487`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     // --- Ticket 08 rules ---
     rule_meta(
         RuleId::RerenderMemoWithDefaultValue,

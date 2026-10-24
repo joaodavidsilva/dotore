@@ -281,14 +281,14 @@ fn build_cross_file_prop_reset_autofix(
         });
     }
 
-    Some(AutofixPatch {
-        description: format!(
+    Some(
+        AutofixPatch::new(format!(
             "Pass `key={{{}}}` at {} caller site(s) of `<{subject_name} />` and remove state-reset useEffect",
             diag.target_name,
             diag.caller_sites.len()
-        ),
-        edits,
-    })
+        ))
+        .with_edits(edits),
+    )
 }
 
 fn extract_caller_key_injection(

@@ -22,7 +22,7 @@ use crate::{
     ir::{
         ByteSpan, SemanticRuleSite, SubjectIr, SubjectKind, loc_from_line_starts,
     },
-    rules::{AutofixPatch, ByteEdit, RuleId},
+    rules::{AutofixPatch, RuleId},
 };
 
 /// Extracts Angular `@Component`, `@Directive`, `@Injectable`, and `@Pipe` classes as [`SubjectIr`]s
@@ -433,18 +433,14 @@ fn check_component_decorator_metadata(
                 has_change_detection = true;
                 if !expr_is_on_push(&prop.value) {
                     let val_span = prop.value.span();
-                    let patch = AutofixPatch {
-                        description: "Set `changeDetection: ChangeDetectionStrategy.OnPush`"
-                            .to_string(),
-                        edits: vec![ByteEdit {
-                            file: None,
-                            span: ByteSpan {
-                                start: val_span.start,
-                                end: val_span.end,
-                            },
-                            replacement: "ChangeDetectionStrategy.OnPush".to_string(),
-                        }],
-                    };
+                    let patch = AutofixPatch::replace(
+                        "Set `changeDetection: ChangeDetectionStrategy.OnPush`",
+                        ByteSpan {
+                            start: val_span.start,
+                            end: val_span.end,
+                        },
+                        "ChangeDetectionStrategy.OnPush",
+                    );
                     push_angular_site(
                         sites,
                         RuleId::AngularPreferOnPushChangeDetection,
@@ -505,17 +501,14 @@ fn build_insert_on_push_patch(obj: &ObjectExpression<'_>, source: &str) -> Autof
         "Add `changeDetection: ChangeDetectionStrategy.OnPush` to `@Component` metadata"
             .to_string();
     let Some(last_prop) = obj.properties.last() else {
-        return AutofixPatch {
+        return AutofixPatch::replace(
             description,
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: obj.span.start,
-                    end: obj.span.end,
-                },
-                replacement: "{ changeDetection: ChangeDetectionStrategy.OnPush }".to_string(),
-            }],
-        };
+            ByteSpan {
+                start: obj.span.start,
+                end: obj.span.end,
+            },
+            "{ changeDetection: ChangeDetectionStrategy.OnPush }",
+        );
     };
 
     let last_span = last_prop.span();
@@ -535,60 +528,32 @@ fn build_insert_on_push_patch(obj: &ObjectExpression<'_>, source: &str) -> Autof
         if has_trailing_comma {
             let comma_rel = trailing.find(',').unwrap_or(0);
             let insert_pos = last_span.end + (comma_rel as u32) + 1;
-            AutofixPatch {
+            AutofixPatch::insert(
                 description,
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: insert_pos,
-                        end: insert_pos,
-                    },
-                    replacement: format!(
-                        "\n{indent_str}changeDetection: ChangeDetectionStrategy.OnPush,"
-                    ),
-                }],
-            }
+                insert_pos,
+                format!("\n{indent_str}changeDetection: ChangeDetectionStrategy.OnPush,"),
+            )
         } else {
-            AutofixPatch {
+            AutofixPatch::insert(
                 description,
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: ByteSpan {
-                        start: last_span.end,
-                        end: last_span.end,
-                    },
-                    replacement: format!(
-                        ",\n{indent_str}changeDetection: ChangeDetectionStrategy.OnPush"
-                    ),
-                }],
-            }
+                last_span.end,
+                format!(",\n{indent_str}changeDetection: ChangeDetectionStrategy.OnPush"),
+            )
         }
     } else if has_trailing_comma {
         let comma_rel = trailing.find(',').unwrap_or(0);
         let insert_pos = last_span.end + (comma_rel as u32) + 1;
-        AutofixPatch {
+        AutofixPatch::insert(
             description,
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: insert_pos,
-                    end: insert_pos,
-                },
-                replacement: " changeDetection: ChangeDetectionStrategy.OnPush".to_string(),
-            }],
-        }
+            insert_pos,
+            " changeDetection: ChangeDetectionStrategy.OnPush",
+        )
     } else {
-        AutofixPatch {
+        AutofixPatch::insert(
             description,
-            edits: vec![ByteEdit {
-                file: None,
-                span: ByteSpan {
-                    start: last_span.end,
-                    end: last_span.end,
-                },
-                replacement: ", changeDetection: ChangeDetectionStrategy.OnPush".to_string(),
-            }],
-        }
+            last_span.end,
+            ", changeDetection: ChangeDetectionStrategy.OnPush",
+        )
     }
 }
 

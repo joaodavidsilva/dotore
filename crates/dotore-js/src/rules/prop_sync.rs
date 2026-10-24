@@ -3,6 +3,7 @@
 use crate::{
     graph::ProjectGraph,
     ir::{DepRef, DepsSpec, EffectNode, FileIr, SubjectIr, SubjectKind},
+    matchers::make_diag_for_subject,
     rules::types::{Diagnostic, PrescriptionTier, RuleId},
 };
 
@@ -28,29 +29,27 @@ pub(crate) fn check_no_reset_all_state_on_prop_change(
             .as_deref()
             .map_or_else(Vec::new, |name| graph.callers_of(&file.path, name));
 
-        out.push(Diagnostic {
-            file: file.path.clone(),
-            subject_name: subject.name.clone(),
-            rule: RuleId::NoResetAllStateOnPropChange,
-            category: RuleId::NoResetAllStateOnPropChange.metadata().category,
-            severity: RuleId::NoResetAllStateOnPropChange.metadata().default_severity,
-            message_id: "avoidResettingAllStateWhenAPropChanges",
-            tier: PrescriptionTier::Refactor,
-            target_name: prop_name.to_string(),
-            message: format!(
-                "Avoid resetting all state when a prop changes. If {prop_name:?} is a key, pass it as `key` on the component instead so React will reset the component."
-            ),
-            docs_url: RuleId::NoResetAllStateOnPropChange.docs_url(),
-            loc: effect.loc,
-            span: effect.call_span,
-            cascade_steps: vec![
+        out.push(
+            make_diag_for_subject(
+                RuleId::NoResetAllStateOnPropChange,
+                file.path.clone(),
+                subject.name.clone(),
+                "avoidResettingAllStateWhenAPropChanges",
+                prop_name.to_string(),
+                format!(
+                    "Avoid resetting all state when a prop changes. If {prop_name:?} is a key, pass it as `key` on the component instead so React will reset the component."
+                ),
+                effect.loc,
+                effect.call_span,
+            )
+            .with_tier(PrescriptionTier::Refactor)
+            .with_cascade_steps(vec![
                 format!("Prop {prop_name:?} changes -> Render #1 with stale state"),
                 "useEffect resets all state slots to initial values".to_string(),
                 "Render #2 with reset state (pass `key` at caller instead)".to_string(),
-            ],
-            caller_sites,
-            autofix: None,
-        });
+            ])
+            .with_caller_sites(caller_sites),
+        );
     }
 }
 
@@ -75,33 +74,30 @@ pub(crate) fn check_no_adjust_state_on_prop_change(
             if call.arg_reads_prop {
                 continue;
             }
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoAdjustStateOnPropChange,
-                category: RuleId::NoAdjustStateOnPropChange.metadata().category,
-                severity: RuleId::NoAdjustStateOnPropChange.metadata().default_severity,
-                message_id: "avoidAdjustingStateWhenAPropChanges",
-                tier: PrescriptionTier::Refactor,
-                target_name: call.state_name.clone(),
-                message: format!(
-                    "Avoid adjusting state when a prop changes. Instead, adjust {:?} directly during render when {props_label} changes, or store a stable identifier in state.",
-                    call.state_name
-                ),
-                docs_url: RuleId::NoAdjustStateOnPropChange.docs_url(),
-                loc: call.loc,
-                span: call.call_span,
-                cascade_steps: vec![
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoAdjustStateOnPropChange,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    "avoidAdjustingStateWhenAPropChanges",
+                    call.state_name.clone(),
+                    format!(
+                        "Avoid adjusting state when a prop changes. Instead, adjust {:?} directly during render when {props_label} changes, or store a stable identifier in state.",
+                        call.state_name
+                    ),
+                    call.loc,
+                    call.call_span,
+                )
+                .with_tier(PrescriptionTier::Refactor)
+                .with_cascade_steps(vec![
                     format!(
                         "Render #1 (prop {props_label} changes, {:?} is stale)",
                         call.state_name
                     ),
                     format!("useEffect runs -> adjusts {:?}", call.state_name),
                     format!("Render #2 (re-renders with adjusted {:?})", call.state_name),
-                ],
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+                ]),
+            );
         }
     }
 }

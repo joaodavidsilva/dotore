@@ -21,6 +21,7 @@ use crate::{
         ByteSpan, SourceLoc,
         types::{compute_line_starts, loc_from_line_starts},
     },
+    matchers::make_diag_for_subject,
     rules::types::{Diagnostic, RuleId, RuleSeverity},
 };
 
@@ -142,99 +143,81 @@ fn check_pnpm_hardening(
     } else {
         root_dir.join(PNPM_WORKSPACE_FILE)
     };
-    let meta = RuleId::RequirePnpmHardening.metadata();
-
     if settings.minimum_release_age.is_none() {
-        out.push(Diagnostic {
-            file: file_path.clone(),
-            subject_name: None,
-            rule: RuleId::RequirePnpmHardening,
-            category: meta.category,
-            severity,
-            message_id: "requirePnpmHardening",
-            tier: meta.default_tier,
-            target_name: "minimumReleaseAge".to_string(),
-            message: format!(
-                "pnpm-workspace.yaml is missing `minimumReleaseAge` — newly published versions can ship malware that gets caught and unpublished within hours. Add `minimumReleaseAge: {RECOMMENDED_PNPM_MINIMUM_RELEASE_AGE_MINUTES}`."
-            ),
-            docs_url: meta.docs_url,
-            loc: SourceLoc { line: 1, column: 1 },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        out.push(
+            make_diag_for_subject(
+                RuleId::RequirePnpmHardening,
+                file_path.clone(),
+                None,
+                "requirePnpmHardening",
+                "minimumReleaseAge",
+                format!(
+                    "pnpm-workspace.yaml is missing `minimumReleaseAge` — newly published versions can ship malware that gets caught and unpublished within hours. Add `minimumReleaseAge: {RECOMMENDED_PNPM_MINIMUM_RELEASE_AGE_MINUTES}`."
+                ),
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(severity),
+        );
     }
 
     if let Some(exotic) = &settings.block_exotic_subdeps
         && exotic.value.eq_ignore_ascii_case("false")
     {
-        out.push(Diagnostic {
-            file: file_path.clone(),
-            subject_name: None,
-            rule: RuleId::RequirePnpmHardening,
-            category: meta.category,
-            severity,
-            message_id: "requirePnpmHardening",
-            tier: meta.default_tier,
-            target_name: "blockExoticSubdeps".to_string(),
-            message: "`blockExoticSubdeps: false` allows transitive deps from `git:`, `file:`, or tarball URLs — a known supply-chain bypass of the npm registry".to_string(),
-            docs_url: meta.docs_url,
-            loc: SourceLoc {
-                line: exotic.line,
-                column: exotic.column,
-            },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        out.push(
+            make_diag_for_subject(
+                RuleId::RequirePnpmHardening,
+                file_path.clone(),
+                None,
+                "requirePnpmHardening",
+                "blockExoticSubdeps",
+                "`blockExoticSubdeps: false` allows transitive deps from `git:`, `file:`, or tarball URLs — a known supply-chain bypass of the npm registry",
+                SourceLoc {
+                    line: exotic.line,
+                    column: exotic.column,
+                },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(severity),
+        );
     }
 
     match &settings.trust_policy {
         None => {
-            out.push(Diagnostic {
-                file: file_path,
-                subject_name: None,
-                rule: RuleId::RequirePnpmHardening,
-                category: meta.category,
-                severity,
-                message_id: "requirePnpmHardening",
-                tier: meta.default_tier,
-                target_name: "trustPolicy".to_string(),
-                message: "pnpm-workspace.yaml is missing `trustPolicy` — without `no-downgrade`, pnpm silently accepts packages whose trust signals (provenance, signatures) weaken between updates".to_string(),
-                docs_url: meta.docs_url,
-                loc: SourceLoc { line: 1, column: 1 },
-                span: ByteSpan { start: 0, end: 0 },
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    RuleId::RequirePnpmHardening,
+                    file_path,
+                    None,
+                    "requirePnpmHardening",
+                    "trustPolicy",
+                    "pnpm-workspace.yaml is missing `trustPolicy` — without `no-downgrade`, pnpm silently accepts packages whose trust signals (provenance, signatures) weaken between updates",
+                    SourceLoc { line: 1, column: 1 },
+                    ByteSpan { start: 0, end: 0 },
+                )
+                .with_severity(severity),
+            );
         }
         Some(tp) if tp.value != "no-downgrade" => {
-            out.push(Diagnostic {
-                file: file_path,
-                subject_name: None,
-                rule: RuleId::RequirePnpmHardening,
-                category: meta.category,
-                severity,
-                message_id: "requirePnpmHardening",
-                tier: meta.default_tier,
-                target_name: "trustPolicy".to_string(),
-                message: format!(
-                    "`trustPolicy: {}` is weaker than `no-downgrade` — packages may lose trust signals between updates without you noticing",
-                    tp.value
-                ),
-                docs_url: meta.docs_url,
-                loc: SourceLoc {
-                    line: tp.line,
-                    column: tp.column,
-                },
-                span: ByteSpan { start: 0, end: 0 },
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    RuleId::RequirePnpmHardening,
+                    file_path,
+                    None,
+                    "requirePnpmHardening",
+                    "trustPolicy",
+                    format!(
+                        "`trustPolicy: {}` is weaker than `no-downgrade` — packages may lose trust signals between updates without you noticing",
+                        tp.value
+                    ),
+                    SourceLoc {
+                        line: tp.line,
+                        column: tp.column,
+                    },
+                    ByteSpan { start: 0, end: 0 },
+                )
+                .with_severity(severity),
+            );
         }
         Some(_) => {}
     }
@@ -419,50 +402,40 @@ fn evaluate_react_server_dom_advisory(
     };
     let installed_display = format!("{package_name}@{version}");
     let line_display = format!("{}.{}", ver_tuple.0, ver_tuple.1);
-    let meta = RuleId::NoVulnerableReactServerComponents.metadata();
-
     if ver_tuple < rce_tuple {
-        return vec![Diagnostic {
-            file: pkg_json_path.to_path_buf(),
-            subject_name: None,
-            rule: RuleId::NoVulnerableReactServerComponents,
-            category: meta.category,
-            severity: RuleSeverity::Error,
-            message_id: "vulnerableReactServerComponents",
-            tier: meta.default_tier,
-            target_name: installed_display.clone(),
-            message: format!(
-                "{installed_display} has the critical React Server Components remote code execution vulnerability (CVE-2025-55182, CVSS 10.0) — an unauthenticated attacker can run arbitrary code on your server by sending a crafted payload to any Server Function endpoint. Upgrade to {latest_safe} within {line_display}. See {REACT_BLOG_RSC_ADVISORY_URL}"
-            ),
-            docs_url: meta.docs_url,
-            loc: SourceLoc { line: 1, column: 1 },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        }];
+        return vec![
+            make_diag_for_subject(
+                RuleId::NoVulnerableReactServerComponents,
+                pkg_json_path.to_path_buf(),
+                None,
+                "vulnerableReactServerComponents",
+                installed_display.clone(),
+                format!(
+                    "{installed_display} has the critical React Server Components remote code execution vulnerability (CVE-2025-55182, CVSS 10.0) — an unauthenticated attacker can run arbitrary code on your server by sending a crafted payload to any Server Function endpoint. Upgrade to {latest_safe} within {line_display}. See {REACT_BLOG_RSC_ADVISORY_URL}"
+                ),
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(RuleSeverity::Error),
+        ];
     }
 
     if ver_tuple < safe_tuple {
-        return vec![Diagnostic {
-            file: pkg_json_path.to_path_buf(),
-            subject_name: None,
-            rule: RuleId::NoVulnerableReactServerComponents,
-            category: meta.category,
-            severity: RuleSeverity::Warning,
-            message_id: "vulnerableReactServerComponents",
-            tier: meta.default_tier,
-            target_name: installed_display.clone(),
-            message: format!(
-                "{installed_display} is affected by a high-severity React Server Components denial-of-service vulnerability (CVE-2026-23870) patched in {latest_safe}. Upgrade to {latest_safe} within {line_display}. See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
-            ),
-            docs_url: meta.docs_url,
-            loc: SourceLoc { line: 1, column: 1 },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        }];
+        return vec![
+            make_diag_for_subject(
+                RuleId::NoVulnerableReactServerComponents,
+                pkg_json_path.to_path_buf(),
+                None,
+                "vulnerableReactServerComponents",
+                installed_display.clone(),
+                format!(
+                    "{installed_display} is affected by a high-severity React Server Components denial-of-service vulnerability (CVE-2026-23870) patched in {latest_safe}. Upgrade to {latest_safe} within {line_display}. See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
+                ),
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(RuleSeverity::Warning),
+        ];
     }
 
     Vec::new()
@@ -477,7 +450,7 @@ fn evaluate_nextjs_rsc_advisory(pkg_json_path: &Path, version: &str) -> Vec<Diag
         return Vec::new();
     }
     let installed_display = format!("next@{version}");
-    let meta = RuleId::NoVulnerableReactServerComponents.metadata();
+    let _ = RuleId::NoVulnerableReactServerComponents;
 
     let latest_safe = match major {
         15 => Some("15.5.18"),
@@ -489,25 +462,21 @@ fn evaluate_nextjs_rsc_advisory(pkg_json_path: &Path, version: &str) -> Vec<Diag
         if major >= 15 {
             return Vec::new();
         }
-        return vec![Diagnostic {
-            file: pkg_json_path.to_path_buf(),
-            subject_name: None,
-            rule: RuleId::NoVulnerableReactServerComponents,
-            category: meta.category,
-            severity: RuleSeverity::Warning,
-            message_id: "vulnerableReactServerComponents",
-            tier: meta.default_tier,
-            target_name: installed_display.clone(),
-            message: format!(
-                "{installed_display} is on an unsupported Next.js release line affected by the React Server Components security advisories — there is no patched {major}.x release. Upgrade to a patched Next.js release ({NEXTJS_SUPPORTED_UPGRADE_TARGETS}). Next.js bundles its own React Server Components runtime. See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
-            ),
-            docs_url: meta.docs_url,
-            loc: SourceLoc { line: 1, column: 1 },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        }];
+        return vec![
+            make_diag_for_subject(
+                RuleId::NoVulnerableReactServerComponents,
+                pkg_json_path.to_path_buf(),
+                None,
+                "vulnerableReactServerComponents",
+                installed_display.clone(),
+                format!(
+                    "{installed_display} is on an unsupported Next.js release line affected by the React Server Components security advisories — there is no patched {major}.x release. Upgrade to a patched Next.js release ({NEXTJS_SUPPORTED_UPGRADE_TARGETS}). Next.js bundles its own React Server Components runtime. See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
+                ),
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(RuleSeverity::Warning),
+        ];
     };
 
     let rce_fixed = match (major, ver_tuple.1) {
@@ -525,49 +494,41 @@ fn evaluate_nextjs_rsc_advisory(pkg_json_path: &Path, version: &str) -> Vec<Diag
         && let Some(rce_tuple) = parse_semver(rce_str)
         && ver_tuple < rce_tuple
     {
-        return vec![Diagnostic {
-            file: pkg_json_path.to_path_buf(),
-            subject_name: None,
-            rule: RuleId::NoVulnerableReactServerComponents,
-            category: meta.category,
-            severity: RuleSeverity::Error,
-            message_id: "vulnerableReactServerComponents",
-            tier: meta.default_tier,
-            target_name: installed_display.clone(),
-            message: format!(
-                "{installed_display} bundles the React Server Components runtime affected by the critical remote code execution vulnerability (CVE-2025-55182, CVSS 10.0) — an unauthenticated attacker can run arbitrary code on your server by sending a crafted payload to any Server Function or Server Action endpoint. Upgrade Next.js to next@{latest_safe_ver} (bundles its own React Server Components runtime). See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
-            ),
-            docs_url: meta.docs_url,
-            loc: SourceLoc { line: 1, column: 1 },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        }];
+        return vec![
+            make_diag_for_subject(
+                RuleId::NoVulnerableReactServerComponents,
+                pkg_json_path.to_path_buf(),
+                None,
+                "vulnerableReactServerComponents",
+                installed_display.clone(),
+                format!(
+                    "{installed_display} bundles the React Server Components runtime affected by the critical remote code execution vulnerability (CVE-2025-55182, CVSS 10.0) — an unauthenticated attacker can run arbitrary code on your server by sending a crafted payload to any Server Function or Server Action endpoint. Upgrade Next.js to next@{latest_safe_ver} (bundles its own React Server Components runtime). See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
+                ),
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(RuleSeverity::Error),
+        ];
     }
 
     if let Some(safe_tuple) = parse_semver(latest_safe_ver)
         && ver_tuple < safe_tuple
     {
-        return vec![Diagnostic {
-            file: pkg_json_path.to_path_buf(),
-            subject_name: None,
-            rule: RuleId::NoVulnerableReactServerComponents,
-            category: meta.category,
-            severity: RuleSeverity::Warning,
-            message_id: "vulnerableReactServerComponents",
-            tier: meta.default_tier,
-            target_name: installed_display.clone(),
-            message: format!(
-                "{installed_display} bundles a React Server Components runtime affected by a high-severity denial-of-service vulnerability (CVE-2026-23870) patched in Next.js next@{latest_safe_ver}. See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
-            ),
-            docs_url: meta.docs_url,
-            loc: SourceLoc { line: 1, column: 1 },
-            span: ByteSpan { start: 0, end: 0 },
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        }];
+        return vec![
+            make_diag_for_subject(
+                RuleId::NoVulnerableReactServerComponents,
+                pkg_json_path.to_path_buf(),
+                None,
+                "vulnerableReactServerComponents",
+                installed_display.clone(),
+                format!(
+                    "{installed_display} bundles a React Server Components runtime affected by a high-severity denial-of-service vulnerability (CVE-2026-23870) patched in Next.js next@{latest_safe_ver}. See {VERCEL_NEXTJS_SECURITY_RELEASE_URL}"
+                ),
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan { start: 0, end: 0 },
+            )
+            .with_severity(RuleSeverity::Warning),
+        ];
     }
 
     Vec::new()
@@ -749,27 +710,21 @@ fn check_supply_chain_scores(
             &package_page_url,
             min_score,
         );
-        let meta = RuleId::LowSupplyChainScore.metadata();
-
-        out.push(Diagnostic {
-            file: pkg_json_path.clone(),
-            subject_name: None,
-            rule: RuleId::LowSupplyChainScore,
-            category: meta.category,
-            severity: effective_sev,
-            message_id: "lowSupplyChainScore",
-            tier: meta.default_tier,
-            target_name: dep.name.clone(),
-            message: format!(
-                "`{identity}` scored {failing_score}/100 on Socket's {failing_axis_label} axis (minimum {min_score}). {reason} Other axes — {other_axes}. {help}"
-            ),
-            docs_url: meta.docs_url,
-            loc: dep.loc,
-            span: dep.span,
-            cascade_steps: Vec::new(),
-            caller_sites: Vec::new(),
-            autofix: None,
-        });
+        out.push(
+            make_diag_for_subject(
+                RuleId::LowSupplyChainScore,
+                pkg_json_path.clone(),
+                None,
+                "lowSupplyChainScore",
+                dep.name.clone(),
+                format!(
+                    "`{identity}` scored {failing_score}/100 on Socket's {failing_axis_label} axis (minimum {min_score}). {reason} Other axes — {other_axes}. {help}"
+                ),
+                dep.loc,
+                dep.span,
+            )
+            .with_severity(effective_sev),
+        );
     }
 }
 

@@ -22,14 +22,8 @@ use dom_and_client::{
 };
 use injection_and_baas::evaluate_security_scan_patterns;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "Re-exported pub(crate) security entrypoint consumed by unit tests"
-    )
-)]
-pub(crate) use dom_and_client::find_suspicious_public_env_in_line;
+#[cfg(test)]
+use dom_and_client::find_suspicious_public_env_in_line;
 
 /// Evaluates all `security` and `security-scan` rules on `file` using `graph` for cross-file resolution.
 pub(crate) fn evaluate_security_rules<F>(

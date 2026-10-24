@@ -2,6 +2,7 @@
 
 use crate::{
     ir::{FileIr, SubjectIr},
+    matchers::make_diag_for_subject,
     rules::types::{Diagnostic, PrescriptionTier, RuleId},
 };
 
@@ -12,33 +13,30 @@ pub(crate) fn check_no_external_store_subscription(
 ) {
     for effect in &subject.effect_nodes {
         for site in &effect.external_store_sites {
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoExternalStoreSubscription,
-                category: RuleId::NoExternalStoreSubscription.metadata().category,
-                severity: RuleId::NoExternalStoreSubscription.metadata().default_severity,
-                message_id: "avoidExternalStoreSubscription",
-                tier: PrescriptionTier::Surgical,
-                target_name: site.state_name.clone(),
-                message: format!(
-                    "Prefer \"useSyncExternalStore\" over \"useState\" + \"useEffect\" to subscribe {:?} to an external store.",
-                    site.state_name
-                ),
-                docs_url: RuleId::NoExternalStoreSubscription.docs_url(),
-                loc: site.loc,
-                span: site.span,
-                cascade_steps: vec![
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoExternalStoreSubscription,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    "avoidExternalStoreSubscription",
+                    site.state_name.clone(),
+                    format!(
+                        "Prefer \"useSyncExternalStore\" over \"useState\" + \"useEffect\" to subscribe {:?} to an external store.",
+                        site.state_name
+                    ),
+                    site.loc,
+                    site.span,
+                )
+                .with_tier(PrescriptionTier::Surgical)
+                .with_cascade_steps(vec![
                     format!("Render #1 with initial {:?} value", site.state_name),
                     format!(
                         "useEffect subscribes to store and synchronously sets {:?}",
                         site.state_name
                     ),
                     "Render #2 (risk of tearing before subscription attaches)".to_string(),
-                ],
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+                ]),
+            );
         }
     }
 }
@@ -86,23 +84,20 @@ pub(crate) fn check_no_fetch_in_effect(
                     ],
                 )
             };
-            out.push(Diagnostic {
-                file: file.path.clone(),
-                subject_name: subject.name.clone(),
-                rule: RuleId::NoFetchInEffect,
-                category: RuleId::NoFetchInEffect.metadata().category,
-                severity: RuleId::NoFetchInEffect.metadata().default_severity,
-                message_id,
-                tier,
-                target_name: site.state_name.clone(),
-                message,
-                docs_url: RuleId::NoFetchInEffect.docs_url(),
-                loc: site.loc,
-                span: site.span,
-                cascade_steps,
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    RuleId::NoFetchInEffect,
+                    file.path.clone(),
+                    subject.name.clone(),
+                    message_id,
+                    site.state_name.clone(),
+                    message,
+                    site.loc,
+                    site.span,
+                )
+                .with_tier(tier)
+                .with_cascade_steps(cascade_steps),
+            );
         }
     }
 }

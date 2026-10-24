@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
     AstKind,
-    ast::{JSXAttribute, JSXAttributeItem, JSXElement, JSXOpeningElement},
+    ast::{JSXAttribute, JSXElement, JSXOpeningElement},
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 
@@ -35,7 +35,7 @@ use crate::{
         ByteSpan, SourceLoc,
         types::{SemanticRuleSite, loc_from_line_starts},
     },
-    matchers::{find_attr_ignore_case, get_attr_static_str, get_jsx_tag_name},
+    matchers::{find_jsx_attr_ignore_case, get_attr_static_str, get_jsx_tag_name, jsx_has_spread_attr},
     rules::RuleId,
 };
 
@@ -122,10 +122,7 @@ pub(super) fn check_jsx_element_a11y(
     let opening = &jsx_el.opening_element;
     let tag = get_jsx_tag_name(&opening.name);
     let is_html = HTML_TAGS.contains(&tag.as_str());
-    let has_spread = opening
-        .attributes
-        .iter()
-        .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)));
+    let has_spread = jsx_has_spread_attr(&opening.attributes);
 
     // 1. `alt-text`
     check_alt_text(jsx_el, &tag, subject_name, loc, span, sites);
@@ -334,7 +331,7 @@ fn check_element_core_aria_rules(
 
     // 3. `aria-role`
     if is_html
-        && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
     {
         let roles: Vec<&str> = role_str.split_whitespace().collect();
@@ -357,7 +354,7 @@ fn check_element_core_aria_rules(
 
     // 4. `no-redundant-roles`
     if is_html
-        && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
         && let Some(first_role) = role_str.split_whitespace().next()
         && !matches!((tag, first_role), ("ul" | "ol", "list"))
@@ -382,10 +379,10 @@ fn check_element_core_aria_rules(
     }
 
     // 5. `aria-activedescendant-has-tabindex`
-    if is_html && find_attr_ignore_case(&opening.attributes, "aria-activedescendant").is_some() {
+    if is_html && find_jsx_attr_ignore_case(&opening.attributes, "aria-activedescendant").is_some() {
         let tab_idx =
-            find_attr_ignore_case(&opening.attributes, "tabIndex").and_then(parse_attr_number);
-        let tab_ok = match find_attr_ignore_case(&opening.attributes, "tabIndex") {
+            find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").and_then(parse_attr_number);
+        let tab_ok = match find_jsx_attr_ignore_case(&opening.attributes, "tabIndex") {
             Some(_) => tab_idx.is_none_or(|v| v >= -1.0),
             None => {
                 is_interactive_element(tag, opening, semantic, const_strings)
@@ -430,7 +427,7 @@ fn check_element_core_aria_rules(
             && !has_accessible_child(jsx_el)
             && !["aria-label", "aria-labelledby", "alt", "title"]
                 .iter()
-                .any(|a| find_attr_ignore_case(&opening.attributes, a).is_some())
+                .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some())
         {
             push_site(
                 sites,
@@ -464,13 +461,13 @@ fn check_element_role_transition_rules(
     if is_html
         && NON_INTERACTIVE_ELEMENTS.contains(&tag)
         && !is_interactive_element(tag, opening, semantic, const_strings)
-        && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
         && let Some(first_role) = role_str.split_whitespace().next()
         && INTERACTIVE_ROLES.contains(&first_role)
         && !is_allowed_interactive_role_on_noninteractive(tag, first_role)
         && !(first_role == "separator"
-            && find_attr_ignore_case(&opening.attributes, "tabIndex").is_none())
+            && find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_none())
     {
         push_site(
             sites,
@@ -492,7 +489,7 @@ fn check_element_role_transition_rules(
     // 12. `no-interactive-element-to-noninteractive-role`
     if is_html
         && (tag == "input" || is_interactive_element(tag, opening, semantic, const_strings))
-        && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
         && let Some(first_role) = role_str.split_whitespace().next()
         && (NON_INTERACTIVE_ROLES.contains(&first_role)
@@ -530,7 +527,7 @@ fn check_aria_hidden_and_prefer_tag(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     // 30. `no-aria-hidden-on-focusable` & `no-aria-hidden-on-body`
-    if let Some(ah_attr) = find_attr_ignore_case(&opening.attributes, "aria-hidden")
+    if let Some(ah_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-hidden")
         && is_attr_statically_true_or_true_str(ah_attr)
     {
         if tag == "body" {
@@ -566,7 +563,7 @@ fn check_aria_hidden_and_prefer_tag(
 
     // 31. `prefer-tag-over-role`
     if matches!(tag, "div" | "span")
-        && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
         && let Some(first_role) = role_str.split_whitespace().next()
         && let Some(preferred_tag) = preferred_html_tag_for_role(first_role)
@@ -606,7 +603,7 @@ pub(super) fn check_role_aria_props(
     if !is_html {
         return;
     }
-    let explicit_role = find_attr_ignore_case(&opening.attributes, "role")
+    let explicit_role = find_jsx_attr_ignore_case(&opening.attributes, "role")
         .and_then(|a| get_attr_static_str(semantic, a, const_strings))
         .and_then(|s| s.split_whitespace().next().map(str::to_string));
 
@@ -624,14 +621,14 @@ pub(super) fn check_role_aria_props(
         };
         let mut missing = Vec::new();
         for &req in required {
-            if find_attr_ignore_case(&opening.attributes, req).is_none()
+            if find_jsx_attr_ignore_case(&opening.attributes, req).is_none()
                 && !supplies_native_aria_prop(tag, opening, req, semantic, const_strings)
             {
                 missing.push(req);
             }
         }
         if !missing.is_empty()
-            && let Some(role_attr) = find_attr_ignore_case(&opening.attributes, "role")
+            && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
         {
             push_site(
                 sites,
@@ -726,7 +723,7 @@ pub(super) fn check_custom_aria_and_role_rules(
                 span,
             );
         }
-        let is_aria_modal = find_attr_ignore_case(&opening.attributes, "aria-modal")
+        let is_aria_modal = find_jsx_attr_ignore_case(&opening.attributes, "aria-modal")
             .is_some_and(is_attr_statically_true_or_true_str);
         if tag != "dialog" && (is_dialog_role || is_aria_modal) {
             push_site(
@@ -743,7 +740,7 @@ pub(super) fn check_custom_aria_and_role_rules(
     }
 
     // 6. `no-uninformative-aria-label`
-    if let Some(al_attr) = find_attr_ignore_case(&opening.attributes, "aria-label")
+    if let Some(al_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-label")
         && let Some(al_val) = get_attr_static_str(semantic, al_attr, const_strings)
         && UNINFORMATIVE_ARIA_LABELS.contains(&al_val.trim().to_ascii_lowercase().as_str())
     {
@@ -766,7 +763,7 @@ pub(super) fn check_custom_aria_and_role_rules(
     // 10. `no-assertive-status`
     if is_html
         && first_role == Some("status")
-        && let Some(live_attr) = find_attr_ignore_case(&opening.attributes, "aria-live")
+        && let Some(live_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-live")
         && get_attr_static_str(semantic, live_attr, const_strings)
             .is_some_and(|v| v.eq_ignore_ascii_case("assertive"))
     {
@@ -788,10 +785,10 @@ pub(super) fn check_custom_aria_and_role_rules(
     // 11. `no-aria-invalid-without-description`
     if matches!(tag, "input" | "select" | "textarea")
         && !has_spread
-        && let Some(inv_attr) = find_attr_ignore_case(&opening.attributes, "aria-invalid")
+        && let Some(inv_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-invalid")
         && !is_attr_statically_false(inv_attr)
-        && find_attr_ignore_case(&opening.attributes, "aria-describedby").is_none()
-        && find_attr_ignore_case(&opening.attributes, "aria-errormessage").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "aria-describedby").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "aria-errormessage").is_none()
     {
         push_site(
             sites,
@@ -811,11 +808,11 @@ pub(super) fn check_custom_aria_and_role_rules(
     // 12. `no-invalid-progress-range`
     if !has_spread {
         if tag == "progress" {
-            let max_val = find_attr_ignore_case(&opening.attributes, "max")
+            let max_val = find_jsx_attr_ignore_case(&opening.attributes, "max")
                 .and_then(parse_attr_number)
                 .unwrap_or(1.0);
             let val_opt =
-                find_attr_ignore_case(&opening.attributes, "value").and_then(parse_attr_number);
+                find_jsx_attr_ignore_case(&opening.attributes, "value").and_then(parse_attr_number);
             if max_val <= 0.0 || val_opt.is_some_and(|v| v < 0.0 || v > max_val) {
                 push_site(
                     sites,
@@ -829,13 +826,13 @@ pub(super) fn check_custom_aria_and_role_rules(
                 );
             }
         } else if first_role == Some("progressbar") {
-            let min_val = find_attr_ignore_case(&opening.attributes, "aria-valuemin")
+            let min_val = find_jsx_attr_ignore_case(&opening.attributes, "aria-valuemin")
                 .and_then(parse_attr_number)
                 .unwrap_or(0.0);
-            let max_val = find_attr_ignore_case(&opening.attributes, "aria-valuemax")
+            let max_val = find_jsx_attr_ignore_case(&opening.attributes, "aria-valuemax")
                 .and_then(parse_attr_number)
                 .unwrap_or(100.0);
-            let now_opt = find_attr_ignore_case(&opening.attributes, "aria-valuenow")
+            let now_opt = find_jsx_attr_ignore_case(&opening.attributes, "aria-valuenow")
                 .and_then(parse_attr_number);
             if min_val >= max_val || now_opt.is_some_and(|v| v < min_val || v > max_val) {
                 push_site(
@@ -871,7 +868,7 @@ pub(super) fn check_custom_aria_and_role_rules(
     if is_html {
         let is_pres = matches!(first_role, Some("none" | "presentation"))
             || (tag == "img"
-                && find_attr_ignore_case(&opening.attributes, "alt")
+                && find_jsx_attr_ignore_case(&opening.attributes, "alt")
                     .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                     .as_deref()
                     == Some(""));

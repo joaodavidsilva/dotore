@@ -21,7 +21,7 @@ use crate::{
         RuleSeverityOverride, RuleTag, rule_registry,
     },
     scanner::collect_source_files_for_analyzers,
-    ui::FlowDiagram,
+    ui::{AsciiBox, Badge, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FlowDiagram},
 };
 
 /// Parsed `<file>:<line>` (and optional `:<column>`) argument for `dotore why`.
@@ -363,92 +363,89 @@ pub fn format_why_report_text(report: &WhyReport) -> String {
         return out;
     }
 
+    let mode = ColorMode::Plain;
     for entry in &report.entries {
-        let _ = writeln!(
-            out,
-            "[{}] {} ({}, tier: {}, category: {})",
-            entry.status,
-            entry.rule,
-            entry.severity.as_str(),
-            entry.tier.as_str(),
-            entry.category.as_str()
+        let sev_badge = Badge::severity(entry.severity).render(mode);
+        let tier_badge = Badge::tier(entry.tier).render(mode);
+        let br_badge = Badge::blast_radius(entry.blast_radius.tier).render(mode);
+        let mut entry_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH).with_title(
+            format!(
+                "[{}] {} ({} {}, tier: {}, category: {})",
+                entry.status,
+                entry.rule,
+                sev_badge,
+                entry.severity.as_str(),
+                tier_badge,
+                entry.category.as_str()
+            ),
         );
-        let _ = writeln!(out, "  Message:     {}", entry.message);
-        let _ = writeln!(out, "  Explanation: {}", entry.explanation);
-        let _ = writeln!(
-            out,
-            "  Blast Radius: {} (score: {}, frequency: {}, fan-out: {}, cascade depth: {})",
-            entry.blast_radius.tier.as_str(),
+        entry_box.add_open_row(format!("  Message:     {}", entry.message));
+        entry_box.add_open_row(format!("  Explanation: {}", entry.explanation));
+        entry_box.add_open_row(format!(
+            "  Blast Radius: {br_badge} (score: {}, frequency: {}, fan-out: {}, cascade depth: {})",
             entry.blast_radius.score,
             entry.blast_radius.render_frequency.as_str(),
             entry.blast_radius.fan_out,
             entry.blast_radius.cascade_depth
-        );
+        ));
         if !entry.cascade_steps.is_empty() {
-            let _ = writeln!(
-                out,
-                "  Cascade:     {}",
-                FlowDiagram::new(&entry.cascade_steps).render_arrow_chain()
-            );
+            let flow = FlowDiagram::new(&entry.cascade_steps);
+            entry_box.add_open_row(format!("  Cascade:     {}", flow.render_arrow_chain()));
+            entry_box.add_open_row(format!("  Flow:        {}", flow.render(mode)));
         }
         if !entry.code_frame.is_empty() {
-            let _ = writeln!(out, "\n  Code Frame:");
+            entry_box.add_titled_divider("Code Frame");
             for line in entry.code_frame.lines() {
-                let _ = writeln!(out, "    {line}");
+                entry_box.add_open_row(format!("    {line}"));
             }
         }
-        let _ = writeln!(
-            out,
-            "\n  Fix Capsule ({}):",
+        entry_box.add_titled_divider(format!(
+            "Fix Capsule ({})",
             entry.fix_capsule.root_cause_group_id
-        );
-        let _ = writeln!(
-            out,
+        ));
+        entry_box.add_open_row(format!(
             "    Subject Excerpt ({}:{}-{}):",
             entry.fix_capsule.subject_excerpt.file.display(),
             entry.fix_capsule.subject_excerpt.start_line,
             entry.fix_capsule.subject_excerpt.end_line
-        );
+        ));
         for line in entry.fix_capsule.subject_excerpt.source.lines() {
-            let _ = writeln!(out, "      {line}");
+            entry_box.add_open_row(format!("      {line}"));
         }
         if !entry.fix_capsule.caller_site_excerpts.is_empty() {
-            let _ = writeln!(out, "    Caller Site Excerpts:");
+            entry_box.add_open_row("    Caller Site Excerpts:");
             for caller in &entry.fix_capsule.caller_site_excerpts {
-                let _ = writeln!(
-                    out,
+                entry_box.add_open_row(format!(
                     "      {}:{}-{}: {}",
                     caller.file.display(),
                     caller.start_line,
                     caller.end_line,
                     caller.source.trim()
-                );
+                ));
             }
         }
-        let _ = writeln!(
-            out,
-            "    Recipe:\n      {}",
-            entry.fix_capsule.recipe_markdown
-        );
+        entry_box.add_open_row("    Recipe:");
+        for line in entry.fix_capsule.recipe_markdown.lines() {
+            entry_box.add_open_row(format!("      {line}"));
+        }
         if !entry.fix_capsule.invariants.is_empty() {
-            let _ = writeln!(
-                out,
+            entry_box.add_open_row(format!(
                 "    Invariants: {}",
                 entry.fix_capsule.invariants.join("; ")
-            );
+            ));
         }
         if let Some(ex) = &entry.fix_capsule.exemplar {
-            let _ = writeln!(
-                out,
+            entry_box.add_open_row(format!(
                 "    Repository Exemplar ({}:{}-{}):",
                 ex.file.display(),
                 ex.start_line,
                 ex.end_line
-            );
+            ));
             for line in ex.source.lines() {
-                let _ = writeln!(out, "      {line}");
+                entry_box.add_open_row(format!("      {line}"));
             }
         }
+        out.push_str(&entry_box.render(mode));
         let _ = writeln!(out);
     }
     out

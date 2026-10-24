@@ -62,13 +62,6 @@ pub(crate) fn span_to_loc_and_byte_span(line_starts: &[u32], span: Span) -> (Sou
 /// Constructs a [`Diagnostic`] for `rule` using `Diagnostic::for_rule` from `dotore-core`,
 /// populating default category, severity, tier, docs URL, and setting `target_name` to `rule.as_str()`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn make_diag(
     rule: RuleId,
     file: impl Into<PathBuf>,
@@ -81,13 +74,6 @@ pub(crate) fn make_diag(
 
 /// Constructs a [`Diagnostic`] for `rule` from an [`oxc_span::Span`] and `line_starts`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn make_diag_at_offset(
     rule: RuleId,
     file: impl Into<PathBuf>,
@@ -122,13 +108,6 @@ pub(crate) fn make_diag_for_subject(
 
 /// Constructs an `Autofix`-tier [`Diagnostic`] with the given [`AutofixPatch`].
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn make_autofix_diag(
     rule: RuleId,
     file: impl Into<PathBuf>,
@@ -285,21 +264,8 @@ pub(crate) fn callee_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
     }
 }
 
-/// Alias for [`callee_name`].
-#[must_use]
-pub(crate) fn extract_callee_short_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
-    callee_name(callee)
-}
-
 /// Extracts `(receiver_object, property_name)` from a static or string-literal computed member expression.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn member_call_parts<'a>(
     expr: &'a Expression<'a>,
 ) -> Option<(&'a Expression<'a>, &'a str)> {
@@ -321,13 +287,6 @@ pub(crate) fn member_call_parts<'a>(
 
 /// Returns `true` if `name` follows React's hook naming convention (`use` or `use<Uppercase>...`).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_hook_name(name: &str) -> bool {
     name == "use" || is_custom_hook_name(name)
 }
@@ -431,26 +390,12 @@ pub(crate) fn is_use_effect_call(semantic: &Semantic<'_>, call: &CallExpression<
 
 /// Checks if `call` invokes `hook_name` either directly (`hook_name(...)`) or as `<Obj>.<hook_name>(...)`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_named_hook_call(call: &CallExpression<'_>, hook_name: &str) -> bool {
     callee_name(&call.callee) == Some(hook_name)
 }
 
 /// Checks if `call` is one of the standard React hooks accepting a dependency array (`useEffect`, `useLayoutEffect`, `useMemo`, `useCallback`).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_hook_with_deps_call(semantic: &Semantic<'_>, call: &CallExpression<'_>) -> bool {
     ["useEffect", "useLayoutEffect", "useMemo", "useCallback"]
         .iter()
@@ -589,24 +534,9 @@ pub(crate) fn find_jsx_attr_ignore_case<'a, 'b>(
     })
 }
 
-/// Alias for [`find_jsx_attr_ignore_case`].
-#[must_use]
-pub(crate) fn find_attr_ignore_case<'a, 'b>(
-    attrs: &'b [JSXAttributeItem<'a>],
-    target: &str,
-) -> Option<&'b JSXAttribute<'a>> {
-    find_jsx_attr_ignore_case(attrs, target)
-}
 
 /// Returns `true` if `attrs` contains an attribute named `target`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn has_jsx_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool {
     find_jsx_attr(attrs, target).is_some()
 }
@@ -630,13 +560,6 @@ pub(crate) fn has_jsx_truthy_attr(attrs: &[JSXAttributeItem<'_>], target: &str) 
 
 /// Returns `true` if `attrs` contains any `{...spread}` attribute.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn jsx_has_spread_attr(attrs: &[JSXAttributeItem<'_>]) -> bool {
     attrs
         .iter()
@@ -665,13 +588,6 @@ pub(crate) fn jsx_attr_string_value<'a>(attr: &'a JSXAttribute<'a>) -> Option<&'
 
 /// Extracts the unwrapped [`Expression`] inside `attr={expr}` for attribute `target`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn jsx_attr_expr<'a, 'b>(
     attrs: &'b [JSXAttributeItem<'a>],
     target: &str,
@@ -847,13 +763,6 @@ pub(crate) fn get_object_prop<'a, 'b>(
 
 /// Extracts a static string value for property `key_name` on `obj`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn get_object_prop_static_str<'a>(
     obj: &'a ObjectExpression<'a>,
     key_name: &str,
@@ -948,13 +857,6 @@ pub(crate) fn has_import_from(program: &Program<'_>, allowed_sources: &[&str]) -
 
 /// Collects all local identifier names imported from any module in `allowed_sources`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn imported_local_names_from(
     program: &Program<'_>,
     allowed_sources: &[&str],
@@ -1008,13 +910,6 @@ pub(crate) fn resolve_import_source(semantic: &Semantic<'_>, sym_id: SymbolId) -
 
 /// Returns `true` if `ident` resolves to an import binding from any module in `allowed_sources`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_identifier_from_package(
     semantic: &Semantic<'_>,
     ident: &IdentifierReference<'_>,
@@ -1031,13 +926,6 @@ pub(crate) fn is_identifier_from_package(
 
 /// Returns `true` if `sym_id` is a named import `imported_name` from any module in `allowed_sources`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_named_import_from(
     semantic: &Semantic<'_>,
     sym_id: SymbolId,
@@ -1057,13 +945,6 @@ pub(crate) fn is_named_import_from(
 
 /// Returns `true` if `sym_id` is a namespace import (`import * as ns`) from any module in `allowed_sources`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn is_namespace_import_from(
     semantic: &Semantic<'_>,
     sym_id: SymbolId,
@@ -1135,7 +1016,7 @@ export function Counter() {
                     saw_use_effect = true;
                 }
                 if is_named_hook_call(call, "useMemo")
-                    && extract_callee_short_name(&call.callee) == Some("useMemo")
+                    && callee_name(&call.callee) == Some("useMemo")
                 {
                     saw_named_memo = true;
                 }
@@ -1205,7 +1086,7 @@ export function Card(props: any) {
                 assert!(has_jsx_attr(&opening.attributes, "id"));
                 assert!(has_jsx_truthy_attr(&opening.attributes, "disabled"));
                 assert!(jsx_has_spread_attr(&opening.attributes));
-                assert!(find_attr_ignore_case(&opening.attributes, "ARIA-LABEL").is_some());
+                assert!(find_jsx_attr_ignore_case(&opening.attributes, "ARIA-LABEL").is_some());
                 assert!(find_last_attr(&opening.attributes, "id").is_some());
 
                 let id_attr = find_attr(&opening.attributes, "id").expect("id attr");

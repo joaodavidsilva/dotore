@@ -34,7 +34,7 @@ use crate::{
         },
         types::loc_from_line_starts,
     },
-    rules::types::{AutofixPatch, ByteEdit, RuleId},
+    rules::types::{AutofixPatch, RuleId},
 };
 
 const SIDE_EFFECT_CALLEE_PREFIXES: &[&str] = &[
@@ -331,17 +331,14 @@ fn check_lazy_state_init(
         end: init_call.span.end,
     };
     let loc = loc_from_line_starts(line_starts, init_call.span.start);
-    let patch = AutofixPatch {
-        description: format!("Wrap `useState` initializer in `() => {arg_text}`"),
-        edits: vec![ByteEdit {
-            file: None,
-            span: ByteSpan {
-                start: arg_span.start,
-                end: arg_span.end,
-            },
-            replacement: format!("() => {arg_text}"),
-        }],
-    };
+    let patch = AutofixPatch::replace(
+        format!("Wrap `useState` initializer in `() => {arg_text}`"),
+        ByteSpan {
+            start: arg_span.start,
+            end: arg_span.end,
+        },
+        format!("() => {arg_text}"),
+    );
     sites.push(SemanticRuleSite {
         rule: RuleId::RerenderLazyStateInit,
         subject_name: subj_name.clone(),

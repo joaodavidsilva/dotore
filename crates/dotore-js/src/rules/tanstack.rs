@@ -26,7 +26,7 @@ use crate::{
         react_ast::{find_enclosing_react_node, get_subject_name, is_use_effect_call},
         types::SemanticRuleSite,
     },
-    matchers::unwrap_expr,
+    matchers::{member_call_parts, unwrap_expr},
 };
 
 use self::{
@@ -419,18 +419,17 @@ pub(crate) fn is_tanstack_query_source(src: &str) -> bool {
 pub(crate) fn static_member_prop_name<'a>(
     expr: &'a Expression<'a>,
 ) -> Option<(&'a Expression<'a>, &'a str)> {
-    match unwrap_expr(expr) {
-        Expression::StaticMemberExpression(mem) => Some((&mem.object, mem.property.name.as_str())),
-        Expression::ComputedMemberExpression(comp) => match unwrap_expr(&comp.expression) {
-            Expression::StringLiteral(lit) => Some((&comp.object, lit.value.as_str()?)),
-            Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
-                let raw = tpl.quasis.first()?.value.raw.as_str();
-                Some((&comp.object, raw))
-            }
-            _ => None,
-        },
-        _ => None,
+    if let Some(parts) = member_call_parts(expr) {
+        return Some(parts);
     }
+    if let Expression::ComputedMemberExpression(comp) = unwrap_expr(expr)
+        && let Expression::TemplateLiteral(tpl) = unwrap_expr(&comp.expression)
+        && tpl.expressions.is_empty()
+    {
+        let raw = tpl.quasis.first()?.value.raw.as_str();
+        return Some((&comp.object, raw));
+    }
+    None
 }
 
 pub(crate) fn is_identifier_shadowed_by_local(

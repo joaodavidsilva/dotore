@@ -32,7 +32,7 @@ use crate::{
         is_global_ident, push_semantic_site, push_semantic_site_with_fix, resolve_ident_symbol,
         span_to_byte_span, unwrap_expr,
     },
-    rules::{AutofixPatch, ByteEdit, RuleId},
+    rules::{AutofixPatch, RuleId},
 };
 
 // ---------------------------------------------------------------------------
@@ -263,17 +263,15 @@ pub(super) fn check_no_json_parse_stringify_clone(
             .and_then(Argument::as_expression)
             .is_some_and(|r| !matches!(unwrap_expr(r), Expression::NullLiteral(_)));
 
-    let autofix =
-        (!has_custom_replacer_or_reviver && !cloned_text.is_empty()).then(|| AutofixPatch {
-            description: format!(
+    let autofix = (!has_custom_replacer_or_reviver && !cloned_text.is_empty()).then(|| {
+        AutofixPatch::replace(
+            format!(
                 "Replace `JSON.parse(JSON.stringify(...))` with `structuredClone({cloned_text})`"
             ),
-            edits: vec![ByteEdit {
-                file: None,
-                span,
-                replacement: format!("structuredClone({cloned_text})"),
-            }],
-        });
+            span,
+            format!("structuredClone({cloned_text})"),
+        )
+    });
 
     let subject_name =
         find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
@@ -1226,14 +1224,11 @@ pub(super) fn check_js_tosorted_immutable(
         .get(mem.property.span.end as usize..call.span.end as usize)
         .unwrap_or("()");
     let replacement = format!("{recv_text}.{immutable_method}{args_text}");
-    let patch = AutofixPatch {
-        description: format!("Replace copy + `.{method}()` with `.{immutable_method}()`"),
-        edits: vec![ByteEdit {
-            file: None,
-            span: span_to_byte_span(call.span),
-            replacement,
-        }],
-    };
+    let patch = AutofixPatch::replace(
+        format!("Replace copy + `.{method}()` with `.{immutable_method}()`"),
+        span_to_byte_span(call.span),
+        replacement,
+    );
     let subject_name =
         find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
     push_semantic_site_with_fix(

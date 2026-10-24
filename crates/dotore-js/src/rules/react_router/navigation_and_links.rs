@@ -35,11 +35,11 @@ use super::{
 use crate::{
     ir::{
         react_ast::{
-            extract_callee_short_name, find_enclosing_react_node, get_subject_name,
-            is_direct_render_phase_node,
+            callee_name, find_enclosing_react_node, get_subject_name, is_direct_render_phase_node,
         },
         types::SemanticRuleSite,
     },
+    matchers::is_named_hook_call,
     rules::RuleId,
 };
 
@@ -58,7 +58,7 @@ pub(crate) fn check_call_expression_rules(
     blocker_calls_by_subject: &mut HashMap<NodeId, Vec<(Span, Option<String>)>>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let Some(callee_name) = extract_callee_short_name(&call.callee) else {
+    let Some(callee_name) = callee_name(&call.callee) else {
         return;
     };
 
@@ -374,7 +374,7 @@ pub(crate) fn check_transition_navigation_promise(
         if let Statement::ExpressionStatement(expr_stmt) = stmt
             && let Expression::CallExpression(inner_call) =
                 expr_stmt.expression.without_parentheses()
-            && let Some(name) = extract_callee_short_name(&inner_call.callee)
+            && let Some(name) = callee_name(&inner_call.callee)
             && (name == "navigate" || name == "revalidate" || name == "submit")
         {
             push_site(
@@ -417,7 +417,7 @@ pub(crate) fn check_search_params_in_statements(
             let Expression::CallExpression(call) = init.without_parentheses() else {
                 continue;
             };
-            if extract_callee_short_name(&call.callee) != Some("useSearchParams") {
+            if !is_named_hook_call(call, "useSearchParams") {
                 continue;
             }
             if let BindingPattern::ArrayPattern(arr_pat) = &decl.id {
@@ -540,9 +540,7 @@ fn is_inside_client_only_boundary(semantic: &Semantic<'_>, node_id: NodeId) -> b
                     return true;
                 }
             }
-            AstKind::CallExpression(call)
-                if extract_callee_short_name(&call.callee) == Some("useEffect") =>
-            {
+            AstKind::CallExpression(call) if is_named_hook_call(call, "useEffect") => {
                 return true;
             }
             _ => {}

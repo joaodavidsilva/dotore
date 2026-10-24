@@ -13,7 +13,7 @@ use crate::{
         types::{SemanticRuleSite, loc_from_line_starts},
     },
     matchers::{
-        find_attr, find_attr_ignore_case, get_attr_static_str, get_class_name_str,
+        find_attr, find_jsx_attr_ignore_case, get_attr_static_str, get_class_name_str,
         get_jsx_tag_name, get_style_prop_number, get_style_prop_str, subtree_has_tag_matching,
     },
     rules::RuleId,
@@ -112,7 +112,7 @@ pub(super) fn check_extended_design_patterns(
 
     // `no-clipped-overlay`
     if unvariant_tokens.contains(&"absolute")
-        && find_attr_ignore_case(&opening.attributes, "role")
+        && find_jsx_attr_ignore_case(&opening.attributes, "role")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .is_some_and(|r| matches!(r.as_str(), "dialog" | "listbox" | "menu" | "tooltip"))
         && has_ancestor_with_class(semantic, node_id, const_strings, |u| {
@@ -540,8 +540,8 @@ pub(super) fn check_extended_design_patterns(
         && (unvariant_tokens.contains(&"pointer-events-none")
             || get_style_prop_str(opening, "pointerEvents", semantic, const_strings).as_deref()
                 == Some("none"))
-        && find_attr_ignore_case(&opening.attributes, "disabled").is_none()
-        && find_attr_ignore_case(&opening.attributes, "aria-disabled").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "disabled").is_none()
+        && find_jsx_attr_ignore_case(&opening.attributes, "aria-disabled").is_none()
     {
         push_design_site(
             sites,
@@ -577,7 +577,7 @@ pub(super) fn check_extended_design_patterns(
     // `no-redundant-title-tooltip`
     if matches!(tag, "button" | "a" | "summary")
         && !trimmed_text.is_empty()
-        && let Some(title_attr) = find_attr_ignore_case(&opening.attributes, "title")
+        && let Some(title_attr) = find_jsx_attr_ignore_case(&opening.attributes, "title")
         && let Some(title_val) = get_attr_static_str(semantic, title_attr, const_strings)
         && title_val.trim().eq_ignore_ascii_case(trimmed_text)
         && !unvariant_tokens

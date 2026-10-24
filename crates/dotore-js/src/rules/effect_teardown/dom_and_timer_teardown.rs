@@ -21,7 +21,7 @@ use crate::{
         react_ast::{get_effect_cleanup_span, get_effect_fn_node},
     },
     matchers::{is_react_hook_callee, span_to_byte_span},
-    rules::types::{AutofixPatch, ByteEdit, RuleId},
+    rules::types::{AutofixPatch, RuleId},
 };
 
 use super::{OBSERVER_CLASSES, push_site, push_site_with_fix};
@@ -617,16 +617,13 @@ fn check_effect_listener_mismatches(
             let autofix = if rem.target_text == add.target_text
                 && let (Some(add_ev), Some(rem_ev_span)) = (&add.event_type, rem.event_type_span)
             {
-                Some(AutofixPatch {
-                    description: format!(
+                Some(AutofixPatch::replace(
+                    format!(
                         "Change `removeEventListener` event type to `'{add_ev}'` to match `addEventListener`"
                     ),
-                    edits: vec![ByteEdit {
-                        file: None,
-                        span: span_to_byte_span(rem_ev_span),
-                        replacement: format!("'{add_ev}'"),
-                    }],
-                })
+                    span_to_byte_span(rem_ev_span),
+                    format!("'{add_ev}'"),
+                ))
             } else {
                 None
             };

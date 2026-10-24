@@ -351,6 +351,7 @@ pub(crate) fn extract_react_native_sites(
             AstKind::StaticMemberExpression(mem) => {
                 check_rn_platform_namespace_shaking(
                     program,
+                    semantic,
                     mem,
                     &subject_name,
                     line_starts,

@@ -14,6 +14,7 @@ use crate::{
         ByteSpan, FileIr, SourceLoc,
         types::{compute_line_starts, loc_from_line_starts},
     },
+    matchers::{make_diag_at_offset, make_diag_for_subject},
     rules::{
         security::{
             find_function_body_in_source, resolve_imported_binding, split_balanced_parens,
@@ -151,24 +152,16 @@ fn push_srv_diag(
     loc: SourceLoc,
     span: ByteSpan,
 ) {
-    let meta = rule.metadata();
-    out.push(Diagnostic {
-        file: file.path.clone(),
-        subject_name,
+    out.push(make_diag_for_subject(
         rule,
-        category: meta.category,
-        severity: meta.default_severity,
+        file.path.clone(),
+        subject_name,
         message_id,
-        tier: meta.default_tier,
-        target_name: target_name.to_string(),
-        message: message.to_string(),
-        docs_url: meta.docs_url,
+        target_name,
+        message,
         loc,
         span,
-        cascade_steps: Vec::new(),
-        caller_sites: Vec::new(),
-        autofix: None,
-    });
+    ));
 }
 
 fn check_server_auth_actions(
@@ -307,19 +300,16 @@ fn check_server_sequential_independent_await(
                 let line_start = line_starts.get(idx + 1).copied().unwrap_or(0);
                 let byte_start = line_start + u32::try_from(first_non_ws).unwrap_or(0);
                 let byte_end = line_start + u32::try_from(raw_second.len()).unwrap_or(0);
-                push_srv_diag(
-                    out,
-                    file,
-                    None,
-                    RuleId::ServerSequentialIndependentAwait,
-                    "serverSequentialIndependentAwait",
-                    second_awaited,
-                    "This awaited initializer does not read the previous result. If the operations are independent asynchronous work, they may overlap with `Promise.all([...])`.",
-                    loc_from_line_starts(line_starts, byte_start),
-                    ByteSpan {
-                        start: byte_start,
-                        end: byte_end,
-                    },
+                out.push(
+                    make_diag_at_offset(
+                        RuleId::ServerSequentialIndependentAwait,
+                        file.path.clone(),
+                        line_starts,
+                        oxc_span::Span::new(byte_start, byte_end),
+                        "This awaited initializer does not read the previous result. If the operations are independent asynchronous work, they may overlap with `Promise.all([...])`.",
+                    )
+                    .with_message_id("serverSequentialIndependentAwait")
+                    .with_target_name(second_awaited),
                 );
                 idx += 2;
                 continue;

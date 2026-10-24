@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Three.js, WebGL, and React Three Fiber 60fps frame-loop rules (`36..=222`).
-pub const RULES: &[RuleMetadata] = &[
+pub(crate) const RULES: &[RuleMetadata] = &[
     rule_meta(
         RuleId::ThreeNoGeometryInFrameLoop,
         "three-no-geometry-in-frame-loop",

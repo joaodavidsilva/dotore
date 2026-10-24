@@ -17,6 +17,7 @@ use crate::{
         },
         types::{MotionExpressionEvidence, PendingMotionRef, PendingMotionUsage},
     },
+    matchers::make_diag_for_subject,
     rules::{Diagnostic, PrescriptionTier, RuleCategory, RuleId, RuleSeverity},
 };
 
@@ -66,24 +67,21 @@ pub fn evaluate_project_reduced_motion(
                 } else {
                     pkg.root_dir.join("package.json")
                 };
-            let meta = RuleId::RequireReducedMotion.metadata();
-            out.push(Diagnostic {
-                file: pkg_json_path,
-                subject_name: None,
-                rule: RuleId::RequireReducedMotion,
-                category: RuleCategory::Accessibility,
-                severity: effective_sev,
-                message_id: "requireReducedMotion",
-                tier: PrescriptionTier::Surgical,
-                target_name: "prefers-reduced-motion".to_string(),
-                message: "Project uses a motion library but has no prefers-reduced-motion handling — required for accessibility (WCAG 2.3.3)".to_string(),
-                docs_url: meta.docs_url,
-                loc: SourceLoc { line: 1, column: 1 },
-                span: ByteSpan { start: 0, end: 0 },
-                cascade_steps: Vec::new(),
-                caller_sites: Vec::new(),
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    RuleId::RequireReducedMotion,
+                    pkg_json_path,
+                    None,
+                    "requireReducedMotion",
+                    "prefers-reduced-motion",
+                    "Project uses a motion library but has no prefers-reduced-motion handling — required for accessibility (WCAG 2.3.3)",
+                    SourceLoc { line: 1, column: 1 },
+                    ByteSpan { start: 0, end: 0 },
+                )
+                .with_category(RuleCategory::Accessibility)
+                .with_severity(effective_sev)
+                .with_tier(PrescriptionTier::Surgical),
+            );
         }
     }
 }

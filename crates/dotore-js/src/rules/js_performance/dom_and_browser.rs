@@ -26,7 +26,7 @@ use crate::{
         is_global_ident, push_semantic_site, push_semantic_site_with_fix, resolve_ident_symbol,
         span_to_byte_span, unwrap_expr,
     },
-    rules::{AutofixPatch, ByteEdit, RuleId},
+    rules::{AutofixPatch, RuleId},
 };
 
 // ---------------------------------------------------------------------------
@@ -247,14 +247,11 @@ pub(super) fn check_client_passive_event_listeners(
             .map(|s| s.trim_end().trim_end_matches(','))
         {
             let replacement = format!("{before_close}, {{ passive: true }})");
-            autofix = Some(AutofixPatch {
-                description: format!("Add `{{ passive: true }}` to `{event_name}` event listener"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: call_span,
-                    replacement,
-                }],
-            });
+            autofix = Some(AutofixPatch::replace(
+                format!("Add `{{ passive: true }}` to `{event_name}` event listener"),
+                call_span,
+                replacement,
+            ));
         }
     }
 

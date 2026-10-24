@@ -303,7 +303,7 @@ impl AsciiBox {
         self
     }
 
-    /// Appends a titled horizontal divider line (`╠══ TITLE ═══...`).
+    /// Appends a titled horizontal divider line (`╠══ TITLE ═══...═══╣`).
     pub fn add_titled_divider(&mut self, title: impl Into<String>) -> &mut Self {
         self.rows.push(BoxRow::TitledDivider(title.into()));
         self
@@ -319,10 +319,24 @@ impl AsciiBox {
 
         // Top border
         let top_inner = if let Some(title) = &self.title {
-            let prefix = format!("{} {} ", g.horizontal, title);
+            let rendered_title = if mode.is_ansi() {
+                title.clone()
+            } else {
+                strip_ansi_codes(title)
+            };
+            let lead = if self.style == BoxBorderStyle::Double {
+                format!("{}{}", g.horizontal, g.horizontal)
+            } else {
+                g.horizontal.to_string()
+            };
+            let prefix = format!("{lead} {rendered_title} ");
             let prefix_len = visible_char_width(&prefix);
             let rem = self.width.saturating_sub(prefix_len);
-            format!("{prefix}{}", g.horizontal.to_string().repeat(rem))
+            if mode.is_ansi() && !bcol.is_empty() && rendered_title.contains("\x1b[") {
+                format!("{prefix}{bcol}{}", g.horizontal.to_string().repeat(rem))
+            } else {
+                format!("{prefix}{}", g.horizontal.to_string().repeat(rem))
+            }
         } else {
             g.horizontal.to_string().repeat(self.width)
         };
@@ -380,14 +394,26 @@ impl AsciiBox {
                     ));
                 }
                 BoxRow::TitledDivider(title) => {
-                    let prefix = format!("{}{} {} ", g.horizontal, g.horizontal, title);
+                    let rendered_title = if mode.is_ansi() {
+                        title.clone()
+                    } else {
+                        strip_ansi_codes(title)
+                    };
+                    let prefix = format!("{}{} {} ", g.horizontal, g.horizontal, rendered_title);
                     let prefix_len = visible_char_width(&prefix);
                     let rem = self.width.saturating_sub(prefix_len);
                     let horiz = g.horizontal.to_string().repeat(rem);
-                    lines.push(format!(
-                        "{}{bcol}{}{prefix}{horiz}{reset}",
-                        self.indent, g.mid_left
-                    ));
+                    if mode.is_ansi() && !bcol.is_empty() && rendered_title.contains("\x1b[") {
+                        lines.push(format!(
+                            "{}{bcol}{}{prefix}{bcol}{horiz}{}{reset}",
+                            self.indent, g.mid_left, g.mid_right
+                        ));
+                    } else {
+                        lines.push(format!(
+                            "{}{bcol}{}{prefix}{horiz}{}{reset}",
+                            self.indent, g.mid_left, g.mid_right
+                        ));
+                    }
                 }
             }
         }

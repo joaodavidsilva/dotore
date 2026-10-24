@@ -10,6 +10,7 @@ use crate::{
         PrescriptionTier, RuleCategory, RuleId, RuleMetadata, RuleSeverity, RuleSeverityOverride,
         rule_registry,
     },
+    ui::{AsciiBox, Badge, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH},
 };
 
 /// Filter options for `dotore rules list` ([`build_rule_catalog`]).
@@ -163,28 +164,33 @@ pub fn format_rule_catalog_text(entries: &[RuleCatalogEntry]) -> String {
     let mut categories: Vec<&str> = by_category.keys().copied().collect();
     categories.sort_unstable();
 
+    let mode = ColorMode::Plain;
     let mut out = String::new();
     for cat in categories {
         let Some(mut rows) = by_category.remove(cat) else {
             continue;
         };
         rows.sort_by(|a, b| a.key.cmp(&b.key));
-        let _ = writeln!(out, "{cat} ({})", rows.len());
+        let mut cat_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+            .with_title(format!("{cat} ({})", rows.len()));
         for row in rows {
             let tags_suffix = if row.tags.is_empty() {
                 String::new()
             } else {
                 format!("  [{}]", row.tags.join(", "))
             };
-            let _ = writeln!(
-                out,
-                "  {:<6} {} ({}) [tier: {}]{tags_suffix}",
-                row.severity,
-                row.key,
-                row.source,
-                row.tier.as_str()
-            );
+            let sev_badge = match row.severity.as_str() {
+                "error" => Badge::severity(RuleSeverity::Error).render(mode),
+                "warn" => Badge::severity(RuleSeverity::Warning).render(mode),
+                _ => Badge::custom("○ OFF  ", "\x1b[2m").render(mode),
+            };
+            let tier_badge = Badge::tier(row.tier).render(mode);
+            cat_box.add_open_row(format!(
+                "  {sev_badge}  {:<6} {} ({}) [tier: {tier_badge}]{tags_suffix}",
+                row.severity, row.key, row.source
+            ));
         }
+        out.push_str(&cat_box.render(mode));
         let _ = writeln!(out);
     }
     let plural = if entries.len() == 1 { "" } else { "s" };
@@ -195,41 +201,48 @@ pub fn format_rule_catalog_text(entries: &[RuleCatalogEntry]) -> String {
 /// Formats the terminal output for `dotore rules explain <rule>`.
 #[must_use]
 pub fn format_rule_explanation_text(entry: &RuleCatalogEntry) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "{} — {}\n", entry.key, entry.title);
-    let _ = writeln!(out, "  {:<18}{}", "Category", entry.category);
-    let _ = writeln!(
-        out,
-        "  {:<18}{}",
-        "Default severity", entry.default_severity
+    let mode = ColorMode::Plain;
+    let tier_badge = Badge::tier(entry.tier).render(mode);
+    let rule_badge = RuleId::parse(&entry.id).map_or_else(
+        || format!("[{}]", entry.id),
+        |id| Badge::rule(id).render(mode),
     );
-    let _ = writeln!(
-        out,
-        "  {:<18}{} ({})",
-        "Current severity", entry.severity, entry.source
-    );
-    let _ = writeln!(out, "  {:<18}{}", "Prescription Tier", entry.tier.as_str());
-    let _ = writeln!(out, "  {:<18}{}", "Framework", entry.framework);
     let tags_display = if entry.tags.is_empty() {
         "none".to_string()
     } else {
         entry.tags.join(", ")
     };
-    let _ = writeln!(out, "  {:<18}{tags_display}", "Tags");
-    if !entry.aliases.is_empty() {
-        let _ = writeln!(out, "  {:<18}{}", "Aliases", entry.aliases.join(", "));
-    }
     let enabled_display = if entry.default_enabled {
         "yes"
     } else {
         "no (opt-in)"
     };
-    let _ = writeln!(out, "  {:<18}{enabled_display}", "Default enabled");
 
-    let _ = writeln!(out, "\nWhy it matters");
-    for line in entry.rationale.lines() {
-        let _ = writeln!(out, "  {line}");
+    let mut header_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
+        .with_title(format!("{} — {}", entry.key, entry.title));
+    header_box.add_open_row(format!("  {:<18}{} {rule_badge}", "Category", entry.category));
+    header_box.add_open_row(format!("  {:<18}{}", "Default severity", entry.default_severity));
+    header_box.add_open_row(format!(
+        "  {:<18}{} ({})",
+        "Current severity", entry.severity, entry.source
+    ));
+    header_box.add_open_row(format!(
+        "  {:<18}{} {tier_badge}",
+        "Prescription Tier",
+        entry.tier.as_str()
+    ));
+    header_box.add_open_row(format!("  {:<18}{}", "Framework", entry.framework));
+    header_box.add_open_row(format!("  {:<18}{tags_display}", "Tags"));
+    if !entry.aliases.is_empty() {
+        header_box.add_open_row(format!("  {:<18}{}", "Aliases", entry.aliases.join(", ")));
     }
+    header_box.add_open_row(format!("  {:<18}{enabled_display}", "Default enabled"));
+    header_box.add_titled_divider("Why it matters");
+    for line in entry.rationale.lines() {
+        header_box.add_open_row(format!("  {line}"));
+    }
+
+    let mut out = header_box.render(mode);
 
     let _ = writeln!(out, "\nBefore (anti-pattern)");
     for line in entry.before_example.lines() {

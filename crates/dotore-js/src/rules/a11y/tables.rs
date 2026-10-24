@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use oxc_ast::ast::{Expression, JSXAttributeValue, JSXOpeningElement};
 use oxc_semantic::{Semantic, SymbolId};
 
-use crate::matchers::{find_attr_ignore_case, get_attr_static_str};
+use crate::matchers::{find_jsx_attr_ignore_case, get_attr_static_str};
 
 pub(super) const RESERVED_HTML_TAGS: &[&str] = &[
     "base", "col", "colgroup", "head", "html", "link", "meta", "noembed", "noscript", "param",
@@ -606,7 +606,7 @@ pub(super) fn get_implicit_role(
     const_strings: &HashMap<SymbolId, String>,
 ) -> Option<&'static str> {
     match tag {
-        "a" | "area" | "link" => find_attr_ignore_case(&opening.attributes, "href").map(|_| "link"),
+        "a" | "area" | "link" => find_jsx_attr_ignore_case(&opening.attributes, "href").map(|_| "link"),
         "article" => Some("article"),
         "aside" => Some("complementary"),
         "button" => Some("button"),
@@ -622,7 +622,7 @@ pub(super) fn get_implicit_role(
         "hr" => Some("separator"),
         "img" => Some("img"),
         "input" => {
-            let input_type = find_attr_ignore_case(&opening.attributes, "type")
+            let input_type = find_jsx_attr_ignore_case(&opening.attributes, "type")
                 .and_then(|a| get_attr_static_str(semantic, a, const_strings))
                 .unwrap_or_else(|| "text".to_string())
                 .to_ascii_lowercase();
@@ -729,7 +729,7 @@ pub(super) fn supplies_native_aria_prop(
         return true;
     }
     if tag == "input" {
-        let input_type = find_attr_ignore_case(&opening.attributes, "type")
+        let input_type = find_jsx_attr_ignore_case(&opening.attributes, "type")
             .and_then(|a| get_attr_static_str(semantic, a, const_strings))
             .unwrap_or_default()
             .to_ascii_lowercase();

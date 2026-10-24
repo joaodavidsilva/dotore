@@ -17,7 +17,7 @@ use crate::{
         types::{SemanticRuleSite, loc_from_line_starts},
     },
     matchers::{eval_numeric_expr, eval_static_str},
-    rules::{AutofixPatch, ByteEdit, RuleId},
+    rules::{AutofixPatch, RuleId},
 };
 
 use super::{LAYOUT_TRANSITION_PROPS, parse_px_or_rem, push_design_site};
@@ -149,14 +149,11 @@ pub(super) fn check_class_name_literal_design(
                     new_tokens.push(t);
                 }
             }
-            let patch = AutofixPatch {
-                description: format!("Collapse `{px_tok} {py_tok}` to `{p_tok}`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: content_span,
-                    replacement: new_tokens.join(" "),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Collapse `{px_tok} {py_tok}` to `{p_tok}`"),
+                content_span,
+                new_tokens.join(" "),
+            );
             push_design_site(
                 sites,
                 RuleId::DesignNoRedundantPaddingAxes,
@@ -198,14 +195,11 @@ pub(super) fn check_class_name_literal_design(
                     new_tokens.push(t);
                 }
             }
-            let patch = AutofixPatch {
-                description: format!("Collapse `{w_tok} {h_tok}` to `{size_tok}`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: content_span,
-                    replacement: new_tokens.join(" "),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Collapse `{w_tok} {h_tok}` to `{size_tok}`"),
+                content_span,
+                new_tokens.join(" "),
+            );
             push_design_site(
                 sites,
                 RuleId::DesignNoRedundantSizeAxes,
@@ -270,15 +264,11 @@ pub(super) fn check_class_name_literal_design(
                 new_tokens.push(t);
             }
         }
-        let patch = AutofixPatch {
-            description: "Collapse `overflow-hidden text-ellipsis whitespace-nowrap` to `truncate`"
-                .to_string(),
-            edits: vec![ByteEdit {
-                file: None,
-                span: content_span,
-                replacement: new_tokens.join(" "),
-            }],
-        };
+        let patch = AutofixPatch::replace(
+            "Collapse `overflow-hidden text-ellipsis whitespace-nowrap` to `truncate`",
+            content_span,
+            new_tokens.join(" "),
+        );
         push_design_site(
             sites,
             RuleId::PreferTruncateShorthand,
@@ -327,14 +317,11 @@ pub(super) fn check_class_name_literal_design(
                     }
                 })
                 .collect();
-            let patch = AutofixPatch {
-                description: format!("Replace deprecated `{base}` with `{new_base}`"),
-                edits: vec![ByteEdit {
-                    file: None,
-                    span: content_span,
-                    replacement: new_tokens.join(" "),
-                }],
-            };
+            let patch = AutofixPatch::replace(
+                format!("Replace deprecated `{base}` with `{new_base}`"),
+                content_span,
+                new_tokens.join(" "),
+            );
             push_design_site(
                 sites,
                 RuleId::NoDeprecatedTailwindClass,

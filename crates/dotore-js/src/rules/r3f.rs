@@ -42,7 +42,7 @@ use crate::{
     },
     matchers::{
         collect_pattern_bound_names, find_last_jsx_attr, get_object_prop as matcher_get_object_prop,
-        has_jsx_truthy_attr, push_semantic_site,
+        has_jsx_truthy_attr, jsx_attr_expr, make_diag_for_subject, push_semantic_site,
     },
     rules::{Diagnostic, RuleId, RuleSeverity},
 };
@@ -656,7 +656,6 @@ pub(crate) fn evaluate_cross_file_frame_loop_findings<F>(
                 continue;
             }
 
-            let meta = rule.metadata();
             let mut cascade_steps = Vec::with_capacity(finding.call_chain.len() + 1);
             for step in &finding.call_chain {
                 cascade_steps.push(format!("60fps frame-loop call chain step: `{step}`"));
@@ -676,26 +675,24 @@ pub(crate) fn evaluate_cross_file_frame_loop_findings<F>(
                 passed_props: Vec::new(),
             }];
 
-            out.push(Diagnostic {
-                file: root_file.path.clone(),
-                subject_name: finding.root_subject_name.clone(),
-                rule,
-                category: meta.category,
-                severity: sev,
-                message_id,
-                tier: meta.default_tier,
-                target_name: finding.helper_name.clone(),
-                message: format!(
-                    "60fps frame loop calls `{chain_display}` which performs {hazard_desc} at `{helper_path_str}:{}`.",
-                    finding.hazard.loc.line
-                ),
-                docs_url: meta.docs_url,
-                loc: finding.call_loc,
-                span: finding.call_span,
-                cascade_steps,
-                caller_sites,
-                autofix: None,
-            });
+            out.push(
+                make_diag_for_subject(
+                    rule,
+                    root_file.path.clone(),
+                    finding.root_subject_name.clone(),
+                    message_id,
+                    finding.helper_name.clone(),
+                    format!(
+                        "60fps frame loop calls `{chain_display}` which performs {hazard_desc} at `{helper_path_str}:{}`.",
+                        finding.hazard.loc.line
+                    ),
+                    finding.call_loc,
+                    finding.call_span,
+                )
+                .with_severity(sev)
+                .with_cascade_steps(cascade_steps)
+                .with_caller_sites(caller_sites),
+            );
         }
     }
 }
@@ -1223,15 +1220,7 @@ pub(crate) fn get_jsx_attr_expr<'a>(
     opening: &'a JSXOpeningElement<'a>,
     name: &str,
 ) -> Option<&'a Expression<'a>> {
-    let attr = get_jsx_attr_item(opening, name)?;
-    let oxc_ast::ast::JSXAttributeValue::ExpressionContainer(container) = attr.value.as_ref()?
-    else {
-        return None;
-    };
-    container
-        .expression
-        .as_expression()
-        .map(Expression::without_parentheses)
+    jsx_attr_expr(&opening.attributes, name)
 }
 
 pub(crate) fn jsx_attr_is_true(opening: &JSXOpeningElement<'_>, name: &str) -> bool {
