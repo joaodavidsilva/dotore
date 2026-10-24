@@ -24,6 +24,7 @@ crates/
       score.rs            # deterministic local 0-100 health score and P0-P3 tier calculation
       search.rs           # native fuzzy Symbol Outline search (dotore search)
       report.rs           # terminal, JSON, why/explain, CI, install, and HTML reporters
+      ui.rs               # reusable terminal UI kit (AsciiBox, GaugeBar, Badge, FlowDiagram, FilterTabBar, StatusBar, LiveSpinner)
   dotore-js/
     src/
       lib.rs              # JsLanguageAnalyzer (LanguageAnalyzer) and dotore-js crate root
