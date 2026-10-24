@@ -1491,9 +1491,11 @@ pub fn set_progress_phase(code: usize, total: usize) {
 /// Records a newly discovered source file during Phase 1 (`Discovering workspace & files`),
 /// incrementing both the discovered total and completed counters and updating `current_file`.
 pub fn tick_discovery_file(path: &Path) {
-    let total = PROGRESS_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    PROGRESS_COMPLETED.store(total, Ordering::Relaxed);
-    set_current_progress_file(path);
+    if PROGRESS_PHASE_CODE.load(Ordering::Relaxed) == 1 {
+        let total = PROGRESS_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+        PROGRESS_COMPLETED.store(total, Ordering::Relaxed);
+        set_current_progress_file(path);
+    }
 }
 
 /// Increments the completed file counter and updates `path` in the lock-free progress snapshot.

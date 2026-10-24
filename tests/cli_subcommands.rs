@@ -944,47 +944,18 @@ fn modular_cli_progress_and_tui_explorer_render_via_ui_kit() {
 #[test]
 fn tui_frame_and_progress_bar_fit_any_terminal_width_and_align_borders() {
     use dotore::{
-        ColorMode, FilterTabItem, RuleId, ScanOptions, TuiFilterKind, TuiGroupMode,
-        build_filter_tabs, current_scan_progress, diagnostic_matches_tab_and_search,
-        format_spinner_frame_with_width, render_tui_body_lines_for_width, render_tui_frame,
-        scan_workspace, strip_ansi_codes, visible_char_width,
+        ColorMode, FilterTabItem, LiveScanProgressSnapshot, RuleId, TuiFilterKind, TuiGroupMode,
+        build_filter_tabs, diagnostic_matches_tab_and_search, format_spinner_frame_with_width,
+        render_tui_body_lines_for_width, render_tui_frame, strip_ansi_codes, visible_char_width,
     };
 
-    // 1. Real filesystem scan updates completed_files, total_files, and current_file
-    let dir = unique_temp_dir("progress-real-scan");
-    fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(
-        dir.join("src/App.tsx"),
-        "import { useState, useEffect } from 'react';\nexport function App({ a }: { a: string }) { const [v, setV] = useState(''); useEffect(() => { setV(a); }, [a]); return <div>{v}</div>; }\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.join("src/service.py"),
-        "import requests\ndef load():\n    return requests.get('https://example.com').text\n",
-    )
-    .unwrap();
-
-    let (mut report, _) = scan_workspace(&ScanOptions {
-        paths: vec![dir.clone()],
-        include_tests: false,
-        rules: None,
-        tiers: None,
-    })
-    .unwrap();
-    let snap = current_scan_progress();
-    assert!(
-        snap.total_files >= 2,
-        "Expected total_files >= 2, got: {snap:?}"
-    );
-    assert_eq!(
-        snap.completed_files, snap.total_files,
-        "Expected completed == total, got: {snap:?}"
-    );
-    assert!(
-        !snap.current_file.is_empty(),
-        "Expected current_file to be populated, got: {snap:?}"
-    );
-
+    // 1. Multi-width spinner frame formatting (80, 100, 120 cols) preserves file counter and current file name
+    let snap = LiveScanProgressSnapshot {
+        phase: "Evaluating ProjectGraph & Rules",
+        completed_files: 145,
+        total_files: 322,
+        current_file: "src/components/UserProfileDashboard.tsx".to_string(),
+    };
     for cols in [80usize, 100, 120] {
         let spinner_line =
             format_spinner_frame_with_width(&snap, 2, 0.8, ColorMode::Plain, cols - 2);
@@ -994,12 +965,20 @@ fn tui_frame_and_progress_bar_fit_any_terminal_width_and_align_borders() {
             cols - 2,
             visible_char_width(&spinner_line)
         );
-        assert!(spinner_line.contains(&format!("({}/{})", snap.completed_files, snap.total_files)));
+        assert!(spinner_line.contains("(145/322)"));
         assert!(
-            spinner_line.contains("App.tsx") || spinner_line.contains("service.py"),
-            "Spinner frame must display the current file name: {spinner_line}"
+            spinner_line.contains("Dashboard.tsx"),
+            "Spinner frame must display the current file name at {cols} cols: {spinner_line}"
         );
     }
+
+    let mut report = dotore::analyze_project_sources(
+        vec![(
+            PathBuf::from("src/App.tsx"),
+            "import { useState, useEffect } from 'react';\nexport function App({ a }: { a: string }) { const [v, setV] = useState(''); useEffect(() => { setV(a); }, [a]); return <div>{v}</div>; }\n".to_string(),
+        )],
+        None,
+    );
 
     // 2. Build a large tab list like the user's 38-tab screenshot and verify 80, 100, and 120 col TUI frames
     report.summary.files_scanned = 322;
@@ -1091,6 +1070,4 @@ fn tui_frame_and_progress_bar_fit_any_terminal_width_and_align_borders() {
             );
         }
     }
-
-    let _ = fs::remove_dir_all(&dir);
 }

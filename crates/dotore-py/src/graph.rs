@@ -793,19 +793,25 @@ fn evaluate_unused_exports(
 ) {
     let mut star_imported_modules: BTreeSet<usize> = BTreeSet::new();
     let module_index = build_module_lookup(files, &package.root_dir);
+    let mut ref_file_counts: HashMap<&str, usize> = HashMap::new();
+    let mut file_irs: Vec<Option<&PyFileIr>> = Vec::with_capacity(files.len());
 
     for (u, file) in files.iter().enumerate() {
-        let Some(ir) = file.downcast_payload::<PyFileIr>() else {
-            continue;
-        };
-        collect_star_imported_targets(
-            u,
-            file,
-            &ir.module_graph.all_imports,
-            files,
-            &module_index,
-            &mut star_imported_modules,
-        );
+        let ir = file.downcast_payload::<PyFileIr>();
+        if let Some(py_ir) = ir {
+            for name in &py_ir.module_graph.referenced_names {
+                *ref_file_counts.entry(name.as_str()).or_insert(0) += 1;
+            }
+            collect_star_imported_targets(
+                u,
+                file,
+                &py_ir.module_graph.all_imports,
+                files,
+                &module_index,
+                &mut star_imported_modules,
+            );
+        }
+        file_irs.push(ir);
     }
 
     for (idx, file) in files.iter().enumerate() {
@@ -814,7 +820,7 @@ fn evaluate_unused_exports(
         {
             continue;
         }
-        let Some(ir) = file.downcast_payload::<PyFileIr>() else {
+        let Some(ir) = file_irs[idx] else {
             continue;
         };
 
@@ -824,19 +830,16 @@ fn evaluate_unused_exports(
             {
                 continue;
             }
-            let used_in_other_file = files.iter().enumerate().any(|(other_idx, other_file)| {
-                if other_idx == idx {
-                    return false;
-                }
-                let Some(other_ir) = other_file.downcast_payload::<PyFileIr>() else {
-                    return false;
-                };
-                other_ir
-                    .module_graph
+            let total_files_referencing = ref_file_counts
+                .get(export.name.as_str())
+                .copied()
+                .unwrap_or(0);
+            let self_references = usize::from(
+                ir.module_graph
                     .referenced_names
-                    .contains(&export.name)
-            });
-            if used_in_other_file {
+                    .contains(export.name.as_str()),
+            );
+            if total_files_referencing > self_references {
                 continue;
             }
             let Some(effective_sev) = resolve_active_py_rule_severity(
