@@ -179,13 +179,6 @@ pub(crate) fn push_simple_diagnostic(
 
 /// Constructs a [`SemanticRuleSite`] from an [`oxc_span::Span`] and `line_starts`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn make_semantic_site(
     rule: RuleId,
     subject_name: Option<String>,
@@ -213,13 +206,6 @@ pub(crate) fn make_semantic_site(
     clippy::too_many_arguments,
     reason = "Pushes a SemanticRuleSite directly to the output vector"
 )]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn push_semantic_site(
     sites: &mut Vec<SemanticRuleSite>,
     rule: RuleId,
@@ -245,13 +231,6 @@ pub(crate) fn push_semantic_site(
 #[expect(
     clippy::too_many_arguments,
     reason = "Pushes a SemanticRuleSite with optional AutofixPatch directly to the output vector"
-)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
 )]
 pub(crate) fn push_semantic_site_with_fix(
     sites: &mut Vec<SemanticRuleSite>,
@@ -299,13 +278,6 @@ pub(crate) fn unparenthesized<'a, 'b>(mut expr: &'b Expression<'a>) -> &'b Expre
 
 /// Alias for [`unparenthesized`].
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn unwrap_expr<'a, 'b>(expr: &'b Expression<'a>) -> &'b Expression<'a> {
     unparenthesized(expr)
 }
@@ -656,13 +628,6 @@ pub(crate) fn has_jsx_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool
 /// Returns `true` if `attrs` contains `target` as a boolean shorthand (`<Comp disabled />`)
 /// or with a literal `true` value (`<Comp disabled={true} />`).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn has_jsx_truthy_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool {
     let Some(attr) = find_last_jsx_attr(attrs, target) else {
         return false;
@@ -694,13 +659,6 @@ pub(crate) fn jsx_has_spread_attr(attrs: &[JSXAttributeItem<'_>]) -> bool {
 
 /// Extracts the Static string value of a [`JSXAttribute`] (`foo="bar"` or `foo={"bar"}` or ``foo={`bar`}``).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn jsx_attr_string_value<'a>(attr: &'a JSXAttribute<'a>) -> Option<&'a str> {
     match attr.value.as_ref()? {
         JSXAttributeValue::StringLiteral(s) => s.value.as_str(),
@@ -927,13 +885,6 @@ pub(crate) fn get_object_prop_static_str<'a>(
 
 /// Extracts a boolean literal value for property `key_name` on `obj`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Shared oxc matcher/builder toolkit consumed across rule modules"
-    )
-)]
 pub(crate) fn get_object_prop_bool(obj: &ObjectExpression<'_>, key_name: &str) -> Option<bool> {
     let prop = get_object_prop(obj, key_name)?;
     if let Expression::BooleanLiteral(b) = unparenthesized(&prop.value) {
