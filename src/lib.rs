@@ -5,10 +5,6 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
 };
 
 #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
@@ -62,6 +58,13 @@ pub use dotore_core::{
         FixCapsule, PrescriptionTier, RenderFrequency, RootCauseGroup, RuleCategory, RuleId,
         RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
         supply_chain_purl_hash,
+    },
+    ui::{
+        self, AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH,
+        FilterTabBar, FilterTabItem, FlowDiagram, GaugeBar, LiveScanProgressSnapshot, LiveSpinner,
+        SPINNER_FRAMES, StatusBar, TuiFilterKind, build_filter_tabs, classify_style_bucket,
+        current_scan_progress, format_spinner_frame, set_progress_phase, strip_ansi_codes,
+        style_bucket_color, tick_progress_file, visible_char_width,
     },
 };
 #[cfg(feature = "js")]
@@ -154,62 +157,6 @@ pub const fn default_analyzers() -> &'static [&'static dyn LanguageAnalyzer] {
     DEFAULT_ANALYZERS
 }
 
-/// Snapshot of live workspace scan progress for terminal loading animations.
-#[derive(Debug, Clone, Default)]
-pub struct LiveScanProgressSnapshot {
-    /// Current scan phase (`"Discovering files"`, `"Reading source files"`, `"Extracting AST & IR"`, `"Evaluating ProjectGraph & Rules"`).
-    pub phase: &'static str,
-    /// Number of files processed in the current phase.
-    pub completed_files: usize,
-    /// Total files discovered for the scan.
-    pub total_files: usize,
-    /// Most recent file path touched by a worker thread.
-    pub current_file: String,
-}
-
-static PROGRESS_PHASE_CODE: AtomicUsize = AtomicUsize::new(0);
-static PROGRESS_COMPLETED: AtomicUsize = AtomicUsize::new(0);
-static PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
-static PROGRESS_CURRENT_FILE: Mutex<String> = Mutex::new(String::new());
-
-fn set_progress_phase(code: usize, total: usize) {
-    PROGRESS_PHASE_CODE.store(code, Ordering::Relaxed);
-    PROGRESS_COMPLETED.store(0, Ordering::Relaxed);
-    PROGRESS_TOTAL.store(total, Ordering::Relaxed);
-}
-
-fn tick_progress_file(path: &Path) {
-    let done = PROGRESS_COMPLETED.fetch_add(1, Ordering::Relaxed) + 1;
-    if (done & 3) == 1
-        && let Ok(mut guard) = PROGRESS_CURRENT_FILE.try_lock()
-    {
-        *guard = path.display().to_string();
-    }
-}
-
-/// Returns a lock-free snapshot of the current workspace scan progress.
-#[must_use]
-pub fn current_scan_progress() -> LiveScanProgressSnapshot {
-    let phase = match PROGRESS_PHASE_CODE.load(Ordering::Relaxed) {
-        1 => "Discovering workspace & files",
-        2 => "Reading source files",
-        3 => "Extracting AST & IR (parallel)",
-        4 => "Evaluating ProjectGraph & Rules",
-        _ => "Initializing",
-    };
-    let completed_files = PROGRESS_COMPLETED.load(Ordering::Relaxed);
-    let total_files = PROGRESS_TOTAL.load(Ordering::Relaxed);
-    let current_file = PROGRESS_CURRENT_FILE
-        .try_lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    LiveScanProgressSnapshot {
-        phase,
-        completed_files,
-        total_files,
-        current_file,
-    }
-}
 
 pub(crate) fn register_active_core_hooks() {
     #[cfg(feature = "js")]

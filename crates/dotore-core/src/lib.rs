@@ -24,6 +24,8 @@ pub mod scanner;
 pub mod score;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub mod search;
+/// Reusable ASCII/Unicode and ANSI terminal UI component kit (`AsciiBox`, `GaugeBar`, `Badge`, `FlowDiagram`, `FilterTabBar`, `StatusBar`, `LiveSpinner`).
+pub mod ui;
 
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
@@ -90,6 +92,13 @@ pub use search::{
     search_extracted_files, search_project_sources, search_project_sources_with,
     search_project_sources_with_analyzers, search_symbols, search_symbols_with,
     search_symbols_with_analyzers, should_highlight_search, should_highlight_stdout,
+};
+pub use ui::{
+    AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FilterTabBar,
+    FilterTabItem, FlowDiagram, GaugeBar, LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES,
+    StatusBar, TuiFilterKind, build_filter_tabs, classify_style_bucket, current_scan_progress,
+    format_spinner_frame, set_progress_phase, strip_ansi_codes, style_bucket_color,
+    tick_progress_file, visible_char_width,
 };
 
 /// Options for scanning a project or file list.
