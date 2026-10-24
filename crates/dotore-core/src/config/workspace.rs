@@ -151,15 +151,93 @@ pub fn resolve_package_for_file<'a>(
     file_path: &Path,
     packages: &'a [WorkspacePackage],
 ) -> Option<&'a WorkspacePackage> {
-    let norm_file = normalize_path_buf(file_path);
-    packages
-        .iter()
-        .filter(|pkg| {
-            let norm_pkg = normalize_path_buf(&pkg.root_dir);
-            norm_file.starts_with(&norm_pkg) || file_path.starts_with(&pkg.root_dir)
-        })
-        .max_by_key(|pkg| normalize_path_buf(&pkg.root_dir).components().count())
-        .or_else(|| packages.first())
+    match packages {
+        [] => None,
+        [single] => Some(single),
+        _ => {
+            let file_is_abs = file_path.is_absolute();
+            if !has_parent_dir_segment(file_path)
+                && packages.iter().all(|pkg| {
+                    pkg.root_dir.is_absolute() == file_is_abs
+                        && !has_parent_dir_segment(&pkg.root_dir)
+                })
+            {
+                let stripped_file = strip_leading_dot(file_path);
+                if let Some((best, _)) = packages
+                    .iter()
+                    .filter_map(|pkg| {
+                        let stripped_pkg = strip_leading_dot(&pkg.root_dir);
+                        if stripped_pkg.as_os_str().is_empty()
+                            || stripped_file.starts_with(stripped_pkg)
+                            || file_path.starts_with(&pkg.root_dir)
+                        {
+                            Some((pkg, stripped_pkg.as_os_str().len()))
+                        } else {
+                            None
+                        }
+                    })
+                    .max_by_key(|&(_, len)| len)
+                {
+                    return Some(best);
+                }
+            }
+
+            if packages
+                .iter()
+                .all(|pkg| pkg.root_dir.is_absolute() == file_is_abs)
+            {
+                let clean_file = clean_lexical_components(file_path);
+                if let Some((best, _)) = packages
+                    .iter()
+                    .filter_map(|pkg| {
+                        let clean_pkg = clean_lexical_components(&pkg.root_dir);
+                        if clean_pkg.as_os_str().is_empty()
+                            || clean_file.starts_with(&clean_pkg)
+                            || file_path.starts_with(&pkg.root_dir)
+                        {
+                            Some((pkg, clean_pkg.components().count()))
+                        } else {
+                            None
+                        }
+                    })
+                    .max_by_key(|&(_, depth)| depth)
+                {
+                    return Some(best);
+                }
+            }
+
+            let cwd = std::env::current_dir().ok();
+            let norm_file = normalize_path_with_cwd(file_path, cwd.as_deref());
+            packages
+                .iter()
+                .filter_map(|pkg| {
+                    let norm_pkg = normalize_path_with_cwd(&pkg.root_dir, cwd.as_deref());
+                    if norm_file.starts_with(&norm_pkg) || file_path.starts_with(&pkg.root_dir) {
+                        Some((pkg, norm_pkg.components().count()))
+                    } else {
+                        None
+                    }
+                })
+                .max_by_key(|&(_, depth)| depth)
+                .map(|(pkg, _)| pkg)
+                .or_else(|| packages.first())
+        }
+    }
+}
+
+fn strip_leading_dot(path: &Path) -> &Path {
+    if path == Path::new(".") {
+        Path::new("")
+    } else {
+        path.strip_prefix(".").unwrap_or(path)
+    }
+}
+
+fn has_parent_dir_segment(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .windows(2)
+        .any(|w| w == b"..")
 }
 
 /// Filters discovered [`WorkspacePackage`]s by package name, manifest name, directory basename,
@@ -334,36 +412,47 @@ fn extract_toml_section_name(content: &str, target_section: &str) -> Option<Stri
 
 fn walk_nested_package_dirs(
     dir: &Path,
-    depth: usize,
+    _depth: usize,
     max_depth: usize,
     manifest_names: &[&str],
     seen: &mut HashSet<PathBuf>,
     out: &mut Vec<PathBuf>,
 ) {
-    if depth >= max_depth {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut subdirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|n| !n.starts_with('.') && !IGNORED_DISCOVERY_DIRS.contains(&n))
-        })
-        .collect();
-    subdirs.sort();
-    for subdir in subdirs {
-        if manifest_names.iter().any(|m| subdir.join(m).is_file())
-            && seen.insert(normalize_path_buf(&subdir))
-        {
-            out.push(subdir.clone());
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder
+        .max_depth(Some(max_depth))
+        .hidden(true)
+        .parents(true)
+        .ignore(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .sort_by_file_path(Ord::cmp);
+    builder.filter_entry(|entry| {
+        if entry.depth() == 0 {
+            return true;
         }
-        walk_nested_package_dirs(&subdir, depth + 1, max_depth, manifest_names, seen, out);
+        if entry.file_type().is_some_and(|ft| ft.is_dir())
+            && let Some(name) = entry.file_name().to_str()
+        {
+            return !name.starts_with('.') && !IGNORED_DISCOVERY_DIRS.contains(&name);
+        }
+        true
+    });
+    let cwd = std::env::current_dir().ok();
+    for result in builder.build().flatten() {
+        if result.depth() == 0 {
+            continue;
+        }
+        if result.file_type().is_some_and(|ft| ft.is_dir()) {
+            let subdir = result.path();
+            if manifest_names.iter().any(|m| subdir.join(m).is_file())
+                && seen.insert(normalize_path_with_cwd(subdir, cwd.as_deref()))
+            {
+                out.push(subdir.to_path_buf());
+            }
+        }
     }
 }
 
@@ -461,8 +550,25 @@ pub fn find_nearest_ancestor_file(start_dir: &Path, file_name: &str) -> Option<P
 /// Returns `file_path` relative to `root_dir` using forward slashes.
 #[must_use]
 pub fn relative_forward_slash(file_path: &Path, root_dir: &Path) -> String {
-    let norm_file = normalize_path_buf(file_path);
-    let norm_root = normalize_path_buf(root_dir);
+    if (root_dir == Path::new(".") || root_dir.as_os_str().is_empty()) && file_path.is_relative() {
+        return normalize_rel_path_str(file_path);
+    }
+    if let Ok(stripped) = file_path.strip_prefix(root_dir) {
+        return normalize_rel_path_str(stripped);
+    }
+    if file_path.is_absolute() == root_dir.is_absolute() {
+        let clean_file = clean_lexical_components(file_path);
+        let clean_root = clean_lexical_components(root_dir);
+        if clean_root.as_os_str().is_empty() {
+            return normalize_rel_path_str(&clean_file);
+        }
+        if let Ok(stripped) = clean_file.strip_prefix(&clean_root) {
+            return normalize_rel_path_str(stripped);
+        }
+    }
+    let cwd = std::env::current_dir().ok();
+    let norm_file = normalize_path_with_cwd(file_path, cwd.as_deref());
+    let norm_root = normalize_path_with_cwd(root_dir, cwd.as_deref());
     let rel = norm_file
         .strip_prefix(&norm_root)
         .or_else(|_| file_path.strip_prefix(root_dir))
@@ -495,15 +601,26 @@ pub fn strip_source_extension(path: &str) -> &str {
 /// Lexically normalizes `path` against the current working directory.
 #[must_use]
 pub fn normalize_path_buf(path: &Path) -> PathBuf {
-    let raw = if path.is_absolute() {
-        path.to_path_buf()
-    } else if let Ok(cwd) = std::env::current_dir() {
-        cwd.join(path)
+    if path.is_absolute() {
+        return clean_lexical_components(path);
+    }
+    let cwd = std::env::current_dir().ok();
+    normalize_path_with_cwd(path, cwd.as_deref())
+}
+
+fn normalize_path_with_cwd(path: &Path, cwd: Option<&Path>) -> PathBuf {
+    if path.is_absolute() {
+        clean_lexical_components(path)
+    } else if let Some(c) = cwd {
+        clean_lexical_components(&c.join(path))
     } else {
-        path.to_path_buf()
-    };
+        clean_lexical_components(path)
+    }
+}
+
+fn clean_lexical_components(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
-    for comp in raw.components() {
+    for comp in path.components() {
         match comp {
             Component::CurDir => {}
             Component::ParentDir => {

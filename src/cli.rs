@@ -81,7 +81,7 @@ pub enum Commands {
 
 /// Output format for `dotore check`, `dotore design`, and `dotore report`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum OutputFormat {
+enum OutputFormat {
     /// Human-readable terminal output.
     Text,
     /// Machine-readable JSON report.
@@ -111,7 +111,7 @@ pub struct CheckArgs {
 
     /// Output format (`text`, `json`, `html`, or `github-pr-comment` / `pr-comment`).
     #[arg(long = "format", value_enum, value_name = "FORMAT")]
-    pub(crate) format: Option<OutputFormat>,
+    format: Option<OutputFormat>,
     /// Write the versioned machine-readable JSON report to a file on disk.
     #[arg(long = "json-out", value_name = "FILE")]
     pub(crate) json_out: Option<PathBuf>,
@@ -304,7 +304,7 @@ pub struct ReportArgs {
 
     /// Output format (`html`, `json`, `text`, or `github-pr-comment` / `pr-comment`).
     #[arg(long = "format", value_enum, value_name = "FORMAT")]
-    pub(crate) format: Option<OutputFormat>,
+    format: Option<OutputFormat>,
     /// Do not open the generated HTML file in the system browser.
     #[arg(long)]
     pub(crate) no_open: bool,

@@ -285,38 +285,62 @@ fn build_project_coverage_metadata(
         }];
     }
 
+    let mut file_to_pkg_idx: HashMap<&Path, usize> =
+        HashMap::with_capacity(file_subject_counts.len());
+    let mut pkg_files: Vec<Vec<PathBuf>> = (0..packages.len()).map(|_| Vec::new()).collect();
+    let mut pkg_subjects: Vec<usize> = vec![0; packages.len()];
+    let mut pkg_diag_counts: Vec<usize> = vec![0; packages.len()];
+    let mut pkg_groups: Vec<Vec<RootCauseGroup>> =
+        (0..packages.len()).map(|_| Vec::new()).collect();
+
+    let resolve_idx = |path: &Path| -> Option<usize> {
+        let resolved = resolve_package_for_file(path, packages)?;
+        packages
+            .iter()
+            .position(|p| p.root_dir == resolved.root_dir)
+    };
+
+    for (file_path, subj_count) in file_subject_counts {
+        if let Some(idx) = resolve_idx(file_path) {
+            file_to_pkg_idx.insert(file_path.as_path(), idx);
+            pkg_files[idx].push(file_path.clone());
+            pkg_subjects[idx] += *subj_count;
+        }
+    }
+
+    for diag in diagnostics {
+        let idx_opt = file_to_pkg_idx
+            .get(diag.file.as_path())
+            .copied()
+            .or_else(|| resolve_idx(&diag.file));
+        if let Some(idx) = idx_opt {
+            file_to_pkg_idx.entry(diag.file.as_path()).or_insert(idx);
+            pkg_diag_counts[idx] += 1;
+        }
+    }
+
+    for group in root_cause_groups {
+        let idx_opt = file_to_pkg_idx
+            .get(group.file.as_path())
+            .copied()
+            .or_else(|| resolve_idx(&group.file));
+        if let Some(idx) = idx_opt {
+            file_to_pkg_idx.entry(group.file.as_path()).or_insert(idx);
+            pkg_groups[idx].push(group.clone());
+        }
+    }
+
     packages
         .iter()
-        .map(|pkg| {
-            let mut analyzed_files = Vec::new();
-            let mut subjects_scanned = 0;
-            for (file_path, subj_count) in file_subject_counts {
-                if resolve_package_for_file(file_path, packages)
-                    .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
-                {
-                    analyzed_files.push(file_path.clone());
-                    subjects_scanned += *subj_count;
-                }
-            }
+        .enumerate()
+        .map(|(idx, pkg)| {
+            let mut analyzed_files = std::mem::take(&mut pkg_files[idx]);
             analyzed_files.sort();
             let analyzed_file_count = analyzed_files.len();
-            let diagnostic_count = diagnostics
-                .iter()
-                .filter(|d| {
-                    resolve_package_for_file(&d.file, packages)
-                        .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
-                })
-                .count();
-            let pkg_groups: Vec<RootCauseGroup> = root_cause_groups
-                .iter()
-                .filter(|g| {
-                    resolve_package_for_file(&g.file, packages)
-                        .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
-                })
-                .cloned()
-                .collect();
+            let subjects_scanned = pkg_subjects[idx];
+            let diagnostic_count = pkg_diag_counts[idx];
             let health =
-                compute_local_health_score(&pkg_groups, analyzed_file_count, subjects_scanned);
+                compute_local_health_score(&pkg_groups[idx], analyzed_file_count, subjects_scanned);
             let mut capabilities: Vec<Capability> =
                 pkg.capability_gate.capabilities.iter().copied().collect();
             capabilities.sort_by_key(|c| c.as_str());
@@ -447,7 +471,8 @@ fn write_scan_result_cache_atomic(
     cache_path: &Path,
     cache: &ScanResultCacheFile,
 ) -> io::Result<()> {
-    let json = serde_json::to_string_pretty(cache)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    crate::config::write_file_atomically(cache_path, format!("{json}\n").as_bytes())
+    let mut bytes =
+        serde_json::to_vec(cache).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    bytes.push(b'\n');
+    crate::config::write_file_atomically(cache_path, &bytes)
 }

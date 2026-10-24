@@ -30,9 +30,7 @@ impl PlannerContext for ProjectGraph {
     }
 
     fn subject_spans_for_file(&self, file: &Path) -> Vec<(Option<String>, ByteSpan)> {
-        self.files
-            .iter()
-            .find(|f| f.path == file)
+        self.find_file_ir(file)
             .map(|f| {
                 f.subjects
                     .iter()
@@ -43,10 +41,7 @@ impl PlannerContext for ProjectGraph {
     }
 
     fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
-        self.files
-            .iter()
-            .find(|f| f.path == file)
-            .map(|f| &f.architecture_facets)
+        self.find_file_ir(file).map(|f| &f.architecture_facets)
     }
 
     fn callers_of(&self, target_file: &Path, subject_name: &str) -> Vec<ResolvedCallerSite> {
@@ -54,7 +49,7 @@ impl PlannerContext for ProjectGraph {
     }
 
     fn child_components_of(&self, file: &Path, subject_name: &str) -> Vec<String> {
-        let Some(file_ir) = self.files.iter().find(|f| f.path == file) else {
+        let Some(file_ir) = self.find_file_ir(file) else {
             return Vec::new();
         };
         file_ir
@@ -66,24 +61,19 @@ impl PlannerContext for ProjectGraph {
     }
 
     fn span_in_list_loop(&self, file: &Path, span: ByteSpan) -> bool {
-        self.files
-            .iter()
-            .find(|f| f.path == file)
-            .is_some_and(|file_ir| {
-                file_ir
-                    .jsx_elements
-                    .iter()
-                    .any(|jsx| jsx.in_array_map && spans_intersect(jsx.span, span))
-            })
+        self.find_file_ir(file).is_some_and(|file_ir| {
+            file_ir
+                .jsx_elements
+                .iter()
+                .any(|jsx| jsx.in_array_map && spans_intersect(jsx.span, span))
+        })
     }
 
     fn subject_rendered_in_list_loop(&self, target_file: &Path, subject_name: &str) -> bool {
         Self::callers_of(self, target_file, subject_name)
             .iter()
             .any(|caller| {
-                self.files
-                    .iter()
-                    .find(|f| f.path == caller.caller_file)
+                self.find_file_ir(&caller.caller_file)
                     .is_some_and(|caller_file| {
                         caller_file
                             .jsx_elements
@@ -92,7 +82,6 @@ impl PlannerContext for ProjectGraph {
                     })
             })
     }
-
     fn count_context_consumers(
         &self,
         context_name: &str,
@@ -135,18 +124,25 @@ impl PlannerContext for ProjectGraph {
         diagnostics: &[Diagnostic],
         sources: &HashMap<PathBuf, String>,
     ) -> Option<SourceExcerpt> {
-        let mut sorted_files: Vec<&FileIr> = self.files.iter().collect();
-        sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
-
-        if group.rule.is_architecture_soc_or_reuse_rule()
-            && let Some(ex) =
-                find_js_architecture_exemplar(&sorted_files, group, diagnostics, sources)
-        {
-            return Some(ex);
+        if group.rule.is_architecture_soc_or_reuse_rule() {
+            if let Some(ex) =
+                find_js_architecture_exemplar(&self.files, group, diagnostics, sources)
+            {
+                return Some(ex);
+            }
+            return None;
         }
 
-        for file in &sorted_files {
-            let Some(src) = sources.get(&file.path) else {
+        if !rule_has_js_subject_or_jsx_exemplar(group.rule) {
+            return None;
+        }
+
+        for file in &self.files {
+            let src = if !file.source.is_empty() {
+                file.source.as_str()
+            } else if let Some(s) = sources.get(&file.path) {
+                s.as_str()
+            } else {
                 continue;
             };
 
@@ -178,8 +174,29 @@ impl PlannerContext for ProjectGraph {
     }
 }
 
+const fn rule_has_js_subject_or_jsx_exemplar(rule: RuleId) -> bool {
+    matches!(
+        rule,
+        RuleId::JsxKey
+            | RuleId::NoArrayIndexAsKey
+            | RuleId::NoExternalStoreSubscription
+            | RuleId::NoFetchInEffect
+            | RuleId::QueryNoVoidQueryFn
+            | RuleId::NoDerivedState
+            | RuleId::NoChainStateUpdates
+            | RuleId::NoAdjustStateOnPropChange
+            | RuleId::NoInitializeState
+            | RuleId::JsxNoNewObjectAsProp
+            | RuleId::NoInlinePropOnMemoComponent
+            | RuleId::ContextProviderValueFromUnmemoizedLocalLiteral
+            | RuleId::JotaiSelectAtomInRenderBody
+            | RuleId::ZustandNoWholeStoreDestructure
+            | RuleId::MobxReactionDisposerDiscarded
+    )
+}
+
 fn find_js_architecture_exemplar(
-    sorted_files: &[&FileIr],
+    sorted_files: &[FileIr],
     group: &RootCauseGroup,
     diagnostics: &[Diagnostic],
     sources: &HashMap<PathBuf, String>,
@@ -192,7 +209,6 @@ fn find_js_architecture_exemplar(
 
     let candidates = sorted_files
         .iter()
-        .copied()
         .filter(|f| f.path != group.file && !flagged_for_rule.contains(f.path.as_path()))
         .map(|f| {
             let primary_span = f

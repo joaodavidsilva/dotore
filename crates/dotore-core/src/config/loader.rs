@@ -195,10 +195,10 @@ impl Default for ArchitectureThresholdsConfig {
 #[serde(rename_all = "camelCase")]
 pub struct DotoreConfig {
     /// Per-rule severity overrides (`"off"`, `"warn"`, `"error"`).
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_map")]
     pub rules: HashMap<String, RuleSeverityOverride>,
     /// Per-category severity overrides (`"Bugs"`, `"Performance"`, `"Accessibility"`, `"Security"`, `"Maintainability"`).
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_map")]
     pub categories: HashMap<String, RuleSeverityOverride>,
     /// File, rule, tag, and per-path ignore settings.
     #[serde(default)]
@@ -357,6 +357,9 @@ impl DotoreConfig {
     /// Returns `true` if `file_path` matches any glob in `self.ignore.files`.
     #[must_use]
     pub fn is_file_ignored(&self, file_path: &Path, root_dir: &Path) -> bool {
+        if self.ignore.files.is_empty() {
+            return false;
+        }
         let rel = relative_forward_slash(file_path, root_dir);
         self.ignore.files.iter().any(|pat| glob_matches(pat, &rel))
     }
@@ -364,12 +367,25 @@ impl DotoreConfig {
     /// Returns `true` if `rule` is suppressed on `file_path` by `self.ignore.overrides`.
     #[must_use]
     pub fn is_overridden_for_file(&self, rule: RuleId, file_path: &Path, root_dir: &Path) -> bool {
+        if self.ignore.overrides.is_empty() {
+            return false;
+        }
         let rel = relative_forward_slash(file_path, root_dir);
         self.ignore.overrides.iter().any(|ov| {
             ov.files.iter().any(|pat| glob_matches(pat, &rel))
                 && (ov.rules.is_empty() || ov.rules.iter().any(|r| RuleId::parse(r) == Some(rule)))
         })
     }
+}
+
+fn serialize_sorted_map<S, V>(map: &HashMap<String, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    let mut sorted: Vec<(&String, &V)> = map.iter().collect();
+    sorted.sort_by_key(|(a, _)| *a);
+    serializer.collect_map(sorted)
 }
 
 /// Loads [`DotoreConfig`] from `dir` or its nearest ancestor containing `dotore.config.*` or `package.json#dotore`.

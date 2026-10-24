@@ -62,6 +62,7 @@ use crate::{
         reduced_motion::evaluate_project_reduced_motion,
     },
 };
+use rayon::prelude::*;
 
 /// Evaluates all enabled rules across the [`ProjectGraph`] using default React capability gate and config.
 #[must_use]
@@ -83,22 +84,28 @@ pub fn evaluate_project_with_packages(
     packages: &[WorkspacePackage],
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    for file in &graph.files {
-        dotore_core::ui::tick_progress_file(&file.path);
-        let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
-            continue;
-        };
-        evaluate_file_in_package(
-            graph,
-            file,
-            &pkg.root_dir,
-            &pkg.capability_gate,
-            &pkg.config,
-            enabled_rules,
-            &mut diagnostics,
-        );
-    }
+    let per_file: Vec<Vec<Diagnostic>> = graph
+        .files
+        .par_iter()
+        .map(|file| {
+            dotore_core::ui::tick_progress_file(&file.path);
+            let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
+                return Vec::new();
+            };
+            let mut file_diags = Vec::new();
+            evaluate_file_in_package(
+                graph,
+                file,
+                &pkg.root_dir,
+                &pkg.capability_gate,
+                &pkg.config,
+                enabled_rules,
+                &mut file_diags,
+            );
+            file_diags
+        })
+        .collect();
+    let mut diagnostics: Vec<Diagnostic> = per_file.into_iter().flatten().collect();
     evaluate_project_graph_rules(graph, packages, enabled_rules, &mut diagnostics);
     evaluate_project_reduced_motion(graph, packages, enabled_rules, &mut diagnostics);
     diagnostics

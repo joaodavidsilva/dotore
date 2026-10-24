@@ -33,27 +33,32 @@ pub fn evaluate_project_reduced_motion(
         return;
     }
 
-    for pkg in packages {
-        if !pkg.capability_gate.has(Capability::Motion) {
+    if !packages
+        .iter()
+        .any(|pkg| pkg.capability_gate.has(Capability::Motion))
+    {
+        return;
+    }
+
+    let mut buckets: Vec<Vec<&FileIr>> = (0..packages.len()).map(|_| Vec::new()).collect();
+    for f in &graph.files {
+        if let Some(resolved) = resolve_package_for_file(&f.path, packages)
+            && let Some(idx) = packages
+                .iter()
+                .position(|p| p.root_dir == resolved.root_dir)
+        {
+            buckets[idx].push(f);
+        }
+    }
+
+    for (pkg, pkg_files) in packages.iter().zip(buckets) {
+        if !pkg.capability_gate.has(Capability::Motion) || pkg_files.is_empty() {
             continue;
         }
         let Some(effective_sev) = resolve_package_reduced_motion_severity(pkg, enabled_rules)
         else {
             continue;
         };
-
-        let pkg_files: Vec<&FileIr> = graph
-            .files
-            .iter()
-            .filter(|f| {
-                resolve_package_for_file(&f.path, packages)
-                    .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
-            })
-            .collect();
-
-        if pkg_files.is_empty() {
-            continue;
-        }
 
         let (has_motion_use, has_reduced_motion_handling) =
             resolve_package_motion_evidence(&pkg_files);

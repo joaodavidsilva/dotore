@@ -253,6 +253,13 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
         entry.push(idx);
     }
 
+    let mut sorted_files = ctx.analyzed_files();
+    sorted_files.sort();
+    let subject_spans_by_file: HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>> = sorted_files
+        .iter()
+        .map(|p| (p.clone(), ctx.subject_spans_for_file(p)))
+        .collect();
+
     let mut groups: Vec<RootCauseGroup> = group_order
         .into_iter()
         .filter_map(|id| {
@@ -267,7 +274,8 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
                 RuleSeverity::Warning
             };
             let tier = group_prescription_tier(&indices, diagnostics);
-            let blast_radius = compute_blast_radius(ctx, &indices, diagnostics, sources);
+            let blast_radius =
+                compute_blast_radius(ctx, &indices, diagnostics, sources, &subject_spans_by_file);
             let message = if indices.len() > 1 {
                 format!(
                     "{} ({} related sites in Root-Cause Group)",
@@ -299,17 +307,12 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
         (Reverse(a.blast_radius.score), &a.id).cmp(&(Reverse(b.blast_radius.score), &b.id))
     });
 
-    let mut sorted_files = ctx.analyzed_files();
-    sorted_files.sort();
-    let subject_spans_by_file: HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>> = sorted_files
-        .iter()
-        .map(|p| (p.clone(), ctx.subject_spans_for_file(p)))
-        .collect();
     let flagged_subjects: BTreeSet<(&Path, Option<&str>)> = diagnostics
         .iter()
         .map(|d| (d.file.as_path(), d.subject_name.as_deref()))
         .collect();
     let mut fallback_exemplar_cache: HashMap<u8, Option<SourceExcerpt>> = HashMap::new();
+    let mut rule_exemplar_cache: HashMap<(RuleId, u8), Option<SourceExcerpt>> = HashMap::new();
 
     let capsules: Vec<FixCapsule> = groups
         .iter()
@@ -329,6 +332,7 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
                 &subject_spans_by_file,
                 &flagged_subjects,
                 &mut fallback_exemplar_cache,
+                &mut rule_exemplar_cache,
             )
         })
         .collect();
@@ -357,11 +361,13 @@ fn compute_blast_radius<C: PlannerContext + ?Sized>(
     indices: &[usize],
     diagnostics: &[Diagnostic],
     sources: &HashMap<PathBuf, String>,
+    subject_spans_by_file: &HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>>,
 ) -> BlastRadius {
     let first = &diagnostics[indices[0]];
     let meta = first.rule.metadata();
 
-    let render_frequency = detect_render_frequency(ctx, indices, diagnostics, sources);
+    let render_frequency =
+        detect_render_frequency(ctx, indices, diagnostics, sources, subject_spans_by_file);
     let fan_out = compute_group_fan_out(ctx, indices, diagnostics, sources);
     let cascade_depth = indices
         .iter()
@@ -492,6 +498,7 @@ fn detect_render_frequency<C: PlannerContext + ?Sized>(
     indices: &[usize],
     diagnostics: &[Diagnostic],
     sources: &HashMap<PathBuf, String>,
+    subject_spans_by_file: &HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>>,
 ) -> RenderFrequency {
     let mut has_list_loop = false;
 
@@ -523,7 +530,7 @@ fn detect_render_frequency<C: PlannerContext + ?Sized>(
         let Some(subj_name) = &diag.subject_name else {
             continue;
         };
-        if subject_uses_frame_loop(ctx, &diag.file, subj_name, sources) {
+        if subject_uses_frame_loop(ctx, &diag.file, subj_name, sources, subject_spans_by_file) {
             return RenderFrequency::FrameLoop60Fps;
         }
         if ctx.subject_rendered_in_list_loop(&diag.file, subj_name) {
@@ -543,10 +550,17 @@ fn subject_uses_frame_loop<C: PlannerContext + ?Sized>(
     file_path: &Path,
     subj_name: &str,
     sources: &HashMap<PathBuf, String>,
+    subject_spans_by_file: &HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>>,
 ) -> bool {
-    let Some((_, subj_span)) = ctx
-        .subject_spans_for_file(file_path)
-        .into_iter()
+    let owned_fallback;
+    let spans = if let Some(cached) = subject_spans_by_file.get(file_path) {
+        cached.as_slice()
+    } else {
+        owned_fallback = ctx.subject_spans_for_file(file_path);
+        owned_fallback.as_slice()
+    };
+    let Some((_, subj_span)) = spans
+        .iter()
         .find(|(name, _)| name.as_deref() == Some(subj_name))
     else {
         return false;
@@ -554,7 +568,7 @@ fn subject_uses_frame_loop<C: PlannerContext + ?Sized>(
     let Some(src) = sources.get(file_path) else {
         return false;
     };
-    let Some(subj_src) = slice_span(src, subj_span) else {
+    let Some(subj_src) = slice_span(src, *subj_span) else {
         return false;
     };
     subj_src.contains("useFrame(") || subj_src.contains("requestAnimationFrame(")
@@ -650,6 +664,7 @@ pub fn build_fix_capsule<C: PlannerContext + ?Sized>(
         .map(|d| (d.file.as_path(), d.subject_name.as_deref()))
         .collect();
     let mut fallback_exemplar_cache: HashMap<u8, Option<SourceExcerpt>> = HashMap::new();
+    let mut rule_exemplar_cache: HashMap<(RuleId, u8), Option<SourceExcerpt>> = HashMap::new();
     build_fix_capsule_cached(
         ctx,
         group,
@@ -659,6 +674,7 @@ pub fn build_fix_capsule<C: PlannerContext + ?Sized>(
         &subject_spans_by_file,
         &flagged_subjects,
         &mut fallback_exemplar_cache,
+        &mut rule_exemplar_cache,
     )
 }
 
@@ -675,6 +691,7 @@ fn build_fix_capsule_cached<C: PlannerContext + ?Sized>(
     subject_spans_by_file: &HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>>,
     flagged_subjects: &BTreeSet<(&Path, Option<&str>)>,
     fallback_exemplar_cache: &mut HashMap<u8, Option<SourceExcerpt>>,
+    rule_exemplar_cache: &mut HashMap<(RuleId, u8), Option<SourceExcerpt>>,
 ) -> FixCapsule {
     let primary_diag = &diagnostics[group.diagnostic_indices[0]];
     let subject_excerpt =
@@ -728,6 +745,7 @@ fn build_fix_capsule_cached<C: PlannerContext + ?Sized>(
         subject_spans_by_file,
         flagged_subjects,
         fallback_exemplar_cache,
+        rule_exemplar_cache,
     );
     let invariants = invariants_for_rule(group.rule, group.tier);
 
@@ -858,6 +876,7 @@ fn find_repository_exemplar_cached<C: PlannerContext + ?Sized>(
     subject_spans_by_file: &HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>>,
     flagged_subjects: &BTreeSet<(&Path, Option<&str>)>,
     fallback_exemplar_cache: &mut HashMap<u8, Option<SourceExcerpt>>,
+    rule_exemplar_cache: &mut HashMap<(RuleId, u8), Option<SourceExcerpt>>,
 ) -> Option<SourceExcerpt> {
     if group.rule == RuleId::NoResetAllStateOnPropChange {
         for &idx in &group.diagnostic_indices {
@@ -868,22 +887,24 @@ fn find_repository_exemplar_cached<C: PlannerContext + ?Sized>(
     }
 
     let lang_bucket = language_family_bucket(&group.file);
-    if group.rule.is_architecture_soc_or_reuse_rule() {
-        let cache_key = 0x80 | lang_bucket;
-        if let Some(cached) = fallback_exemplar_cache.get(&cache_key)
-            && let Some(ex) = cached
-            && ex.file != group.file
-        {
-            return Some(ex.clone());
+    let rule_key = (group.rule, lang_bucket);
+    if let Some(cached_opt) = rule_exemplar_cache.get(&rule_key) {
+        match cached_opt {
+            None => {}
+            Some(ex) if ex.file != group.file => return Some(ex.clone()),
+            Some(_) => {
+                if let Some(rule_ex) = ctx.find_rule_exemplar(group, diagnostics, sources) {
+                    return Some(rule_ex);
+                }
+            }
         }
-        if let Some(rule_ex) = ctx.find_rule_exemplar(group, diagnostics, sources) {
-            fallback_exemplar_cache.insert(cache_key, Some(rule_ex.clone()));
-            return Some(rule_ex);
+    } else {
+        let rule_ex = ctx.find_rule_exemplar(group, diagnostics, sources);
+        rule_exemplar_cache.insert(rule_key, rule_ex.clone());
+        if let Some(ex) = rule_ex {
+            return Some(ex);
         }
-    } else if let Some(rule_ex) = ctx.find_rule_exemplar(group, diagnostics, sources) {
-        return Some(rule_ex);
     }
-    let lang_bucket = language_family_bucket(&group.file);
     if let Some(cached) = fallback_exemplar_cache.get(&lang_bucket) {
         return cached.clone();
     }

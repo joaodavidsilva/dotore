@@ -2015,18 +2015,32 @@ pub(super) fn evaluate_reuse_architecture_rules<F>(
         Option<&[RuleId]>,
     ) -> Option<RuleSeverity>,
 {
-    for pkg in packages {
-        let pkg_files: Vec<&FileIr> = graph
-            .files
+    if packages.is_empty() {
+        return;
+    }
+    let mut buckets: Vec<Vec<&FileIr>> = (0..packages.len()).map(|_| Vec::new()).collect();
+    for f in &graph.files {
+        if f.file_context != FileContext::Production {
+            continue;
+        }
+        let Some(resolved) = resolve_package_for_file(&f.path, packages) else {
+            continue;
+        };
+        if let Some(idx) = packages
             .iter()
-            .filter(|f| {
-                f.file_context == FileContext::Production
-                    && resolve_package_for_file(&f.path, packages)
-                        .is_some_and(|resolved| resolved.root_dir == pkg.root_dir)
-                    && !pkg.config.is_file_ignored(&f.path, &pkg.root_dir)
-            })
-            .collect();
+            .position(|p| p.root_dir == resolved.root_dir)
+            && !packages[idx]
+                .config
+                .is_file_ignored(&f.path, &packages[idx].root_dir)
+        {
+            buckets[idx].push(f);
+        }
+    }
 
+    for (pkg, pkg_files) in packages.iter().zip(buckets) {
+        if pkg_files.is_empty() {
+            continue;
+        }
         evaluate_duplicated_helpers_for_package(
             &pkg_files,
             pkg,

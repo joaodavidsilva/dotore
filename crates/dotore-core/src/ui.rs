@@ -1452,7 +1452,8 @@ static PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static PROGRESS_CURRENT_FILE: Mutex<String> = Mutex::new(String::new());
 
 fn normalize_progress_display_path(path: &Path) -> String {
-    let raw = if let Ok(cwd) = std::env::current_dir()
+    let raw = if path.is_absolute()
+        && let Ok(cwd) = std::env::current_dir()
         && let Ok(stripped) = path.strip_prefix(&cwd)
     {
         stripped.to_string_lossy().into_owned()

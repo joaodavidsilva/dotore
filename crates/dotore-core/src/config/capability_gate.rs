@@ -467,17 +467,52 @@ impl CapabilityPredicate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityGate {
     /// Active capability tokens for this package.
+    #[serde(serialize_with = "serialize_sorted_capabilities")]
     pub capabilities: HashSet<Capability>,
     /// Inferred package role (`Application`, `Library`, or `Unknown`).
     pub package_role: PackageRole,
     /// Relative entrypoint paths declared in `package.json` (`exports`, `main`, `module`, `source`).
+    #[serde(serialize_with = "serialize_sorted_paths")]
     pub entrypoints: HashSet<PathBuf>,
     /// Combined dependency map (`name -> version spec`).
+    #[serde(serialize_with = "serialize_sorted_deps")]
     pub dependencies: HashMap<String, String>,
     /// Whether React Compiler is enabled for this package.
     pub has_react_compiler: bool,
 }
 
+fn serialize_sorted_capabilities<S>(
+    caps: &HashSet<Capability>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut sorted: Vec<Capability> = caps.iter().copied().collect();
+    sorted.sort_by_key(|c| c.as_str());
+    serializer.collect_seq(sorted)
+}
+
+fn serialize_sorted_paths<S>(paths: &HashSet<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut sorted: Vec<&PathBuf> = paths.iter().collect();
+    sorted.sort();
+    serializer.collect_seq(sorted)
+}
+
+fn serialize_sorted_deps<S>(
+    deps: &HashMap<String, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut sorted: Vec<(&String, &String)> = deps.iter().collect();
+    sorted.sort_by_key(|(a, _)| *a);
+    serializer.collect_map(sorted)
+}
 impl Default for CapabilityGate {
     fn default() -> Self {
         Self::default_react()

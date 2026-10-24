@@ -424,6 +424,7 @@ pub fn analyze_project_sources(
 
 struct PolyglotPlannerContext<'a> {
     extracted_files: &'a [ExtractedFile],
+    extracted_index_by_path: HashMap<&'a Path, usize>,
     #[cfg(feature = "js")]
     js_graph: Option<&'a ProjectGraph>,
 }
@@ -434,17 +435,23 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
     }
 
     fn subject_spans_for_file(&self, file: &Path) -> Vec<(Option<String>, ByteSpan)> {
-        let spans = self.extracted_files.subject_spans_for_file(file);
-        if !spans.is_empty() {
-            return spans;
+        if let Some(&idx) = self.extracted_index_by_path.get(file) {
+            let f = &self.extracted_files[idx];
+            if !f.subject_spans.is_empty() {
+                return f
+                    .subject_spans
+                    .iter()
+                    .map(|(name, span, _)| (name.clone(), *span))
+                    .collect();
+            }
+            return Vec::new();
         }
         #[cfg(feature = "js")]
         if let Some(g) = self.js_graph {
             return g.subject_spans_for_file(file);
         }
-        Vec::new()
+        self.extracted_files.subject_spans_for_file(file)
     }
-
     fn callers_of(&self, target_file: &Path, subject_name: &str) -> Vec<ResolvedCallerSite> {
         #[cfg(feature = "js")]
         if let Some(g) = self.js_graph {
@@ -495,6 +502,9 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
     }
 
     fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
+        if let Some(&idx) = self.extracted_index_by_path.get(file) {
+            return Some(&self.extracted_files[idx].architecture_facets);
+        }
         #[cfg(feature = "js")]
         if let Some(g) = self.js_graph
             && let Some(facets) = g.architecture_facets_for_file(file)
@@ -546,8 +556,14 @@ fn build_polyglot_report(
         .map(|f| (f.path.clone(), f.subjects_count))
         .collect();
     let effects_scanned: usize = all_extracted.iter().map(|f| f.effects_count).sum();
+    let extracted_index_by_path: HashMap<&Path, usize> = all_extracted
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| (f.path.as_path(), idx))
+        .collect();
     let ctx = PolyglotPlannerContext {
         extracted_files: all_extracted,
+        extracted_index_by_path,
         #[cfg(feature = "js")]
         js_graph,
     };

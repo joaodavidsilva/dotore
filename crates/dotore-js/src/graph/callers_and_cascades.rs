@@ -50,6 +50,16 @@ pub(crate) struct MultiEffectCascade {
 }
 
 impl ProjectGraph {
+    /// Looks up a [`FileIr`] by path in $O(\log N)$ via binary search over `self.files`.
+    #[must_use]
+    pub(crate) fn find_file_ir(&self, file: &Path) -> Option<&FileIr> {
+        self.files
+            .binary_search_by(|f| f.path.as_path().cmp(file))
+            .ok()
+            .map(|idx| &self.files[idx])
+            .or_else(|| self.files.iter().find(|f| f.path == file))
+    }
+
     /// Returns all resolved JSX **Caller Sites** rendering `component_name` declared in `target_file`.
     #[must_use]
     pub fn callers_of(&self, target_file: &Path, component_name: &str) -> Vec<ResolvedCallerSite> {
@@ -62,7 +72,6 @@ impl ProjectGraph {
             .cloned()
             .unwrap_or_default()
     }
-
     /// Resolves a component's transitive `children`-forwarding JSX target across same-file and imported declarations.
     #[must_use]
     pub(crate) fn resolve_children_forwarding_target(
@@ -134,7 +143,7 @@ impl ProjectGraph {
             if callers
                 .iter()
                 .any(|c| c.caller_file == caller_file && c.span == jsx_span)
-                && let Some(target_file) = self.files.iter().find(|f| f.path == target_key.file)
+                && let Some(target_file) = self.find_file_ir(&target_key.file)
                 && let Some(target_subj) = target_file
                     .subjects
                     .iter()
@@ -144,7 +153,7 @@ impl ProjectGraph {
             }
         }
 
-        let same_file = self.files.iter().find(|f| f.path == caller_file)?;
+        let same_file = self.find_file_ir(caller_file)?;
         let same_subj = same_file
             .subjects
             .iter()

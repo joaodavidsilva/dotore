@@ -389,13 +389,15 @@ pub(crate) fn evaluate_architecture_project_graph_rules<F>(
 {
     // 1 & 2: Context.Provider unstable value & Overloaded provider analysis
     for file in &graph.files {
+        if file.context_providers.is_empty() {
+            continue;
+        }
         let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
             continue;
         };
         if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
             continue;
         }
-
         for provider in &file.context_providers {
             let (all_consumer_sites, static_only_consumers) =
                 collect_consumers_for_provider(graph, file, provider);
@@ -489,6 +491,13 @@ pub(crate) fn evaluate_architecture_project_graph_rules<F>(
 
     // 3: Ancestral `<Suspense>` and `<ErrorBoundary>` verification across Caller Sites
     for file in &graph.files {
+        if !file
+            .subjects
+            .iter()
+            .any(|s| s.suspends || s.throws_in_render)
+        {
+            continue;
+        }
         let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
             continue;
         };

@@ -466,6 +466,19 @@ fn cli_subcommands_use_scan_cache_and_honor_no_cache_flag_and_env() {
         r#"{"name": "cli-cache-app", "dependencies": {"react": "^19.0.0"}}"#,
     )
     .unwrap();
+    fs::write(repo_dir.join(".gitignore"), "ignored-vendor-pkg/\n").unwrap();
+    let ignored_pkg_dir = repo_dir.join("ignored-vendor-pkg");
+    fs::create_dir_all(&ignored_pkg_dir).unwrap();
+    fs::write(
+        ignored_pkg_dir.join("package.json"),
+        r#"{"name": "ignored-vendor-pkg", "dependencies": {"react": "^19.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo_dir.join("dotore.config.json"),
+        r#"{"rules": {"no-console": "warn", "prefer-const": "warn"}, "categories": {"Bugs": "error", "Performance": "warn"}}"#,
+    )
+    .unwrap();
     fs::write(
         src_dir.join("Widget.tsx"),
         r#"
@@ -533,6 +546,17 @@ fn cli_subcommands_use_scan_cache_and_honor_no_cache_flag_and_env() {
     let warm_report: JsonReport = serde_json::from_slice(&out_warm.stdout).unwrap();
     assert_eq!(warm_report, cold_report);
     assert_eq!(out_warm.stdout, out_cold.stdout);
+    let warm_cache = load_scan_result_cache(&cache_path);
+    assert_eq!(
+        warm_cache.entries.len(),
+        1,
+        "separate CLI child processes must compute an identical deterministic cache key"
+    );
+    assert_eq!(
+        warm_report.projects.len(),
+        1,
+        "gitignored nested package directories must not pollute discovered workspace packages"
+    );
 
     // `dotore score` also accepts `--no-cache`
     let out_score = Command::new(bin)
