@@ -681,6 +681,7 @@ fn ci_and_install_subcommands_scaffold_workflows_skills_and_hooks() {
     assert!(wf_path.is_file());
     let wf_content = fs::read_to_string(&wf_path).unwrap();
     assert!(wf_content.contains("dotore check --scope changed"));
+    assert!(wf_content.contains("dotore ci comment"));
 
     // Update via `dotore ci config` CLI
     let cfg_ci_out = Command::new(dotore_bin())
@@ -734,6 +735,11 @@ fn ci_and_install_subcommands_scaffold_workflows_skills_and_hooks() {
         fs::read_to_string(&gl_path)
             .unwrap()
             .contains("--scope lines")
+    );
+    assert!(
+        fs::read_to_string(&gl_path)
+            .unwrap()
+            .contains("dotore ci comment")
     );
     let gl_cfg_res = ci_config(&CiOptions {
         cwd: dir.clone(),
@@ -1070,4 +1076,163 @@ fn tui_frame_and_progress_bar_fit_any_terminal_width_and_align_borders() {
             );
         }
     }
+}
+
+#[test]
+fn cli_pr_comment_format_and_ci_comment_subcommand_render_deterministic_summary() {
+    use dotore::{
+        BaselineSummary, OutputFormat, PR_COMMENT_MARKER, read_json_report, write_json_report,
+    };
+
+    let _ = OutputFormat::GithubPrComment;
+    let dir = unique_temp_dir("pr-comment-cli");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/Form.tsx"),
+        r#"import { useState, useEffect } from 'react';
+export function Form({ first, last, onSubmit }: { first: string; last: string; onSubmit: () => void }) {
+    const [full, setFull] = useState('');
+    const [submitted, setSubmitted] = useState(false);
+    useEffect(() => {
+        setFull(first + ' ' + last);
+    }, [first, last]);
+    useEffect(() => {
+        if (submitted) {
+            onSubmit();
+        }
+    }, [submitted, onSubmit]);
+    return <button onClick={() => setSubmitted(true)}>{full}</button>;
+}
+"#,
+    )
+    .unwrap();
+
+    let report_json = dir.join("dotore-report.json");
+
+    // 1. `dotore check --format github-pr-comment --json-out <file>` with GitHub env vars
+    let check_out = Command::new(dotore_bin())
+        .args([
+            "check",
+            "--format",
+            "github-pr-comment",
+            "--no-fail",
+            "--json-out",
+        ])
+        .arg(&report_json)
+        .arg(&dir)
+        .env("GITHUB_REPOSITORY", "acme/frontend")
+        .env("GITHUB_SERVER_URL", "https://github.com")
+        .env("GITHUB_SHA", "1234567890abcdef")
+        .output()
+        .unwrap();
+    assert!(
+        check_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&check_out.stdout);
+    assert!(stdout.starts_with(PR_COMMENT_MARKER));
+    assert!(stdout.contains("Health Score"));
+    assert!(stdout.contains("https://github.com/acme/frontend/blob/1234567890abcdef/"));
+    assert!(stdout.contains("#L6)"));
+    assert!(stdout.contains("<details>"));
+    assert!(stdout.contains("Warnings (1)"));
+    assert!(report_json.is_file());
+
+    // 2. Alias `--format pr-comment`
+    let alias_out = Command::new(dotore_bin())
+        .args(["check", "--format", "pr-comment", "--no-fail"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(alias_out.status.success());
+    assert!(String::from_utf8_lossy(&alias_out.stdout).starts_with(PR_COMMENT_MARKER));
+
+    // 3. `dotore ci comment <report.json> -o comment.md` with baseline & baseline_degraded
+    let mut saved_report = read_json_report(&report_json).unwrap();
+    saved_report.baseline = Some(BaselineSummary {
+        baseline_source: "origin/main".to_string(),
+        introduced_count: 1,
+        fixed_count: 2,
+        preexisting_count: 3,
+        baseline_total_count: 5,
+    });
+    saved_report.baseline_degraded = true;
+    write_json_report(&saved_report, &report_json).unwrap();
+
+    let comment_md = dir.join("comment.md");
+    let ci_comment_out = Command::new(dotore_bin())
+        .args(["ci", "comment"])
+        .arg(&report_json)
+        .arg("-o")
+        .arg(&comment_md)
+        .env_remove("DOTORE_SILENCE_MISSING_BASELINE_WARNING")
+        .output()
+        .unwrap();
+    assert!(
+        ci_comment_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ci_comment_out.stderr)
+    );
+    let rendered_file = fs::read_to_string(&comment_md).unwrap();
+    assert!(rendered_file.starts_with(PR_COMMENT_MARKER));
+    assert!(rendered_file.contains("origin/main"));
+    assert!(rendered_file.contains("+1"));
+    assert!(rendered_file.contains("-2"));
+    assert!(rendered_file.contains("fetch-depth: 0"));
+
+    // 4. `DOTORE_SILENCE_MISSING_BASELINE_WARNING=true` suppresses the shallow checkout block
+    let silenced_out = Command::new(dotore_bin())
+        .args(["ci", "comment"])
+        .arg(&report_json)
+        .env("DOTORE_SILENCE_MISSING_BASELINE_WARNING", "true")
+        .output()
+        .unwrap();
+    assert!(silenced_out.status.success());
+    let silenced_stdout = String::from_utf8_lossy(&silenced_out.stdout);
+    assert!(silenced_stdout.starts_with(PR_COMMENT_MARKER));
+    assert!(!silenced_stdout.contains("fetch-depth: 0"));
+
+    // 5. Backward-compatible `dotore ci --provider github-actions --blocking error --scope changed --cwd <dir>`
+    let bare_ci_out = Command::new(dotore_bin())
+        .args([
+            "ci",
+            "--provider",
+            "github-actions",
+            "--blocking",
+            "error",
+            "--scope",
+            "changed",
+            "--cwd",
+        ])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        bare_ci_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&bare_ci_out.stderr)
+    );
+    let wf_content = fs::read_to_string(dir.join(".github/workflows/dotore.yml")).unwrap();
+    assert!(wf_content.contains("dotore check --scope changed --blocking error"));
+    assert!(wf_content.contains("dotore ci comment"));
+
+    // 6. `dotore report --format github-pr-comment -o report-comment.md` with GitLab CI env vars
+    let report_comment_md = dir.join("report-comment.md");
+    let rep_out = Command::new(dotore_bin())
+        .args(["report", "--format", "github-pr-comment", "-o"])
+        .arg(&report_comment_md)
+        .arg(&dir)
+        .env_remove("GITHUB_REPOSITORY")
+        .env_remove("GITHUB_SHA")
+        .env("CI_PROJECT_URL", "https://gitlab.com/acme/frontend")
+        .env("CI_COMMIT_SHA", "abcdef0123456789")
+        .output()
+        .unwrap();
+    assert!(rep_out.status.success());
+    let gl_comment = fs::read_to_string(&report_comment_md).unwrap();
+    assert!(gl_comment.starts_with(PR_COMMENT_MARKER));
+    assert!(gl_comment.contains("https://gitlab.com/acme/frontend/-/blob/abcdef0123456789/"));
+
+    let _ = fs::remove_dir_all(&dir);
 }
