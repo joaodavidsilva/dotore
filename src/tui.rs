@@ -2,11 +2,12 @@
 //! grouping modes, `/` search, and `ESC` clean exit) built on `dotore_core::ui`.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     fmt::Write as _,
     fs::OpenOptions,
     io::{self, IsTerminal, Read, Write},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -17,8 +18,10 @@ use dotore_core::{
         build_agent_handoff_prompt, copy_to_clipboard, detect_available_coding_agents,
         execute_handoff, filter_report_for_diagnostics, load_preferred_handoff_target,
     },
-    report::JsonReport,
-    rules::{BlastRadiusTier, Diagnostic, PrescriptionTier, RuleSeverity},
+    report::{JsonReport, ProjectCoverageMetadata},
+    rules::{BlastRadiusTier, Diagnostic, PrescriptionTier, RootCauseGroup, RuleSeverity},
+    score::compute_local_health_score,
+    search::score_fuzzy,
     ui::{
         AsciiBox, Badge, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FilterTabBar, FlowDiagram,
         GaugeBar, StatusBar, truncate_ansi_to_width, visible_char_width,
@@ -62,7 +65,111 @@ impl TuiGroupMode {
     }
 }
 
-/// Interactive navigation, filter tab, grouping, and search state for the TUI explorer.
+/// A workspace package entry displayed in the interactive TUI package picker (`p`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiPackageItem {
+    /// Package name.
+    pub name: String,
+    /// Workspace-relative directory path display string.
+    pub rel_path: String,
+    /// Root directory path of the package.
+    pub root_dir: PathBuf,
+    /// Number of diagnostics in this package.
+    pub diagnostic_count: usize,
+    /// Individual `0..=100` Health Score for this package.
+    pub health_score: u32,
+    /// Human-readable score label (`"Excellent"`, `"Good"`, etc.).
+    pub score_label: String,
+    /// Analyzed files belonging to this package.
+    pub analyzed_files: Vec<PathBuf>,
+}
+
+impl TuiPackageItem {
+    /// Converts a [`ProjectCoverageMetadata`] record from [`JsonReport`] into a [`TuiPackageItem`].
+    #[must_use]
+    pub fn from_metadata(meta: &ProjectCoverageMetadata) -> Self {
+        Self {
+            name: meta.name.clone(),
+            rel_path: format_package_rel_path(&meta.root_dir),
+            root_dir: meta.root_dir.clone(),
+            diagnostic_count: meta.diagnostic_count,
+            health_score: meta.health_score,
+            score_label: meta.score_label.clone(),
+            analyzed_files: meta.analyzed_files.clone(),
+        }
+    }
+}
+
+fn normalize_rel_display(raw: &str) -> String {
+    let clean = raw.replace('\\', "/");
+    let trimmed = clean
+        .strip_prefix("./")
+        .unwrap_or(clean.as_str())
+        .trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn format_package_rel_path(root_dir: &Path) -> String {
+    if root_dir.is_relative() {
+        return normalize_rel_display(&root_dir.to_string_lossy());
+    }
+    if let Ok(cwd) = env::current_dir()
+        && let Ok(stripped) = root_dir.strip_prefix(&cwd)
+    {
+        return normalize_rel_display(&stripped.to_string_lossy());
+    }
+    if let Some(parent) = root_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        && matches!(
+            parent,
+            "apps" | "packages" | "services" | "crates" | "libs" | "modules"
+        )
+        && let Some(leaf) = root_dir.file_name().and_then(|s| s.to_str())
+    {
+        return format!("{parent}/{leaf}");
+    }
+    normalize_rel_display(&root_dir.to_string_lossy())
+}
+
+fn common_ancestor_dir(paths: &[PathBuf]) -> Option<PathBuf> {
+    let first = paths.first()?;
+    if !first.is_absolute() {
+        return None;
+    }
+    let mut ancestor = first.clone();
+    for path in &paths[1..] {
+        if !path.is_absolute() {
+            return None;
+        }
+        while !path.starts_with(&ancestor) {
+            if !ancestor.pop() {
+                return None;
+            }
+        }
+    }
+    (ancestor.components().count() > 1).then_some(ancestor)
+}
+
+/// A fuzzy-filtered package row in the TUI package picker with character match indices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilteredPackageRow {
+    /// Index into `TuiState::packages`.
+    pub package_idx: usize,
+    /// Fuzzy match score (`0.0` when query is empty).
+    pub score: f64,
+    /// 0-based matched character indices in `name`.
+    pub name_matches: Vec<usize>,
+    /// 0-based matched character indices in `rel_path`.
+    pub path_matches: Vec<usize>,
+}
+
+/// Interactive navigation, filter tab, grouping, search, and package picker state for the TUI explorer.
 #[derive(Debug, Clone)]
 pub struct TuiState {
     /// Currently selected filter tab index.
@@ -79,6 +186,16 @@ pub struct TuiState {
     pub scroll_offset: usize,
     /// Whether the workspace package picker overlay (`p`) is currently open.
     pub in_package_picker: bool,
+    /// Discovered workspace packages available in the package picker (`p`).
+    pub packages: Vec<TuiPackageItem>,
+    /// Currently highlighted row index inside the filtered package picker list.
+    pub picker_cursor: usize,
+    /// Fuzzy filter query typed inside the package picker.
+    pub picker_query: String,
+    /// Working package selection flags inside the picker (indexed by `packages`).
+    pub picker_selected: Vec<bool>,
+    /// Active package selection flags applied via `Enter` (indexed by `packages`).
+    pub active_packages: Vec<bool>,
     /// Transient status bar confirmation or error message from TUI actions (`y`, `a`, `p`).
     pub status_message: Option<String>,
     report_snapshot: Option<(JsonReport, Vec<TuiFilterTab>)>,
@@ -96,18 +213,156 @@ impl TuiState {
             in_search_input: false,
             scroll_offset: 0,
             in_package_picker: false,
+            packages: Vec::new(),
+            picker_cursor: 0,
+            picker_query: String::new(),
+            picker_selected: Vec::new(),
+            active_packages: Vec::new(),
             status_message: None,
             report_snapshot: None,
         }
     }
 
-    /// Creates a [`TuiState`] initialized with `report` and `tabs` so TUI handoff actions (`y`/`a`)
-    /// can synthesize filtered handoff prompts directly.
+    /// Attaches discovered workspace `packages` to this [`TuiState`], selecting all packages by default.
+    #[must_use]
+    pub fn with_packages(mut self, packages: Vec<TuiPackageItem>) -> Self {
+        let count = packages.len();
+        self.packages = packages;
+        self.picker_selected = vec![true; count];
+        self.active_packages = vec![true; count];
+        self
+    }
+
+    /// Creates a [`TuiState`] initialized with `report` and `tabs` so package filtering (`p`)
+    /// and TUI handoff actions (`y`/`a`) operate on the full report metadata.
     #[must_use]
     pub fn from_report(report: &JsonReport, tabs: &[TuiFilterTab]) -> Self {
-        let mut state = Self::new(tabs.len());
+        let mut packages: Vec<TuiPackageItem> = report
+            .projects
+            .iter()
+            .map(TuiPackageItem::from_metadata)
+            .collect();
+        let root_dirs: Vec<PathBuf> = report.projects.iter().map(|p| p.root_dir.clone()).collect();
+        if root_dirs.len() > 1
+            && let Some(ancestor) = common_ancestor_dir(&root_dirs)
+        {
+            for item in &mut packages {
+                if Path::new(&item.rel_path).is_absolute()
+                    && let Ok(stripped) = item.root_dir.strip_prefix(&ancestor)
+                {
+                    item.rel_path = normalize_rel_display(&stripped.to_string_lossy());
+                }
+            }
+        }
+        let mut state = Self::new(tabs.len()).with_packages(packages);
         state.report_snapshot = Some((report.clone(), tabs.to_vec()));
         state
+    }
+
+    /// Returns `true` if a subset of workspace packages is currently filtered via the package picker.
+    #[must_use]
+    pub fn has_active_package_filter(&self) -> bool {
+        !self.packages.is_empty()
+            && self.active_packages.len() == self.packages.len()
+            && !self.active_packages.iter().all(|&b| b)
+    }
+
+    /// Returns `true` if `file` belongs to one of the currently active workspace packages.
+    #[must_use]
+    pub fn is_file_in_active_packages(&self, file: &Path) -> bool {
+        if !self.has_active_package_filter() {
+            return true;
+        }
+        if self.active_packages.iter().all(|&b| !b) {
+            return false;
+        }
+        for (idx, pkg) in self.packages.iter().enumerate() {
+            let is_active = self.active_packages.get(idx).copied().unwrap_or(false);
+            if is_active && pkg.analyzed_files.iter().any(|f| f == file) {
+                return true;
+            }
+        }
+        if let Some(best_idx) = self.resolve_package_index_for_path(file) {
+            return self.active_packages.get(best_idx).copied().unwrap_or(false);
+        }
+        false
+    }
+
+    fn resolve_package_index_for_path(&self, file: &Path) -> Option<usize> {
+        let file_norm = normalize_rel_display(&file.to_string_lossy());
+        let mut best: Option<(usize, usize)> = None;
+        for (idx, pkg) in self.packages.iter().enumerate() {
+            let matches_root = pkg.root_dir == Path::new(".")
+                || file.starts_with(&pkg.root_dir)
+                || pkg.rel_path == "."
+                || file_norm == pkg.rel_path
+                || file_norm
+                    .strip_prefix(&pkg.rel_path)
+                    .is_some_and(|rest| rest.starts_with('/'));
+            if !matches_root {
+                continue;
+            }
+            let specificity = if pkg.rel_path == "." {
+                0
+            } else {
+                pkg.rel_path.len().max(pkg.root_dir.as_os_str().len())
+            };
+            if best.is_none_or(|(_, best_len)| specificity > best_len) {
+                best = Some((idx, specificity));
+            }
+        }
+        best.map(|(idx, _)| idx)
+    }
+
+    /// Returns the workspace packages matching `picker_query`, ranked by fuzzy match score
+    /// with character match indices for `name` and `rel_path`.
+    #[must_use]
+    pub fn filtered_picker_packages(&self) -> Vec<FilteredPackageRow> {
+        let query = self.picker_query.trim();
+        if query.is_empty() {
+            return (0..self.packages.len())
+                .map(|package_idx| FilteredPackageRow {
+                    package_idx,
+                    score: 0.0,
+                    name_matches: Vec::new(),
+                    path_matches: Vec::new(),
+                })
+                .collect();
+        }
+        let mut rows: Vec<FilteredPackageRow> = self
+            .packages
+            .iter()
+            .enumerate()
+            .filter_map(|(package_idx, pkg)| {
+                let name_hit = score_fuzzy(query, &pkg.name);
+                let path_hit = score_fuzzy(query, &pkg.rel_path);
+                if name_hit.is_none() && path_hit.is_none() {
+                    return None;
+                }
+                let name_score = name_hit.as_ref().map(|(s, _)| *s + 2.0);
+                let path_score = path_hit.as_ref().map(|(s, _)| *s);
+                let score = match (name_score, path_score) {
+                    (Some(ns), Some(ps)) => ns.max(ps),
+                    (Some(ns), None) => ns,
+                    (None, Some(ps)) => ps,
+                    (None, None) => 0.0,
+                };
+                let name_matches = name_hit.map(|(_, m)| m).unwrap_or_default();
+                let path_matches = path_hit.map(|(_, m)| m).unwrap_or_default();
+                Some(FilteredPackageRow {
+                    package_idx,
+                    score,
+                    name_matches,
+                    path_matches,
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.package_idx.cmp(&b.package_idx))
+        });
+        rows
     }
 
     fn active_filtered_report(&self) -> (JsonReport, usize) {
@@ -118,11 +373,16 @@ impl TuiState {
                     .diagnostics
                     .iter()
                     .filter(|d| {
-                        diagnostic_matches_tab_and_search(d, active_tab, &self.search_query)
+                        self.is_file_in_active_packages(&d.file)
+                            && diagnostic_matches_tab_and_search(d, active_tab, &self.search_query)
                     })
                     .collect()
             } else {
-                report.diagnostics.iter().collect()
+                report
+                    .diagnostics
+                    .iter()
+                    .filter(|d| self.is_file_in_active_packages(&d.file))
+                    .collect()
             };
             let count = filtered.len();
             (filter_report_for_diagnostics(report, &filtered), count)
@@ -135,7 +395,6 @@ impl TuiState {
             (empty, 0)
         }
     }
-
     /// Copies the active filter's coding-agent handoff prompt to the system clipboard and updates `status_message`.
     pub fn copy_active_handoff_to_clipboard(&mut self) {
         let (filtered_report, count) = self.active_filtered_report();
@@ -191,6 +450,9 @@ impl TuiState {
         viewport_height: usize,
         max_scroll: usize,
     ) -> bool {
+        if self.in_package_picker {
+            return handle_tui_picker_key(self, key_bytes);
+        }
         if self.in_search_input {
             handle_tui_search_key(
                 key_bytes,
@@ -202,7 +464,6 @@ impl TuiState {
         }
 
         match key_bytes {
-            // Bare ESC or 'q' or 'Q' or Ctrl+C -> exit TUI cleanly!
             [0x1b] | [b'q'] | [b'Q'] | [0x03] => return true,
             // Up arrow or 'k'
             [0x1b, b'[', b'A'] | [0x1b, b'O', b'A'] | [b'k'] => {
@@ -259,6 +520,19 @@ impl TuiState {
                 self.search_query.clear();
                 self.scroll_offset = 0;
             }
+            // 'p' -> open workspace package picker overlay
+            [b'p'] | [b'P'] => {
+                if self.picker_selected.len() != self.packages.len() {
+                    self.picker_selected = vec![true; self.packages.len()];
+                }
+                if self.active_packages.len() != self.packages.len() {
+                    self.active_packages = vec![true; self.packages.len()];
+                }
+                self.in_package_picker = true;
+                self.picker_cursor = 0;
+                self.picker_query.clear();
+                self.picker_selected = self.active_packages.clone();
+            }
             // 'y' -> copy active filter's handoff prompt to clipboard
             [b'y'] | [b'Y'] => {
                 self.copy_active_handoff_to_clipboard();
@@ -267,7 +541,6 @@ impl TuiState {
             [b'a'] | [b'A'] => {
                 self.launch_active_coding_agent();
             }
-            // '1'..'9' quick filter tab jump
             [ch @ b'1'..=b'9'] => {
                 let idx = (ch - b'1') as usize;
                 if idx < self.tab_count {
@@ -635,6 +908,262 @@ pub fn build_score_gauge(score: u32, width: usize) -> String {
         .render(ColorMode::Ansi)
 }
 
+/// Highlights 0-based `matched_indices` in `text` using `match_ansi` and non-matching characters using `base_ansi`.
+#[must_use]
+pub fn highlight_fuzzy_matches(
+    text: &str,
+    matched_indices: &[usize],
+    base_ansi: &str,
+    match_ansi: &str,
+) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(text.len() * 8);
+    for (idx, ch) in text.chars().enumerate() {
+        if matched_indices.contains(&idx) {
+            let _ = write!(out, "{match_ansi}{ch}\x1b[0m");
+        } else if base_ansi.is_empty() {
+            out.push(ch);
+        } else {
+            let _ = write!(out, "{base_ansi}{ch}\x1b[0m");
+        }
+    }
+    out
+}
+
+/// Renders the resizable workspace package picker overlay box (`p`) fitted to `cols` terminal columns.
+#[must_use]
+pub fn render_package_picker_lines(state: &TuiState, cols: usize) -> Vec<String> {
+    let box_width = cols.saturating_sub(4).max(46);
+    let mut picker_box = AsciiBox::new(BoxBorderStyle::Double, box_width)
+        .with_indent(" ")
+        .with_border_color("\x1b[38;5;51;1m")
+        .with_title(
+            "WORKSPACE PACKAGE PICKER (Space: toggle, a: toggle all, Enter: apply, ESC: cancel)",
+        );
+
+    let selected_count = state.picker_selected.iter().filter(|&&b| b).count();
+    let total_pkg = state.packages.len();
+    picker_box.add_closed_row(format!(
+        " \x1b[48;5;236;38;5;226;1m FILTER \x1b[0m \x1b[38;5;255;1m{}█\x1b[0m   \x1b[38;5;245mSelected: {selected_count}/{total_pkg} packages\x1b[0m",
+        state.picker_query
+    ));
+    picker_box.add_titled_divider("DISCOVERED WORKSPACE PACKAGES");
+
+    let filtered = state.filtered_picker_packages();
+    if filtered.is_empty() {
+        picker_box.add_closed_row(
+            "  \x1b[38;5;244mNo workspace packages match the current filter.\x1b[0m",
+        );
+    } else {
+        let cursor = state.picker_cursor.min(filtered.len().saturating_sub(1));
+        for (row_idx, row) in filtered.iter().enumerate() {
+            let Some(pkg) = state.packages.get(row.package_idx) else {
+                continue;
+            };
+            let is_cursor = row_idx == cursor;
+            let is_selected = state
+                .picker_selected
+                .get(row.package_idx)
+                .copied()
+                .unwrap_or(true);
+            let cursor_glyph = if is_cursor {
+                "\x1b[38;5;51;1m▶\x1b[0m"
+            } else {
+                " "
+            };
+            let checkbox = if is_selected {
+                "\x1b[38;5;48;1m[x]\x1b[0m"
+            } else {
+                "\x1b[38;5;240m[ ]\x1b[0m"
+            };
+            let name_str = highlight_fuzzy_matches(
+                &pkg.name,
+                &row.name_matches,
+                "\x1b[38;5;255;1m",
+                "\x1b[38;5;226;1;4m",
+            );
+            let path_str = highlight_fuzzy_matches(
+                &pkg.rel_path,
+                &row.path_matches,
+                "\x1b[38;5;245m",
+                "\x1b[38;5;226;1;4m",
+            );
+            picker_box.add_closed_row(format!(
+                " {cursor_glyph} {checkbox} {name_str} ({path_str})  \x1b[38;5;250mscore:\x1b[0m \x1b[38;5;48;1m{}/100 ({})\x1b[0m  \x1b[38;5;250mfindings:\x1b[0m \x1b[38;5;220;1m{}\x1b[0m",
+                pkg.health_score, pkg.score_label, pkg.diagnostic_count
+            ));
+        }
+    }
+
+    picker_box.render_lines(ColorMode::Ansi)
+}
+
+struct FilteredHeaderMetrics {
+    health_score: u32,
+    score_label: String,
+    error_count: usize,
+    warning_count: usize,
+    autofix_count: usize,
+    surgical_count: usize,
+    refactor_count: usize,
+    files_scanned: usize,
+    subjects_scanned: usize,
+    effects_scanned: usize,
+    affected_file_count: usize,
+    p0: usize,
+    p1: usize,
+    p2: usize,
+    package_badge: String,
+}
+
+fn compute_header_metrics(report: &JsonReport, state: &TuiState) -> FilteredHeaderMetrics {
+    let s = &report.summary;
+    if !state.has_active_package_filter() {
+        let p0 = report
+            .root_cause_groups
+            .iter()
+            .filter(|g| g.blast_radius.tier == BlastRadiusTier::P0)
+            .count();
+        let p1 = report
+            .root_cause_groups
+            .iter()
+            .filter(|g| g.blast_radius.tier == BlastRadiusTier::P1)
+            .count();
+        let p2 = report
+            .root_cause_groups
+            .iter()
+            .filter(|g| g.blast_radius.tier == BlastRadiusTier::P2)
+            .count();
+        return FilteredHeaderMetrics {
+            health_score: s.health_score,
+            score_label: s.score_label.clone(),
+            error_count: s.error_count,
+            warning_count: s.warning_count,
+            autofix_count: s.autofix_count,
+            surgical_count: s.surgical_count,
+            refactor_count: s.refactor_count,
+            files_scanned: s.files_scanned,
+            subjects_scanned: s.subjects_scanned,
+            effects_scanned: s.effects_scanned,
+            affected_file_count: s.affected_file_count,
+            p0,
+            p1,
+            p2,
+            package_badge: String::new(),
+        };
+    }
+
+    let mut error_count = 0usize;
+    let mut warning_count = 0usize;
+    let mut autofix_count = 0usize;
+    let mut surgical_count = 0usize;
+    let mut refactor_count = 0usize;
+    let mut affected_files: BTreeSet<&Path> = BTreeSet::new();
+
+    for d in &report.diagnostics {
+        if !state.is_file_in_active_packages(&d.file) {
+            continue;
+        }
+        affected_files.insert(&d.file);
+        match d.severity {
+            RuleSeverity::Error => error_count += 1,
+            RuleSeverity::Warning => warning_count += 1,
+        }
+        match d.tier {
+            PrescriptionTier::Autofix => autofix_count += 1,
+            PrescriptionTier::Surgical => surgical_count += 1,
+            PrescriptionTier::Refactor => refactor_count += 1,
+        }
+    }
+
+    let active_groups: Vec<RootCauseGroup> = report
+        .root_cause_groups
+        .iter()
+        .filter(|g| state.is_file_in_active_packages(&g.file))
+        .cloned()
+        .collect();
+    let p0 = active_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P0)
+        .count();
+    let p1 = active_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P1)
+        .count();
+    let p2 = active_groups
+        .iter()
+        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P2)
+        .count();
+
+    let selected_indices: Vec<usize> = state
+        .active_packages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &active)| active.then_some(idx))
+        .collect();
+
+    let files_scanned: usize = selected_indices
+        .iter()
+        .filter_map(|&idx| {
+            report
+                .projects
+                .get(idx)
+                .map(|p| p.analyzed_file_count)
+                .or_else(|| state.packages.get(idx).map(|p| p.analyzed_files.len()))
+        })
+        .sum();
+    let subjects_scanned: usize = selected_indices
+        .iter()
+        .filter_map(|&idx| report.projects.get(idx).map(|p| p.subjects_scanned))
+        .sum();
+
+    let (health_score, score_label) = if selected_indices.len() == 1
+        && let Some(pkg) = state.packages.get(selected_indices[0])
+    {
+        (pkg.health_score, pkg.score_label.clone())
+    } else if selected_indices.is_empty() {
+        (100, "Excellent".to_string())
+    } else {
+        let computed = compute_local_health_score(&active_groups, files_scanned, subjects_scanned);
+        (computed.score, computed.label)
+    };
+
+    let selected_names: Vec<&str> = selected_indices
+        .iter()
+        .filter_map(|&idx| state.packages.get(idx).map(|p| p.name.as_str()))
+        .collect();
+    let names_label = if selected_names.is_empty() {
+        "none".to_string()
+    } else {
+        selected_names.join(", ")
+    };
+    let package_badge = format!(
+        " · \x1b[38;5;250mPackages:\x1b[0m \x1b[38;5;51;1m{}/{} ({names_label})\x1b[0m",
+        selected_indices.len(),
+        state.packages.len()
+    );
+
+    FilteredHeaderMetrics {
+        health_score,
+        score_label,
+        error_count,
+        warning_count,
+        autofix_count,
+        surgical_count,
+        refactor_count,
+        files_scanned,
+        subjects_scanned,
+        effects_scanned: s.effects_scanned,
+        affected_file_count: affected_files.len(),
+        p0,
+        p1,
+        p2,
+        package_badge,
+    }
+}
+
 /// Renders a complete TUI frame (header banner, [`FilterTabBar`], body viewport, and [`StatusBar`] footer)
 /// as an ANSI string fitted to `(rows, cols)` using `state`.
 #[must_use]
@@ -652,26 +1181,10 @@ pub fn render_tui_frame_with_state(
     let search_query = state.search_query.as_str();
     let in_search_input = state.in_search_input;
     let scroll_offset = state.scroll_offset;
-    let s = &report.summary;
+    let metrics = compute_header_metrics(report, state);
     let effective_cols = cols.max(52);
     let box_inner_width = effective_cols.saturating_sub(4).max(46);
     let line_cap = effective_cols.saturating_sub(1);
-
-    let p0 = report
-        .root_cause_groups
-        .iter()
-        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P0)
-        .count();
-    let p1 = report
-        .root_cause_groups
-        .iter()
-        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P1)
-        .count();
-    let p2 = report
-        .root_cause_groups
-        .iter()
-        .filter(|g| g.blast_radius.tier == BlastRadiusTier::P2)
-        .count();
 
     let mut frame = String::with_capacity(16384);
     frame.push_str("\x1b[H");
@@ -682,14 +1195,17 @@ pub fn render_tui_frame_with_state(
     } else {
         format!(
             "{} \x1b[38;5;248m({})\x1b[0m",
-            build_score_gauge(s.health_score, gauge_cells),
-            s.score_label
+            build_score_gauge(metrics.health_score, gauge_cells),
+            metrics.score_label
         )
     };
 
-    let p0_badge = Badge::blast_radius_count(BlastRadiusTier::P0, p0).render_pill(ColorMode::Ansi);
-    let p1_badge = Badge::blast_radius_count(BlastRadiusTier::P1, p1).render_pill(ColorMode::Ansi);
-    let p2_badge = Badge::blast_radius_count(BlastRadiusTier::P2, p2).render_pill(ColorMode::Ansi);
+    let p0_badge =
+        Badge::blast_radius_count(BlastRadiusTier::P0, metrics.p0).render_pill(ColorMode::Ansi);
+    let p1_badge =
+        Badge::blast_radius_count(BlastRadiusTier::P1, metrics.p1).render_pill(ColorMode::Ansi);
+    let p2_badge =
+        Badge::blast_radius_count(BlastRadiusTier::P2, metrics.p2).render_pill(ColorMode::Ansi);
 
     let mut header_box = AsciiBox::new(BoxBorderStyle::Double, box_inner_width)
         .with_indent(" ")
@@ -699,14 +1215,19 @@ pub fn render_tui_frame_with_state(
         ));
     header_box.add_closed_row(format!(
         " \x1b[38;5;196;1m✖ {} err\x1b[0m  \x1b[38;5;220;1m▲ {} warn\x1b[0m │ \x1b[38;5;48;1m⚙ {} autofix\x1b[0m  \x1b[38;5;220;1m✎ {} surgical\x1b[0m  \x1b[38;5;203;1m⇄ {} refactor\x1b[0m │ \x1b[38;5;250mBlast:\x1b[0m {p0_badge} {p1_badge} {p2_badge}",
-        s.error_count, s.warning_count, s.autofix_count, s.surgical_count, s.refactor_count
+        metrics.error_count,
+        metrics.warning_count,
+        metrics.autofix_count,
+        metrics.surgical_count,
+        metrics.refactor_count
     ));
     header_box.add_closed_row(format!(
-        "  \x1b[38;5;250mScope:\x1b[0m {} files · {} subjects · {} effects · {} affected files   \x1b[38;5;250mView:\x1b[0m \x1b[38;5;219;1m{}\x1b[0m",
-        s.files_scanned,
-        s.subjects_scanned,
-        s.effects_scanned,
-        s.affected_file_count,
+        "  \x1b[38;5;250mScope:\x1b[0m {} files · {} subjects · {} effects · {} affected files{}  \x1b[38;5;250mView:\x1b[0m \x1b[38;5;219;1m{}\x1b[0m",
+        metrics.files_scanned,
+        metrics.subjects_scanned,
+        metrics.effects_scanned,
+        metrics.affected_file_count,
+        metrics.package_badge,
         group_mode.label()
     ));
     header_box.add_titled_divider("FILTER TABS (h/l or ←/→ or Tab to switch)");
@@ -750,9 +1271,22 @@ pub fn render_tui_frame_with_state(
     let footer_rows = 2usize;
     let viewport_height = rows.saturating_sub(header_rows + footer_rows).max(2);
 
+    let overlay_lines = if state.in_package_picker {
+        let mut lines = render_package_picker_lines(state, effective_cols);
+        lines.push(String::new());
+        lines
+    } else {
+        Vec::new()
+    };
+
     let total_lines = body_lines.len().max(1);
     for row_idx in 0..viewport_height {
-        let line_idx = scroll_offset + row_idx;
+        if let Some(overlay_line) = overlay_lines.get(row_idx) {
+            let fitted = truncate_ansi_to_width(overlay_line, line_cap);
+            let _ = writeln!(frame, "\x1b[2K{fitted}");
+            continue;
+        }
+        let line_idx = scroll_offset + row_idx.saturating_sub(overlay_lines.len());
         if let Some(line) = body_lines.get(line_idx) {
             let fitted = truncate_ansi_to_width(line, line_cap);
             let _ = writeln!(frame, "\x1b[2K{fitted}");
@@ -770,8 +1304,8 @@ pub fn render_tui_frame_with_state(
         (scroll_offset + 1).min(total_lines),
         end_line,
         total_lines,
-        s.health_score,
-        &s.score_label,
+        metrics.health_score,
+        &metrics.score_label,
     );
     let footer_lines = footer.render_lines(ColorMode::Ansi);
     if let Some(row1) = footer_lines.first() {
@@ -885,7 +1419,10 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
             let filtered: Vec<&Diagnostic> = report
                 .diagnostics
                 .iter()
-                .filter(|d| diagnostic_matches_tab_and_search(d, active_tab, &state.search_query))
+                .filter(|d| {
+                    state.is_file_in_active_packages(&d.file)
+                        && diagnostic_matches_tab_and_search(d, active_tab, &state.search_query)
+                })
                 .collect();
             cached_body_lines = render_tui_body_lines_for_width(&filtered, state.group_mode, cols);
             let max_scroll = cached_body_lines.len().saturating_sub(viewport_height);
@@ -955,4 +1492,69 @@ pub fn handle_tui_search_key(
         search_query.push(ch);
         *scroll_offset = 0;
     }
+}
+
+/// Processes a key event while the TUI workspace package picker overlay (`p`) is active.
+pub fn handle_tui_picker_key(state: &mut TuiState, key_bytes: &[u8]) -> bool {
+    match key_bytes {
+        // Ctrl+C exits TUI cleanly
+        [0x03] => return true,
+        // ESC closes package picker without applying changes (does not exit TUI)
+        [0x1b] => {
+            state.in_package_picker = false;
+            state.picker_query.clear();
+            return false;
+        }
+        // Enter applies selected packages to active_packages and closes picker
+        [b'\r' | b'\n'] => {
+            state.active_packages = state.picker_selected.clone();
+            state.in_package_picker = false;
+            state.picker_query.clear();
+            state.scroll_offset = 0;
+            return false;
+        }
+        // Space toggles selection of the highlighted package row
+        [b' '] => {
+            let filtered = state.filtered_picker_packages();
+            let cursor = state.picker_cursor.min(filtered.len().saturating_sub(1));
+            if let Some(row) = filtered.get(cursor)
+                && let Some(slot) = state.picker_selected.get_mut(row.package_idx)
+            {
+                *slot = !*slot;
+            }
+            return false;
+        }
+        // 'a', 'A', or Ctrl-A toggles all packages
+        [b'a' | b'A' | 0x01] => {
+            let all_selected =
+                !state.picker_selected.is_empty() && state.picker_selected.iter().all(|&b| b);
+            state.picker_selected.fill(!all_selected);
+            return false;
+        }
+        // Up arrow moves picker cursor up
+        [0x1b, b'[', b'A'] | [0x1b, b'O', b'A'] => {
+            state.picker_cursor = state.picker_cursor.saturating_sub(1);
+            return false;
+        }
+        // Down arrow moves picker cursor down
+        [0x1b, b'[', b'B'] | [0x1b, b'O', b'B'] => {
+            let max_idx = state.filtered_picker_packages().len().saturating_sub(1);
+            state.picker_cursor = (state.picker_cursor + 1).min(max_idx);
+            return false;
+        }
+        // Backspace deletes last char from picker_query
+        [0x7f | 0x08] => {
+            state.picker_query.pop();
+            state.picker_cursor = 0;
+            return false;
+        }
+        _ => {}
+    }
+    if let Ok(s) = std::str::from_utf8(key_bytes) {
+        for ch in s.chars().filter(|c| !c.is_control()) {
+            state.picker_query.push(ch);
+            state.picker_cursor = 0;
+        }
+    }
+    false
 }

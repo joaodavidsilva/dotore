@@ -159,9 +159,11 @@ pub use search::{
     should_highlight_stdout,
 };
 pub use tui::{
-    TuiFilterTab, TuiGroupMode, TuiState, build_score_gauge, diagnostic_matches_tab_and_search,
-    draw_tui_frame, handle_tui_search_key, render_tui_body_lines, render_tui_body_lines_for_width,
-    render_tui_frame, render_tui_frame_with_state, run_interactive_tui, should_launch_tui,
+    FilteredPackageRow, TuiFilterTab, TuiGroupMode, TuiPackageItem, TuiState, build_score_gauge,
+    diagnostic_matches_tab_and_search, draw_tui_frame, handle_tui_picker_key,
+    handle_tui_search_key, highlight_fuzzy_matches, render_package_picker_lines,
+    render_tui_body_lines, render_tui_body_lines_for_width, render_tui_frame,
+    render_tui_frame_with_state, run_interactive_tui, should_launch_tui,
 };
 
 use diff::{collect_git_diff, load_baseline_entries};
