@@ -9,7 +9,7 @@ crates/
   dotore-core/
     src/
       lib.rs              # language-agnostic core crate root and re-exports
-      ir.rs               # SourceLoc, ByteSpan, SymbolOutline, ExtractedFile, LanguageAnalyzer
+      ir.rs               # SourceLoc, ByteSpan, SymbolOutline, FileSuppressions, ExtractedFile, LanguageAnalyzer
       config.rs           # workspace package discovery and config utilities
       config/
         capability_gate.rs # Capability, CapabilityPredicate, CapabilityGate across JS/Angular/Python/Rust
@@ -17,6 +17,17 @@ crates/
       rules.rs            # unified rule registry module root
       rules/
         types.rs          # RuleId, RuleMetadata, PrescriptionTier, Diagnostic, AutofixPatch, FixCapsule
+        catalog.rs        # 965-rule static metadata catalog assembled across domain submodules
+        catalog/
+          react_core.rs   # React Effect Node, State Slot, hooks, lifecycle, and architecture rule metadata
+          three_r3f_webgl.rs # Three.js, WebGL, and React Three Fiber 60fps frame-loop rule metadata
+          a11y_and_design.rs # WCAG accessibility, ARIA, and UI design polish rule metadata
+          performance_and_bundle.rs # React re-render, hydration, bundle size, and motion performance rule metadata
+          security_and_server.rs # XSS, SSRF, Next.js App Router, Server Actions, RSC, and supply-chain rule metadata
+          react_native_and_expo.rs # React Native and Expo mobile rule metadata
+          ecosystem.rs    # Zustand, Jotai, MobX, Valtio, Preact, Ink, TanStack, Redux, and Zod v4 rule metadata
+          defensive_and_correctness.rs # Defensive JS/TS/DOM safety, React Router, Remotion, and correctness rule metadata
+          polyglot.rs     # Angular Signals/RxJS, Python, and Rust rule metadata
       scanner.rs          # parallel gitignore-aware file discovery
       fixer.rs            # surgical single- and cross-file byte-range auto-fixer with syntax validation
       diff.rs             # git diff, Contextual Owner filtering, and baseline multiset comparison
