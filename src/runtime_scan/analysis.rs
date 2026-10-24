@@ -106,7 +106,7 @@ pub fn sanitize_runtime_text(value: &str) -> String {
     value
         .chars()
         .filter(|&ch| {
-            let code = ch as u32;
+            let code = u32::from(ch);
             !(code <= 0x1f || (0x7f..=0x9f).contains(&code))
         })
         .collect()

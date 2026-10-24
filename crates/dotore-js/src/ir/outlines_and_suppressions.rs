@@ -615,7 +615,7 @@ fn compute_signature_end(
     let start_usize = (decl_start as usize).min(source.len());
     let fallback_end = source[start_usize..]
         .find('\n')
-        .map_or(decl_end, |rel| decl_start + rel as u32);
+        .map_or(decl_end, |rel| decl_start + u32::try_from(rel).unwrap_or(0));
     decl_end.min(fallback_end)
 }
 
@@ -637,7 +637,7 @@ fn extract_adjacent_comment(
         let mut in_block = false;
         while let Some(raw_line) = lines.get(idx) {
             let line = raw_line.trim();
-            let line_num = (idx + 1) as u32;
+            let line_num = u32::try_from(idx + 1).unwrap_or(u32::MAX);
             if in_block {
                 collected.push((line_num, line.to_string()));
                 if line.starts_with("/*") {

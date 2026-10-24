@@ -410,7 +410,10 @@ fn enclosing_function_span(semantic: &Semantic<'_>, node_id: NodeId) -> Span {
             _ => {}
         }
     }
-    Span::new(0, semantic.source_text().len() as u32)
+    Span::new(
+        0,
+        u32::try_from(semantic.source_text().len()).unwrap_or(u32::MAX),
+    )
 }
 
 fn has_nullish_guard_before(semantic: &Semantic<'_>, before_offset: u32, var_name: &str) -> bool {

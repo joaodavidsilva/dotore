@@ -575,7 +575,8 @@ fn build_keycode_autofix(
 
         if let Some(Expression::NumericLiteral(num)) =
             other_expr.map(Expression::without_parentheses)
-            && let Some(key_str) = keycode_number_to_key_name(num.value as u32)
+            && let Ok(code) = format!("{:.0}", num.value).parse::<u32>()
+            && let Some(key_str) = keycode_number_to_key_name(code)
         {
             let op_str = match bin.operator {
                 BinaryOperator::StrictEquality | BinaryOperator::Equality => "===",

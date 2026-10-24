@@ -69,7 +69,9 @@ impl<W: std::io::Write> GzipStoredWriter<W> {
             }
             self.crc = (self.crc >> 8) ^ c;
         }
-        self.total_bytes = self.total_bytes.wrapping_add(data.len() as u32);
+        self.total_bytes = self
+            .total_bytes
+            .wrapping_add(u32::try_from(data.len()).unwrap_or(u32::MAX));
     }
 
     fn write_stored_block(&mut self, block: &[u8], final_block: bool) -> std::io::Result<()> {
@@ -281,10 +283,14 @@ impl CdpWebSocketClient {
         let mut frame = Vec::with_capacity(payload.len() + 14);
         frame.push(0x80 | (opcode & 0x0f));
         if payload.len() <= 125 {
-            frame.push(0x80 | (payload.len() as u8));
+            frame.push(0x80 | u8::try_from(payload.len()).unwrap_or(0));
         } else if payload.len() <= 65_535 {
             frame.push(0x80 | 126);
-            frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+            frame.extend_from_slice(
+                &u16::try_from(payload.len())
+                    .unwrap_or(u16::MAX)
+                    .to_be_bytes(),
+            );
         } else {
             frame.push(0x80 | 127);
             frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
