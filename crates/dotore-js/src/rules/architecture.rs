@@ -16,7 +16,9 @@ use std::collections::HashSet;
 use oxc_ast::AstKind;
 use oxc_semantic::{NodeId, Semantic};
 
-pub(crate) use self::context_and_boundaries::evaluate_architecture_project_graph_rules;
+pub(crate) use self::context_and_boundaries::{
+    evaluate_architecture_project_graph_rules, extract_reuse_architecture_facets,
+};
 pub(crate) use self::soc_rules::{evaluate_file_soc_rules, extract_soc_architecture_facets};
 use self::{
     component_contracts::check_module_and_expr_architecture_rules,
@@ -146,5 +148,162 @@ export function Consumer() {
                 .iter()
                 .any(|d| d.rule == RuleId::OverloadedContextProvider)
         );
+    }
+
+    #[test]
+    fn reuse_rules_respect_thresholds_suppressions_and_project_graph_planner_exemplars() {
+        use std::{collections::HashMap, path::PathBuf};
+
+        use crate::{
+            config::{CapabilityGate, DotoreConfig, WorkspacePackage},
+            planner::{PlannerContext, build_root_cause_groups_and_capsules},
+            rules::evaluate_project_with_packages,
+        };
+
+        let ui_src = r#"export const BOX_TOP = "┌────────┐";
+export const ANSI_RESET = "\u001b[0m";
+"#;
+        let build_runner_src = r#"function parseEntry(line: string, sep: string): string {
+    const trimmed = line.trim();
+    if (!trimmed) {
+        return sep;
+    }
+    const idx = trimmed.indexOf(sep);
+    return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}
+
+export class SpanConfig {
+    constructor(public opts: Record<string, unknown>) {}
+}
+
+export function runBuild(raw: string): SpanConfig {
+    const msg = "\033[33m│ building │\033[0m";
+    // dotore-disable-next-line arch-no-inline-terminal-ui-primitives
+    const ignored = "\x1b[32mOK\x1b[0m";
+    void msg;
+    void ignored;
+    return new SpanConfig({
+        name: parseEntry(raw, ":"),
+        timeout: 0,
+        retries: 0,
+        tags: [],
+        metadata: {},
+    });
+}
+"#;
+        let deploy_runner_src = r#"function extractValue(input: string, delimiter: string): string {
+    const clean = input.trim();
+    if (!clean) {
+        return delimiter;
+    }
+    const pos = clean.indexOf(delimiter);
+    return pos >= 0 ? clean.slice(pos + 1) : clean;
+}
+
+import { SpanConfig } from "./build_runner";
+
+export function runDeploy(raw: string): SpanConfig[] {
+    const first = new SpanConfig({
+        name: extractValue(raw, "="),
+        timeout: 0,
+        retries: 0,
+        tags: [],
+        metadata: {},
+    });
+    const second = new SpanConfig({
+        name: "fallback",
+        timeout: 0,
+        retries: 0,
+        tags: [],
+        metadata: {},
+    });
+    return [first, second];
+}
+"#;
+
+        let files = vec![
+            parse_file_ir(Path::new("src/ui/ansi_box.ts"), ui_src),
+            parse_file_ir(Path::new("src/build_runner.ts"), build_runner_src),
+            parse_file_ir(Path::new("src/deploy_runner.ts"), deploy_runner_src),
+        ];
+        assert!(files[0].architecture_facets.is_ui_kit_module);
+        // `build_runner.ts` contains "ui" inside "build", which must NOT be treated as a UI kit module
+        assert!(!files[1].architecture_facets.is_ui_kit_module);
+
+        let graph = ProjectGraph::build(files);
+        assert!(
+            graph
+                .architecture_facets_for_file(Path::new("src/ui/ansi_box.ts"))
+                .is_some_and(|f| f.is_ui_kit_module)
+        );
+
+        let pkg = WorkspacePackage {
+            name: "cli".to_string(),
+            root_dir: PathBuf::from("."),
+            capability_gate: CapabilityGate::default_react(),
+            config: DotoreConfig::default(),
+        };
+
+        let reuse_rules = [
+            RuleId::ArchNoDuplicatedHelperLogic,
+            RuleId::ArchPreferFluentBuilder,
+            RuleId::ArchNoInlineTerminalUiPrimitives,
+        ];
+        let diags =
+            evaluate_project_with_packages(&graph, std::slice::from_ref(&pkg), Some(&reuse_rules));
+
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.rule == RuleId::ArchNoDuplicatedHelperLogic)
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.rule == RuleId::ArchPreferFluentBuilder && d.target_name == "SpanConfig")
+        );
+        let ui_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchNoInlineTerminalUiPrimitives)
+            .collect();
+        // Only `msg` is flagged; `ignored` is suppressed by `// dotore-disable-next-line`
+        assert_eq!(ui_diags.len(), 1);
+
+        let mut sources = HashMap::new();
+        sources.insert(PathBuf::from("src/ui/ansi_box.ts"), ui_src.to_string());
+        sources.insert(
+            PathBuf::from("src/build_runner.ts"),
+            build_runner_src.to_string(),
+        );
+        sources.insert(
+            PathBuf::from("src/deploy_runner.ts"),
+            deploy_runner_src.to_string(),
+        );
+
+        let (groups, capsules) = build_root_cause_groups_and_capsules(&graph, &diags, &sources);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(capsules.len(), 3);
+        let ui_cap = capsules
+            .iter()
+            .find(|c| c.rule == RuleId::ArchNoInlineTerminalUiPrimitives)
+            .expect("ui capsule");
+        assert_eq!(
+            ui_cap.exemplar.as_ref().map(|e| &e.file),
+            Some(&PathBuf::from("src/ui/ansi_box.ts"))
+        );
+
+        // Raising thresholds in `config.architecture` suppresses helper & builder findings
+        let mut high_threshold_pkg = pkg;
+        high_threshold_pkg.config.architecture.min_helper_statements = 20;
+        high_threshold_pkg.config.architecture.min_builder_sites = 10;
+        let high_diags = evaluate_project_with_packages(
+            &graph,
+            std::slice::from_ref(&high_threshold_pkg),
+            Some(&[
+                RuleId::ArchNoDuplicatedHelperLogic,
+                RuleId::ArchPreferFluentBuilder,
+            ]),
+        );
+        assert!(high_diags.is_empty());
     }
 }

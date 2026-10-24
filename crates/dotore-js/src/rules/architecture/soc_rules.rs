@@ -25,8 +25,8 @@ use crate::{
     config::DotoreConfig,
     ir::{
         ArchitectureFileFacets, ByteSpan, ConcernBucket, ConcernSignalSite, FileContext, FileIr,
-        InlineTerminalUiPrimitiveSiteIr, JsxElementIr, SourceLoc, StaticCatalogSiteIr, SubjectIr,
-        SymbolKind, SymbolOutline, loc_from_line_starts, react_ast::classify_jsx_element_name,
+        JsxElementIr, SourceLoc, StaticCatalogSiteIr, SubjectIr, SymbolKind, SymbolOutline,
+        loc_from_line_starts, react_ast::classify_jsx_element_name,
         types::ModuleIr,
     },
     matchers::make_diag_for_subject,
@@ -239,21 +239,6 @@ pub(crate) fn extract_soc_architecture_facets(
                     .get(lit.span.start as usize..lit.span.end as usize)
                     .unwrap_or(cooked);
                 if let Some((kind, snippet)) = classify_terminal_ui_literal(cooked, raw) {
-                    let loc = loc_from_line_starts(line_starts, lit.span.start);
-                    let span = ByteSpan {
-                        start: lit.span.start,
-                        end: lit.span.end,
-                    };
-                    if !facets.is_ui_kit_module {
-                        facets
-                            .inline_terminal_ui_sites
-                            .push(InlineTerminalUiPrimitiveSiteIr {
-                                kind: kind.to_string(),
-                                snippet: snippet.clone(),
-                                loc,
-                                span,
-                            });
-                    }
                     push_concern_signal(
                         facets,
                         &mut seen_signals,
@@ -274,21 +259,6 @@ pub(crate) fn extract_soc_architecture_facets(
                 if let Some((kind, snippet)) =
                     classify_terminal_ui_literal(cooked, tpl.value.raw.as_str())
                 {
-                    let loc = loc_from_line_starts(line_starts, tpl.span.start);
-                    let span = ByteSpan {
-                        start: tpl.span.start,
-                        end: tpl.span.end,
-                    };
-                    if !facets.is_ui_kit_module {
-                        facets
-                            .inline_terminal_ui_sites
-                            .push(InlineTerminalUiPrimitiveSiteIr {
-                                kind: kind.to_string(),
-                                snippet: snippet.clone(),
-                                loc,
-                                span,
-                            });
-                    }
                     push_concern_signal(
                         facets,
                         &mut seen_signals,

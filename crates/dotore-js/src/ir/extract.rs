@@ -132,7 +132,17 @@ where
         .with_jsx(true)
         .with_module(true);
 
-    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let mut parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.diagnostics.is_empty() && matches!(ext, "ts" | "mts" | "cts") {
+        let ts_no_jsx = SourceType::from_path(path)
+            .unwrap_or_default()
+            .with_jsx(false)
+            .with_module(true);
+        let reparsed = Parser::new(&allocator, source, ts_no_jsx).parse();
+        if reparsed.diagnostics.len() < parsed.diagnostics.len() {
+            parsed = reparsed;
+        }
+    }
     let semantic_ret = SemanticBuilder::new()
         .with_build_nodes(true)
         .build(&parsed.program);
@@ -192,6 +202,7 @@ where
     );
     let mut context_providers = Vec::new();
     let mut context_consumers = Vec::new();
+    let mut architecture_facets = ArchitectureFileFacets::default();
     crate::rules::state_and_effects::extract_state_and_effects_sites(
         &semantic,
         &line_starts,
@@ -232,7 +243,6 @@ where
     crate::rules::angular::extract_angular_sites(&semantic, &line_starts, &mut semantic_sites);
     let mut contextual_owner_spans = extract_contextual_owner_spans(&semantic);
     contextual_owner_spans.element_spans = jsx_subtrees.iter().map(|s| s.span).collect();
-    let mut architecture_facets = ArchitectureFileFacets::default();
     crate::rules::architecture::extract_soc_architecture_facets(
         path,
         source,
@@ -242,6 +252,15 @@ where
         &subjects,
         &jsx_elements,
         &symbol_outlines,
+        &line_starts,
+        &mut architecture_facets,
+    );
+    crate::rules::architecture::extract_reuse_architecture_facets(
+        path,
+        source,
+        &semantic,
+        &subjects,
+        &module,
         &line_starts,
         &mut architecture_facets,
     );
