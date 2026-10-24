@@ -5,15 +5,13 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
 };
 
 #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
 use rayon::prelude::*;
 
+/// Clap command-line argument parser and subcommand execution runners.
+pub mod cli;
 /// Project configuration loader (`dotore.config.*` / `package.json#dotore`) and **Capability Gate**.
 pub(crate) mod config;
 /// Git diff scopes (`--scope`, `--base`, `--staged`), **Contextual Owner** filtering, and `--baseline` multiset comparison.
@@ -22,6 +20,8 @@ pub(crate) mod diff;
 pub(crate) mod fixer;
 /// Deterministic **Root-Cause Grouping**, **Blast Radius**, **Fix Capsules**, and `dotore plan` generator.
 pub(crate) mod planner;
+/// Live terminal progress bar and 30fps spinner animation for workspace scans.
+pub mod progress;
 /// Terminal and JSON reporters.
 pub(crate) mod report;
 /// Native Chrome DevTools Protocol (CDP) runtime profiler (`dotore scan`).
@@ -32,7 +32,10 @@ pub(crate) mod scanner;
 pub(crate) mod score;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
+/// Interactive TUI explorer (`hjkl`/arrow navigation, dynamic filter tabs, grouping modes, `/` search, `ESC` exit).
+pub mod tui;
 
+pub use cli::{Cli, Commands, run_cli};
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
     DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
@@ -63,6 +66,16 @@ pub use dotore_core::{
         RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry,
         supply_chain_purl_hash,
     },
+    ui::{
+        self, AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH,
+        FilterTabBar, FilterTabItem, FlowDiagram, GaugeBar, StatusBar, TuiFilterKind,
+        build_filter_tabs, classify_style_bucket, strip_ansi_codes, style_bucket_color,
+        visible_char_width,
+    },
+};
+pub use progress::{
+    LiveProgressBar, LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
+    format_spinner_frame, set_progress_phase, tick_progress_file,
 };
 #[cfg(feature = "js")]
 pub use dotore_js::{
@@ -127,6 +140,11 @@ pub use search::{
     search_symbols, search_symbols_with, search_symbols_with_analyzers, should_highlight_search,
     should_highlight_stdout,
 };
+pub use tui::{
+    TuiFilterTab, TuiGroupMode, TuiState, build_score_gauge, diagnostic_matches_tab_and_search,
+    draw_tui_frame, handle_tui_search_key, render_tui_body_lines, render_tui_frame,
+    run_interactive_tui, should_launch_tui,
+};
 
 use diff::{collect_git_diff, load_baseline_entries};
 use dotore_core::{
@@ -154,62 +172,6 @@ pub const fn default_analyzers() -> &'static [&'static dyn LanguageAnalyzer] {
     DEFAULT_ANALYZERS
 }
 
-/// Snapshot of live workspace scan progress for terminal loading animations.
-#[derive(Debug, Clone, Default)]
-pub struct LiveScanProgressSnapshot {
-    /// Current scan phase (`"Discovering files"`, `"Reading source files"`, `"Extracting AST & IR"`, `"Evaluating ProjectGraph & Rules"`).
-    pub phase: &'static str,
-    /// Number of files processed in the current phase.
-    pub completed_files: usize,
-    /// Total files discovered for the scan.
-    pub total_files: usize,
-    /// Most recent file path touched by a worker thread.
-    pub current_file: String,
-}
-
-static PROGRESS_PHASE_CODE: AtomicUsize = AtomicUsize::new(0);
-static PROGRESS_COMPLETED: AtomicUsize = AtomicUsize::new(0);
-static PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
-static PROGRESS_CURRENT_FILE: Mutex<String> = Mutex::new(String::new());
-
-fn set_progress_phase(code: usize, total: usize) {
-    PROGRESS_PHASE_CODE.store(code, Ordering::Relaxed);
-    PROGRESS_COMPLETED.store(0, Ordering::Relaxed);
-    PROGRESS_TOTAL.store(total, Ordering::Relaxed);
-}
-
-fn tick_progress_file(path: &Path) {
-    let done = PROGRESS_COMPLETED.fetch_add(1, Ordering::Relaxed) + 1;
-    if (done & 3) == 1
-        && let Ok(mut guard) = PROGRESS_CURRENT_FILE.try_lock()
-    {
-        *guard = path.display().to_string();
-    }
-}
-
-/// Returns a lock-free snapshot of the current workspace scan progress.
-#[must_use]
-pub fn current_scan_progress() -> LiveScanProgressSnapshot {
-    let phase = match PROGRESS_PHASE_CODE.load(Ordering::Relaxed) {
-        1 => "Discovering workspace & files",
-        2 => "Reading source files",
-        3 => "Extracting AST & IR (parallel)",
-        4 => "Evaluating ProjectGraph & Rules",
-        _ => "Initializing",
-    };
-    let completed_files = PROGRESS_COMPLETED.load(Ordering::Relaxed);
-    let total_files = PROGRESS_TOTAL.load(Ordering::Relaxed);
-    let current_file = PROGRESS_CURRENT_FILE
-        .try_lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    LiveScanProgressSnapshot {
-        phase,
-        completed_files,
-        total_files,
-        current_file,
-    }
-}
 
 pub(crate) fn register_active_core_hooks() {
     #[cfg(feature = "js")]

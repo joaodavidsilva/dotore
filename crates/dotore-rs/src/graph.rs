@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use dotore_core::{ByteSpan, ExtractedFile, FileContext, RuleId, SourceLoc, loc_from_line_starts};
+use dotore_core::{ByteSpan, ExtractedFile, FileContext, RuleId, SourceLoc};
 use syn::{
     File, ImplItemFn, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemStruct,
     ItemTrait, ItemType, Visibility,
@@ -13,7 +13,10 @@ use syn::{
     visit::{self, Visit},
 };
 
-use crate::ir::{RsCandidateFinding, attrs_indicate_test_context, span_to_bytes};
+use crate::matchers::{
+    RsCandidateFinding, RsScopeTracker, attrs_indicate_test_context, is_pub_crate_visibility,
+    loc_at, span_to_bytes,
+};
 
 /// A `pub(crate)` item extracted from a Rust file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,9 +55,7 @@ pub(crate) fn extract_file_graph_ir(
 ) -> RsFileGraphIr {
     let mut visitor = GraphIrExtractor {
         line_starts,
-        in_test_context: false,
-        current_subject_name: None,
-        current_inline_module: None,
+        scope: RsScopeTracker::for_file(ast),
         pub_crate_items: Vec::new(),
     };
     visitor.visit_file(ast);
@@ -122,22 +123,20 @@ pub(crate) fn collect_unused_pub_crate_findings_for_package(
 }
 
 fn build_unused_pub_crate_finding(item: &PubCrateItemIr) -> RsCandidateFinding {
-    RsCandidateFinding {
-        rule: RuleId::RsArchNoUnusedPubCrateItems,
-        subject_name: item
-            .subject_name
+    RsCandidateFinding::new(
+        RuleId::RsArchNoUnusedPubCrateItems,
+        item.subject_name
             .clone()
             .or_else(|| Some(item.name.clone())),
-        target_name: item.name.clone(),
-        message_id: "rsArchNoUnusedPubCrateItems",
-        message: format!(
+        item.name.clone(),
+        "rsArchNoUnusedPubCrateItems",
+        format!(
             "`pub(crate) {} {}` is never referenced or imported by any other module in the crate; remove it or narrow its visibility to private.",
             item.kind_label, item.name
         ),
-        loc: item.loc,
-        span: item.span,
-        autofix: None,
-    }
+        item.loc,
+        item.span,
+    )
 }
 
 fn is_crate_entrypoint_path(path: &Path) -> bool {
@@ -203,9 +202,7 @@ fn tokenize_identifiers_in_range(source: &str, start: usize, end: usize) -> Hash
 
 struct GraphIrExtractor<'a> {
     line_starts: &'a [u32],
-    in_test_context: bool,
-    current_subject_name: Option<String>,
-    current_inline_module: Option<String>,
+    scope: RsScopeTracker,
     pub_crate_items: Vec<PubCrateItemIr>,
 }
 
@@ -215,7 +212,7 @@ impl GraphIrExtractor<'_> {
     }
 
     fn loc_at(&self, byte_offset: u32) -> SourceLoc {
-        loc_from_line_starts(self.line_starts, byte_offset)
+        loc_at(self.line_starts, byte_offset)
     }
 
     fn record_if_pub_crate(
@@ -226,7 +223,7 @@ impl GraphIrExtractor<'_> {
         kind_label: &'static str,
         subject_override: Option<String>,
     ) {
-        if self.in_test_context || !is_pub_crate_visibility(vis) {
+        if self.scope.in_test() || !is_pub_crate_visibility(vis) {
             return;
         }
         let span = self.span_to_bytes(item_span);
@@ -235,11 +232,11 @@ impl GraphIrExtractor<'_> {
         let name = ident.to_string();
         self.pub_crate_items.push(PubCrateItemIr {
             subject_name: subject_override
-                .or_else(|| self.current_subject_name.clone())
+                .or_else(|| self.scope.subject_name())
                 .or_else(|| Some(name.clone())),
             name,
             kind_label,
-            inline_module: self.current_inline_module.clone(),
+            inline_module: self.scope.current_inline_module.clone(),
             loc,
             span,
         });
@@ -248,27 +245,20 @@ impl GraphIrExtractor<'_> {
 
 impl<'ast> Visit<'ast> for GraphIrExtractor<'_> {
     fn visit_item_mod(&mut self, i: &'ast ItemMod) {
-        let prev_test = self.in_test_context;
-        self.in_test_context =
-            prev_test || attrs_indicate_test_context(&i.attrs) || i.ident == "tests";
-        let mod_name = i.ident.to_string();
-        let prev_mod = self.current_inline_module.replace(mod_name.clone());
-        let prev_subj = self.current_subject_name.replace(mod_name);
+        let snap = self.scope.enter_mod(i);
         visit::visit_item_mod(self, i);
-        self.current_subject_name = prev_subj;
-        self.current_inline_module = prev_mod;
-        self.in_test_context = prev_test;
+        self.scope.exit(snap);
     }
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
-        let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
+        let prev_test = self.scope.in_test_context;
+        self.scope.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
         let fn_name = i.sig.ident.to_string();
         self.record_if_pub_crate(&i.vis, &i.sig.ident, i.span(), "fn", Some(fn_name.clone()));
-        let prev_subj = self.current_subject_name.replace(fn_name);
+        let prev_subj = self.scope.current_subject_name.replace(fn_name);
         visit::visit_item_fn(self, i);
-        self.current_subject_name = prev_subj;
-        self.in_test_context = prev_test;
+        self.scope.current_subject_name = prev_subj;
+        self.scope.in_test_context = prev_test;
     }
 
     fn visit_item_struct(&mut self, i: &'ast ItemStruct) {
@@ -338,15 +328,15 @@ impl<'ast> Visit<'ast> for GraphIrExtractor<'_> {
     }
 
     fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
-        let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
+        let prev_test = self.scope.in_test_context;
+        self.scope.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
         visit::visit_item_impl(self, i);
-        self.in_test_context = prev_test;
+        self.scope.in_test_context = prev_test;
     }
 
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
-        let prev_test = self.in_test_context;
-        self.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
+        let prev_test = self.scope.in_test_context;
+        self.scope.in_test_context = prev_test || attrs_indicate_test_context(&i.attrs);
         self.record_if_pub_crate(
             &i.vis,
             &i.sig.ident,
@@ -355,15 +345,6 @@ impl<'ast> Visit<'ast> for GraphIrExtractor<'_> {
             Some(i.sig.ident.to_string()),
         );
         visit::visit_impl_item_fn(self, i);
-        self.in_test_context = prev_test;
+        self.scope.in_test_context = prev_test;
     }
 }
-
-fn is_pub_crate_visibility(vis: &Visibility) -> bool {
-    if let Visibility::Restricted(restr) = vis {
-        restr.path.is_ident("crate") || restr.path.is_ident("super")
-    } else {
-        false
-    }
-}
-

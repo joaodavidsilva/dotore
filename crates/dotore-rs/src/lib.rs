@@ -1,31 +1,38 @@
 //! Single-pass Rust (`syn`) analyzer (`RsLanguageAnalyzer`), `Cargo.toml` **Capability Gate**
-//! discovery, and core Rust safety rule detectors for `dotore`.
+//! discovery, and Rust rule detectors for `dotore`.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use dotore_core::{
-    Capability, CapabilityGate, Diagnostic, DotoreConfig, ExtractedFile, LanguageAnalyzer,
-    LanguageId, PackageAnalysisResult, PackageRole, RuleId, WorkspacePackage,
+    CapabilityGate, Diagnostic, DotoreConfig, ExtractedFile, LanguageAnalyzer, LanguageId,
+    PackageAnalysisResult, RuleId, WorkspacePackage,
 };
-use toml::Value;
 
-/// Single-pass `syn` AST and scope extraction for `.rs` files.
-pub(crate) mod ir;
-/// Rule activation and evaluation for Rust rules.
-pub(crate) mod rules;
-/// Single-pass detectors for Axum, SQLx, Leptos/Dioxus UI signals, and boolean parameter architecture rules.
-pub(crate) mod axum_sqlx_ui_arch;
+/// Single-pass detectors for Axum shared state contention and SQLx query hazards.
+pub(crate) mod axum_sqlx;
 /// Crate-level `ProjectGraph` analysis for `dotore-rs` (`rs-arch-no-unused-pub-crate-items`).
 pub(crate) mod graph;
-/// Single-pass Tokio async hazard and Rust allocation performance detectors.
-pub(crate) mod tokio_perf;
+/// Single-pass `syn` AST, **Subject**, **Symbol Outline**, and suppression extraction for `.rs` files.
+pub(crate) mod ir;
+/// `Cargo.toml` **Capability Gate** inference and package role classification.
+pub(crate) mod manifest;
+/// Shared `syn` AST, type, attribute, span/line, and lexical-scope matchers and diagnostic helpers.
+pub(crate) mod matchers;
+/// Single-pass detectors for Rust allocation and hot-loop performance rules.
+pub(crate) mod perf;
+/// Rule activation gating and evaluation dispatcher for Rust rules.
+pub(crate) mod rules;
+/// Single-pass detectors for the 5 core production Rust safety rules.
+pub(crate) mod safety;
+/// Single-pass detectors for Tokio async concurrency hazards.
+pub(crate) mod tokio_async;
+/// Single-pass detectors for Leptos/Dioxus reactive signals and boolean parameter rules.
+pub(crate) mod ui_signals;
 
 pub use ir::{RsCandidateFinding, RsFileIr, RsSubjectIr, RsSubjectKind, extract_rs_file};
+pub use manifest::infer_cargo_toml_capability_gate;
+pub use perf::TOKIO_AND_PERF_RULES;
 pub use rules::{CORE_RUST_SAFETY_RULES, evaluate_rs_file, evaluate_rs_package};
-pub use tokio_perf::TOKIO_AND_PERF_RULES;
 
 /// Rust language analyzer implementing [`LanguageAnalyzer`] for `.rs` files and `Cargo.toml` manifests.
 #[derive(Debug, Clone, Copy, Default)]
@@ -107,162 +114,144 @@ pub fn analyze_rs_source_with_config(
     evaluate_rs_package(&pkg, &[extracted], enabled_rules).diagnostics
 }
 
-/// Infers a Rust [`CapabilityGate`] from `Cargo.toml` manifest sources.
-#[must_use]
-pub fn infer_cargo_toml_capability_gate(
-    package_dir: &Path,
-    manifest_sources: &[(PathBuf, &str)],
-) -> CapabilityGate {
-    let mut loaded_from_disk = Vec::new();
+#[cfg(test)]
+mod tests {
+    use dotore_core::{compute_line_starts, fixer::apply_patches_to_source_with_analyzers};
 
-    let has_cargo_manifest = manifest_sources.iter().any(|(p, _)| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "Cargo.toml")
+    use super::*;
+
+    #[test]
+    fn dedicated_rule_submodules_extract_their_domain_findings_independently() {
+        let source = r#"
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use regex::Regex;
+use axum::extract::State;
+
+pub struct SharedState {
+    pub lock: Mutex<Vec<String>>,
+}
+
+pub(crate) fn unused_helper() {}
+
+pub async fn handler(
+    State(state): State<Arc<SharedState>>,
+    pool: &sqlx::PgPool,
+    items: &[String],
+    flag_a: bool,
+    flag_b: bool,
+    flag_c: bool,
+) {
+    let _ = items[0];
+    let (_tx, _rx) = mpsc::unbounded_channel::<u32>();
+    let _re = Regex::new("^a+$").unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    let mut out = Vec::new();
+    for item in items {
+        out.push(item.clone());
+        let q = format!("SELECT * FROM t WHERE id = '{item}'");
+        let _ = sqlx::query(&q).fetch_all(pool).await;
+    }
+    create_effect(move |_| {
+        let v = count.get();
+        doubled.set(v * 2);
     });
-    if !has_cargo_manifest {
-        let disk_cargo = package_dir.join("Cargo.toml");
-        if let Ok(content) = fs::read_to_string(&disk_cargo) {
-            loaded_from_disk.push((disk_cargo, content));
-        }
-    }
-
-    // Check ancestor directories on disk for workspace root `[workspace.dependencies]`
-    if !has_cargo_manifest || package_dir.is_absolute() {
-        let mut ancestor_opt = package_dir.parent();
-        while let Some(anc) = ancestor_opt {
-            if anc.as_os_str().is_empty() {
-                break;
-            }
-            let anc_cargo = anc.join("Cargo.toml");
-            if anc_cargo.is_file()
-                && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
-                && let Ok(content) = fs::read_to_string(&anc_cargo)
-            {
-                loaded_from_disk.push((anc_cargo, content));
-            }
-            ancestor_opt = anc.parent();
-        }
-    }
-
-    if !has_cargo_manifest && loaded_from_disk.is_empty() {
-        return CapabilityGate::default_rust();
-    }
-
-    let mut gate = CapabilityGate::with_capabilities([Capability::Rust]);
-    for (path, src) in manifest_sources {
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "Cargo.toml")
-        {
-            apply_cargo_toml_str(&mut gate, src);
-        }
-    }
-    for (_, src) in &loaded_from_disk {
-        apply_cargo_toml_str(&mut gate, src);
-    }
-
-    gate
 }
+"#;
+        let ast = syn::parse_file(source).unwrap_or_else(|e| panic!("valid syn parse: {e}"));
+        let lines: Vec<&str> = source.lines().collect();
+        let starts = compute_line_starts(source);
 
-fn apply_cargo_toml_str(gate: &mut CapabilityGate, cargo_toml_str: &str) {
-    let Ok(doc) = toml::from_str::<Value>(cargo_toml_str) else {
-        return;
-    };
-    let Some(root_table) = doc.as_table() else {
-        return;
-    };
+        let mut safety_out = Vec::new();
+        safety::extract_safety_findings(&ast, &lines, &starts, &mut safety_out);
+        assert!(
+            safety_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsNoUnguardedSliceIndex)
+        );
+        assert!(
+            safety_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsNoUnwrapInProduction)
+        );
 
-    if root_table.contains_key("bin") {
-        gate.package_role = PackageRole::Application;
-    } else if root_table.contains_key("lib") && gate.package_role == PackageRole::Unknown {
-        gate.package_role = PackageRole::Library;
-    }
+        let mut tokio_out = Vec::new();
+        tokio_async::extract_tokio_async_findings(&ast, source, &starts, &mut tokio_out);
+        assert!(
+            tokio_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsTokioNoBlockingInAsync && f.autofix.is_some())
+        );
+        assert!(
+            tokio_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsTokioPreferBoundedChannel)
+        );
 
-    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(Value::Table(dep_table)) = root_table.get(section) {
-            collect_cargo_dep_table(gate, dep_table);
-        }
-    }
+        let mut perf_out = Vec::new();
+        perf::extract_perf_findings(&ast, &starts, &mut perf_out);
+        assert!(
+            perf_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsPerfHoistRegexToLazylock)
+        );
+        assert!(
+            perf_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsPerfPreferVecWithCapacity)
+        );
+        assert!(
+            perf_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsPerfNoCloneInLoop)
+        );
 
-    if let Some(Value::Table(ws_table)) = root_table.get("workspace")
-        && let Some(Value::Table(ws_deps)) = ws_table.get("dependencies")
-    {
-        collect_cargo_dep_table(gate, ws_deps);
-    }
+        let mut axum_sqlx_out = Vec::new();
+        axum_sqlx::extract_axum_sqlx_findings(&ast, &starts, &mut axum_sqlx_out);
+        assert!(
+            axum_sqlx_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsAxumNoContendedMutexState)
+        );
+        assert!(
+            axum_sqlx_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsSqlxNoFormattedQueryString)
+        );
+        assert!(
+            axum_sqlx_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsSqlxNoQueryInLoop)
+        );
 
-    if let Some(Value::Table(targets_table)) = root_table.get("target") {
-        for target_cfg in targets_table.values().filter_map(Value::as_table) {
-            collect_target_cfg_deps(gate, target_cfg);
-        }
-    }
-}
+        let mut ui_out = Vec::new();
+        ui_signals::extract_ui_and_arch_findings(&ast, &starts, &mut ui_out);
+        assert!(
+            ui_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsUiNoDerivedSignalInEffect)
+        );
+        assert!(
+            ui_out
+                .iter()
+                .any(|f| f.rule == RuleId::RsArchNoManyBooleanParams)
+        );
 
-fn collect_target_cfg_deps(gate: &mut CapabilityGate, target_cfg: &toml::map::Map<String, Value>) {
-    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(Value::Table(dep_table)) = target_cfg.get(section) {
-            collect_cargo_dep_table(gate, dep_table);
-        }
-    }
-}
+        let graph_ir = graph::extract_file_graph_ir(&ast, source, &starts);
+        assert_eq!(graph_ir.pub_crate_items.len(), 1);
+        assert_eq!(graph_ir.pub_crate_items[0].name, "unused_helper");
 
-fn collect_cargo_dep_table(gate: &mut CapabilityGate, dep_table: &toml::map::Map<String, Value>) {
-    for (dep_key, dep_val) in dep_table {
-        let mut version = "*".to_string();
-        let mut actual_pkg: Option<&str> = None;
-
-        #[expect(
-            clippy::wildcard_enum_match_arm,
-            reason = "Cargo dependency entries are either version strings or inline specification tables"
-        )]
-        match dep_val {
-            Value::String(ver_str) => {
-                version.clone_from(ver_str);
-            }
-            Value::Table(spec) => {
-                if let Some(Value::String(ver_str)) = spec.get("version") {
-                    version.clone_from(ver_str);
-                }
-                if let Some(Value::String(pkg_name)) = spec.get("package") {
-                    actual_pkg = Some(pkg_name.as_str());
-                }
-            }
-            _ => {}
-        }
-
-        record_rust_dep_and_capabilities(gate, dep_key, &version);
-        if let Some(pkg_name) = actual_pkg {
-            record_rust_dep_and_capabilities(gate, pkg_name, &version);
-        }
-    }
-}
-
-fn record_rust_dep_and_capabilities(gate: &mut CapabilityGate, raw_name: &str, version: &str) {
-    let normalized = raw_name.trim().to_ascii_lowercase().replace('_', "-");
-    if !gate.dependencies.contains_key(raw_name) || version != "*" {
-        gate.dependencies
-            .insert(raw_name.to_string(), version.to_string());
-    }
-
-    let caps: &[Capability] = match normalized.as_str() {
-        "tokio" | "tokio-util" | "tokio-stream" => &[Capability::Tokio],
-        "axum" | "axum-extra" | "axum-core" => &[Capability::Axum],
-        "sqlx" | "sqlx-core" | "sqlx-postgres" | "sqlx-mysql" | "sqlx-sqlite" => {
-            &[Capability::Sqlx]
-        }
-        "serde" | "serde-json" | "serde-derive" => &[Capability::Serde],
-        "tracing" | "tracing-subscriber" | "tracing-futures" | "tracing-appender" => {
-            &[Capability::Tracing]
-        }
-        "leptos" | "leptos-reactive" | "leptos-router" | "leptos-meta" => &[Capability::Leptos],
-        "dioxus" | "dioxus-hooks" | "dioxus-web" | "dioxus-desktop" | "dioxus-fullstack" => {
-            &[Capability::Dioxus]
-        }
-        _ => &[],
-    };
-
-    for &cap in caps {
-        gate.capabilities.insert(cap);
+        // Verify Autofix round-trip on RsTokioNoBlockingInAsync
+        let diags = analyze_rs_source(
+            Path::new("src/handler.rs"),
+            source,
+            Some(&[RuleId::RsTokioNoBlockingInAsync]),
+        );
+        assert_eq!(diags.len(), 1);
+        let analyzers: [&dyn LanguageAnalyzer; 1] = [&RsLanguageAnalyzer];
+        let (fixed, applied) = apply_patches_to_source_with_analyzers(source, &diags, &analyzers);
+        assert_eq!(applied.len(), 1);
+        assert!(fixed.contains("tokio::time::sleep(Duration::from_millis(5)).await"));
     }
 }

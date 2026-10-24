@@ -10,10 +10,12 @@ crates/
     src/
       lib.rs              # language-agnostic core crate root and re-exports
       ir.rs               # SourceLoc, ByteSpan, SymbolOutline, FileSuppressions, ExtractedFile, LanguageAnalyzer
-      config.rs           # workspace package discovery and config utilities
+      config.rs           # configuration module root and re-exports
       config/
+        workspace.rs      # WorkspacePackage discovery and path/JSONC normalization helpers
         capability_gate.rs # Capability, CapabilityPredicate, CapabilityGate across JS/Angular/Python/Rust
-        loader.rs         # DotoreConfig loader and in-place mutator
+        loader.rs         # DotoreConfig loader and static JS/TS/JSONC parser
+        mutator.rs        # in-place configuration mutator (dotore rules)
       rules.rs            # unified rule registry module root
       rules/
         types.rs          # RuleId, RuleMetadata, PrescriptionTier, Diagnostic, AutofixPatch, FixCapsule
@@ -30,11 +32,23 @@ crates/
           polyglot.rs     # Angular Signals/RxJS, Python, and Rust rule metadata
       scanner.rs          # parallel gitignore-aware file discovery
       fixer.rs            # surgical single- and cross-file byte-range auto-fixer with syntax validation
-      diff.rs             # git diff, Contextual Owner filtering, and baseline multiset comparison
+      diff.rs             # git diff, Contextual Owner, and baseline module root
+      diff/
+        patch.rs          # git revision validation, unified diff patch parsing, and git diff execution
+        contextual_owner.rs # Contextual Owner span intersection and scope filtering
+        baseline.rs       # diagnostic fingerprinting and baseline multiset comparison
       planner.rs          # Root-Cause Grouping, Blast Radius, Exemplar lookup, Fix Capsules (dotore plan)
       score.rs            # deterministic local 0-100 health score and P0-P3 tier calculation
       search.rs           # native fuzzy Symbol Outline search (dotore search)
-      report.rs           # terminal, JSON, why/explain, CI, install, and HTML reporters
+      report.rs           # reporting module root and re-exports
+      report/
+        json.rs           # JsonReport schema, builders, and JSON file serializer
+        terminal.rs       # terminal/ASCII report rendering built on crate::ui
+        html.rs           # self-contained visual HTML cascade report renderer
+        rules.rs          # rule catalog listing and rule explanation (dotore rules)
+        why.rs            # location diagnosis and suppression/gate explanation (dotore why)
+        ci_install.rs     # CI workflow automation (dotore ci) and skill/hook installer (dotore install)
+      ui.rs               # reusable terminal UI kit (AsciiBox, GaugeBar, Badge, FlowDiagram, FilterTabBar, StatusBar, LiveSpinner)
   dotore-js/
     src/
       lib.rs              # JsLanguageAnalyzer (LanguageAnalyzer) and dotore-js crate root
@@ -88,21 +102,36 @@ crates/
         tanstack.rs       # TanStack Query and TanStack Start loader/query rules
   dotore-py/
     src/
-      lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer), pyproject.toml capability gate, and Python safety rules
-      web_orm_security.rs # Pydantic, FastAPI, SQLAlchemy/Django ORM N+1, and SQL/shell/deserialization security rules
-      async_perf_arch.rs  # asyncio concurrency hazards, regex hoisting autofix, and loop membership performance rules
+      lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer) facade and dotore-py crate root
+      matchers.rs         # shared Python AST matchers, PyScopeTracker, rule gating, and Diagnostic/Autofix builders
+      manifest.rs         # pyproject.toml and requirements.txt Capability Gate inference
+      ir.rs               # PyFileIr, single-pass Subject, SymbolOutline, ContextualOwnerSpansIr, and suppression extraction
       graph.rs            # Python package ProjectGraph analysis (circular imports, unused exports, unawaited coroutines)
+      safety.rs           # Python runtime and resource safety rules
+      asyncio.rs          # asyncio concurrency hazard rules
+      perf.rs             # hot-loop regex hoisting autofix and linear membership performance rules
+      fastapi_pydantic.rs # FastAPI route/auth and Pydantic default_factory rules
+      orm.rs              # SQLAlchemy and Django ORM N+1 loop query rule
+      security.rs         # Python SQL injection and unsafe deserialization/shell rules
   dotore-rs/
     src/
-      lib.rs              # RsLanguageAnalyzer and Cargo.toml Capability Gate discovery
+      lib.rs              # RsLanguageAnalyzer (LanguageAnalyzer) and dotore-rs crate root
+      matchers.rs         # shared syn AST, type, attribute, and lexical-scope matchers (RsScopeTracker)
+      manifest.rs         # Cargo.toml Capability Gate discovery and package role classification
       ir.rs               # single-pass syn AST, Subject, SymbolOutline, and suppression extraction
-      rules.rs            # Rust rule activation gating and core safety rule evaluation
-      axum_sqlx_ui_arch.rs# single-pass detectors for Axum, SQLx, Leptos/Dioxus UI signals, and boolean params
       graph.rs            # Rust crate ProjectGraph analysis (rs-arch-no-unused-pub-crate-items)
-      tokio_perf.rs       # single-pass Tokio async hazard and Rust allocation performance detectors
+      rules.rs            # Rust rule activation gating and rule pipeline dispatcher
+      safety.rs           # single-pass detectors for the 5 core production Rust safety rules
+      tokio_async.rs      # single-pass detectors for Tokio async concurrency hazards
+      perf.rs             # single-pass detectors for Rust allocation and hot-loop performance rules
+      axum_sqlx.rs        # single-pass detectors for Axum shared state contention and SQLx query hazards
+      ui_signals.rs       # single-pass detectors for Leptos/Dioxus reactive signals and boolean params
 src/
-  main.rs                 # thin CLI entrypoint: parses args and dispatches subcommands
+  main.rs                 # thin CLI adapter: parses args and returns process exit code
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API
+  cli.rs                  # Clap CLI definitions and subcommand execution runners
+  progress.rs             # live terminal progress bar and 30fps spinner animation (dotore_core::ui::LiveSpinner)
+  tui.rs                  # interactive TUI explorer (hjkl/arrows, filter tabs, grouping modes, / search, ESC exit)
   scanner.rs              # parallel gitignore-aware file discovery facade
   config.rs               # dotore.config.* / package.json loader and Capability Gate facade
   fixer.rs                # surgical single- and cross-file byte-range auto-fixer facade (dotore fix)
@@ -110,7 +139,13 @@ src/
   search.rs               # native fuzzy AST Symbol Outline search facade (dotore search)
   diff.rs                 # git diff, Contextual Owner filtering, and baseline multiset comparison facade
   score.rs                # deterministic local 0-100 health score and P0-P3 tier calculation facade
-  runtime_scan.rs         # native CDP WebSocket runtime profiler (dotore scan)
+  runtime_scan.rs         # native CDP WebSocket runtime profiler root (dotore scan)
+  runtime_scan/
+    transport.rs          # TCP, HTTP /json/version, RFC 6455 WebSocket transport, JSON-RPC multiplexing, and GzipStoredWriter
+    probe.rs              # local HTTP port discovery, interactive URL prompt, browser probe, and snapshot relay scripts
+    capture.rs            # Chrome binary discovery, isolated process launcher, CDP target selection, and trace capture
+    analysis.rs           # snapshot validation, multi-navigation merging, React/LoAF/interaction hotspot aggregation, and report builder
+    report.rs             # terminal, JSON, and JSONL report formatters for RuntimeScanReport
   report.rs               # terminal, JSON, why/explain, and self-contained HTML reporters facade
 docs/
   adr/                    # architecture decision records
