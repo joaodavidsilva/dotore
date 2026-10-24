@@ -196,8 +196,8 @@ pub(crate) fn extract_angular_html_template_sites(
         };
         let header = &template_source[open_paren + 1..close_paren];
         if let Some((track_target, reason)) = classify_for_header_track_violation(header) {
-            let start = base_byte_offset + (at_pos as u32);
-            let end = base_byte_offset + (close_paren as u32) + 1;
+            let start = base_byte_offset + u32::try_from(at_pos).unwrap_or(0);
+            let end = base_byte_offset + u32::try_from(close_paren).unwrap_or(0) + 1;
             sites.push(SemanticRuleSite {
                 rule: RuleId::AngularForTrackNoIndex,
                 subject_name: subject_name.map(ToOwned::to_owned),
@@ -528,7 +528,7 @@ fn build_insert_on_push_patch(obj: &ObjectExpression<'_>, source: &str) -> Autof
         let indent_str = if indent.is_empty() { "  " } else { indent };
         if has_trailing_comma {
             let comma_rel = trailing.find(',').unwrap_or(0);
-            let insert_pos = last_span.end + (comma_rel as u32) + 1;
+            let insert_pos = last_span.end + u32::try_from(comma_rel).unwrap_or(0) + 1;
             AutofixPatch::insert(
                 description,
                 insert_pos,
@@ -543,7 +543,7 @@ fn build_insert_on_push_patch(obj: &ObjectExpression<'_>, source: &str) -> Autof
         }
     } else if has_trailing_comma {
         let comma_rel = trailing.find(',').unwrap_or(0);
-        let insert_pos = last_span.end + (comma_rel as u32) + 1;
+        let insert_pos = last_span.end + u32::try_from(comma_rel).unwrap_or(0) + 1;
         AutofixPatch::insert(
             description,
             insert_pos,
