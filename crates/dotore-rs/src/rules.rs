@@ -187,6 +187,8 @@ const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
             | RuleId::RsUiNoDerivedSignalInEffect
             | RuleId::RsArchNoManyBooleanParams
             | RuleId::RsArchNoUnusedPubCrateItems
+            | RuleId::RsArchPreferPubCrateModules
+            | RuleId::RsArchNoLegacyModRs
             | RuleId::RsTokioNoStdLockAcrossAwait
             | RuleId::RsTokioNoBlockingInAsync
             | RuleId::RsTokioPreferBoundedChannel
