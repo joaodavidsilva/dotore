@@ -1,7 +1,7 @@
 //! Unified diagnostic rule registry, metadata, categories, tags,
 //! **Capability Gate** predicates, **Contextual Owner** policies, and **Prescription Tiers**.
 
-/// Decomposed 965-rule static metadata catalog.
+/// Decomposed 974-rule static metadata catalog.
 pub mod catalog;
 /// Domain types for the unified rule registry, diagnostics, and autofix patches.
 pub mod types;

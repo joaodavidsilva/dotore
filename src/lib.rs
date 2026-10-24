@@ -37,10 +37,11 @@ pub(crate) mod tui;
 
 pub use cli::{Cli, Commands, run_cli};
 pub use config::{
-    Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
-    DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
-    WorkspacePackage, discover_workspace_packages, discover_workspace_packages_with_analyzers,
-    load_config_from_dir, mutate_config_in_dir, resolve_package_for_file,
+    ArchitectureThresholdsConfig, Capability, CapabilityGate, CapabilityPredicate, ConfigMutation,
+    ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
+    SupplyChainConfig, WorkspacePackage, discover_workspace_packages,
+    discover_workspace_packages_with_analyzers, load_config_from_dir, mutate_config_in_dir,
+    resolve_package_for_file,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -54,10 +55,12 @@ pub use diff::{
 pub use dotore_core::{
     CliOverrides, ScanOptions,
     ir::{
-        BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
-        FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
-        PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite, SourceLoc,
-        SubjectEffectOwner, SymbolKind, SymbolOutline, classify_file_context, compute_line_starts,
+        ArchitectureFileFacets, BlockDisableRange, ByteSpan, ConcernBucket, ConcernSignalSite,
+        ContextualOwnerSpansIr, ExtractedFile, FileContext, FileSuppressions, HelperFingerprintIr,
+        InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId, LineDisableDirective,
+        OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite,
+        SourceLoc, StaticCatalogSiteIr, StructLiteralConstructionSiteIr, SubjectEffectOwner,
+        SymbolKind, SymbolOutline, classify_file_context, compute_line_starts,
         loc_from_line_starts,
     },
     rules::{
@@ -72,10 +75,6 @@ pub use dotore_core::{
         build_filter_tabs, classify_style_bucket, strip_ansi_codes, style_bucket_color,
         visible_char_width,
     },
-};
-pub use progress::{
-    LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
-    format_spinner_frame, set_progress_phase, tick_progress_file,
 };
 #[cfg(feature = "js")]
 pub use dotore_js::{
@@ -96,19 +95,24 @@ pub use planner::{
     PlanResult, PlannerContext, build_fix_capsule, build_root_cause_groups_and_capsules,
     compute_root_cause_group_id, format_plan_report, plan_project,
 };
-#[cfg(feature = "js")]
-pub use report::{build_report, build_report_with_packages};
+pub use progress::{
+    LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
+    format_spinner_frame, set_progress_phase, tick_progress_file,
+};
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
     JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
     build_extracted_report_with_packages, build_rule_catalog, ci_config, ci_install, ci_upgrade,
-    explain_location, explain_location_with_analyzers, explain_rule, format_design_report,
-    format_design_report_pretty, format_fix_report, format_install_report,
-    format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
-    format_terminal_report_pretty, format_why_report_text, install_dotore,
-    parse_why_location, render_html_report, write_and_open_html_report, write_json_report,
+    explain_location, explain_location_with_analyzers, explain_rule,
+    format_architecture_signal_explanation, format_design_report, format_design_report_pretty,
+    format_fix_report, format_install_report, format_rule_catalog_text,
+    format_rule_explanation_text, format_terminal_report, format_terminal_report_pretty,
+    format_why_report_text, install_dotore, parse_why_location, render_html_report,
+    write_and_open_html_report, write_json_report,
 };
+#[cfg(feature = "js")]
+pub use report::{build_report, build_report_with_packages};
 pub use runtime_scan::{
     BuildRuntimeScanReportInput, ComponentEventSource, LocalUrlSuggestion,
     RUNTIME_SCAN_INTERACTION_DURATION_THRESHOLD_MS, RUNTIME_SCAN_LAYOUT_THRASH_RATIO,
@@ -171,7 +175,6 @@ const DEFAULT_ANALYZERS: &[&dyn LanguageAnalyzer] = &[
 pub const fn default_analyzers() -> &'static [&'static dyn LanguageAnalyzer] {
     DEFAULT_ANALYZERS
 }
-
 
 pub(crate) fn register_active_core_hooks() {
     #[cfg(feature = "js")]
@@ -474,6 +477,16 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
             .count_context_consumers(context_name, sources)
     }
 
+    fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
+        #[cfg(feature = "js")]
+        if let Some(g) = self.js_graph
+            && let Some(facets) = g.architecture_facets_for_file(file)
+        {
+            return Some(facets);
+        }
+        self.extracted_files.architecture_facets_for_file(file)
+    }
+
     fn find_rule_exemplar(
         &self,
         group: &RootCauseGroup,
@@ -481,13 +494,14 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
         sources: &HashMap<PathBuf, String>,
     ) -> Option<SourceExcerpt> {
         #[cfg(feature = "js")]
-        if let Some(g) = self.js_graph
+        if JsLanguageAnalyzer.supports_path(&group.file)
+            && let Some(g) = self.js_graph
             && let Some(ex) = g.find_rule_exemplar(group, diagnostics, sources)
         {
             return Some(ex);
         }
-        let _ = (group, diagnostics, sources);
-        None
+        self.extracted_files
+            .find_rule_exemplar(group, diagnostics, sources)
     }
 }
 
@@ -531,9 +545,14 @@ fn build_polyglot_report(
 }
 
 #[cfg(any(feature = "py", feature = "rs"))]
-fn resolve_package_index_for_file(file_path: &Path, packages: &[WorkspacePackage]) -> Option<usize> {
+fn resolve_package_index_for_file(
+    file_path: &Path,
+    packages: &[WorkspacePackage],
+) -> Option<usize> {
     let resolved = resolve_package_for_file(file_path, packages)?;
-    packages.iter().position(|p| p.root_dir == resolved.root_dir)
+    packages
+        .iter()
+        .position(|p| p.root_dir == resolved.root_dir)
 }
 
 fn analyze_polyglot_sources(
@@ -545,7 +564,13 @@ fn analyze_polyglot_sources(
 ) -> (Vec<ExtractedFile>, OptionalJsGraph, Vec<Diagnostic>) {
     #[cfg(not(any(feature = "js", feature = "py", feature = "rs")))]
     {
-        let _ = (packages, manifests, filtered_sources, sources, enabled_rules);
+        let _ = (
+            packages,
+            manifests,
+            filtered_sources,
+            sources,
+            enabled_rules,
+        );
         return (Vec::new(), None, Vec::new());
     }
 

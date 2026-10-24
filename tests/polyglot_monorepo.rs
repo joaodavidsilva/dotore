@@ -14,13 +14,16 @@ use std::{
 };
 
 use dotore::{
-    AutofixPatch, ByteEdit, ByteSpan, Capability, ChangedFileLineRanges, DiffScope, DotoreConfig,
-    JsLanguageAnalyzer, LanguageAnalyzer, LanguageId, PrescriptionTier, PyLanguageAnalyzer,
-    RsLanguageAnalyzer, RuleId, RulesListOptions, ScanOptions, SearchOptions, SymbolKind,
-    analyze_project_sources, analyze_source, apply_autofixes, apply_patches_to_source,
-    build_rule_catalog, default_analyzers, discover_workspace_packages, explain_location,
-    explain_rule, filter_diagnostics_by_scope, format_search_json, format_search_text,
-    plan_project, resolve_package_for_file, rule_registry, scan_workspace, search_project_sources,
+    ArchitectureFileFacets, ArchitectureThresholdsConfig, AutofixPatch, ByteEdit, ByteSpan,
+    Capability, ChangedFileLineRanges, ConcernBucket, ConcernSignalSite, DiffScope, DotoreConfig,
+    HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr, JsLanguageAnalyzer, LanguageAnalyzer,
+    LanguageId, PrescriptionTier, PyLanguageAnalyzer, RsLanguageAnalyzer, RuleId, RuleSeverity,
+    RulesListOptions, ScanOptions, SearchOptions, StaticCatalogSiteIr,
+    StructLiteralConstructionSiteIr, SymbolKind, analyze_project_sources, analyze_source,
+    apply_autofixes, apply_patches_to_source, build_rule_catalog, default_analyzers,
+    discover_workspace_packages, explain_location, explain_rule, filter_diagnostics_by_scope,
+    format_architecture_signal_explanation, format_search_json, format_search_text, plan_project,
+    resolve_package_for_file, rule_registry, scan_workspace, search_project_sources,
     search_symbols,
 };
 
@@ -70,7 +73,11 @@ fn polyglot_default_analyzers_and_multi_manifest_workspace_discovery() {
         r#"{"name": "ng-frontend", "dependencies": {"@angular/core": "^19.0.0", "rxjs": "^7.8.0"}}"#,
     )
     .unwrap();
-    fs::write(frontend_dir.join("angular.json"), r#"{"version": 1, "projects": {}}"#).unwrap();
+    fs::write(
+        frontend_dir.join("angular.json"),
+        r#"{"version": 1, "projects": {}}"#,
+    )
+    .unwrap();
 
     // Subpackage 2: React web app
     fs::write(
@@ -85,7 +92,11 @@ fn polyglot_default_analyzers_and_multi_manifest_workspace_discovery() {
         "[project]\nname = \"api-service\"\ndependencies = [\"fastapi>=0.115.0\", \"pydantic>=2.9.0\", \"sqlalchemy>=2.0.0\"]\n",
     )
     .unwrap();
-    fs::write(py_api_dir.join("requirements.txt"), "pytest>=8.0.0\nhttpx>=0.27.0\n").unwrap();
+    fs::write(
+        py_api_dir.join("requirements.txt"),
+        "pytest>=8.0.0\nhttpx>=0.27.0\n",
+    )
+    .unwrap();
 
     // Subpackage 4: Rust Tokio + Axum + SQLx worker
     fs::write(
@@ -95,7 +106,11 @@ fn polyglot_default_analyzers_and_multi_manifest_workspace_discovery() {
     .unwrap();
 
     let packages = discover_workspace_packages(&temp_dir);
-    assert_eq!(packages.len(), 5, "Expected root + 4 subpackages, got: {packages:#?}");
+    assert_eq!(
+        packages.len(),
+        5,
+        "Expected root + 4 subpackages, got: {packages:#?}"
+    );
 
     // Root package merges JS (Zod), Python (Pydantic), and Rust (Serde) capabilities
     let root_pkg = packages.iter().find(|p| p.root_dir == temp_dir).unwrap();
@@ -106,7 +121,8 @@ fn polyglot_default_analyzers_and_multi_manifest_workspace_discovery() {
     assert!(root_pkg.capability_gate.has(Capability::Serde));
 
     // Angular package
-    let ng_pkg = resolve_package_for_file(&frontend_dir.join("src/app.component.ts"), &packages).unwrap();
+    let ng_pkg =
+        resolve_package_for_file(&frontend_dir.join("src/app.component.ts"), &packages).unwrap();
     assert_eq!(ng_pkg.root_dir, frontend_dir);
     assert!(ng_pkg.capability_gate.has(Capability::Angular));
     assert!(ng_pkg.capability_gate.has(Capability::Rxjs));
@@ -313,7 +329,11 @@ pub(crate) fn unused_internal_helper(x: u32) -> u32 {
     assert_eq!(in_memory_report.summary.files_scanned, 7);
     assert_eq!(in_memory_report.projects.len(), 4);
 
-    let mem_rules: Vec<RuleId> = in_memory_report.diagnostics.iter().map(|d| d.rule).collect();
+    let mem_rules: Vec<RuleId> = in_memory_report
+        .diagnostics
+        .iter()
+        .map(|d| d.rule)
+        .collect();
     // Angular diagnostics
     assert!(mem_rules.contains(&RuleId::AngularNoSignalWriteInEffect));
     assert!(mem_rules.contains(&RuleId::AngularPreferOnPushChangeDetection));
@@ -494,8 +514,16 @@ pub fn clean_rust_subject(val: u32) -> u32 {
         ng_capsule.subject_excerpt.file,
         Path::new("frontend/src/user.component.ts")
     );
-    assert!(ng_capsule.subject_excerpt.source.contains("export class UserComponent"));
-    let ng_ex = ng_capsule.exemplar.as_ref().expect("Expected TS/Angular exemplar");
+    assert!(
+        ng_capsule
+            .subject_excerpt
+            .source
+            .contains("export class UserComponent")
+    );
+    let ng_ex = ng_capsule
+        .exemplar
+        .as_ref()
+        .expect("Expected TS/Angular exemplar");
     assert_eq!(ng_ex.file, Path::new("frontend/src/user.component.ts"));
     assert!(ng_ex.source.contains("CleanComponent"));
 
@@ -504,11 +532,25 @@ pub fn clean_rust_subject(val: u32) -> u32 {
         .iter()
         .find(|c| c.rule == RuleId::PyAsyncNoBlockingCall)
         .expect("Expected Python FixCapsule");
-    assert_eq!(py_capsule.subject_excerpt.file, Path::new("backend-py/app.py"));
-    assert!(py_capsule.subject_excerpt.source.contains("async def sync_inventory"));
-    let py_ex = py_capsule.exemplar.as_ref().expect("Expected Python exemplar");
+    assert_eq!(
+        py_capsule.subject_excerpt.file,
+        Path::new("backend-py/app.py")
+    );
+    assert!(
+        py_capsule
+            .subject_excerpt
+            .source
+            .contains("async def sync_inventory")
+    );
+    let py_ex = py_capsule
+        .exemplar
+        .as_ref()
+        .expect("Expected Python exemplar");
     assert_eq!(py_ex.file, Path::new("backend-py/app.py"));
-    assert!(py_ex.source.contains("def suppressed_broad_except") || py_ex.source.contains("def clean_python_subject"));
+    assert!(
+        py_ex.source.contains("def suppressed_broad_except")
+            || py_ex.source.contains("def clean_python_subject")
+    );
 
     let rs_capsule = report
         .fix_capsules
@@ -519,10 +561,21 @@ pub fn clean_rust_subject(val: u32) -> u32 {
         rs_capsule.subject_excerpt.file,
         Path::new("backend-rs/src/lib.rs")
     );
-    assert!(rs_capsule.subject_excerpt.source.contains("pub async fn settle_ledger"));
-    let rs_ex = rs_capsule.exemplar.as_ref().expect("Expected Rust exemplar");
+    assert!(
+        rs_capsule
+            .subject_excerpt
+            .source
+            .contains("pub async fn settle_ledger")
+    );
+    let rs_ex = rs_capsule
+        .exemplar
+        .as_ref()
+        .expect("Expected Rust exemplar");
     assert_eq!(rs_ex.file, Path::new("backend-rs/src/lib.rs"));
-    assert!(rs_ex.source.contains("pub fn suppressed_unwrap_fn") || rs_ex.source.contains("pub fn clean_rust_subject"));
+    assert!(
+        rs_ex.source.contains("pub fn suppressed_unwrap_fn")
+            || rs_ex.source.contains("pub fn clean_rust_subject")
+    );
 
     // 2. Verify `plan_project` writes Markdown plans with `tsx`, `python`, and `rust` code fences
     let temp_dir =
@@ -634,8 +687,7 @@ pub async fn delay_worker() {
 }
 "#;
 
-    let temp_dir =
-        std::env::temp_dir().join(format!("dotore-polyglot-fix-{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!("dotore-polyglot-fix-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);
     let ng_dir = temp_dir.join("frontend");
     let py_dir = temp_dir.join("backend-py");
@@ -687,7 +739,11 @@ pub async fn delay_worker() {
     assert_eq!(report.diagnostics.len(), 6);
 
     let fix_results = apply_autofixes(&report.diagnostics, &sources, false).unwrap();
-    assert_eq!(fix_results.len(), 3, "Expected fixes across .ts, .py, and .rs");
+    assert_eq!(
+        fix_results.len(),
+        3,
+        "Expected fixes across .ts, .py, and .rs"
+    );
 
     let fixed_ng = fs::read_to_string(&ng_file).unwrap();
     let fixed_py = fs::read_to_string(&py_file).unwrap();
@@ -720,9 +776,21 @@ pub async fn delay_worker() {
 
     // Verify `apply_patches_to_source` rejects malformed syntax edits in TS, Python, and Rust
     for (path_str, valid_code, broken_replacement) in [
-        ("src/card.ts", "export const x = 1;\n", "export const x = (((;\n"),
-        ("src/app.py", "def f():\n    return 1\n", "def f(:\n    return\n"),
-        ("src/lib.rs", "pub fn f() -> i32 { 1 }\n", "pub fn f() -> { {{{ }\n"),
+        (
+            "src/card.ts",
+            "export const x = 1;\n",
+            "export const x = (((;\n",
+        ),
+        (
+            "src/app.py",
+            "def f():\n    return 1\n",
+            "def f(:\n    return\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub fn f() -> i32 { 1 }\n",
+            "pub fn f() -> { {{{ }\n",
+        ),
     ] {
         let mut fake_diag = report.diagnostics[0].clone();
         fake_diag.file = PathBuf::from(path_str);
@@ -810,7 +878,10 @@ pub fn execute_order_match(id: u64) -> bool {
 
     // Verify Struct and Trait kind filtering works across languages
     let struct_hits = search_project_sources("Order", &files, Some(&[SymbolKind::Struct]), 10);
-    let struct_names: Vec<&str> = struct_hits.iter().map(|h| h.outline.name.as_str()).collect();
+    let struct_names: Vec<&str> = struct_hits
+        .iter()
+        .map(|h| h.outline.name.as_str())
+        .collect();
     assert!(struct_names.contains(&"OrderProcessor"));
     assert!(struct_names.contains(&"OrderBookEngine"));
 
@@ -855,7 +926,7 @@ pub fn execute_order_match(id: u64) -> bool {
     // 3. Verify `build_rule_catalog` and `explain_rule` support all language & ecosystem frameworks
     let cfg = DotoreConfig::default();
     let all_catalog = build_rule_catalog(&cfg, &RulesListOptions::default());
-    assert_eq!(all_catalog.len(), 965);
+    assert_eq!(all_catalog.len(), 974);
 
     for (fw, expected_rule_id) in [
         ("angular", "angular-no-signal-write-in-effect"),
@@ -958,7 +1029,11 @@ pub fn untouched_rust_fn(opt: Option<u32>) -> u32 {
         rs_src,
         Some(&[RuleId::RsNoUnwrapInProduction]),
     ));
-    assert_eq!(diagnostics.len(), 6, "Expected 2 findings per language before diff filter");
+    assert_eq!(
+        diagnostics.len(),
+        6,
+        "Expected 2 findings per language before diff filter"
+    );
 
     let mut sources = HashMap::new();
     sources.insert(tsx_path.clone(), tsx_src.to_string());
@@ -1031,8 +1106,8 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
     let registry = rule_registry();
     assert_eq!(
         registry.len(),
-        965,
-        "Expected 965 total rules (921 React/TS + 7 Angular + 19 Python + 18 Rust)"
+        974,
+        "Expected 974 total rules (928 React/TS/universal + 7 Angular + 19 Python + 20 Rust)"
     );
 
     let angular_count = registry
@@ -1049,10 +1124,10 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
         .count();
     let js_react_count = registry.len() - angular_count - py_count - rs_count;
 
-    assert_eq!(js_react_count, 921, "Expected 921 React/TS rules");
+    assert_eq!(js_react_count, 928, "Expected 928 React/TS/universal rules");
     assert_eq!(angular_count, 7, "Expected 7 Angular rules");
     assert_eq!(py_count, 19, "Expected 19 Python rules");
-    assert_eq!(rs_count, 18, "Expected 18 Rust rules");
+    assert_eq!(rs_count, 20, "Expected 20 Rust rules");
 
     // Collect all detector source text across `crates/dotore-js/src`, `crates/dotore-py/src`, and `crates/dotore-rs/src`
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1066,7 +1141,11 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
     }
 
     for meta in registry {
-        assert!(!meta.title.trim().is_empty(), "Empty title for {}", meta.canonical_id);
+        assert!(
+            !meta.title.trim().is_empty(),
+            "Empty title for {}",
+            meta.canonical_id
+        );
         assert!(
             !meta.recipe_markdown.trim().is_empty(),
             "Empty recipe_markdown for {}",
@@ -1090,7 +1169,8 @@ fn polyglot_zero_stub_rule_parity_across_all_950_registered_rules() {
 }
 
 #[test]
-fn spec_8_new_rules_contain_no_external_competitor_linter_names_and_cli_supports_score_subcommand() {
+fn spec_8_new_rules_contain_no_external_competitor_linter_names_and_cli_supports_score_subcommand()
+{
     let registry = rule_registry();
     for meta in registry.iter().filter(|m| {
         m.canonical_id.starts_with("angular-")
@@ -1144,4 +1224,1200 @@ fn append_rs_sources_recursively(dir: &Path, out: &mut String) {
             out.push('\n');
         }
     }
+}
+
+#[test]
+fn polyglot_architecture_soc_reuse_visibility_and_layout_rules_fix_capsules_and_why() {
+    // Confirm top-level re-exports of architecture IR facets, threshold config, and signal formatter
+    let default_thresholds = ArchitectureThresholdsConfig::default();
+    assert_eq!(default_thresholds.min_helper_statements, 4);
+    let _ = (
+        std::mem::size_of::<ArchitectureFileFacets>(),
+        std::mem::size_of::<ConcernBucket>(),
+        std::mem::size_of::<ConcernSignalSite>(),
+        std::mem::size_of::<HelperFingerprintIr>(),
+        std::mem::size_of::<InlineTerminalUiPrimitiveSiteIr>(),
+        std::mem::size_of::<StaticCatalogSiteIr>(),
+        std::mem::size_of::<StructLiteralConstructionSiteIr>(),
+        format_architecture_signal_explanation as fn(_, _) -> _,
+    );
+
+    let mut ts_catalog_entries = String::new();
+    let mut py_catalog_entries = String::new();
+    let mut rs_catalog_entries = String::new();
+    for i in 1..=26 {
+        ts_catalog_entries.push_str(&format!(
+            "    {{ id: 'rule-{i}', severity: 'warning', enabled: true }},\n"
+        ));
+        py_catalog_entries.push_str(&format!("    \"RULE_{i:02}\": {{\"code\": {i}}},\n"));
+        rs_catalog_entries.push_str(&format!("    (\"rule-{i}\", {i}),\n"));
+    }
+
+    let files: Vec<(PathBuf, String)> = vec![
+        // --- TypeScript / React Package (`web/`) ---
+        (
+            PathBuf::from("web/package.json"),
+            r#"{"name": "web", "dependencies": {"react": "^19.0.0", "react-dom": "^19.0.0"}}"#
+                .to_string(),
+        ),
+        // 1. TS `arch-thin-entrypoint` (violating) + valid thin entrypoint exemplar
+        (
+            PathBuf::from("web/src/main.tsx"),
+            r#"import fs from 'node:fs';
+
+export interface BootstrapConfig {
+    port: number;
+    host: string;
+}
+
+export async function main() {
+    const raw = fs.readFileSync('./config.json', 'utf8');
+    const res = await fetch('https://api.example.com/bootstrap');
+    const data = await res.json();
+    return <main className="app-shell"><h1>{data.title}</h1><pre>{raw}</pre></main>;
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/bin/cli.ts"),
+            r#"import { runCli } from '../src/runner';
+const exitCode = await runCli(process.argv.slice(2));
+process.exit(exitCode);
+"#
+            .to_string(),
+        ),
+        // 2. TS `arch-no-mixed-io-and-presentation`
+        (
+            PathBuf::from("web/src/OrdersDashboard.tsx"),
+            r#"import React from 'react';
+
+export async function OrdersDashboard({ accountId }: { accountId: string }) {
+    const response = await fetch(`/api/accounts/${accountId}/orders`);
+    const orders = await response.json();
+    return (
+        <section className="orders-view">
+            <h2>Orders</h2>
+            <ul>{orders.map((o: { id: string; total: number }) => <li key={o.id}>{o.total}</li>)}</ul>
+        </section>
+    );
+}
+"#
+            .to_string(),
+        ),
+        // 3. TS `arch-separate-static-catalog-from-types` + cohesive pure catalog
+        (
+            PathBuf::from("web/src/catalog.ts"),
+            format!(
+                r#"export interface RuleRecord {{
+    id: string;
+    severity: RuleLevel;
+    enabled: boolean;
+}}
+export type RuleLevel = 'error' | 'warning';
+export enum RuleDomain {{ Core = 'core', Arch = 'arch' }}
+export const BUILTIN_RULES: RuleRecord[] = [
+{ts_catalog_entries}];
+"#
+            ),
+        ),
+        (
+            PathBuf::from("web/src/pureCatalog.ts"),
+            format!(
+                r#"import type {{ RuleRecord }} from './catalog';
+export const SEPARATED_RULES: RuleRecord[] = [
+{ts_catalog_entries}];
+"#
+            ),
+        ),
+        // 4. TS `arch-no-mixed-domain-monolith` + cohesive single-concern parser
+        (
+            PathBuf::from("web/src/monolith.tsx"),
+            r#"import fs from 'node:fs';
+export interface UserAccount { id: string; email: string; }
+export interface InvoiceRecord { id: string; amount: number; }
+export type PaymentStatus = 'pending' | 'paid' | 'failed';
+export enum AuditCategory { Billing = 'billing', Security = 'security' }
+export async function fetchUserAccount(id: string): Promise<UserAccount> {
+    const res = await fetch(`/api/users/${id}`);
+    return res.json();
+}
+export function readInvoiceCache(path: string): string {
+    return fs.readFileSync(path, 'utf8');
+}
+export function validateUserEmail(email: string): boolean {
+    if (!email.includes('@')) return false;
+    return email.trim().length > 3;
+}
+export function parseInvoiceLine(line: string): InvoiceRecord {
+    const parts = line.split(',');
+    return { id: parts[0] ?? '', amount: Number(parts[1] ?? 0) };
+}
+export function normalizePaymentStatus(raw: string): PaymentStatus {
+    if (raw === 'paid') return 'paid';
+    if (raw === 'failed') return 'failed';
+    return 'pending';
+}
+export function computeInvoiceTotal(items: InvoiceRecord[]): number {
+    let sum = 0;
+    for (const item of items) sum += item.amount;
+    return sum;
+}
+export function AccountSummaryBanner({ user }: { user: UserAccount }) {
+    return <header className="account-banner"><span>{user.email}</span></header>;
+}
+export function InvoiceTableView({ invoices }: { invoices: InvoiceRecord[] }) {
+    return <section className="invoices">{invoices.map((inv) => <div key={inv.id}>{inv.amount}</div>)}</section>;
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/src/cohesiveParser.ts"),
+            r#"export interface Token { kind: string; text: string; }
+export type NodeKind = 'ident' | 'number' | 'binary';
+export function isDigit(ch: string): boolean { return ch >= '0' && ch <= '9'; }
+export function isAlpha(ch: string): boolean { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'); }
+export function trimToken(raw: string): string { return raw.trim(); }
+export function makeToken(kind: string, text: string): Token { return { kind, text }; }
+export function parseIdent(src: string): Token { return makeToken('ident', trimToken(src)); }
+export function parseNumber(src: string): Token { return makeToken('number', trimToken(src)); }
+export function parsePrimary(src: string): Token { return isDigit(src[0] ?? '') ? parseNumber(src) : parseIdent(src); }
+export function parseUnary(src: string): Token { return parsePrimary(src); }
+export function parseMultiplicative(src: string): Token { return parseUnary(src); }
+export function parseAdditive(src: string): Token { return parseMultiplicative(src); }
+export function parseComparison(src: string): Token { return parseAdditive(src); }
+export function parseExpression(src: string): Token { return parseComparison(src); }
+"#
+            .to_string(),
+        ),
+        // 5. TS `arch-no-inline-terminal-ui-primitives` + UI kit exemplar (`terminal_ui.ts`)
+        (
+            PathBuf::from("web/src/terminal_ui.ts"),
+            r#"export function renderBox(title: string, body: string): string {
+    return `\x1b[36m┌── ${title} ──┐\x1b[0m\n│ ${body} │\n└──────────┘`;
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/src/reporter.ts"),
+            r#"export function formatSummary(status: string): string {
+    const header = "\x1b[31mFAIL\x1b[0m";
+    const border = `╭────────────╮\n│ ${status} │\n╰────────────╯`;
+    return `${header}\n${border}`;
+}
+"#
+            .to_string(),
+        ),
+        // 6 & 7. TS `arch-prefer-fluent-builder` + `arch-no-duplicated-helper-logic` + builder exemplar
+        (
+            PathBuf::from("web/src/requestBuilder.ts"),
+            r#"export interface RequestConfig {
+    url: string;
+    method: string;
+    timeoutMs: number;
+    retryCount: number;
+    headers: Record<string, string>;
+}
+export class RequestConfigBuilder {
+    withTimeout(ms: number): this { return this; }
+    build(): RequestConfig {
+        return { url: "/", method: "GET", timeoutMs: 0, retryCount: 0, headers: {} };
+    }
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/src/routesA.ts"),
+            r#"export interface DiagnosticRecord {
+    rule: string;
+    file: string;
+    message: string;
+    autofix: string | null;
+    callerSites: string[];
+    suppressed: boolean;
+}
+function normalizeHeader(raw: string, prefix: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        return prefix;
+    }
+    const cleaned = trimmed.toLowerCase().replace(/\s+/g, "-");
+    return `${prefix}:${cleaned}`;
+}
+export function checkFirst(file: string): DiagnosticRecord {
+    const label = normalizeHeader(file, "first");
+    const diag: DiagnosticRecord = {
+        rule: "rule-a",
+        file: label,
+        message: "First issue",
+        autofix: null,
+        callerSites: [],
+        suppressed: false,
+    };
+    return diag;
+}
+export function checkSecond(file: string): DiagnosticRecord {
+    return <DiagnosticRecord>{
+        rule: "rule-b",
+        file,
+        message: "Second issue",
+        autofix: null,
+        callerSites: [],
+        suppressed: false,
+    };
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/src/routesB.ts"),
+            r#"import type { DiagnosticRecord } from "./routesA";
+const cleanToken = (input: string, ns: string): string => {
+    const stripped = input.trim();
+    if (!stripped) {
+        return ns;
+    }
+    const slug = stripped.toLowerCase().replace(/\s+/g, "-");
+    return `${ns}:${slug}`;
+};
+export function checkThird(file: string): DiagnosticRecord {
+    const tag = cleanToken(file, "third");
+    const entry: DiagnosticRecord = {
+        rule: "rule-c",
+        file: tag,
+        message: "Third issue",
+        autofix: null,
+        callerSites: [],
+        suppressed: false,
+    };
+    return entry;
+}
+"#
+            .to_string(),
+        ),
+        // --- Python Package (`py-svc/`) ---
+        (
+            PathBuf::from("py-svc/pyproject.toml"),
+            "[project]\nname = \"py-svc\"\ndependencies = [\"pydantic>=2.0\", \"httpx>=0.27\", \"rich>=13.0\"]\n"
+                .to_string(),
+        ),
+        // 1. Python `arch-thin-entrypoint` + valid thin `__main__.py`
+        (
+            PathBuf::from("py-svc/main.py"),
+            r#"from pydantic import BaseModel
+import httpx
+
+class InvoicePayload(BaseModel):
+    invoice_id: str
+    amount_cents: int
+
+def main() -> None:
+    resp = httpx.get("https://api.example.com/invoices")
+    data = resp.json()
+    for row in data:
+        payload = InvoicePayload(invoice_id=row["id"], amount_cents=row["amount"])
+        httpx.post("https://api.example.com/ledger", json=payload.model_dump())
+
+if __name__ == "__main__":
+    main()
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/__main__.py"),
+            r#"import sys
+from py_svc.runner import run_cli
+
+def main() -> int:
+    return run_cli(sys.argv[1:])
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#
+            .to_string(),
+        ),
+        // 2. Python `arch-no-mixed-io-and-presentation`
+        (
+            PathBuf::from("py-svc/views.py"),
+            r#"from flask import render_template
+
+def save_and_render_invoice(invoice_html: str):
+    with open("/tmp/invoice.html", "w") as f:
+        f.write(invoice_html)
+    return render_template("invoice.html", body=invoice_html)
+"#
+            .to_string(),
+        ),
+        // 3. Python `arch-separate-static-catalog-from-types`
+        (
+            PathBuf::from("py-svc/catalog.py"),
+            format!(
+                r#"from dataclasses import dataclass
+from enum import Enum
+from pydantic import BaseModel
+
+class Severity(Enum):
+    WARN = "warn"
+    ERROR = "error"
+
+@dataclass
+class RuleSpec:
+    code: int
+
+class RuleRecord(BaseModel):
+    id: str
+
+DEFAULT_RULE_CATALOG = {{
+{py_catalog_entries}}}
+"#
+            ),
+        ),
+        // 4. Python `arch-no-mixed-domain-monolith`
+        (
+            PathBuf::from("py-svc/monolith.py"),
+            r#"from pydantic import BaseModel
+from rich.console import Console
+import httpx
+
+class OrderModel(BaseModel):
+    order_id: str
+
+class PaymentModel(BaseModel):
+    payment_id: str
+
+class ShipmentModel(BaseModel):
+    shipment_id: str
+
+def fetch_orders():
+    return httpx.get("https://api.example.com/orders").json()
+
+def fetch_payments():
+    return httpx.get("https://api.example.com/payments").json()
+
+def render_order_box(order_id: str) -> None:
+    Console().print(f"Order: {order_id}")
+
+def render_payment_status(payment_id: str) -> None:
+    Console().print(f"Paid {payment_id}")
+
+def parse_order_node(node):
+    return str(node)
+
+def validate_payment_schema(item):
+    return bool(item)
+
+def transform_shipment_row(row):
+    return row
+
+def compute_tax_cents(amount: int) -> int:
+    return amount * 10
+
+def normalize_currency_code(code: str) -> str:
+    return code.upper()
+"#
+            .to_string(),
+        ),
+        // 5. Python `arch-no-inline-terminal-ui-primitives` + UI kit exemplar (`ui.py`)
+        (
+            PathBuf::from("py-svc/ui.py"),
+            r#"def draw_banner(title: str) -> str:
+    return f"\x1b[1m╭──────╮\n│ {title} │\n╰──────╯\x1b[0m"
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/status_printer.py"),
+            r#"def print_failure(label: str) -> str:
+    return f"\x1b[31m╭──────╮\n│ {label} │\n╰──────╯\x1b[0m"
+"#
+            .to_string(),
+        ),
+        // 6 & 7. Python `arch-prefer-fluent-builder` + `arch-no-duplicated-helper-logic` + builder exemplar
+        (
+            PathBuf::from("py-svc/builders.py"),
+            r#"class AuditEventBuilder:
+    def with_actor(self, actor: str):
+        return self
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/alpha.py"),
+            r#"__all__ = ["process_alpha"]
+
+def sanitize_payload(raw: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        clean_k = k.strip().lower()
+        if clean_k:
+            out[clean_k] = v.strip()
+    return out
+
+def process_alpha():
+    return [
+        JobEnvelope(job_id="1", actor="sys", retries=0, metadata=None, archived=False),
+        JobEnvelope(job_id="2", actor="sys", retries=0, metadata=None, archived=False),
+    ]
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/beta.py"),
+            r#"__all__ = ["process_beta"]
+
+def sanitize_payload(entries: dict[str, str]) -> dict[str, str]:
+    acc: dict[str, str] = {}
+    for key, val in entries.items():
+        norm = key.strip().lower()
+        if norm:
+            acc[norm] = val.strip()
+    return acc
+
+def process_beta():
+    return [
+        JobEnvelope(job_id="3", actor="ops", retries=0, metadata=None, archived=False),
+    ]
+"#
+            .to_string(),
+        ),
+        // --- Rust Package (`rs-svc/`) ---
+        (
+            PathBuf::from("rs-svc/Cargo.toml"),
+            "[package]\nname = \"rs-svc\"\nversion = \"0.1.0\"\n[dependencies]\nsqlx = \"0.8\"\ncrossterm = \"0.28\"\n"
+                .to_string(),
+        ),
+        // 8. Rust `rs-arch-prefer-pub-crate-modules` (lib.rs with `pub mod helpers;` re-exported via `pub use helpers::Helper;`)
+        (
+            PathBuf::from("rs-svc/src/lib.rs"),
+            r#"pub mod helpers;
+pub(crate) mod internal;
+pub use helpers::Helper;
+
+pub fn run_service(h: Helper) -> u32 {
+    internal::compute() + h.0
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/helpers.rs"),
+            "pub struct Helper(pub u32);\n".to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/internal.rs"),
+            "pub(crate) fn compute() -> u32 { 42 }\n".to_string(),
+        ),
+        // 9. Rust `rs-arch-no-legacy-mod-rs`
+        (
+            PathBuf::from("rs-svc/src/legacy/mod.rs"),
+            "pub fn legacy_helper() -> u32 { 7 }\n".to_string(),
+        ),
+        // 1. Rust `arch-thin-entrypoint`
+        (
+            PathBuf::from("rs-svc/src/main.rs"),
+            r#"pub struct CliDomainModel {
+    pub id: u64,
+}
+
+fn main() {
+    let raw = std::fs::read_to_string("config.toml").unwrap_or_default();
+    println!("loaded {} bytes", raw.len());
+}
+"#
+            .to_string(),
+        ),
+        // 2 & 5. Rust `arch-no-mixed-io-and-presentation` + `arch-no-inline-terminal-ui-primitives` + UI kit exemplar (`ui.rs`)
+        (
+            PathBuf::from("rs-svc/src/ui.rs"),
+            r#"pub struct AsciiBanner;
+impl AsciiBanner {
+    pub fn render(title: &str) -> String {
+        format!("\x1b[36m┌── {title} ──┐\x1b[0m")
+    }
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/mixed_worker.rs"),
+            r#"pub async fn sync_and_render(pool: &sqlx::PgPool) {
+    let _ = sqlx::query("SELECT 1").fetch_one(pool).await;
+    println!("\x1b[31m┌─ SYNC DONE ─┐\x1b[0m");
+}
+"#
+            .to_string(),
+        ),
+        // 3. Rust `arch-separate-static-catalog-from-types`
+        (
+            PathBuf::from("rs-svc/src/catalog_types.rs"),
+            format!(
+                r#"pub struct RuleEntry {{ pub id: &'static str, pub code: u32 }}
+pub enum RuleKind {{ Safety, Perf }}
+pub struct RuleGroup {{ pub name: &'static str }}
+pub const STATIC_RULES: &[(&str, u32)] = &[
+{rs_catalog_entries}];
+"#
+            ),
+        ),
+        // 4. Rust `arch-no-mixed-domain-monolith`
+        (
+            PathBuf::from("rs-svc/src/monolith.rs"),
+            r#"pub struct Account { pub id: u64 }
+pub struct LedgerEntry { pub cents: i64 }
+pub enum Currency { Usd, Eur }
+pub struct AuditRecord { pub actor: String }
+pub struct Invoice { pub total: i64 }
+pub struct TaxRate { pub bps: u32 }
+pub const DEFAULT_FEE_CENTS: i64 = 25;
+pub const MAX_BATCH_SIZE: usize = 100;
+pub async fn fetch_account(pool: &sqlx::PgPool) {
+    let _ = sqlx::query("SELECT 1").fetch_one(pool).await;
+}
+pub async fn save_ledger(pool: &sqlx::PgPool) {
+    let _ = sqlx::query("INSERT INTO ledger VALUES (1)").execute(pool).await;
+}
+pub fn validate_account_token(raw: &str) -> bool {
+    !raw.trim().is_empty()
+}
+pub fn render_ledger_tui() {
+    let _ = crossterm::execute!(std::io::stdout());
+}
+"#
+            .to_string(),
+        ),
+        // 6 & 7. Rust `arch-prefer-fluent-builder` + `arch-no-duplicated-helper-logic` + builder exemplar
+        (
+            PathBuf::from("rs-svc/src/builder.rs"),
+            r#"pub struct ConfigSpec {
+    pub host: String,
+    pub port: u16,
+}
+impl ConfigSpec {
+    pub fn new(host: impl Into<String>) -> Self {
+        Self { host: host.into(), port: 8080 }
+    }
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/job_a.rs"),
+            r#"pub struct JobSpec {
+    pub name: String,
+    pub retries: u32,
+    pub timeout_ms: Option<u64>,
+    pub tags: Vec<String>,
+    pub dry_run: bool,
+    pub priority: u32,
+}
+fn normalize_slug_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let cleaned = lower.replace(' ', "-");
+    Some(cleaned)
+}
+pub fn build_import_job(raw: &str) -> JobSpec {
+    let name = normalize_slug_key(raw).unwrap_or_default();
+    JobSpec {
+        name,
+        retries: 0,
+        timeout_ms: None,
+        tags: Vec::new(),
+        dry_run: false,
+        priority: 0,
+    }
+}
+pub fn build_cleanup_job() -> JobSpec {
+    JobSpec {
+        name: "cleanup".to_string(),
+        retries: 0,
+        timeout_ms: None,
+        tags: Vec::new(),
+        dry_run: false,
+        priority: 0,
+    }
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/job_b.rs"),
+            r#"use crate::job_a::JobSpec;
+fn sanitize_identifier(input: &str) -> Option<String> {
+    let stripped = input.trim();
+    if stripped.is_empty() {
+        return None;
+    }
+    let downcased = stripped.to_ascii_lowercase();
+    let dashed = downcased.replace(' ', "-");
+    Some(dashed)
+}
+pub fn build_export_job(label: &str) -> JobSpec {
+    let name = sanitize_identifier(label).unwrap_or_default();
+    JobSpec {
+        name,
+        retries: 0,
+        timeout_ms: None,
+        tags: Vec::new(),
+        dry_run: false,
+        priority: 0,
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let arch_rules = [
+        RuleId::ArchThinEntrypoint,
+        RuleId::ArchNoMixedIoAndPresentation,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        RuleId::ArchNoMixedDomainMonolith,
+        RuleId::ArchNoInlineTerminalUiPrimitives,
+        RuleId::ArchPreferFluentBuilder,
+        RuleId::ArchNoDuplicatedHelperLogic,
+        RuleId::RsArchPreferPubCrateModules,
+        RuleId::RsArchNoLegacyModRs,
+    ];
+
+    let report = analyze_project_sources(files.clone(), Some(&arch_rules));
+
+    // Every architecture diagnostic must be Warning, Refactor or Surgical, and have patch: None
+    assert!(!report.diagnostics.is_empty());
+    for diag in &report.diagnostics {
+        assert_eq!(
+            diag.severity,
+            RuleSeverity::Warning,
+            "Expected Warning severity on {:?}",
+            diag
+        );
+        assert!(
+            matches!(
+                diag.tier,
+                PrescriptionTier::Refactor | PrescriptionTier::Surgical
+            ),
+            "Expected Refactor or Surgical tier on {:?}",
+            diag
+        );
+        assert!(
+            diag.autofix.is_none(),
+            "Architecture rule {:?} must NEVER emit an autofix patch",
+            diag.rule
+        );
+    }
+
+    let has_finding = |path_suffix: &str, rule_id: &str| -> bool {
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.file.ends_with(path_suffix) && d.rule.as_str() == rule_id)
+    };
+
+    // Verify all 7 cross-language rules fire in TypeScript, Python, and Rust:
+    for (path_suffix, rule_id) in [
+        // TypeScript
+        ("web/src/main.tsx", "arch-thin-entrypoint"),
+        (
+            "web/src/OrdersDashboard.tsx",
+            "arch-no-mixed-io-and-presentation",
+        ),
+        (
+            "web/src/catalog.ts",
+            "arch-separate-static-catalog-from-types",
+        ),
+        ("web/src/monolith.tsx", "arch-no-mixed-domain-monolith"),
+        (
+            "web/src/reporter.ts",
+            "arch-no-inline-terminal-ui-primitives",
+        ),
+        ("web/src/routesA.ts", "arch-prefer-fluent-builder"),
+        ("web/src/routesA.ts", "arch-no-duplicated-helper-logic"),
+        // Python
+        ("py-svc/main.py", "arch-thin-entrypoint"),
+        ("py-svc/views.py", "arch-no-mixed-io-and-presentation"),
+        (
+            "py-svc/catalog.py",
+            "arch-separate-static-catalog-from-types",
+        ),
+        ("py-svc/monolith.py", "arch-no-mixed-domain-monolith"),
+        (
+            "py-svc/status_printer.py",
+            "arch-no-inline-terminal-ui-primitives",
+        ),
+        ("py-svc/alpha.py", "arch-prefer-fluent-builder"),
+        ("py-svc/alpha.py", "arch-no-duplicated-helper-logic"),
+        // Rust
+        ("rs-svc/src/main.rs", "arch-thin-entrypoint"),
+        (
+            "rs-svc/src/mixed_worker.rs",
+            "arch-no-mixed-io-and-presentation",
+        ),
+        (
+            "rs-svc/src/catalog_types.rs",
+            "arch-separate-static-catalog-from-types",
+        ),
+        ("rs-svc/src/monolith.rs", "arch-no-mixed-domain-monolith"),
+        (
+            "rs-svc/src/mixed_worker.rs",
+            "arch-no-inline-terminal-ui-primitives",
+        ),
+        ("rs-svc/src/job_a.rs", "arch-prefer-fluent-builder"),
+        ("rs-svc/src/job_a.rs", "arch-no-duplicated-helper-logic"),
+        ("rs-svc/src/lib.rs", "rs-arch-prefer-pub-crate-modules"),
+        ("rs-svc/src/legacy/mod.rs", "rs-arch-no-legacy-mod-rs"),
+    ] {
+        assert!(
+            has_finding(path_suffix, rule_id),
+            "Missing expected finding `{rule_id}` on `{path_suffix}`. Emitted:\n{:#?}",
+            report
+                .diagnostics
+                .iter()
+                .map(|d| (&d.file, &d.rule))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Adversarial valid files must have zero findings
+    for valid_path in [
+        "web/bin/cli.ts",
+        "web/src/pureCatalog.ts",
+        "web/src/cohesiveParser.ts",
+        "web/src/terminal_ui.ts",
+        "web/src/requestBuilder.ts",
+        "py-svc/__main__.py",
+        "py-svc/ui.py",
+        "py-svc/builders.py",
+        "rs-svc/src/ui.rs",
+        "rs-svc/src/builder.rs",
+        "rs-svc/src/internal.rs",
+    ] {
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.file == Path::new(valid_path)),
+            "Expected 0 findings on valid cohesive/kit file `{valid_path}`, got: {:#?}",
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.file == Path::new(valid_path))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Verify Fix Capsules & Repository Exemplars across TS, Python, and Rust
+    assert!(!report.root_cause_groups.is_empty());
+    assert_eq!(report.root_cause_groups.len(), report.fix_capsules.len());
+    for capsule in &report.fix_capsules {
+        assert!(!capsule.recipe_markdown.is_empty());
+        assert!(!capsule.invariants.is_empty());
+        let ex = capsule.exemplar.as_ref().unwrap_or_else(|| {
+            panic!(
+                "Expected repository exemplar for capsule `{}` (rule {:?}, file {})",
+                capsule.root_cause_group_id,
+                capsule.rule,
+                capsule.subject_excerpt.file.display()
+            )
+        });
+        // Exemplar must come from the same language family as the subject file
+        let subj_ext = capsule
+            .subject_excerpt
+            .file
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let ex_ext = ex
+            .file
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        match subj_ext {
+            "py" => assert_eq!(ex_ext, "py", "Python capsule must get Python exemplar"),
+            "rs" => assert_eq!(ex_ext, "rs", "Rust capsule must get Rust exemplar"),
+            _ => assert!(
+                matches!(ex_ext, "ts" | "tsx" | "js" | "jsx"),
+                "TS/JS capsule must get TS/JS exemplar, got {ex_ext}"
+            ),
+        }
+    }
+
+    // Verify `plan_project` and `explain_location` on disk across TS, Python, and Rust
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-polyglot-arch-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let plan_dir = temp_dir.join("plans");
+    let plan_res = plan_project(&report, &plan_dir).unwrap();
+    assert!(plan_res.index_file.is_file());
+    assert_eq!(plan_res.plan_files.len(), report.fix_capsules.len());
+
+    for (rel_path, content) in &files {
+        let full_path = temp_dir.join(rel_path);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full_path, content).unwrap();
+    }
+
+    for (loc_arg, expected_rule_substr) in [
+        (
+            "web/src/OrdersDashboard.tsx:4",
+            "arch-no-mixed-io-and-presentation",
+        ),
+        ("py-svc/views.py:6", "arch-no-mixed-io-and-presentation"),
+        (
+            "rs-svc/src/mixed_worker.rs:2",
+            "arch-no-mixed-io-and-presentation",
+        ),
+        ("rs-svc/src/legacy/mod.rs:1", "rs-arch-no-legacy-mod-rs"),
+    ] {
+        let why_rep = explain_location(loc_arg, &temp_dir).unwrap();
+        let matching_entry = why_rep
+            .entries
+            .iter()
+            .find(|e| e.rule.contains(expected_rule_substr))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected `explain_location(\"{loc_arg}\")` to explain `{expected_rule_substr}`, got: {:#?}",
+                    why_rep.entries
+                )
+            });
+        assert_eq!(matching_entry.status, "active");
+        assert!(
+            matching_entry.explanation.contains("Structural signals:"),
+            "Expected `Structural signals:` in why explanation for `{loc_arg}`, got: {}",
+            matching_entry.explanation
+        );
+        assert!(
+            !matching_entry.cascade_steps.is_empty(),
+            "Expected non-empty cascade_steps for `{loc_arg}`"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn polyglot_architecture_threshold_overrides_and_inline_suppressions_across_ts_py_and_rs() {
+    let mut ts_entries = String::new();
+    let mut py_entries = String::new();
+    let mut rs_entries = String::new();
+    for i in 1..=26 {
+        ts_entries.push_str(&format!("    {{ id: 'r-{i}', code: {i} }},\n"));
+        py_entries.push_str(&format!("    \"R_{i:02}\": {i},\n"));
+        rs_entries.push_str(&format!("    (\"r-{i}\", {i}),\n"));
+    }
+
+    let arch_rules = [
+        RuleId::ArchThinEntrypoint,
+        RuleId::ArchNoMixedIoAndPresentation,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        RuleId::ArchNoMixedDomainMonolith,
+        RuleId::ArchNoInlineTerminalUiPrimitives,
+        RuleId::ArchPreferFluentBuilder,
+        RuleId::ArchNoDuplicatedHelperLogic,
+        RuleId::RsArchPreferPubCrateModules,
+        RuleId::RsArchNoLegacyModRs,
+    ];
+
+    // 1. Threshold overrides via root `dotore.config.json`:
+    // Relax thresholds so 26-entry static catalogs, 4-statement helpers, and 6-field builders
+    // are below the configured workspace thresholds across TS, Python, and Rust.
+    let threshold_files: Vec<(PathBuf, String)> = vec![
+        (
+            PathBuf::from("dotore.config.json"),
+            r#"{
+  "architecture": {
+    "minHelperStatements": 15,
+    "minDuplicatedHelperModules": 4,
+    "minBuilderFields": 10,
+    "minBuilderSites": 6,
+    "minTypesWithCatalog": 10,
+    "minStaticCatalogEntries": 100,
+    "maxEntrypointStatements": 100,
+    "minMonolithDomainClusters": 5,
+    "minMonolithSymbols": 50
+  }
+}"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/package.json"),
+            r#"{"name": "web", "dependencies": {"react": "^19.0.0"}}"#.to_string(),
+        ),
+        (
+            PathBuf::from("web/src/catalog.ts"),
+            format!(
+                "export interface A {{ id: string; }}\nexport interface B {{ code: number; }}\nexport type C = A & B;\nexport const DATA: C[] = [\n{ts_entries}];\n"
+            ),
+        ),
+        (
+            PathBuf::from("web/src/modA.ts"),
+            r#"function helperA(raw: string): string {
+    const a = raw.trim();
+    if (!a) return "x";
+    const b = a.toLowerCase();
+    return b;
+}
+export const runA = (s: string) => helperA(s);
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("web/src/modB.ts"),
+            r#"function helperB(input: string): string {
+    const a = input.trim();
+    if (!a) return "x";
+    const b = a.toLowerCase();
+    return b;
+}
+export const runB = (s: string) => helperB(s);
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/pyproject.toml"),
+            "[project]\nname = \"py-svc\"\ndependencies = [\"pydantic>=2.0\"]\n".to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/catalog.py"),
+            format!(
+                "from pydantic import BaseModel\nclass A(BaseModel): pass\nclass B(BaseModel): pass\nclass C(BaseModel): pass\nDATA = {{\n{py_entries}}}\n"
+            ),
+        ),
+        (
+            PathBuf::from("py-svc/mod_a.py"),
+            r#"__all__ = ["run_a"]
+def helper_a(raw: str) -> str:
+    a = raw.strip()
+    if not a:
+        return "x"
+    b = a.lower()
+    return b
+def run_a(s: str) -> str:
+    return helper_a(s)
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/mod_b.py"),
+            r#"__all__ = ["run_b"]
+def helper_b(raw: str) -> str:
+    a = raw.strip()
+    if not a:
+        return "x"
+    b = a.lower()
+    return b
+def run_b(s: str) -> str:
+    return helper_b(s)
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/Cargo.toml"),
+            "[package]\nname = \"rs-svc\"\nversion = \"0.1.0\"\n".to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/catalog.rs"),
+            format!(
+                "pub struct A;\npub struct B;\npub enum C {{ X, Y }}\npub const DATA: &[(&str, u32)] = &[\n{rs_entries}];\n"
+            ),
+        ),
+        (
+            PathBuf::from("rs-svc/src/mod_a.rs"),
+            r#"fn helper_a(raw: &str) -> String {
+    let a = raw.trim();
+    if a.is_empty() {
+        return "x".to_string();
+    }
+    let b = a.to_ascii_lowercase();
+    b
+}
+pub fn run_a(s: &str) -> String { helper_a(s) }
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/mod_b.rs"),
+            r#"fn helper_b(raw: &str) -> String {
+    let a = raw.trim();
+    if a.is_empty() {
+        return "x".to_string();
+    }
+    let b = a.to_ascii_lowercase();
+    b
+}
+pub fn run_b(s: &str) -> String { helper_b(s) }
+"#
+            .to_string(),
+        ),
+    ];
+
+    let relaxed_report = analyze_project_sources(threshold_files, Some(&arch_rules));
+    assert!(
+        relaxed_report.diagnostics.is_empty(),
+        "Expected relaxed `DotoreConfig.architecture` thresholds to produce 0 diagnostics across TS/Py/Rs, got: {:#?}",
+        relaxed_report.diagnostics
+    );
+
+    // 2. Inline suppressions across TS, Python, and Rust + `explain_location` suppressed status
+    let suppressed_files: Vec<(PathBuf, String)> = vec![
+        (
+            PathBuf::from("web/package.json"),
+            r#"{"name": "web", "dependencies": {"react": "^19.0.0"}}"#.to_string(),
+        ),
+        (
+            PathBuf::from("web/src/SuppressedOrders.tsx"),
+            r#"import React from 'react';
+
+// dotore-disable-next-line arch-no-mixed-io-and-presentation
+export async function SuppressedOrders({ accountId }: { accountId: string }) {
+    const response = await fetch(`/api/accounts/${accountId}/orders`);
+    const orders = await response.json();
+    return <section className="orders-view"><span>{orders.length}</span></section>;
+}
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/pyproject.toml"),
+            "[project]\nname = \"py-svc\"\ndependencies = [\"flask>=3.0\"]\n".to_string(),
+        ),
+        (
+            PathBuf::from("py-svc/suppressed_views.py"),
+            r#"from flask import render_template
+
+def save_and_render(html: str):
+    with open("/tmp/out.html", "w") as f:  # dotore-disable-line arch-no-mixed-io-and-presentation
+        f.write(html)
+    # dotore-disable-next-line arch-no-mixed-io-and-presentation
+    return render_template("out.html", body=html)
+"#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/Cargo.toml"),
+            "[package]\nname = \"rs-svc\"\nversion = \"0.1.0\"\n".to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/suppressed_mod/mod.rs"),
+            "#[allow(clippy::mod_module_files)]\npub fn allowed_legacy() -> u32 { 1 }\n"
+                .to_string(),
+        ),
+        (
+            PathBuf::from("rs-svc/src/suppressed_ui.rs"),
+            r#"pub fn print_alert() {
+    // dotore-disable-next-line arch-no-inline-terminal-ui-primitives
+    let banner = "\x1b[31m╭─ ALERT ─╮\x1b[0m";
+    println!("{banner}");
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let suppressed_report = analyze_project_sources(suppressed_files.clone(), Some(&arch_rules));
+    assert!(
+        suppressed_report.diagnostics.is_empty(),
+        "Expected inline suppressions across TS/Py/Rs to silence all architecture diagnostics, got: {:#?}",
+        suppressed_report.diagnostics
+    );
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-polyglot-arch-supp-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    for (rel_path, content) in &suppressed_files {
+        let full_path = temp_dir.join(rel_path);
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full_path, content).unwrap();
+    }
+
+    for (loc_arg, expected_rule_substr) in [
+        (
+            "web/src/SuppressedOrders.tsx:4",
+            "arch-no-mixed-io-and-presentation",
+        ),
+        (
+            "py-svc/suppressed_views.py:7",
+            "arch-no-mixed-io-and-presentation",
+        ),
+        (
+            "rs-svc/src/suppressed_ui.rs:3",
+            "arch-no-inline-terminal-ui-primitives",
+        ),
+        (
+            "rs-svc/src/suppressed_mod/mod.rs:1",
+            "rs-arch-no-legacy-mod-rs",
+        ),
+    ] {
+        let why_rep = explain_location(loc_arg, &temp_dir).unwrap();
+        let entry = why_rep
+            .entries
+            .iter()
+            .find(|e| e.rule.contains(expected_rule_substr))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected `explain_location(\"{loc_arg}\")` to report suppressed `{expected_rule_substr}`, got: {:#?}",
+                    why_rep.entries
+                )
+            });
+        assert_eq!(entry.status, "suppressed");
+        assert!(entry.explanation.contains("Structural signals:"));
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn self_hosting_dogfood_audit_zero_architectural_false_positives_across_dotore_workspace() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let arch_rules = vec![
+        RuleId::ArchThinEntrypoint,
+        RuleId::ArchNoMixedIoAndPresentation,
+        RuleId::ArchSeparateStaticCatalogFromTypes,
+        RuleId::ArchNoMixedDomainMonolith,
+        RuleId::ArchNoInlineTerminalUiPrimitives,
+        RuleId::ArchPreferFluentBuilder,
+        RuleId::ArchNoDuplicatedHelperLogic,
+        RuleId::RsArchPreferPubCrateModules,
+        RuleId::RsArchNoLegacyModRs,
+        RuleId::RsArchNoUnusedPubCrateItems,
+        RuleId::RsArchNoManyBooleanParams,
+    ];
+
+    let (report, _sources) = scan_workspace(&ScanOptions {
+        paths: vec![
+            workspace_root.join("crates/dotore-core/src"),
+            workspace_root.join("crates/dotore-js/src"),
+            workspace_root.join("crates/dotore-py/src"),
+            workspace_root.join("crates/dotore-rs/src"),
+            workspace_root.join("src"),
+        ],
+        include_tests: false,
+        rules: Some(arch_rules),
+        tiers: None,
+    })
+    .expect("Failed to scan dotore workspace during self-hosting dogfood audit");
+
+    assert!(
+        report.diagnostics.is_empty(),
+        "Self-hosting dogfood audit found {} architectural false positive(s) across dotore's own modularized workspace:\n{:#?}",
+        report.diagnostics.len(),
+        report
+            .diagnostics
+            .iter()
+            .map(|d| (&d.file, d.loc.line, d.rule, &d.target_name, &d.message))
+            .collect::<Vec<_>>()
+    );
 }

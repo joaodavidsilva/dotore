@@ -120,7 +120,6 @@ pub(crate) fn collect_unused_pub_crate_findings_for_package(
         if file.file_context != FileContext::Production {
             continue;
         }
-        let is_entrypoint = is_crate_entrypoint_path(&file.path);
 
         if let Some(mod_rs_finding) = check_legacy_mod_rs_file(&file.path, graph_ir) {
             out.push((file.path.clone(), mod_rs_finding));
@@ -153,10 +152,7 @@ pub(crate) fn collect_unused_pub_crate_findings_for_package(
                 {
                     out.push((file.path.clone(), build_unused_pub_crate_finding(item)));
                 }
-            } else if multi_file
-                || !is_entrypoint
-                || !is_ident_referenced_outside_span(&file.source, &item.name, item.span)
-            {
+            } else if !is_ident_referenced_outside_span(&file.source, &item.name, item.span) {
                 out.push((file.path.clone(), build_unused_pub_crate_finding(item)));
             }
         }
@@ -352,13 +348,6 @@ fn build_unused_pub_crate_finding(item: &PubCrateItemIr) -> RsCandidateFinding {
         ),
         item.loc,
         item.span,
-    )
-}
-
-fn is_crate_entrypoint_path(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|n| n.to_str()),
-        Some("lib.rs" | "main.rs")
     )
 }
 
