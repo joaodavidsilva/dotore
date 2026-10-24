@@ -26,7 +26,8 @@ use crate::{
     resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols,
     should_highlight_stdout,
     tui::{run_interactive_tui, should_launch_tui},
-    validate_warning_exit_code, write_and_open_html_report, write_json_report,
+    validate_warning_exit_code, write_and_open_html_report, write_diagnostics_bundle,
+    write_json_report,
 };
 
 /// Top-level `dotore` CLI parser.
@@ -226,6 +227,14 @@ pub struct PlanArgs {
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Synthesize a coding-agent handoff prompt and write a diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`).
+    #[arg(long)]
+    pub handoff: bool,
+
+    /// Explicit directory for the diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`, defaults to `--out`).
+    #[arg(long = "bundle-dir", value_name = "DIR")]
+    pub bundle_dir: Option<PathBuf>,
 }
 
 /// CLI arguments for `dotore report`.
@@ -913,16 +922,30 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    match plan_project(&report, &args.out) {
-        Ok(result) => {
-            print!("{}", format_plan_report(&result));
-            ExitCode::SUCCESS
-        }
+    let plan_result = match plan_project(&report, &args.out) {
+        Ok(result) => result,
         Err(err) => {
             eprintln!("error writing remediation plans: {err}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
+        }
+    };
+
+    if args.handoff || args.bundle_dir.is_some() {
+        let target_bundle_dir = args.bundle_dir.as_deref().unwrap_or(&args.out);
+        match write_diagnostics_bundle(&report, target_bundle_dir) {
+            Ok(bundle) => {
+                print!("{}", bundle.prompt_markdown);
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                eprintln!("error writing diagnostics bundle: {err}");
+                return ExitCode::from(2);
+            }
         }
     }
+
+    print!("{}", format_plan_report(&plan_result));
+    ExitCode::SUCCESS
 }
 
 /// Runs `dotore report`.
