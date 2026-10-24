@@ -786,13 +786,14 @@ export function parseExpression(src: string): Token { return parseComparison(src
         );
     }
 
-    // Verify Contextual Owner spans: line-scope outside declaration vs contextual-scope
+    // Verify Contextual Owner spans: touching an unrelated line outside the catalog does NOT trigger it,
+    // while touching a line inside the catalog declaration DOES trigger it under contextual-scope.
     let catalog_diag = res
         .diagnostics
         .iter()
         .find(|d| d.rule == RuleId::ArchSeparateStaticCatalogFromTypes)
         .expect("catalog diagnostic");
-    let change_on_line_1 = ChangedFileLineRanges {
+    let change_outside_catalog = ChangedFileLineRanges {
         file: PathBuf::from("src/rules/catalog.ts"),
         ranges: vec![(1, 1)],
         deletion_lines: Vec::new(),
@@ -801,17 +802,28 @@ export function parseExpression(src: string): Token { return parseComparison(src
         catalog_diag,
         Some(&files[6]),
         Some(&mixed_catalog_types_src),
-        &change_on_line_1,
+        &change_outside_catalog,
         false,
     ));
+    assert!(!diagnostic_intersects_changed_lines(
+        catalog_diag,
+        Some(&files[6]),
+        Some(&mixed_catalog_types_src),
+        &change_outside_catalog,
+        true,
+    ));
+    let change_inside_catalog = ChangedFileLineRanges {
+        file: PathBuf::from("src/rules/catalog.ts"),
+        ranges: vec![(16, 16)],
+        deletion_lines: Vec::new(),
+    };
     assert!(diagnostic_intersects_changed_lines(
         catalog_diag,
         Some(&files[6]),
         Some(&mixed_catalog_types_src),
-        &change_on_line_1,
+        &change_inside_catalog,
         true,
     ));
-
     // Verify ProjectGraph PlannerContext architecture_facets_for_file and Fix Capsules
     let file_irs: Vec<FileIr> = files
         .iter()
@@ -1369,4 +1381,64 @@ fn js_language_analyzer_detects_inline_terminal_ui_primitives_outside_ui_kit_mod
     assert_eq!(capsules.len(), 1);
     let exemplar = capsules[0].exemplar.as_ref().expect("UI kit exemplar");
     assert_eq!(exemplar.file, PathBuf::from("src/terminal_ui.ts"));
+}
+
+#[test]
+fn js_language_analyzer_supports_lowered_min_helper_statements_threshold() {
+    let analyzer = JsLanguageAnalyzer;
+
+    let mod_a = r#"function clampScore(val: number): number {
+    const a = Math.max(0, val);
+    const b = Math.min(100, a);
+    return b;
+}
+export const scoreA = (x: number) => clampScore(x);
+"#;
+    let mod_b = r#"function boundValue(input: number): number {
+    const low = Math.max(0, input);
+    const high = Math.min(100, low);
+    return high;
+}
+export const scoreB = (x: number) => boundValue(x);
+"#;
+
+    let files = vec![
+        analyzer.extract_file(Path::new("src/a.ts"), mod_a),
+        analyzer.extract_file(Path::new("src/b.ts"), mod_b),
+    ];
+    assert_eq!(files[0].architecture_facets.helper_fingerprints.len(), 1);
+    assert_eq!(
+        files[0].architecture_facets.helper_fingerprints[0].statement_count,
+        3
+    );
+
+    // Default threshold (min_helper_statements = 4) skips 3-statement helpers
+    let default_pkg = WorkspacePackage {
+        name: "app".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    };
+    let default_res = analyzer.analyze_package(
+        &default_pkg,
+        &files,
+        Some(&[RuleId::ArchNoDuplicatedHelperLogic]),
+    );
+    assert!(default_res.diagnostics.is_empty());
+
+    // Lowered threshold (min_helper_statements = 3) catches 3-statement helpers
+    let mut lowered_cfg = DotoreConfig::default();
+    lowered_cfg.architecture.min_helper_statements = 3;
+    let lowered_pkg = WorkspacePackage {
+        name: "app".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: lowered_cfg,
+    };
+    let lowered_res = analyzer.analyze_package(
+        &lowered_pkg,
+        &files,
+        Some(&[RuleId::ArchNoDuplicatedHelperLogic]),
+    );
+    assert_eq!(lowered_res.diagnostics.len(), 2);
 }

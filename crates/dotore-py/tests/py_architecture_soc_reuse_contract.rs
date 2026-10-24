@@ -232,3 +232,55 @@ def process_beta():
         assert!(!capsule.recipe_markdown.is_empty());
     }
 }
+
+#[test]
+fn py_fluent_builder_requires_overlapping_default_values_and_line_suppression_is_scoped() {
+    let analyzer = PyLanguageAnalyzer::new();
+    let mut pkg = default_py_package("accounts", "accounts");
+    pkg.config.architecture.min_builder_fields = 5;
+    pkg.config.architecture.min_builder_sites = 3;
+
+    // 1. Distinct non-default domain values (different emails, non-zero ints, True) must NOT be treated as boilerplate defaults
+    let distinct_domain_calls = r#"def seed_accounts():
+    return [
+        UserAccount(email="alice@example.com", age=30, role="admin", verified=True, quota_mb=512),
+        UserAccount(email="bob@example.com", age=28, role="editor", verified=True, quota_mb=256),
+        UserAccount(email="carol@example.com", age=35, role="viewer", verified=True, quota_mb=128),
+    ]
+"#;
+    let distinct_file = analyzer.extract_file(Path::new("accounts/seed.py"), distinct_domain_calls);
+    let distinct_res = analyzer.analyze_package(
+        &pkg,
+        &[distinct_file],
+        Some(&[RuleId::ArchPreferFluentBuilder]),
+    );
+    assert!(
+        distinct_res.diagnostics.is_empty(),
+        "Expected 0 ArchPreferFluentBuilder diagnostics when all keyword args are non-default domain values, got: {:#?}",
+        distinct_res.diagnostics
+    );
+
+    // 2. Unrelated mid-file `# dotore-disable-next-line` on line 10 must NOT suppress a rule on line 4
+    let mid_file_disable = r#"from flask import render_template
+
+def handler_one(cursor):
+    cursor.execute("SELECT 1")
+    return render_template("index.html")
+
+def handler_two():
+    # dotore-disable-next-line arch-no-mixed-io-and-presentation
+    x = 1
+    return x
+"#;
+    let mid_file = analyzer.extract_file(Path::new("accounts/views.py"), mid_file_disable);
+    let mid_res = analyzer.analyze_package(
+        &pkg,
+        &[mid_file],
+        Some(&[RuleId::ArchNoMixedIoAndPresentation]),
+    );
+    assert_eq!(
+        mid_res.diagnostics.len(),
+        1,
+        "Mid-file line disable on an unrelated function must not suppress file/subject SoC rule on handler_one"
+    );
+}

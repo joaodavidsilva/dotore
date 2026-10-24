@@ -1113,7 +1113,7 @@ fn architecture_soc_and_reuse_rule_catalog_metadata_and_non_autofix_invariants()
             "arch-thin-entrypoint",
             "dotore/arch-thin-entrypoint",
             CapabilityPredicate::UNIVERSAL,
-            ContextualOwnerPolicy::File,
+            ContextualOwnerPolicy::Subject,
             PrescriptionTier::Refactor,
         ),
         (
@@ -1121,7 +1121,7 @@ fn architecture_soc_and_reuse_rule_catalog_metadata_and_non_autofix_invariants()
             "arch-no-mixed-io-and-presentation",
             "dotore/arch-no-mixed-io-and-presentation",
             CapabilityPredicate::UNIVERSAL,
-            ContextualOwnerPolicy::File,
+            ContextualOwnerPolicy::Subject,
             PrescriptionTier::Refactor,
         ),
         (
@@ -1129,7 +1129,7 @@ fn architecture_soc_and_reuse_rule_catalog_metadata_and_non_autofix_invariants()
             "arch-separate-static-catalog-from-types",
             "dotore/arch-separate-static-catalog-from-types",
             CapabilityPredicate::UNIVERSAL,
-            ContextualOwnerPolicy::File,
+            ContextualOwnerPolicy::Subject,
             PrescriptionTier::Refactor,
         ),
         (
@@ -1137,7 +1137,7 @@ fn architecture_soc_and_reuse_rule_catalog_metadata_and_non_autofix_invariants()
             "arch-no-mixed-domain-monolith",
             "dotore/arch-no-mixed-domain-monolith",
             CapabilityPredicate::UNIVERSAL,
-            ContextualOwnerPolicy::File,
+            ContextualOwnerPolicy::Subject,
             PrescriptionTier::Refactor,
         ),
         (
@@ -1220,8 +1220,9 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
     use dotore_core::{
         ArchitectureFileFacets, ArchitectureThresholdsConfig, AutofixPatch, ConcernBucket,
         ConcernSignalSite, DotoreConfig, HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr,
-        ResolvedCallerSite, StaticCatalogSiteIr, StructLiteralConstructionSiteIr, apply_autofixes,
-        apply_patches_to_source, build_root_cause_groups_and_capsules, compute_root_cause_group_id,
+        ResolvedCallerSite, StaticCatalogSiteIr, StructLiteralConstructionSiteIr,
+        TerminalUiPrimitiveKind, apply_autofixes, apply_patches_to_source,
+        build_root_cause_groups_and_capsules, compute_root_cause_group_id,
         explain_location_with_analyzers, format_architecture_signal_explanation,
     };
 
@@ -1304,7 +1305,7 @@ fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and
             span: ByteSpan { start: 32, end: 66 },
         }],
         inline_terminal_ui_sites: vec![InlineTerminalUiPrimitiveSiteIr {
-            kind: "ansi-escape".to_string(),
+            kind: TerminalUiPrimitiveKind::AnsiEscape,
             snippet: "\\x1b[31m".to_string(),
             loc: SourceLoc {
                 line: 4,

@@ -2382,19 +2382,12 @@ def save_and_render(html: str):
 #[test]
 fn self_hosting_dogfood_audit_zero_architectural_false_positives_across_dotore_workspace() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let arch_rules = vec![
-        RuleId::ArchThinEntrypoint,
-        RuleId::ArchNoMixedIoAndPresentation,
-        RuleId::ArchSeparateStaticCatalogFromTypes,
-        RuleId::ArchNoMixedDomainMonolith,
-        RuleId::ArchNoInlineTerminalUiPrimitives,
-        RuleId::ArchPreferFluentBuilder,
-        RuleId::ArchNoDuplicatedHelperLogic,
-        RuleId::RsArchPreferPubCrateModules,
-        RuleId::RsArchNoLegacyModRs,
-        RuleId::RsArchNoUnusedPubCrateItems,
-        RuleId::RsArchNoManyBooleanParams,
-    ];
+    let arch_rules: Vec<RuleId> = dotore::rule_registry()
+        .iter()
+        .map(|m| m.id)
+        .filter(|r| r.is_architecture_soc_or_reuse_rule())
+        .collect();
+    assert!(arch_rules.contains(&RuleId::RsArchNoUnusedPubCrateItems));
 
     let (report, _sources) = scan_workspace(&ScanOptions {
         paths: vec![
@@ -2420,4 +2413,126 @@ fn self_hosting_dogfood_audit_zero_architectural_false_positives_across_dotore_w
             .map(|d| (&d.file, d.loc.line, d.rule, &d.target_name, &d.message))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn soc_rules_honor_subject_contextual_owner_and_cli_category_and_only_filters() {
+    use clap::Parser;
+    use dotore::Cli;
+
+    let mut ts_entries = String::new();
+    let mut py_entries = String::new();
+    let mut rs_entries = String::new();
+    for i in 1..=26 {
+        ts_entries.push_str(&format!("    {{ id: 'r-{i}', code: {i} }},\n"));
+        py_entries.push_str(&format!("    \"R_{i:02}\": {i},\n"));
+        rs_entries.push_str(&format!("    (\"r-{i}\", {i}),\n"));
+    }
+
+    let ts_src = format!(
+        "export interface A {{ id: string; }}\nexport interface B {{ code: number; }}\nexport type C = A & B;\nexport const DATA: C[] = [\n{ts_entries}];\n\nexport function unrelatedHelper(x: number): number {{\n    return x + 1;\n}}\n"
+    );
+    let py_src = format!(
+        "from pydantic import BaseModel\nclass A(BaseModel): pass\nclass B(BaseModel): pass\nclass C(BaseModel): pass\nDATA = {{\n{py_entries}}}\n\ndef unrelated_helper(x: int) -> int:\n    return x + 1\n"
+    );
+    let rs_src = format!(
+        "pub struct A;\npub struct B;\npub enum C {{ X, Y }}\npub const DATA: &[(&str, u32)] = &[\n{rs_entries}];\n\npub fn unrelated_helper(x: u32) -> u32 {{\n    x + 1\n}}\n"
+    );
+
+    let ts_ext = JsLanguageAnalyzer.extract_file(Path::new("web/src/catalog.ts"), &ts_src);
+    let py_ext = PyLanguageAnalyzer::new().extract_file(Path::new("py-svc/catalog.py"), &py_src);
+    let rs_ext = RsLanguageAnalyzer.extract_file(Path::new("rs-svc/src/catalog.rs"), &rs_src);
+
+    let files = vec![
+        (PathBuf::from("web/src/catalog.ts"), ts_src.clone()),
+        (PathBuf::from("py-svc/catalog.py"), py_src.clone()),
+        (PathBuf::from("rs-svc/src/catalog.rs"), rs_src.clone()),
+    ];
+    let report = analyze_project_sources(
+        files.clone(),
+        Some(&[RuleId::ArchSeparateStaticCatalogFromTypes]),
+    );
+    assert_eq!(report.diagnostics.len(), 3);
+
+    let sources_map: HashMap<PathBuf, String> = files.into_iter().collect();
+    let extracted_files = vec![ts_ext, py_ext, rs_ext];
+
+    // 1. Touching only the unrelated function at the bottom of each file must NOT surface the catalog diagnostic under `--scope contextual`
+    let ts_total_lines = u32::try_from(ts_src.lines().count()).unwrap();
+    let py_total_lines = u32::try_from(py_src.lines().count()).unwrap();
+    let rs_total_lines = u32::try_from(rs_src.lines().count()).unwrap();
+
+    let unrelated_filtered = filter_diagnostics_by_scope(
+        report.diagnostics.clone(),
+        DiffScope::Contextual,
+        Path::new("."),
+        &[
+            PathBuf::from("web/src/catalog.ts"),
+            PathBuf::from("py-svc/catalog.py"),
+            PathBuf::from("rs-svc/src/catalog.rs"),
+        ],
+        &[
+            ChangedFileLineRanges {
+                file: PathBuf::from("web/src/catalog.ts"),
+                ranges: vec![(ts_total_lines - 1, ts_total_lines)],
+                deletion_lines: Vec::new(),
+            },
+            ChangedFileLineRanges {
+                file: PathBuf::from("py-svc/catalog.py"),
+                ranges: vec![(py_total_lines, py_total_lines)],
+                deletion_lines: Vec::new(),
+            },
+            ChangedFileLineRanges {
+                file: PathBuf::from("rs-svc/src/catalog.rs"),
+                ranges: vec![(rs_total_lines - 1, rs_total_lines)],
+                deletion_lines: Vec::new(),
+            },
+        ],
+        &extracted_files,
+        &sources_map,
+    );
+    assert!(
+        unrelated_filtered.is_empty(),
+        "Touching an unrelated function in the same file must NOT trigger ArchSeparateStaticCatalogFromTypes under --scope contextual, got: {unrelated_filtered:#?}"
+    );
+
+    // 2. Touching lines inside the static catalog declaration DOES surface the diagnostic under `--scope contextual`
+    let catalog_filtered = filter_diagnostics_by_scope(
+        report.diagnostics,
+        DiffScope::Contextual,
+        Path::new("."),
+        &[
+            PathBuf::from("web/src/catalog.ts"),
+            PathBuf::from("py-svc/catalog.py"),
+            PathBuf::from("rs-svc/src/catalog.rs"),
+        ],
+        &[
+            ChangedFileLineRanges {
+                file: PathBuf::from("web/src/catalog.ts"),
+                ranges: vec![(10, 10)],
+                deletion_lines: Vec::new(),
+            },
+            ChangedFileLineRanges {
+                file: PathBuf::from("py-svc/catalog.py"),
+                ranges: vec![(10, 10)],
+                deletion_lines: Vec::new(),
+            },
+            ChangedFileLineRanges {
+                file: PathBuf::from("rs-svc/src/catalog.rs"),
+                ranges: vec![(10, 10)],
+                deletion_lines: Vec::new(),
+            },
+        ],
+        &extracted_files,
+        &sources_map,
+    );
+    assert_eq!(catalog_filtered.len(), 3);
+
+    // 3. Verify CLI `--category architecture` and `--only arch` parse cleanly
+    let cli_cat = Cli::try_parse_from(["dotore", "--category", "architecture", "--no-pager", "."])
+        .expect("Failed to parse --category architecture");
+    assert!(cli_cat.command.is_none());
+    let cli_only = Cli::try_parse_from(["dotore", "check", "--only", "arch", "--no-pager", "."])
+        .expect("Failed to parse --only arch");
+    assert!(cli_only.command.is_some());
 }
