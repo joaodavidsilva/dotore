@@ -40,8 +40,8 @@ pub use config::{
     ArchitectureThresholdsConfig, Capability, CapabilityGate, CapabilityPredicate, ConfigMutation,
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, discover_workspace_packages,
-    discover_workspace_packages_with_analyzers, load_config_from_dir, mutate_config_in_dir,
-    resolve_package_for_file,
+    discover_workspace_packages_with_analyzers, is_cache_disabled, load_config_from_dir,
+    mutate_config_in_dir, resolve_dotore_home_dir, resolve_package_for_file,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -139,10 +139,13 @@ pub use runtime_scan::{
 };
 pub use score::{HealthScore, compute_local_health_score, score_label};
 pub use search::{
-    SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
-    format_search_json, format_search_text, score_fuzzy, search_extracted_files,
-    search_project_sources, search_project_sources_with, search_project_sources_with_analyzers,
-    search_symbols, search_symbols_with, search_symbols_with_analyzers, should_highlight_search,
+    CachedFileSymbols, SYMBOL_INDEX_SCHEMA_VERSION, SearchJsonLocation, SearchJsonReport,
+    SearchJsonResult, SearchOptions, SymbolIndexCache, SymbolSearchResult, format_search_json,
+    format_search_text, load_symbol_index_cache, resolve_symbol_cache_path,
+    save_symbol_index_cache, score_fuzzy, search_extracted_files, search_project_sources,
+    search_project_sources_with, search_project_sources_with_analyzers, search_symbols,
+    search_symbols_with, search_symbols_with_analyzers, search_symbols_with_analyzers_and_cache,
+    search_symbols_with_cache, search_symbols_with_extractor_and_cache, should_highlight_search,
     should_highlight_stdout,
 };
 pub use tui::{

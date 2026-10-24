@@ -346,3 +346,34 @@ pub fn normalize_path_buf(path: &Path) -> PathBuf {
     }
     out
 }
+
+/// Resolves the base `~/.dotore` directory, honoring `DOTORE_HOME`
+/// before falling back to `$HOME/.dotore` (or `$USERPROFILE/.dotore`).
+#[must_use]
+pub fn resolve_dotore_home_dir() -> Option<PathBuf> {
+    if let Some(custom) = std::env::var_os("DOTORE_HOME")
+        && !custom.is_empty()
+    {
+        return Some(PathBuf::from(custom));
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home).join(".dotore"));
+    }
+    None
+}
+
+/// Returns `true` if `no_cache_flag` is set or `DOTORE_NO_CACHE` is truthy (`"1"`, `"true"`, `"yes"`).
+#[must_use]
+pub fn is_cache_disabled(no_cache_flag: bool) -> bool {
+    if no_cache_flag {
+        return true;
+    }
+    std::env::var("DOTORE_NO_CACHE").is_ok_and(|v| {
+        let trimmed = v.trim();
+        trimmed == "1"
+            || trimmed.eq_ignore_ascii_case("true")
+            || trimmed.eq_ignore_ascii_case("yes")
+    })
+}

@@ -7,7 +7,8 @@ pub use dotore_core::config::{
     ArchitectureThresholdsConfig, Capability, CapabilityGate, CapabilityPredicate, ConfigMutation,
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, discover_workspace_packages_with_analyzers,
-    load_config_from_dir, mutate_config_in_dir, resolve_package_for_file,
+    is_cache_disabled, load_config_from_dir, mutate_config_in_dir, resolve_dotore_home_dir,
+    resolve_package_for_file,
 };
 
 /// Discovers all workspace packages under `root_dir` across all active [`crate::LanguageAnalyzer`]s,

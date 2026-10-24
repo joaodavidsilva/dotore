@@ -23,7 +23,7 @@ use crate::{
     mutate_config_in_dir, plan_project,
     progress::LiveSpinner,
     prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
-    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols,
+    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols_with_cache,
     should_highlight_stdout,
     tui::{run_interactive_tui, should_launch_tui},
     validate_warning_exit_code, write_and_open_html_report, write_json_report,
@@ -315,6 +315,10 @@ pub struct SearchArgs {
     /// Disable ANSI syntax highlighting in text output.
     #[arg(long)]
     pub no_color: bool,
+
+    /// Bypass reading and writing the persistent per-project Symbol Outline disk cache.
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
 }
 
 /// CLI arguments for `dotore scan`.
@@ -1024,7 +1028,7 @@ fn run_search(args: &SearchArgs) -> ExitCode {
         include_tests: true,
     };
 
-    let (results, sources) = match search_symbols(&args.query, &options) {
+    let (results, sources) = match search_symbols_with_cache(&args.query, &options, args.no_cache) {
         Ok(res) => res,
         Err(err) => {
             eprintln!("error searching symbols: {err}");
