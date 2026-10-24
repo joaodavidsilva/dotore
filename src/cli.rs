@@ -25,10 +25,10 @@ use crate::{
     progress::LiveSpinner,
     prompt_runtime_scan_url_with_io, record_runtime_trace, render_github_pr_comment_from_env,
     render_html_report, resolve_runtime_scan_format, resolve_scan_exit_code, scan_design,
-    scan_workspace_with_overrides, search_symbols, should_highlight_stdout,
+    scan_workspace_with_overrides, search_symbols_with_cache, should_highlight_stdout,
     tui::{run_interactive_tui, should_launch_tui},
-    validate_warning_exit_code, write_and_open_html_report, write_github_pr_comment,
-    write_json_report,
+    validate_warning_exit_code, write_and_open_html_report, write_diagnostics_bundle,
+    write_github_pr_comment, write_json_report,
 };
 
 /// Top-level `dotore` CLI parser.
@@ -186,6 +186,10 @@ pub struct CheckArgs {
     /// Disable the interactive TUI explorer when running in a terminal.
     #[arg(long = "no-pager")]
     pub no_pager: bool,
+
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
 }
 
 /// CLI arguments for `dotore fix`.
@@ -218,6 +222,10 @@ pub struct FixArgs {
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
 }
 
 /// CLI arguments for `dotore plan`.
@@ -250,6 +258,18 @@ pub struct PlanArgs {
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
+
+    /// Synthesize a coding-agent handoff prompt and write a diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`).
+    #[arg(long)]
+    pub handoff: bool,
+
+    /// Explicit directory for the diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`, defaults to `--out`).
+    #[arg(long = "bundle-dir", value_name = "DIR")]
+    pub bundle_dir: Option<PathBuf>,
 }
 
 /// CLI arguments for `dotore report`.
@@ -305,6 +325,10 @@ pub struct ReportArgs {
     /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
     #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
     pub tiers: Vec<String>,
+
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
 }
 
 /// Output format for `dotore search`.
@@ -342,6 +366,10 @@ pub struct SearchArgs {
     /// Disable ANSI syntax highlighting in text output.
     #[arg(long)]
     pub no_color: bool,
+
+    /// Bypass reading and writing the persistent per-project Symbol Outline disk cache.
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
 }
 
 /// CLI arguments for `dotore scan`.
@@ -819,6 +847,7 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         base_ref: args.base_ref.clone(),
         staged: args.staged,
         baseline_path: args.baseline.clone(),
+        projects: args.projects.clone(),
     };
 
     let is_json = args.json || args.format == Some(OutputFormat::Json);
@@ -882,6 +911,10 @@ fn run_check(args: &CheckArgs) -> ExitCode {
     ExitCode::from(code)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Subcommand scan helper forwards CLI flags directly into ScanOptions and CliOverrides"
+)]
 fn scan_workspace_for_subcommand(
     paths: &[PathBuf],
     include_tests: bool,
@@ -890,6 +923,7 @@ fn scan_workspace_for_subcommand(
     custom_rules_only: bool,
     ignore_tags: &[String],
     config_path: Option<&PathBuf>,
+    projects: &[String],
 ) -> Result<
     (
         crate::JsonReport,
@@ -908,6 +942,7 @@ fn scan_workspace_for_subcommand(
         custom_rules_only,
         ignore_tags: ignore_tags.to_vec(),
         config_path: config_path.cloned(),
+        projects: projects.to_vec(),
         ..Default::default()
     };
     scan_workspace_with_overrides(&options, &overrides).map_err(|err| {
@@ -927,6 +962,7 @@ fn run_fix(args: &FixArgs) -> ExitCode {
         args.custom_rules_only,
         &args.ignore_tags,
         args.config.as_ref(),
+        &args.projects,
     ) {
         Ok(res) => res,
         Err(code) => return code,
@@ -955,21 +991,36 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
         args.custom_rules_only,
         &args.ignore_tags,
         args.config.as_ref(),
+        &args.projects,
     ) {
         Ok(res) => res,
         Err(code) => return code,
     };
 
-    match plan_project(&report, &args.out) {
-        Ok(result) => {
-            print!("{}", format_plan_report(&result));
-            ExitCode::SUCCESS
-        }
+    let plan_result = match plan_project(&report, &args.out) {
+        Ok(result) => result,
         Err(err) => {
             eprintln!("error writing remediation plans: {err}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
+        }
+    };
+
+    if args.handoff || args.bundle_dir.is_some() {
+        let target_bundle_dir = args.bundle_dir.as_deref().unwrap_or(&args.out);
+        match write_diagnostics_bundle(&report, target_bundle_dir) {
+            Ok(bundle) => {
+                print!("{}", bundle.prompt_markdown);
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                eprintln!("error writing diagnostics bundle: {err}");
+                return ExitCode::from(2);
+            }
         }
     }
+
+    print!("{}", format_plan_report(&plan_result));
+    ExitCode::SUCCESS
 }
 
 /// Runs `dotore report`.
@@ -998,6 +1049,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         base_ref: None,
         staged: false,
         baseline_path: None,
+        projects: args.projects.clone(),
     };
     let spinner_guard = if should_launch_tui(false) {
         LiveSpinner::start()
@@ -1121,7 +1173,7 @@ fn run_search(args: &SearchArgs) -> ExitCode {
         include_tests: true,
     };
 
-    let (results, sources) = match search_symbols(&args.query, &options) {
+    let (results, sources) = match search_symbols_with_cache(&args.query, &options, args.no_cache) {
         Ok(res) => res,
         Err(err) => {
             eprintln!("error searching symbols: {err}");
@@ -1481,6 +1533,7 @@ fn run_design(args: &CheckArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        projects: args.projects.clone(),
         ..Default::default()
     };
     let is_json = args.json || args.format == Some(OutputFormat::Json);

@@ -162,6 +162,176 @@ pub fn resolve_package_for_file<'a>(
         .or_else(|| packages.first())
 }
 
+/// Filters discovered [`WorkspacePackage`]s by package name, manifest name, directory basename,
+/// or workspace-relative directory path.
+///
+/// # Errors
+/// Returns a descriptive error listing available workspace packages if any requested filter
+/// does not match at least one discovered package.
+pub fn filter_workspace_packages(
+    packages: &[WorkspacePackage],
+    workspace_root: &Path,
+    project_filters: &[String],
+) -> Result<Vec<WorkspacePackage>, String> {
+    let normalized_filters: Vec<String> = project_filters
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if normalized_filters.is_empty() {
+        return Ok(packages.to_vec());
+    }
+
+    let pkg_keys: Vec<Vec<String>> = packages
+        .iter()
+        .map(|pkg| collect_package_match_keys(pkg, workspace_root))
+        .collect();
+
+    let mut matched_indices = vec![false; packages.len()];
+    for raw_filter in &normalized_filters {
+        let norm = normalize_project_filter(raw_filter);
+        let mut any_match = false;
+        for (idx, keys) in pkg_keys.iter().enumerate() {
+            if keys.iter().any(|k| k == &norm || k == raw_filter) {
+                matched_indices[idx] = true;
+                any_match = true;
+            }
+        }
+        if !any_match {
+            let available_list: Vec<String> = packages
+                .iter()
+                .map(|pkg| format_available_package_label(pkg, workspace_root))
+                .collect();
+            return Err(format!(
+                "Unknown workspace project {raw_filter:?}. Available workspace packages: {}",
+                available_list.join(", ")
+            ));
+        }
+    }
+
+    let filtered: Vec<WorkspacePackage> = packages
+        .iter()
+        .enumerate()
+        .filter(|&(idx, _)| matched_indices[idx])
+        .map(|(_, pkg)| pkg.clone())
+        .collect();
+    Ok(filtered)
+}
+
+fn normalize_project_filter(raw: &str) -> String {
+    let forward = raw.trim().replace('\\', "/");
+    let stripped = forward.trim_start_matches("./").trim_end_matches('/');
+    if stripped.is_empty() {
+        ".".to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn collect_package_match_keys(pkg: &WorkspacePackage, workspace_root: &Path) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_unique_key(&mut keys, &pkg.name);
+
+    if let Some(base) = pkg.root_dir.file_name().and_then(|s| s.to_str()) {
+        push_unique_key(&mut keys, base);
+    }
+
+    let rel = relative_forward_slash(&pkg.root_dir, workspace_root);
+    if rel.is_empty() {
+        push_unique_key(&mut keys, ".");
+    } else {
+        push_unique_key(&mut keys, &rel);
+    }
+
+    for manifest_name in read_manifest_package_names(&pkg.root_dir) {
+        push_unique_key(&mut keys, &manifest_name);
+        if let Some((_, unscoped)) = manifest_name.rsplit_once('/')
+            && !unscoped.is_empty()
+        {
+            push_unique_key(&mut keys, unscoped);
+        }
+    }
+
+    keys
+}
+
+fn push_unique_key(keys: &mut Vec<String>, candidate: &str) {
+    let trimmed = candidate.trim();
+    if !trimmed.is_empty() && !keys.iter().any(|k| k == trimmed) {
+        keys.push(trimmed.to_string());
+    }
+}
+
+fn format_available_package_label(pkg: &WorkspacePackage, workspace_root: &Path) -> String {
+    let rel = relative_forward_slash(&pkg.root_dir, workspace_root);
+    let rel_display = if rel.is_empty() { "." } else { rel.as_str() };
+    let manifest_names = read_manifest_package_names(&pkg.root_dir);
+    let primary_manifest = manifest_names.first().map(String::as_str);
+
+    match primary_manifest {
+        Some(m_name) if m_name != pkg.name && m_name != rel_display => {
+            format!("{m_name} ({rel_display})")
+        }
+        _ if rel_display != "." && rel_display != pkg.name => {
+            format!("{} ({rel_display})", pkg.name)
+        }
+        _ => pkg.name.clone(),
+    }
+}
+
+fn read_manifest_package_names(pkg_dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(pkg_json) = fs::read_to_string(pkg_dir.join("package.json"))
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&strip_jsonc(&pkg_json))
+        && let Some(name) = val.get("name").and_then(serde_json::Value::as_str)
+    {
+        push_unique_key(&mut names, name);
+    }
+    if let Ok(pyproject) = fs::read_to_string(pkg_dir.join("pyproject.toml")) {
+        for section in ["project", "tool.poetry"] {
+            if let Some(name) = extract_toml_section_name(&pyproject, section) {
+                push_unique_key(&mut names, &name);
+            }
+        }
+    }
+    if let Ok(cargo_toml) = fs::read_to_string(pkg_dir.join("Cargo.toml"))
+        && let Some(name) = extract_toml_section_name(&cargo_toml, "package")
+    {
+        push_unique_key(&mut names, &name);
+    }
+    names
+}
+
+fn extract_toml_section_name(content: &str, target_section: &str) -> Option<String> {
+    let mut in_target = false;
+    for raw_line in content.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(header) = rest.strip_suffix(']')
+        {
+            in_target = header.trim() == target_section;
+            continue;
+        }
+        if !in_target {
+            continue;
+        }
+        if let Some((key, val)) = line.split_once('=')
+            && key.trim() == "name"
+        {
+            let unquoted = val.trim().trim_matches('"').trim_matches('\'').trim();
+            if !unquoted.is_empty() {
+                return Some(unquoted.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn walk_nested_package_dirs(
     dir: &Path,
     depth: usize,
@@ -345,4 +515,35 @@ pub fn normalize_path_buf(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Resolves the base `~/.dotore` directory, honoring `DOTORE_HOME`
+/// before falling back to `$HOME/.dotore` (or `$USERPROFILE/.dotore`).
+#[must_use]
+pub fn resolve_dotore_home_dir() -> Option<PathBuf> {
+    if let Some(custom) = std::env::var_os("DOTORE_HOME")
+        && !custom.is_empty()
+    {
+        return Some(PathBuf::from(custom));
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home).join(".dotore"));
+    }
+    None
+}
+
+/// Returns `true` if `no_cache_flag` is set or `DOTORE_NO_CACHE` is truthy (`"1"`, `"true"`, `"yes"`).
+#[must_use]
+pub fn is_cache_disabled(no_cache_flag: bool) -> bool {
+    if no_cache_flag {
+        return true;
+    }
+    std::env::var("DOTORE_NO_CACHE").is_ok_and(|v| {
+        let trimmed = v.trim();
+        trimmed == "1"
+            || trimmed.eq_ignore_ascii_case("true")
+            || trimmed.eq_ignore_ascii_case("yes")
+    })
 }

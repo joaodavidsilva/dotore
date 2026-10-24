@@ -8,8 +8,11 @@ use std::{
 };
 
 use dotore::{
-    SearchJsonReport, SearchOptions, SymbolKind, format_search_json, format_search_text,
-    parse_file_ir, score_fuzzy, search_project_sources, search_symbols, should_highlight_search,
+    CachedFileSymbols, SYMBOL_INDEX_SCHEMA_VERSION, SearchJsonReport, SearchOptions,
+    SymbolIndexCache, SymbolKind, format_search_json, format_search_text, is_cache_disabled,
+    load_symbol_index_cache, parse_file_ir, resolve_dotore_home_dir, resolve_symbol_cache_path,
+    save_symbol_index_cache, score_fuzzy, search_project_sources, search_symbols,
+    search_symbols_with_cache, search_symbols_with_extractor_and_cache, should_highlight_search,
 };
 
 #[test]
@@ -579,5 +582,278 @@ export const BUTTON_DEFAULT_LABEL = "Click";
         .expect("run dotore search with invalid kind");
     assert_eq!(bad_kind.status.code(), Some(2));
 
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn persistent_symbol_outline_index_cache_reuses_unchanged_invalidates_edits_and_honors_no_cache() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    assert!(is_cache_disabled(true));
+    assert!(!is_cache_disabled(false));
+    assert!(resolve_dotore_home_dir().is_some());
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-symbol-cache-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let src_dir = temp_dir.join("src");
+    fs::create_dir_all(&src_dir).expect("create src_dir");
+
+    let cache_path = resolve_symbol_cache_path(&temp_dir).expect("resolve_symbol_cache_path");
+    if let Some(cache_dir) = cache_path.parent() {
+        let _ = fs::remove_dir_all(cache_dir);
+    }
+    let cache_path_str = cache_path.to_string_lossy();
+    assert!(
+        cache_path_str.contains("/projects/dotore-symbol-cache-test-")
+            && cache_path_str.ends_with("/symbols.json"),
+        "unexpected cache path: {cache_path_str}"
+    );
+
+    let tsx_path = src_dir.join("Counter.tsx");
+    let py_path = src_dir.join("service.py");
+    let rs_path = src_dir.join("engine.rs");
+    fs::write(
+        &tsx_path,
+        "export function CounterView() { return <div />; }\nexport interface CounterProps { initial: number; }\n",
+    )
+    .expect("write Counter.tsx");
+    fs::write(
+        &py_path,
+        "def compute_counter_step(delta: int) -> int:\n    return delta + 1\n",
+    )
+    .expect("write service.py");
+    fs::write(
+        &rs_path,
+        "pub struct CounterEngine {\n    pub value: i64,\n}\n",
+    )
+    .expect("write engine.rs");
+
+    let options = SearchOptions {
+        paths: vec![temp_dir.clone()],
+        kinds: None,
+        limit: 50,
+        include_tests: true,
+    };
+
+    // 1. Cold run across JS/TS, Python, and Rust creates `symbols.json` on disk.
+    let (cold_hits, _) = search_symbols("Counter", &options).expect("cold search_symbols");
+    let cold_names: Vec<&str> = cold_hits.iter().map(|h| h.outline.name.as_str()).collect();
+    assert!(cold_names.contains(&"CounterView"));
+    assert!(cold_names.contains(&"CounterProps"));
+    assert!(cold_names.contains(&"compute_counter_step"));
+    assert!(cold_names.contains(&"CounterEngine"));
+    assert!(
+        cache_path.is_file(),
+        "symbols.json should be created on disk"
+    );
+
+    let loaded_cache: SymbolIndexCache =
+        load_symbol_index_cache(&cache_path).expect("load_symbol_index_cache");
+    assert_eq!(loaded_cache.version, SYMBOL_INDEX_SCHEMA_VERSION);
+    assert_eq!(loaded_cache.files.len(), 3);
+    assert!(loaded_cache.files.contains_key("src/Counter.tsx"));
+    assert!(loaded_cache.files.contains_key("src/service.py"));
+    assert!(loaded_cache.files.contains_key("src/engine.rs"));
+
+    // 2. Warm run with unchanged files reuses cached outlines without reparsing (`0` extractor calls).
+    let parse_calls = AtomicUsize::new(0);
+    let (warm_hits, _) =
+        search_symbols_with_extractor_and_cache("Counter", &options, false, |path, source| {
+            parse_calls.fetch_add(1, Ordering::SeqCst);
+            parse_file_ir(path, source).symbol_outlines
+        })
+        .expect("warm search_symbols_with_extractor_and_cache");
+    assert_eq!(parse_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(warm_hits.len(), cold_hits.len());
+
+    // 3. Metadata-only touch (mtime bumped, size + content hash identical) reuses cached outlines without reparsing.
+    let mut bumped_cache = loaded_cache.clone();
+    if let Some(entry) = bumped_cache.files.get_mut("src/Counter.tsx") {
+        entry.mtime_ms = entry.mtime_ms.saturating_sub(5_000);
+    }
+    save_symbol_index_cache(&cache_path, &bumped_cache).expect("save bumped cache");
+
+    let touch_calls = AtomicUsize::new(0);
+    let (touch_hits, _) =
+        search_symbols_with_extractor_and_cache("CounterView", &options, false, |path, source| {
+            touch_calls.fetch_add(1, Ordering::SeqCst);
+            parse_file_ir(path, source).symbol_outlines
+        })
+        .expect("touch search_symbols_with_extractor_and_cache");
+    assert_eq!(touch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(touch_hits[0].outline.name, "CounterView");
+    let refreshed_cache = load_symbol_index_cache(&cache_path).expect("reload cache after touch");
+    assert_eq!(
+        refreshed_cache.files["src/Counter.tsx"].mtime_ms,
+        loaded_cache.files["src/Counter.tsx"].mtime_ms
+    );
+
+    // 4. Editing one file invalidates and reparses ONLY that file (`1` extractor call).
+    fs::write(
+        &tsx_path,
+        "export function CounterViewRenamed() { return <div />; }\nexport interface CounterProps { initial: number; }\n",
+    )
+    .expect("edit Counter.tsx");
+    let edit_calls = AtomicUsize::new(0);
+    let (edit_hits, _) = search_symbols_with_extractor_and_cache(
+        "CounterViewRenamed",
+        &options,
+        false,
+        |path, source| {
+            edit_calls.fetch_add(1, Ordering::SeqCst);
+            parse_file_ir(path, source).symbol_outlines
+        },
+    )
+    .expect("edit search_symbols_with_extractor_and_cache");
+    assert_eq!(edit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(edit_hits.len(), 1);
+    assert_eq!(edit_hits[0].outline.name, "CounterViewRenamed");
+
+    // 5. Adding a file parses only the newly added file (`1` extractor call), and deleting a file prunes it.
+    let added_path = src_dir.join("added.ts");
+    fs::write(
+        &added_path,
+        "export function CounterAddedHelper(): number { return 42; }\n",
+    )
+    .expect("write added.ts");
+    let add_calls = AtomicUsize::new(0);
+    let (add_hits, _) = search_symbols_with_extractor_and_cache(
+        "CounterAddedHelper",
+        &options,
+        false,
+        |path, source| {
+            add_calls.fetch_add(1, Ordering::SeqCst);
+            parse_file_ir(path, source).symbol_outlines
+        },
+    )
+    .expect("add search_symbols_with_extractor_and_cache");
+    assert_eq!(add_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(add_hits.len(), 1);
+    assert_eq!(add_hits[0].outline.name, "CounterAddedHelper");
+
+    fs::remove_file(&py_path).expect("remove service.py");
+    fs::remove_file(&added_path).expect("remove added.ts");
+    let _ = search_symbols("Counter", &options).expect("search after delete");
+    let after_delete_cache = load_symbol_index_cache(&cache_path).expect("cache after delete");
+    assert_eq!(after_delete_cache.files.len(), 2);
+    assert!(!after_delete_cache.files.contains_key("src/service.py"));
+    assert!(!after_delete_cache.files.contains_key("src/added.ts"));
+    // 6. `no_cache: true` bypasses the disk cache.
+    let bypass_calls = AtomicUsize::new(0);
+    let _ = search_symbols_with_extractor_and_cache("Counter", &options, true, |path, source| {
+        bypass_calls.fetch_add(1, Ordering::SeqCst);
+        parse_file_ir(path, source).symbol_outlines
+    })
+    .expect("no_cache search_symbols_with_extractor_and_cache");
+    assert_eq!(bypass_calls.load(Ordering::SeqCst), 2);
+    let (no_cache_hits, _) = search_symbols_with_cache("CounterViewRenamed", &options, true)
+        .expect("search_symbols_with_cache");
+    assert_eq!(no_cache_hits.len(), 1);
+
+    // 7. End-to-end CLI tests with isolated `DOTORE_HOME`, `--no-cache`, and `DOTORE_NO_CACHE=1`.
+    let dotore_home = temp_dir.join(".custom-dotore-home");
+    let bin = env!("CARGO_BIN_EXE_dotore");
+
+    // --no-cache does not create the cache directory
+    let cli_no_cache = Command::new(bin)
+        .current_dir(&temp_dir)
+        .env("DOTORE_HOME", &dotore_home)
+        .args(["search", "Counter", "--no-cache", "--format", "json"])
+        .output()
+        .expect("run dotore search --no-cache");
+    assert!(cli_no_cache.status.success());
+    assert!(
+        !dotore_home.join("projects").exists(),
+        "--no-cache must not create projects cache dir"
+    );
+
+    // DOTORE_NO_CACHE=1 does not create the cache directory
+    let cli_env_no_cache = Command::new(bin)
+        .current_dir(&temp_dir)
+        .env("DOTORE_HOME", &dotore_home)
+        .env("DOTORE_NO_CACHE", "1")
+        .args(["search", "Counter", "--format", "json"])
+        .output()
+        .expect("run dotore search with DOTORE_NO_CACHE=1");
+    assert!(cli_env_no_cache.status.success());
+    assert!(
+        !dotore_home.join("projects").exists(),
+        "DOTORE_NO_CACHE=1 must not create projects cache dir"
+    );
+
+    // Standard CLI search creates `<DOTORE_HOME>/projects/<slug>-<hash>/symbols.json`
+    let cli_cached = Command::new(bin)
+        .current_dir(&temp_dir)
+        .env("DOTORE_HOME", &dotore_home)
+        .args(["search", "Counter", "--format", "json"])
+        .output()
+        .expect("run dotore search with cache enabled");
+    assert!(cli_cached.status.success());
+    let projects_dir = dotore_home.join("projects");
+    assert!(projects_dir.is_dir(), "projects cache dir should exist");
+    let project_entries: Vec<PathBuf> = fs::read_dir(&projects_dir)
+        .expect("read projects_dir")
+        .filter_map(|e| e.ok().map(|d| d.path()))
+        .collect();
+    assert_eq!(project_entries.len(), 1);
+    let cli_symbols_json = project_entries[0].join("symbols.json");
+    assert!(cli_symbols_json.is_file());
+    let mut cli_cache: SymbolIndexCache =
+        load_symbol_index_cache(&cli_symbols_json).expect("load cli symbols.json");
+    let cached_tsx: &mut CachedFileSymbols = cli_cache
+        .files
+        .get_mut("src/Counter.tsx")
+        .expect("src/Counter.tsx in cli_cache");
+    assert!(!cached_tsx.outlines.is_empty());
+    cached_tsx.outlines[0].name = "CachedSentinelSymbol".to_string();
+    save_symbol_index_cache(&cli_symbols_json, &cli_cache).expect("save sentinel cli_cache");
+
+    // Warm CLI search reuses `symbols.json` without reparsing `src/Counter.tsx`
+    let cli_warm_out = Command::new(bin)
+        .current_dir(&temp_dir)
+        .env("DOTORE_HOME", &dotore_home)
+        .args(["search", "CachedSentinelSymbol", "--format", "json"])
+        .output()
+        .expect("run warm dotore search");
+    assert!(cli_warm_out.status.success());
+    let warm_report: SearchJsonReport =
+        serde_json::from_slice(&cli_warm_out.stdout).expect("parse warm SearchJsonReport");
+    assert_eq!(warm_report.count, 1);
+    assert_eq!(warm_report.results[0].name, "CachedSentinelSymbol");
+
+    // CLI `--no-cache` bypasses `symbols.json` and parses the actual file on disk
+    let cli_bypass_out = Command::new(bin)
+        .current_dir(&temp_dir)
+        .env("DOTORE_HOME", &dotore_home)
+        .args([
+            "search",
+            "CachedSentinelSymbol",
+            "--no-cache",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run dotore search --no-cache against sentinel");
+    assert!(cli_bypass_out.status.success());
+    let bypass_report: SearchJsonReport =
+        serde_json::from_slice(&cli_bypass_out.stdout).expect("parse bypass SearchJsonReport");
+    assert_eq!(bypass_report.count, 0);
+
+    // CLI `DOTORE_NO_CACHE=1` also bypasses `symbols.json`
+    let cli_env_bypass_out = Command::new(bin)
+        .current_dir(&temp_dir)
+        .env("DOTORE_HOME", &dotore_home)
+        .env("DOTORE_NO_CACHE", "1")
+        .args(["search", "CachedSentinelSymbol", "--format", "json"])
+        .output()
+        .expect("run dotore search with DOTORE_NO_CACHE=1 against sentinel");
+    assert!(cli_env_bypass_out.status.success());
+    let env_bypass_report: SearchJsonReport = serde_json::from_slice(&cli_env_bypass_out.stdout)
+        .expect("parse env bypass SearchJsonReport");
+    assert_eq!(env_bypass_report.count, 0);
+    if let Some(cache_dir) = cache_path.parent() {
+        let _ = fs::remove_dir_all(cache_dir);
+    }
     let _ = fs::remove_dir_all(&temp_dir);
 }

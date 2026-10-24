@@ -1,22 +1,32 @@
 //! Native fuzzy **Symbol Outline** search (`dotore search`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{
+        RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ir::{
-        ExtractedFile, LanguageAnalyzer, SymbolKind, SymbolOutline, compute_line_starts,
-        loc_from_line_starts,
+    config::{
+        is_cache_disabled, normalize_path_buf, relative_forward_slash, resolve_dotore_home_dir,
     },
-    scanner::{collect_source_files, collect_source_files_for_analyzers},
+    ir::{
+        ExtractedFile, FNV1A_64_OFFSET_BASIS, LanguageAnalyzer, SymbolKind, SymbolOutline,
+        compute_line_starts, fnv1a_64_step, loc_from_line_starts,
+    },
+    scanner::{
+        POLYGLOT_SOURCE_EXTENSIONS, collect_source_files_for_analyzers,
+        collect_source_files_with_extensions,
+    },
 };
 
 type SymbolExtractorFn = fn(&Path, &str) -> Vec<SymbolOutline>;
@@ -44,6 +54,131 @@ const MAX_COMMENT_LINES: usize = 10;
 const MAX_INTERFACE_PROPERTIES: usize = 15;
 const MAX_LINE_CHARS: usize = 120;
 
+/// Current schema version for `symbols.json`.
+pub const SYMBOL_INDEX_SCHEMA_VERSION: u32 = 1;
+
+static CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Cached Symbol Outline entry for a single source file inside [`SymbolIndexCache`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedFileSymbols {
+    /// Modification timestamp in milliseconds since `UNIX_EPOCH`.
+    pub mtime_ms: u64,
+    /// File byte length.
+    pub size: u64,
+    /// 64-bit FNV-1a content hash formatted as 16-char lowercase hex.
+    pub content_hash: String,
+    /// Extracted **Symbol Outlines** for this file.
+    pub outlines: Vec<SymbolOutline>,
+}
+
+/// Persistent per-project **Symbol Outline** disk index stored at
+/// `~/.dotore/projects/<project-slug>-<hash>/symbols.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolIndexCache {
+    /// Schema version (`1`).
+    pub version: u32,
+    /// Canonicalized project root path string.
+    pub project_root: String,
+    /// Cached per-file symbol outlines keyed by project-relative (or normalized) file path.
+    pub files: BTreeMap<String, CachedFileSymbols>,
+}
+
+/// Resolves the persistent per-project **Symbol Outline** cache path
+/// (`~/.dotore/projects/<project-slug>-<hash>/symbols.json`) for `project_root`.
+#[must_use]
+pub fn resolve_symbol_cache_path(project_root: &Path) -> Option<PathBuf> {
+    let home = resolve_dotore_home_dir()?;
+    let canonical = canonicalize_or_normalize(project_root);
+    let slug = sanitize_project_slug(&canonical);
+    let canonical_str = canonical.to_string_lossy();
+    let hash = fnv1a_64_step(FNV1A_64_OFFSET_BASIS, canonical_str.as_bytes());
+    Some(
+        home.join("projects")
+            .join(format!("{slug}-{hash:016x}"))
+            .join("symbols.json"),
+    )
+}
+
+/// Loads a [`SymbolIndexCache`] from `cache_path`, returning `None` if missing,
+/// unreadable, or incompatible with [`SYMBOL_INDEX_SCHEMA_VERSION`].
+#[must_use]
+pub fn load_symbol_index_cache(cache_path: &Path) -> Option<SymbolIndexCache> {
+    let raw = fs::read_to_string(cache_path).ok()?;
+    let parsed: SymbolIndexCache = serde_json::from_str(&raw).ok()?;
+    if parsed.version != SYMBOL_INDEX_SCHEMA_VERSION {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Persists `cache` to `cache_path` atomically using a temporary sibling file.
+///
+/// # Errors
+/// Returns an `io::Error` if creating parent directories, serializing, or writing fails.
+pub fn save_symbol_index_cache(cache_path: &Path, cache: &SymbolIndexCache) -> io::Result<()> {
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(cache).map_err(io::Error::other)?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let pid = std::process::id();
+    let seq = CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = cache_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("symbols.json");
+    let tmp_path = cache_path.with_file_name(format!(".{file_name}.tmp-{pid}-{nanos}-{seq}"));
+    fs::write(&tmp_path, json)?;
+    if let Err(err) = fs::rename(&tmp_path, cache_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn canonicalize_or_normalize(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| normalize_path_buf(path))
+}
+
+fn sanitize_project_slug(project_root: &Path) -> String {
+    let raw = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    let mut out = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "project".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn file_mtime_ms(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn compute_content_hash(content: &str) -> String {
+    let hash = fnv1a_64_step(FNV1A_64_OFFSET_BASIS, content.as_bytes());
+    format!("{hash:016x}")
+}
 /// Options for searching **Symbol Outlines** across files or directories.
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -346,7 +481,20 @@ pub fn search_symbols(
     query: &str,
     options: &SearchOptions,
 ) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
-    search_symbols_with(query, options, default_extract_symbols)
+    search_symbols_with_cache(query, options, false)
+}
+
+/// Discovers source files under `options.paths` and fuzzy-searches their **Symbol Outlines**,
+/// bypassing the persistent disk index when `no_cache` is `true` or `DOTORE_NO_CACHE=1`.
+///
+/// # Errors
+/// Returns an `io::Error` if reading discovered source files fails.
+pub fn search_symbols_with_cache(
+    query: &str,
+    options: &SearchOptions,
+    no_cache: bool,
+) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
+    search_symbols_with_extractor_and_cache(query, options, no_cache, default_extract_symbols)
 }
 
 /// Discovers source files under `options.paths` using `analyzers` and fuzzy-searches their **Symbol Outlines**.
@@ -358,25 +506,30 @@ pub fn search_symbols_with_analyzers(
     options: &SearchOptions,
     analyzers: &[&dyn LanguageAnalyzer],
 ) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
+    search_symbols_with_analyzers_and_cache(query, options, analyzers, false)
+}
+
+/// Discovers source files under `options.paths` using `analyzers` and fuzzy-searches their **Symbol Outlines**,
+/// bypassing the persistent disk index when `no_cache` is `true` or `DOTORE_NO_CACHE=1`.
+///
+/// # Errors
+/// Returns an `io::Error` if reading discovered source files fails.
+pub fn search_symbols_with_analyzers_and_cache(
+    query: &str,
+    options: &SearchOptions,
+    analyzers: &[&dyn LanguageAnalyzer],
+    no_cache: bool,
+) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)> {
     let discovered =
         collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
-    let mut files = Vec::with_capacity(discovered.len());
-    let mut sources = HashMap::with_capacity(discovered.len());
-
-    for path in discovered {
-        let content = fs::read_to_string(&path)?;
-        sources.insert(path.clone(), content.clone());
-        files.push((path, content));
-    }
-
-    let results = search_project_sources_with_analyzers(
-        query,
-        &files,
-        options.kinds.as_deref(),
-        options.limit,
-        analyzers,
-    );
-    Ok((results, sources))
+    search_discovered_files_with_cache(query, options, discovered, no_cache, |path, source| {
+        for analyzer in analyzers {
+            if analyzer.supports_path(path) {
+                return analyzer.extract_file(path, source).symbol_outlines;
+            }
+        }
+        default_extract_symbols(path, source)
+    })
 }
 
 /// Discovers source files under `options.paths` and fuzzy-searches their **Symbol Outlines** using `extract_symbols`.
@@ -391,24 +544,217 @@ pub fn search_symbols_with<F>(
 where
     F: Fn(&Path, &str) -> Vec<SymbolOutline> + Sync,
 {
-    let discovered = collect_source_files(&options.paths, options.include_tests);
-    let mut files = Vec::with_capacity(discovered.len());
-    let mut sources = HashMap::with_capacity(discovered.len());
+    search_symbols_with_extractor_and_cache(query, options, false, extract_symbols)
+}
+
+/// Discovers source files under `options.paths` and fuzzy-searches their **Symbol Outlines**
+/// using `extract_symbols`, bypassing the persistent disk index when `no_cache` is `true` or `DOTORE_NO_CACHE=1`.
+///
+/// # Errors
+/// Returns an `io::Error` if reading discovered source files fails.
+pub fn search_symbols_with_extractor_and_cache<F>(
+    query: &str,
+    options: &SearchOptions,
+    no_cache: bool,
+    extract_symbols: F,
+) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)>
+where
+    F: Fn(&Path, &str) -> Vec<SymbolOutline> + Sync,
+{
+    let discovered = collect_source_files_with_extensions(
+        &options.paths,
+        options.include_tests,
+        POLYGLOT_SOURCE_EXTENSIONS,
+    );
+    search_discovered_files_with_cache(query, options, discovered, no_cache, extract_symbols)
+}
+
+fn search_discovered_files_with_cache<F>(
+    query: &str,
+    options: &SearchOptions,
+    discovered: Vec<PathBuf>,
+    no_cache: bool,
+    extract_symbols: F,
+) -> io::Result<(Vec<SymbolSearchResult>, HashMap<PathBuf, String>)>
+where
+    F: Fn(&Path, &str) -> Vec<SymbolOutline> + Sync,
+{
+    let search_root = match options.paths.first() {
+        None => PathBuf::from("."),
+        Some(first) if first.is_dir() => first.clone(),
+        Some(first) => first
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    };
+    let cache_path_opt = if is_cache_disabled(no_cache) {
+        None
+    } else {
+        resolve_symbol_cache_path(&search_root)
+    };
+
+    let Some(cache_path) = cache_path_opt else {
+        let mut files = Vec::with_capacity(discovered.len());
+        let mut sources = HashMap::with_capacity(discovered.len());
+        for path in discovered {
+            let content = fs::read_to_string(&path)?;
+            sources.insert(path.clone(), content.clone());
+            files.push((path, content));
+        }
+        let results = search_project_sources_with(
+            query,
+            &files,
+            options.kinds.as_deref(),
+            options.limit,
+            extract_symbols,
+        );
+        return Ok((results, sources));
+    };
+
+    let canonical_root = canonicalize_or_normalize(&search_root);
+    let root_str = canonical_root.to_string_lossy().to_string();
+    let existing_cache = load_symbol_index_cache(&cache_path)
+        .filter(|c| c.version == SYMBOL_INDEX_SCHEMA_VERSION && c.project_root == root_str);
+
+    let mut cache_dirty = existing_cache.is_none();
+    let mut new_files = BTreeMap::new();
+    let mut file_outlines = Vec::with_capacity(discovered.len());
+    let mut sources = HashMap::new();
 
     for path in discovered {
-        let content = fs::read_to_string(&path)?;
-        sources.insert(path.clone(), content.clone());
-        files.push((path, content));
+        let canonical_file = canonicalize_or_normalize(&path);
+        let rel_key = relative_forward_slash(&canonical_file, &canonical_root);
+        let metadata = fs::metadata(&path)?;
+        let size = metadata.len();
+        let mtime_ms = file_mtime_ms(&metadata);
+
+        let cached_entry = existing_cache.as_ref().and_then(|c| c.files.get(&rel_key));
+        let entry = resolve_cached_or_extract_file(
+            &path,
+            size,
+            mtime_ms,
+            cached_entry,
+            &extract_symbols,
+            &mut sources,
+            &mut cache_dirty,
+        )?;
+        file_outlines.push((path, entry.outlines.clone()));
+        new_files.insert(rel_key, entry);
     }
 
-    let results = search_project_sources_with(
+    if let Some(prev) = &existing_cache
+        && prev.files.len() != new_files.len()
+    {
+        cache_dirty = true;
+    }
+
+    if cache_dirty {
+        let updated = SymbolIndexCache {
+            version: SYMBOL_INDEX_SCHEMA_VERSION,
+            project_root: root_str,
+            files: new_files,
+        };
+        let _ = save_symbol_index_cache(&cache_path, &updated);
+    }
+
+    let results = score_cached_outlines(
         query,
-        &files,
+        &file_outlines,
         options.kinds.as_deref(),
         options.limit,
-        extract_symbols,
     );
+    for res in &results {
+        if !sources.contains_key(&res.file) {
+            let content = fs::read_to_string(&res.file)?;
+            sources.insert(res.file.clone(), content);
+        }
+    }
     Ok((results, sources))
+}
+
+fn resolve_cached_or_extract_file<F>(
+    path: &Path,
+    size: u64,
+    mtime_ms: u64,
+    cached: Option<&CachedFileSymbols>,
+    extract_symbols: &F,
+    sources: &mut HashMap<PathBuf, String>,
+    cache_dirty: &mut bool,
+) -> io::Result<CachedFileSymbols>
+where
+    F: Fn(&Path, &str) -> Vec<SymbolOutline> + Sync,
+{
+    if let Some(hit) = cached
+        && hit.mtime_ms == mtime_ms
+        && hit.size == size
+    {
+        return Ok(hit.clone());
+    }
+
+    let content = fs::read_to_string(path)?;
+    let content_hash = compute_content_hash(&content);
+    if let Some(hit) = cached
+        && hit.size == size
+        && hit.content_hash == content_hash
+    {
+        sources.insert(path.to_path_buf(), content);
+        *cache_dirty = true;
+        return Ok(CachedFileSymbols {
+            mtime_ms,
+            size,
+            content_hash,
+            outlines: hit.outlines.clone(),
+        });
+    }
+
+    let outlines = extract_symbols(path, &content);
+    sources.insert(path.to_path_buf(), content);
+    *cache_dirty = true;
+    Ok(CachedFileSymbols {
+        mtime_ms,
+        size,
+        content_hash,
+        outlines,
+    })
+}
+
+fn score_cached_outlines(
+    query: &str,
+    file_outlines: &[(PathBuf, Vec<SymbolOutline>)],
+    kinds: Option<&[SymbolKind]>,
+    limit: usize,
+) -> Vec<SymbolSearchResult> {
+    if query.trim().is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let allowed_kinds: HashSet<SymbolKind> = kinds
+        .unwrap_or(SymbolKind::DEFAULT_SEARCH_KINDS)
+        .iter()
+        .copied()
+        .collect();
+
+    let mut results: Vec<SymbolSearchResult> = file_outlines
+        .iter()
+        .flat_map(|(path, outlines)| {
+            let file_path = path.clone();
+            outlines
+                .iter()
+                .filter(|outline| allowed_kinds.contains(&outline.kind))
+                .filter_map(move |outline| {
+                    let (score, matches) = score_fuzzy(query, &outline.name)?;
+                    Some(SymbolSearchResult {
+                        file: file_path.clone(),
+                        outline: outline.clone(),
+                        score,
+                        matches,
+                    })
+                })
+        })
+        .collect();
+
+    sort_and_truncate_results(&mut results, limit);
+    results
 }
 
 /// Formats ranked search results into a machine-readable [`SearchJsonReport`].

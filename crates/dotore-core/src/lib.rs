@@ -32,9 +32,10 @@ pub use config::{
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, content_enables_react_compiler,
     discover_workspace_packages, discover_workspace_packages_with_analyzers,
-    find_nearest_ancestor_file, load_config_from_dir, load_local_config_in_dir,
-    mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str, relative_forward_slash,
-    resolve_package_for_file, strip_jsonc, strip_source_extension,
+    filter_workspace_packages, find_nearest_ancestor_file, is_cache_disabled, load_config_from_dir,
+    load_local_config_in_dir, mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str,
+    relative_forward_slash, resolve_dotore_home_dir, resolve_package_for_file, strip_jsonc,
+    strip_source_extension,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -64,10 +65,12 @@ pub use ir::{
     tokenize_suppression_rules,
 };
 pub use planner::{
-    PlanResult, PlannerContext, build_caller_site_excerpt, build_fix_capsule,
-    build_root_cause_groups_and_capsules, compute_root_cause_group_id, excerpt_from_span,
-    find_architecture_exemplar_from_facets, format_plan_report, plan_project, slice_span,
-    spans_intersect,
+    DiagnosticsBundle, MIGRATION_BUCKET_MIN_FILES, MigrationRuleBucket, PlanResult, PlannerContext,
+    build_agent_handoff_prompt, build_caller_site_excerpt, build_fix_capsule,
+    build_root_cause_groups_and_capsules, compute_root_cause_group_id,
+    detect_migration_rule_buckets, excerpt_from_span, find_architecture_exemplar_from_facets,
+    format_plan_report, plan_project, render_rule_bundle_summary_text, slice_span, spans_intersect,
+    write_diagnostics_bundle,
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
@@ -99,11 +102,14 @@ pub use scanner::{
 };
 pub use score::{HealthScore, compute_local_health_score, score_label};
 pub use search::{
-    SearchJsonLocation, SearchJsonReport, SearchJsonResult, SearchOptions, SymbolSearchResult,
-    format_search_json, format_search_text, register_default_symbol_extractor, score_fuzzy,
-    search_extracted_files, search_project_sources, search_project_sources_with,
-    search_project_sources_with_analyzers, search_symbols, search_symbols_with,
-    search_symbols_with_analyzers, should_highlight_search, should_highlight_stdout,
+    CachedFileSymbols, SYMBOL_INDEX_SCHEMA_VERSION, SearchJsonLocation, SearchJsonReport,
+    SearchJsonResult, SearchOptions, SymbolIndexCache, SymbolSearchResult, format_search_json,
+    format_search_text, load_symbol_index_cache, register_default_symbol_extractor,
+    resolve_symbol_cache_path, save_symbol_index_cache, score_fuzzy, search_extracted_files,
+    search_project_sources, search_project_sources_with, search_project_sources_with_analyzers,
+    search_symbols, search_symbols_with, search_symbols_with_analyzers,
+    search_symbols_with_analyzers_and_cache, search_symbols_with_cache,
+    search_symbols_with_extractor_and_cache, should_highlight_search, should_highlight_stdout,
 };
 pub use ui::{
     AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH, FilterTabBar,
@@ -146,4 +152,6 @@ pub struct CliOverrides {
     pub staged: bool,
     /// Compare against a saved baseline JSON report or git revision (`--baseline <path>`).
     pub baseline_path: Option<PathBuf>,
+    /// Filter to specific workspace package(s) by name or relative path (`--project <name-or-path>`).
+    pub projects: Vec<String>,
 }

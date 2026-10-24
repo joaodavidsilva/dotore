@@ -17,9 +17,11 @@ use dotore::{
     CiOptions, CiProviderKind, CliOverrides, ConfigMutation, ConfigTargetKind, DotoreConfig,
     InstallOptions, PrescriptionTier, RuleCategory, RuleId, RuleSeverityOverride, RuleTag,
     RulesListOptions, ScanOptions, build_rule_catalog, ci_config, ci_install, ci_upgrade,
-    design_rule_ids, explain_location, explain_rule, format_design_report, format_install_report,
+    design_rule_ids, discover_workspace_packages, explain_location, explain_rule,
+    filter_workspace_packages, format_design_report, format_install_report,
     format_rule_catalog_text, format_rule_explanation_text, format_why_report_text, install_dotore,
     load_config_from_dir, mutate_config_in_dir, parse_why_location, scan_design, scan_workspace,
+    scan_workspace_with_overrides,
 };
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -1076,6 +1078,326 @@ fn tui_frame_and_progress_bar_fit_any_terminal_width_and_align_borders() {
             );
         }
     }
+}
+
+#[test]
+fn project_filter_scopes_packages_across_cli_subcommands_and_rejects_unknown_project() {
+    let temp_dir = unique_temp_dir("project-filter-cli");
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    let web_dir = temp_dir.join("apps/web-react");
+    let api_dir = temp_dir.join("services/api");
+    let worker_dir = temp_dir.join("crates/worker");
+    fs::create_dir_all(web_dir.join("src")).unwrap();
+    fs::create_dir_all(&api_dir).unwrap();
+    fs::create_dir_all(worker_dir.join("src")).unwrap();
+
+    // Root manifest + root file with diagnostic
+    fs::write(
+        temp_dir.join("package.json"),
+        r#"{"name": "monorepo-root", "private": true, "dependencies": {"react": "^19.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        temp_dir.join("RootApp.tsx"),
+        r#"import { useState, useEffect } from 'react';
+export function RootApp({ q }: { q: string }) {
+    const [val, setVal] = useState('');
+    useEffect(() => {
+        setVal(q.trim());
+    }, [q]);
+    return <div>{val}</div>;
+}
+"#,
+    )
+    .unwrap();
+
+    // Subpackage 1: apps/web-react (@acme/web-react) with derived-state (Autofix), cross-file CallerSite, and design issue
+    fs::write(
+        web_dir.join("package.json"),
+        r#"{"name": "@acme/web-react", "dependencies": {"react": "^19.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        web_dir.join("src/ChildCard.tsx"),
+        r#"import { useState, useEffect } from 'react';
+export function ChildCard({ first, last }: { first: string; last: string }) {
+    const [full, setFull] = useState('');
+    useEffect(() => {
+        setFull(`${first} ${last}`);
+    }, [first, last]);
+    return <div style={{ outline: 'none' }}>{full}</div>;
+}
+export function ResetModal({ userId }: { userId: string }) {
+    const [draft, setDraft] = useState('');
+    useEffect(() => {
+        setDraft('');
+    }, [userId]);
+    return <div>{draft}</div>;
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        web_dir.join("src/ParentPage.tsx"),
+        r#"import { ChildCard, ResetModal } from './ChildCard';
+export function ParentPage() {
+    return (
+        <section>
+            <ChildCard first="Ada" last="Lovelace" />
+            <ResetModal userId="u-1" />
+        </section>
+    );
+}
+"#,
+    )
+    .unwrap();
+
+    // Subpackage 2: services/api (pyproject.toml name = "billing-api") with Python issue
+    fs::write(
+        api_dir.join("pyproject.toml"),
+        "[project]\nname = \"billing-api\"\ndependencies = [\"fastapi>=0.115.0\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        api_dir.join("app.py"),
+        "import time\nasync def handle_charge(items: list[str] = []) -> int:\n    time.sleep(0.1)\n    return len(items)\n",
+    )
+    .unwrap();
+
+    // Subpackage 3: crates/worker (Cargo.toml name = "worker-engine") with Rust issue
+    fs::write(
+        worker_dir.join("Cargo.toml"),
+        "[package]\nname = \"worker-engine\"\nversion = \"0.1.0\"\n[dependencies]\ntokio = \"1.40\"\n",
+    )
+    .unwrap();
+    fs::write(
+        worker_dir.join("src/lib.rs"),
+        "pub fn compute_job(input: Option<i32>) -> i32 {\n    input.unwrap()\n}\n",
+    )
+    .unwrap();
+
+    // 1. Unit/library check for `filter_workspace_packages` matching name, manifest name, unscoped name, relative path, and error message
+    let all_pkgs = discover_workspace_packages(&temp_dir);
+    assert_eq!(all_pkgs.len(), 4);
+
+    let by_scoped =
+        filter_workspace_packages(&all_pkgs, &temp_dir, &["@acme/web-react".to_string()]).unwrap();
+    assert_eq!(by_scoped.len(), 1);
+    assert_eq!(by_scoped[0].name, "web-react");
+
+    let by_rel_and_cargo = filter_workspace_packages(
+        &all_pkgs,
+        &temp_dir,
+        &["services/api,worker-engine".to_string()],
+    )
+    .unwrap();
+    assert_eq!(by_rel_and_cargo.len(), 2);
+    assert_eq!(by_rel_and_cargo[0].name, "worker");
+    assert_eq!(by_rel_and_cargo[1].name, "api");
+
+    let err_msg = filter_workspace_packages(&all_pkgs, &temp_dir, &["nonexistent-pkg".to_string()])
+        .unwrap_err();
+    assert!(err_msg.contains("Unknown workspace project \"nonexistent-pkg\""));
+    assert!(err_msg.contains("Available workspace packages:"));
+    assert!(err_msg.contains("@acme/web-react (apps/web-react)"));
+    assert!(err_msg.contains("billing-api (services/api)"));
+    assert!(err_msg.contains("worker-engine (crates/worker)"));
+
+    // 2. Library `scan_workspace_with_overrides` with single project scopes files, ProjectGraph CallerSites, and report.projects
+    let opts = ScanOptions {
+        paths: vec![temp_dir.clone()],
+        include_tests: false,
+        rules: None,
+        tiers: None,
+    };
+    let (web_report, _) = scan_workspace_with_overrides(
+        &opts,
+        &CliOverrides {
+            projects: vec!["apps/web-react".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(web_report.projects.len(), 1);
+    assert_eq!(web_report.projects[0].name, "web-react");
+    assert_eq!(web_report.summary.files_scanned, 2);
+    assert!(
+        web_report
+            .diagnostics
+            .iter()
+            .all(|d| d.file.starts_with(&web_dir)),
+        "Expected all diagnostics in apps/web-react, got: {:#?}",
+        web_report.diagnostics
+    );
+    let child_diag = web_report
+        .diagnostics
+        .iter()
+        .find(|d| d.rule == RuleId::NoResetAllStateOnPropChange)
+        .expect("Expected no-reset-all-state-on-prop-change in ChildCard.tsx");
+    assert_eq!(
+        child_diag.caller_sites.len(),
+        1,
+        "Expected ProjectGraph cross-file CallerSite from ParentPage.tsx"
+    );
+    assert_eq!(
+        child_diag.caller_sites[0].parent_subject_name.as_deref(),
+        Some("ParentPage")
+    );
+    assert!(
+        web_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::NoDerivedState)
+    );
+
+    // 3. `scan_design` respects `--project`
+    let (design_report, _) = scan_design(
+        &opts,
+        &CliOverrides {
+            projects: vec!["@acme/web-react".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(design_report.projects.len(), 1);
+    assert_eq!(design_report.projects[0].name, "web-react");
+    assert!(
+        design_report
+            .diagnostics
+            .iter()
+            .all(|d| d.file.starts_with(&web_dir))
+    );
+
+    // 4. CLI `check` with repeatable & comma-separated `--project`
+    let check_out = Command::new(dotore_bin())
+        .args([
+            "check",
+            "--json",
+            "--no-fail",
+            "--project",
+            "billing-api,worker-engine",
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        check_out.status.success(),
+        "check --project failed: {}",
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+    let check_json: serde_json::Value = serde_json::from_slice(&check_out.stdout).unwrap();
+    let proj_names: Vec<&str> = check_json["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert_eq!(proj_names, vec!["worker", "api"]);
+    assert_eq!(check_json["summary"]["files_scanned"].as_u64(), Some(2));
+
+    // 5. CLI `score` with `--project`
+    let score_out = Command::new(dotore_bin())
+        .args([
+            "score",
+            "--no-fail",
+            "--project",
+            "apps/web-react",
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(score_out.status.success());
+    let score_val: u32 = String::from_utf8_lossy(&score_out.stdout)
+        .trim()
+        .parse()
+        .expect("Numeric score output");
+    assert_eq!(score_val, web_report.summary.health_score);
+
+    // 6. CLI `plan` and `report` with `--project`
+    let plans_dir = temp_dir.join("out-plans");
+    let plan_out = Command::new(dotore_bin())
+        .args([
+            "plan",
+            "--project",
+            "billing-api",
+            "--out",
+            plans_dir.to_str().unwrap(),
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(plan_out.status.success());
+    let plan_readme = fs::read_to_string(plans_dir.join("README.md")).unwrap();
+    assert!(plan_readme.contains("app.py"));
+    assert!(!plan_readme.contains("RootApp.tsx"));
+    assert!(!plan_readme.contains("ChildCard.tsx"));
+
+    let html_path = temp_dir.join("out-report.html");
+    let report_out = Command::new(dotore_bin())
+        .args([
+            "report",
+            "--no-open",
+            "--project",
+            "worker-engine",
+            "--output",
+            html_path.to_str().unwrap(),
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(report_out.status.success());
+    assert!(html_path.is_file());
+
+    // 7. CLI `fix --dry-run` with `--project` only touches the selected package
+    let fix_out = Command::new(dotore_bin())
+        .args([
+            "fix",
+            "--dry-run",
+            "--project",
+            "apps/web-react",
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(fix_out.status.success());
+    let fix_stdout = String::from_utf8_lossy(&fix_out.stdout);
+    assert!(fix_stdout.contains("ChildCard.tsx"));
+    assert!(!fix_stdout.contains("RootApp.tsx"));
+
+    // 8. CLI `design` with `--project`
+    let design_out = Command::new(dotore_bin())
+        .args([
+            "design",
+            "--json",
+            "--no-fail",
+            "--project",
+            "web-react",
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(design_out.status.success());
+    let design_json: serde_json::Value = serde_json::from_slice(&design_out.stdout).unwrap();
+    assert_eq!(design_json["projects"].as_array().unwrap().len(), 1);
+
+    // 9. Unknown `--project` exits with code 2 and lists available packages
+    let bad_out = Command::new(dotore_bin())
+        .args([
+            "check",
+            "--project",
+            "does-not-exist",
+            temp_dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(bad_out.status.code(), Some(2));
+    let bad_stderr = String::from_utf8_lossy(&bad_out.stderr);
+    assert!(bad_stderr.contains("Unknown workspace project \"does-not-exist\""));
+    assert!(bad_stderr.contains("Available workspace packages:"));
+    assert!(bad_stderr.contains("@acme/web-react (apps/web-react)"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
