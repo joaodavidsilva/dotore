@@ -16,7 +16,7 @@ pub use dotore_core::planner::{
 
 use crate::{
     graph::{ProjectGraph, ResolvedCallerSite},
-    ir::{ByteSpan, DepsSpec, FileIr, SubjectIr},
+    ir::{ArchitectureFileFacets, ByteSpan, DepsSpec, FileIr, SubjectIr},
     rules::{
         AutofixPatch, ByteEdit, Diagnostic, PrescriptionTier, RootCauseGroup, RuleId, SourceExcerpt,
     },
@@ -122,12 +122,24 @@ impl PlannerContext for ProjectGraph {
         count
     }
 
+    fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
+        self.files
+            .iter()
+            .find(|f| f.path == file)
+            .map(|f| &f.architecture_facets)
+    }
+
     fn find_rule_exemplar(
         &self,
         group: &RootCauseGroup,
-        _diagnostics: &[Diagnostic],
+        diagnostics: &[Diagnostic],
         sources: &HashMap<PathBuf, String>,
     ) -> Option<SourceExcerpt> {
+        if group.rule.is_architecture_soc_or_reuse_rule()
+            && let Some(ex) = find_architecture_exemplar_in_graph(self, group, diagnostics, sources)
+        {
+            return Some(ex);
+        }
         let mut sorted_files: Vec<&FileIr> = self.files.iter().collect();
         sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -162,6 +174,96 @@ impl PlannerContext for ProjectGraph {
 
         None
     }
+}
+
+fn find_architecture_exemplar_in_graph(
+    graph: &ProjectGraph,
+    group: &RootCauseGroup,
+    diagnostics: &[Diagnostic],
+    sources: &HashMap<PathBuf, String>,
+) -> Option<SourceExcerpt> {
+    let flagged_for_rule: BTreeSet<&Path> = diagnostics
+        .iter()
+        .filter(|d| d.rule == group.rule)
+        .map(|d| d.file.as_path())
+        .collect();
+
+    let mut ordered: Vec<&FileIr> = graph
+        .files
+        .iter()
+        .filter(|f| f.path != group.file && !flagged_for_rule.contains(f.path.as_path()))
+        .collect();
+    ordered.sort_by(|a, b| a.path.cmp(&b.path));
+
+    if group.rule == RuleId::ArchNoInlineTerminalUiPrimitives {
+        if let Some(ui_file) = ordered.iter().copied().find(|f| {
+            f.architecture_facets.is_ui_kit_module
+                || f.path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s == "ui" || s.ends_with("_ui"))
+        }) && let Some(ex) = excerpt_for_file_ir(ui_file, sources)
+        {
+            return Some(ex);
+        }
+    } else if group.rule == RuleId::ArchPreferFluentBuilder
+        && let Some(builder_file) = ordered
+            .iter()
+            .copied()
+            .find(|f| {
+                f.architecture_facets
+                    .defined_builder_types
+                    .iter()
+                    .any(|t| t == &group.target_name)
+            })
+            .or_else(|| {
+                ordered
+                    .iter()
+                    .copied()
+                    .find(|f| !f.architecture_facets.defined_builder_types.is_empty())
+            })
+        && let Some(ex) = excerpt_for_file_ir(builder_file, sources)
+    {
+        return Some(ex);
+    }
+
+    if let Some(cohesive) = ordered
+        .iter()
+        .copied()
+        .find(|f| f.architecture_facets.distinct_concern_buckets().len() == 1)
+        && let Some(ex) = excerpt_for_file_ir(cohesive, sources)
+    {
+        return Some(ex);
+    }
+
+    for candidate in ordered {
+        if let Some(ex) = excerpt_for_file_ir(candidate, sources) {
+            return Some(ex);
+        }
+    }
+
+    None
+}
+
+fn excerpt_for_file_ir(file: &FileIr, sources: &HashMap<PathBuf, String>) -> Option<SourceExcerpt> {
+    let src = sources
+        .get(&file.path)
+        .map_or(file.source.as_str(), String::as_str);
+    if src.is_empty() {
+        return None;
+    }
+    if let Some(subj) = file.subjects.iter().find(|s| s.name.is_some()) {
+        return Some(excerpt_from_span(&file.path, src, subj.span));
+    }
+    if let Some(sym) = file.symbol_outlines.first() {
+        return Some(excerpt_from_span(&file.path, src, sym.span));
+    }
+    let end = u32::try_from(src.len()).unwrap_or(0);
+    Some(excerpt_from_span(
+        &file.path,
+        src,
+        ByteSpan { start: 0, end },
+    ))
 }
 
 #[expect(

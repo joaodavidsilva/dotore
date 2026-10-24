@@ -17,8 +17,7 @@ pub(crate) use super::outlines_and_suppressions::extract_file_suppressions;
 
 use super::{
     dataflow::{
-        extract_async_flows, extract_mutations, extract_security_sinks,
-        extract_semantic_rule_sites,
+        extract_async_flows, extract_mutations, extract_security_sinks, extract_semantic_rule_sites,
     },
     jsx_subtree::extract_jsx_subtrees,
     module_ir::extract_module_ir,
@@ -27,8 +26,8 @@ use super::{
     react_ast::{RefEntry, extract_caller_sites, extract_jsx_elements},
     subject::extract_subjects,
     types::{
-        ByteSpan, ContextualOwnerSpansIr, FileIr, FileSuppressions, ModuleIr, MotionFileIr,
-        RelatedHookOwnerSpanIr, classify_file_context, compute_line_starts,
+        ArchitectureFileFacets, ByteSpan, ContextualOwnerSpansIr, FileIr, FileSuppressions,
+        ModuleIr, MotionFileIr, RelatedHookOwnerSpanIr, classify_file_context, compute_line_starts,
     },
 };
 
@@ -79,6 +78,7 @@ where
             context_providers: Vec::new(),
             context_consumers: Vec::new(),
             contextual_owner_spans: ContextualOwnerSpansIr::default(),
+            architecture_facets: ArchitectureFileFacets::default(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -120,6 +120,7 @@ where
             context_providers: Vec::new(),
             context_consumers: Vec::new(),
             contextual_owner_spans: ContextualOwnerSpansIr::default(),
+            architecture_facets: ArchitectureFileFacets::default(),
         };
         return f(&file_ir, &semantic_ret.semantic);
     }
@@ -131,7 +132,17 @@ where
         .with_jsx(true)
         .with_module(true);
 
-    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let mut parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.diagnostics.is_empty() && matches!(ext, "ts" | "mts" | "cts") {
+        let ts_no_jsx = SourceType::from_path(path)
+            .unwrap_or_default()
+            .with_jsx(false)
+            .with_module(true);
+        let reparsed = Parser::new(&allocator, source, ts_no_jsx).parse();
+        if reparsed.diagnostics.len() < parsed.diagnostics.len() {
+            parsed = reparsed;
+        }
+    }
     let semantic_ret = SemanticBuilder::new()
         .with_build_nodes(true)
         .build(&parsed.program);
@@ -191,6 +202,7 @@ where
     );
     let mut context_providers = Vec::new();
     let mut context_consumers = Vec::new();
+    let mut architecture_facets = ArchitectureFileFacets::default();
     crate::rules::state_and_effects::extract_state_and_effects_sites(
         &semantic,
         &line_starts,
@@ -214,6 +226,15 @@ where
         &mut semantic_sites,
         &mut context_providers,
         &mut context_consumers,
+    );
+    crate::rules::architecture::extract_reuse_architecture_facets(
+        path,
+        source,
+        &semantic,
+        &subjects,
+        &module,
+        &line_starts,
+        &mut architecture_facets,
     );
     crate::rules::effect_teardown::extract_effect_teardown_sites(
         path,
@@ -255,6 +276,7 @@ where
         context_providers,
         context_consumers,
         contextual_owner_spans,
+        architecture_facets,
     };
 
     f(&file_ir, &semantic)

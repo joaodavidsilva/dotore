@@ -19,7 +19,10 @@ fn js_language_analyzer_supports_all_js_ts_extensions_and_manifest_filenames() {
     let analyzer = JsLanguageAnalyzer::new();
     assert_eq!(analyzer.language_id(), LanguageId::JavaScript);
     assert_eq!(analyzer.language_id(), LanguageId::Js);
-    assert_eq!(analyzer.manifest_filenames(), &["package.json", "angular.json"]);
+    assert_eq!(
+        analyzer.manifest_filenames(),
+        &["package.json", "angular.json"]
+    );
 
     for supported in [
         "src/index.js",
@@ -176,10 +179,7 @@ export function UserCard({ firstName, lastName }: UserCardProps) {
     assert_eq!(extracted.subjects_count, 1);
     assert_eq!(extracted.effects_count, 1);
     assert_eq!(extracted.subject_spans.len(), 1);
-    assert_eq!(
-        extracted.subject_spans[0].0.as_deref(),
-        Some("UserCard")
-    );
+    assert_eq!(extracted.subject_spans[0].0.as_deref(), Some("UserCard"));
 
     // Verify Symbol Outlines
     let outline_names_and_kinds: Vec<(&str, SymbolKind)> = extracted
@@ -343,7 +343,10 @@ export function Suppressed({ a, b }: { a: string; b: string }) {
     ));
 
     let mut sources = HashMap::new();
-    sources.insert(PathBuf::from("src/ProfilePage.tsx"), profile_src.to_string());
+    sources.insert(
+        PathBuf::from("src/ProfilePage.tsx"),
+        profile_src.to_string(),
+    );
     sources.insert(PathBuf::from("src/App.tsx"), app_src.to_string());
 
     let scoped = filter_diagnostics_by_scope(
@@ -390,7 +393,10 @@ fn js_language_analyzer_validates_syntax_across_js_jsx_ts_tsx_mjs_cjs_and_autofi
             "src/View.tsx",
             "export function View({ items }: { items: string[] }) { return <ul>{items.map((x) => <li key={x}>{x}</li>)}</ul>; }\n",
         ),
-        ("src/esm.mjs", "export default function run() { return 42; }\n"),
+        (
+            "src/esm.mjs",
+            "export default function run() { return 42; }\n",
+        ),
         ("src/cjs.cjs", "module.exports = { ok: true };\n"),
     ];
 
@@ -403,9 +409,15 @@ fn js_language_analyzer_validates_syntax_across_js_jsx_ts_tsx_mjs_cjs_and_autofi
 
     let invalid_cases = [
         ("src/module.js", "export const add = (a, b) => {\n"),
-        ("src/Card.jsx", "export const Card = () => <div><span></div>;\n"),
+        (
+            "src/Card.jsx",
+            "export const Card = () => <div><span></div>;\n",
+        ),
         ("src/types.ts", "export interface Broken { x: ;\n"),
-        ("src/View.tsx", "export function View() { return <div prop={ />; }\n"),
+        (
+            "src/View.tsx",
+            "export function View() { return <div prop={ />; }\n",
+        ),
         ("src/esm.mjs", "import { from 'mod';\n"),
         ("src/cjs.cjs", "module.exports = {{{;\n"),
     ];
@@ -471,4 +483,331 @@ fn js_language_analyzer_validates_syntax_across_js_jsx_ts_tsx_mjs_cjs_and_autofi
         apply_patches_to_source_with_analyzers(source, &[invalid_patch], analyzers);
     assert!(rejected.is_empty());
     assert_eq!(untouched, source);
+}
+
+#[test]
+fn js_language_analyzer_detects_duplicated_helper_logic_across_modules_and_ignores_trivial_helpers()
+{
+    use dotore_core::build_root_cause_groups_and_capsules;
+
+    let analyzer = JsLanguageAnalyzer;
+
+    let mod_a_src = r#"function normalizeHeader(raw: string, prefix: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        return prefix;
+    }
+    const cleaned = trimmed.toLowerCase().replace(/\s+/g, "-");
+    return `${prefix}:${cleaned}`;
+}
+
+const getId = (item: { id: string }) => item.id.trim();
+
+export function formatRouteHeader(input: string): string {
+    return normalizeHeader(input, "route") + getId({ id: input });
+}
+"#;
+
+    let mod_b_src = r#"const cleanToken = (input: string, ns: string): string => {
+    const stripped = input.trim();
+    if (!stripped) {
+        return ns;
+    }
+    const slug = stripped.toLowerCase().replace(/\s+/g, "-");
+    return `${ns}:${slug}`;
+};
+
+const pickId = (entry: { id: string }) => entry.id.trim();
+
+export function formatEventHeader(name: string): string {
+    return cleanToken(name, "event") + pickId({ id: name });
+}
+"#;
+
+    let mod_c_src = r#"export function uniqueSharedHelper(value: string): string {
+    const lines = value.split("\n");
+    const out: string[] = [];
+    for (const line of lines) {
+        if (line.length > 0) {
+            out.push(line.toUpperCase());
+        }
+    }
+    return out.join(",");
+}
+"#;
+
+    let files = vec![
+        analyzer.extract_file(Path::new("src/routes.ts"), mod_a_src),
+        analyzer.extract_file(Path::new("src/events.ts"), mod_b_src),
+        analyzer.extract_file(Path::new("src/shared.ts"), mod_c_src),
+    ];
+
+    // 1-2 line trivial helpers (`getId` / `pickId`) must not be recorded in helper_fingerprints
+    assert_eq!(files[0].architecture_facets.helper_fingerprints.len(), 1);
+    assert_eq!(
+        files[0].architecture_facets.helper_fingerprints[0].name,
+        "normalizeHeader"
+    );
+    assert_eq!(files[1].architecture_facets.helper_fingerprints.len(), 1);
+    assert_eq!(
+        files[1].architecture_facets.helper_fingerprints[0].name,
+        "cleanToken"
+    );
+    assert_eq!(
+        files[0].architecture_facets.helper_fingerprints[0].normalized_hash,
+        files[1].architecture_facets.helper_fingerprints[0].normalized_hash
+    );
+    // Exported function in `src/shared.ts` is not a private helper
+    assert!(files[2].architecture_facets.helper_fingerprints.is_empty());
+
+    let pkg = WorkspacePackage {
+        name: "app".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    };
+
+    let res = analyzer.analyze_package(&pkg, &files, Some(&[RuleId::ArchNoDuplicatedHelperLogic]));
+    assert!(
+        !res.diagnostics.is_empty(),
+        "Expected duplicated helper diagnostic"
+    );
+    for diag in &res.diagnostics {
+        assert_eq!(diag.rule, RuleId::ArchNoDuplicatedHelperLogic);
+        assert_eq!(diag.severity, RuleSeverity::Warning);
+        assert_eq!(diag.tier, PrescriptionTier::Refactor);
+        assert!(diag.autofix.is_none());
+        assert!(!diag.caller_sites.is_empty());
+        assert!(!diag.cascade_steps.is_empty());
+    }
+
+    let mut sources = HashMap::new();
+    sources.insert(PathBuf::from("src/routes.ts"), mod_a_src.to_string());
+    sources.insert(PathBuf::from("src/events.ts"), mod_b_src.to_string());
+    sources.insert(PathBuf::from("src/shared.ts"), mod_c_src.to_string());
+
+    let (groups, capsules) =
+        build_root_cause_groups_and_capsules(&files, &res.diagnostics, &sources);
+    assert_eq!(
+        groups.len(),
+        1,
+        "Peer duplicated helpers must cluster into a single Root-Cause Group"
+    );
+    assert_eq!(capsules.len(), 1);
+    assert!(!capsules[0].caller_site_excerpts.is_empty());
+    assert!(capsules[0].exemplar.is_some());
+}
+
+#[test]
+fn js_language_analyzer_detects_prefer_fluent_builder_and_skips_types_with_builders() {
+    use dotore_core::build_root_cause_groups_and_capsules;
+
+    let analyzer = JsLanguageAnalyzer;
+
+    let builder_src = r#"export interface RequestConfig {
+    url: string;
+    method: string;
+    timeoutMs: number;
+    retryCount: number;
+    headers: Record<string, string>;
+}
+
+export class RequestConfigBuilder {
+    withTimeout(ms: number): this {
+        return this;
+    }
+    build(): RequestConfig {
+        return { url: "/", method: "GET", timeoutMs: 0, retryCount: 0, headers: {} };
+    }
+}
+"#;
+
+    let rules_a_src = r#"export interface DiagnosticRecord {
+    rule: string;
+    file: string;
+    message: string;
+    autofix: string | null;
+    callerSites: string[];
+    suppressed: boolean;
+}
+
+export function checkFirst(file: string): DiagnosticRecord {
+    const diag: DiagnosticRecord = {
+        rule: "rule-a",
+        file,
+        message: "First issue",
+        autofix: null,
+        callerSites: [],
+        suppressed: false,
+    };
+    return diag;
+}
+
+export function checkSecond(file: string): DiagnosticRecord {
+    return <DiagnosticRecord>{
+        rule: "rule-b",
+        file,
+        message: "Second issue",
+        autofix: null,
+        callerSites: [],
+        suppressed: false,
+    };
+}
+"#;
+
+    let rules_b_src = r#"import type { DiagnosticRecord } from "./rulesA";
+import type { RequestConfig } from "./requestBuilder";
+
+export function checkThird(file: string): DiagnosticRecord {
+    const entry: DiagnosticRecord = {
+        rule: "rule-c",
+        file,
+        message: "Third issue",
+        autofix: null,
+        callerSites: [],
+        suppressed: false,
+    };
+    return entry;
+}
+
+export function makeRequests(): RequestConfig[] {
+    const r1: RequestConfig = { url: "/a", method: "GET", timeoutMs: 0, retryCount: 0, headers: {} };
+    const r2: RequestConfig = { url: "/b", method: "POST", timeoutMs: 0, retryCount: 0, headers: {} };
+    const r3: RequestConfig = { url: "/c", method: "PUT", timeoutMs: 0, retryCount: 0, headers: {} };
+    return [r1, r2, r3];
+}
+"#;
+
+    let files = vec![
+        analyzer.extract_file(Path::new("src/requestBuilder.ts"), builder_src),
+        analyzer.extract_file(Path::new("src/rulesA.ts"), rules_a_src),
+        analyzer.extract_file(Path::new("src/rulesB.ts"), rules_b_src),
+    ];
+
+    assert!(
+        files[0]
+            .architecture_facets
+            .defined_builder_types
+            .contains(&"RequestConfig".to_string())
+    );
+    assert_eq!(files[1].architecture_facets.struct_literal_sites.len(), 2);
+    assert!(!files[2].architecture_facets.struct_literal_sites.is_empty());
+
+    let pkg = WorkspacePackage {
+        name: "app".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    };
+
+    let res = analyzer.analyze_package(&pkg, &files, Some(&[RuleId::ArchPreferFluentBuilder]));
+    assert!(
+        !res.diagnostics.is_empty(),
+        "Expected ArchPreferFluentBuilder diagnostic"
+    );
+    for diag in &res.diagnostics {
+        assert_eq!(diag.rule, RuleId::ArchPreferFluentBuilder);
+        assert_eq!(diag.target_name, "DiagnosticRecord");
+        assert_eq!(diag.severity, RuleSeverity::Warning);
+        assert_eq!(diag.tier, PrescriptionTier::Refactor);
+        assert!(diag.autofix.is_none());
+        assert!(!diag.caller_sites.is_empty());
+        assert!(!diag.cascade_steps.is_empty());
+    }
+
+    let mut sources = HashMap::new();
+    sources.insert(
+        PathBuf::from("src/requestBuilder.ts"),
+        builder_src.to_string(),
+    );
+    sources.insert(PathBuf::from("src/rulesA.ts"), rules_a_src.to_string());
+    sources.insert(PathBuf::from("src/rulesB.ts"), rules_b_src.to_string());
+
+    let (groups, capsules) =
+        build_root_cause_groups_and_capsules(&files, &res.diagnostics, &sources);
+    assert_eq!(
+        groups.len(),
+        1,
+        "All DiagnosticRecord literal sites must cluster into one Root-Cause Group"
+    );
+    assert_eq!(capsules.len(), 1);
+    assert!(!capsules[0].caller_site_excerpts.is_empty());
+    let exemplar = capsules[0].exemplar.as_ref().expect("builder exemplar");
+    assert_eq!(exemplar.file, PathBuf::from("src/requestBuilder.ts"));
+}
+
+#[test]
+fn js_language_analyzer_detects_inline_terminal_ui_primitives_outside_ui_kit_modules() {
+    use dotore_core::build_root_cause_groups_and_capsules;
+
+    let analyzer = JsLanguageAnalyzer;
+
+    let ui_kit_src = r#"export function renderBox(title: string, body: string): string {
+    return `\x1b[36m┌── ${title} ──┐\x1b[0m\n│ ${body} │\n└──────────┘`;
+}
+"#;
+
+    let reporter_src = r#"export function formatSummary(status: string): string {
+    const header = "\x1b[31mFAIL\x1b[0m";
+    const border = `╭────────────╮\n│ ${status} │\n╰────────────╯`;
+    return `${header}\n${border}`;
+}
+"#;
+
+    let test_src = r#"export function testSnapshot(): string {
+    return "\x1b[32m┌──┐\x1b[0m";
+}
+"#;
+
+    let files = vec![
+        analyzer.extract_file(Path::new("src/terminal_ui.ts"), ui_kit_src),
+        analyzer.extract_file(Path::new("src/reporter.ts"), reporter_src),
+        analyzer.extract_file(Path::new("src/reporter.test.ts"), test_src),
+    ];
+
+    assert!(files[0].architecture_facets.is_ui_kit_module);
+    assert!(
+        files[0]
+            .architecture_facets
+            .inline_terminal_ui_sites
+            .is_empty()
+    );
+    assert!(!files[1].architecture_facets.is_ui_kit_module);
+    assert_eq!(
+        files[1].architecture_facets.inline_terminal_ui_sites.len(),
+        2
+    );
+
+    let pkg = WorkspacePackage {
+        name: "app".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    };
+
+    let res = analyzer.analyze_package(
+        &pkg,
+        &files,
+        Some(&[RuleId::ArchNoInlineTerminalUiPrimitives]),
+    );
+    assert_eq!(res.diagnostics.len(), 2);
+    for diag in &res.diagnostics {
+        assert_eq!(diag.rule, RuleId::ArchNoInlineTerminalUiPrimitives);
+        assert_eq!(diag.file, PathBuf::from("src/reporter.ts"));
+        assert_eq!(diag.severity, RuleSeverity::Warning);
+        assert_eq!(diag.tier, PrescriptionTier::Surgical);
+        assert!(diag.autofix.is_none());
+    }
+
+    let mut sources = HashMap::new();
+    sources.insert(PathBuf::from("src/terminal_ui.ts"), ui_kit_src.to_string());
+    sources.insert(PathBuf::from("src/reporter.ts"), reporter_src.to_string());
+    sources.insert(PathBuf::from("src/reporter.test.ts"), test_src.to_string());
+
+    let (groups, capsules) =
+        build_root_cause_groups_and_capsules(&files, &res.diagnostics, &sources);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(capsules.len(), 1);
+    let exemplar = capsules[0].exemplar.as_ref().expect("UI kit exemplar");
+    assert_eq!(exemplar.file, PathBuf::from("src/terminal_ui.ts"));
 }
