@@ -10,6 +10,8 @@ use std::{
 #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
 use rayon::prelude::*;
 
+/// Clap command-line argument parser and subcommand execution runners.
+pub mod cli;
 /// Project configuration loader (`dotore.config.*` / `package.json#dotore`) and **Capability Gate**.
 pub(crate) mod config;
 /// Git diff scopes (`--scope`, `--base`, `--staged`), **Contextual Owner** filtering, and `--baseline` multiset comparison.
@@ -18,6 +20,8 @@ pub(crate) mod diff;
 pub(crate) mod fixer;
 /// Deterministic **Root-Cause Grouping**, **Blast Radius**, **Fix Capsules**, and `dotore plan` generator.
 pub(crate) mod planner;
+/// Live terminal progress bar and 30fps spinner animation for workspace scans.
+pub mod progress;
 /// Terminal and JSON reporters.
 pub(crate) mod report;
 /// Native Chrome DevTools Protocol (CDP) runtime profiler (`dotore scan`).
@@ -28,7 +32,10 @@ pub(crate) mod scanner;
 pub(crate) mod score;
 /// Native fuzzy AST **Symbol Outline** search (`dotore search`).
 pub(crate) mod search;
+/// Interactive TUI explorer (`hjkl`/arrow navigation, dynamic filter tabs, grouping modes, `/` search, `ESC` exit).
+pub mod tui;
 
+pub use cli::{Cli, Commands, run_cli};
 pub use config::{
     Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
     DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
@@ -61,11 +68,14 @@ pub use dotore_core::{
     },
     ui::{
         self, AsciiBox, Badge, BadgeKind, BoxBorderStyle, ColorMode, DEFAULT_BOX_WIDTH,
-        FilterTabBar, FilterTabItem, FlowDiagram, GaugeBar, LiveScanProgressSnapshot, LiveSpinner,
-        SPINNER_FRAMES, StatusBar, TuiFilterKind, build_filter_tabs, classify_style_bucket,
-        current_scan_progress, format_spinner_frame, set_progress_phase, strip_ansi_codes,
-        style_bucket_color, tick_progress_file, visible_char_width,
+        FilterTabBar, FilterTabItem, FlowDiagram, GaugeBar, StatusBar, TuiFilterKind,
+        build_filter_tabs, classify_style_bucket, strip_ansi_codes, style_bucket_color,
+        visible_char_width,
     },
+};
+pub use progress::{
+    LiveProgressBar, LiveScanProgressSnapshot, LiveSpinner, SPINNER_FRAMES, current_scan_progress,
+    format_spinner_frame, set_progress_phase, tick_progress_file,
 };
 #[cfg(feature = "js")]
 pub use dotore_js::{
@@ -129,6 +139,11 @@ pub use search::{
     search_project_sources, search_project_sources_with, search_project_sources_with_analyzers,
     search_symbols, search_symbols_with, search_symbols_with_analyzers, should_highlight_search,
     should_highlight_stdout,
+};
+pub use tui::{
+    TuiFilterTab, TuiGroupMode, TuiState, build_score_gauge, diagnostic_matches_tab_and_search,
+    draw_tui_frame, handle_tui_search_key, render_tui_body_lines, render_tui_frame,
+    run_interactive_tui, should_launch_tui,
 };
 
 use diff::{collect_git_diff, load_baseline_entries};
