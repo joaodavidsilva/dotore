@@ -88,18 +88,41 @@ crates/
         effect_teardown.rs# Effect Node listener/observer/RAF/timer teardown and React correctness rules
         js_performance.rs # loop, hot-path JavaScript allocation, and immutable sort/early-exit rules
         performance.rs    # React re-render, transition loading, hydration, and CSS/SVG motion performance rules
-        r3f.rs            # Three.js, WebGL, and React Three Fiber 60fps frame-loop rules
-        react_native.rs   # React Native and Expo AST, animation/style, and project configuration rules
+        r3f.rs            # Three.js, WebGL, and React Three Fiber 60fps frame-loop module root
+        r3f/
+          three_lifecycle.rs # Three.js geometry/material/texture constructors, disposal lifecycle, and scene contracts
+          use_frame_and_hooks.rs # React Three Fiber useFrame, animation loops, useThree, loader hooks, and pointer rules
+          webgl_and_shaders.rs # WebGL and GLSL ShaderMaterial/RawShaderMaterial stage and uniform rules
+          webgpu.rs       # WebGPU renderer, Canvas compatibility, and TSL uniform branch rules
+        react_native.rs   # React Native and Expo module root
+        react_native/
+          lists_and_layout.rs # ScrollView, FlatList/FlashList/LegendList, and host JSX layout rules
+          animations_and_styles.rs # Reanimated 4, StyleSheet, Dimensions, Detox, and Pressable/GestureDetector rules
+          navigation_and_expo.rs # React Native and Expo module imports, bottom sheets, and process.env/Platform rules
+          platform_and_config.rs # package.json, Babel, Metro, Gradle, app.json, lockfile, and .gitignore rules
         react_builtins.rs # exhaustive-deps, rules-of-hooks, JSX/fragment built-ins, class lifecycles, and inline prop gating
-        react_router.rs   # React Router v7/v8 route tree, loader/action/middleware, and navigation rules
+        react_router.rs   # React Router v7/v8 module root
+        react_router/
+          loaders_and_actions.rs # loaders, actions, sessions, cookies, handleError, meta, and error UI rules
+          routes_and_middleware.rs # route tree, JSX <Route>, lazy routes, middleware, and v8 migration rules
+          navigation_and_links.rs # navigation, <Link>, <a>, useSearchParams, useBlocker, and startTransition rules
         reduced_motion.rs # cross-file motion library and CSS prefers-reduced-motion rules
-        remotion.rs       # Motion, Remotion, TanStack Form/Table/Virtual, Redux, and UI primitive rules
+        remotion.rs       # Motion, Remotion, TanStack Form/Table/Virtual, Redux, and UI primitive module root
+        remotion/
+          motion.rs       # Framer Motion / motion/react AnimatePresence, layout, drag, keyframe, and render rules
+          remotion_video.rs # Remotion media elements, CSS animation/transition/url, calculateMetadata, and delayRender rules
+          tanstack_form_table_virtual.rs # TanStack Form, Table, and Virtual rules
+          redux_and_ui_primitives.rs # Redux useSelector and Radix/Base UI/shadcn/styled-components primitive rules
         security.rs       # XSS, eval, SSRF, and trust-boundary security rules
         server_nextjs.rs  # Server Actions, RSC, and Next.js App Router rules
         state_and_effects.rs # state/effect loop, render setState, async/timer refs, and lazy init rules
         stores.rs         # Zustand, Jotai, MobX, and Valtio state-store rules
         supply_chain.rs   # pnpm hardening, RSC advisory, and Socket supply-chain rules
-        tanstack.rs       # TanStack Query and TanStack Start loader/query rules
+        tanstack.rs       # TanStack Query and TanStack Start module root
+        tanstack/
+          query.rs        # TanStack Query hooks, QueryClient stability, destructuring, queryFn, and refetch rules
+          start.rs        # TanStack Start server functions, loaders, and __root route rules
+          router_and_invalidation.rs # TanStack Query mutation invalidation and TanStack Router route/loader/anchor rules
   dotore-py/
     src/
       lib.rs              # PyLanguageAnalyzer (LanguageAnalyzer) facade and dotore-py crate root
