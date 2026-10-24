@@ -28,12 +28,13 @@ pub mod search;
 pub mod ui;
 
 pub use config::{
-    Capability, CapabilityGate, CapabilityPredicate, ConfigMutation, ConfigTargetKind,
-    DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole, SupplyChainConfig,
-    WorkspacePackage, content_enables_react_compiler, discover_workspace_packages,
-    discover_workspace_packages_with_analyzers, find_nearest_ancestor_file, load_config_from_dir,
-    load_local_config_in_dir, mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str,
-    relative_forward_slash, resolve_package_for_file, strip_jsonc, strip_source_extension,
+    ArchitectureThresholdsConfig, Capability, CapabilityGate, CapabilityPredicate, ConfigMutation,
+    ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
+    SupplyChainConfig, WorkspacePackage, content_enables_react_compiler,
+    discover_workspace_packages, discover_workspace_packages_with_analyzers,
+    find_nearest_ancestor_file, load_config_from_dir, load_local_config_in_dir,
+    mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str, relative_forward_slash,
+    resolve_package_for_file, strip_jsonc, strip_source_extension,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -50,10 +51,12 @@ pub use fixer::{
     apply_patches_to_source_with_validator, register_default_syntax_validator,
 };
 pub use ir::{
-    BlockDisableRange, ByteSpan, ContextualOwnerSpansIr, ExtractedFile, FileContext,
-    FileSuppressions, LanguageAnalyzer, LanguageId, LineDisableDirective, OpenerLineRange,
-    PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite, SourceLoc,
-    SubjectEffectOwner, SuppressionDirectiveKind, SymbolKind, SymbolOutline, classify_file_context,
+    ArchitectureFileFacets, BlockDisableRange, ByteSpan, ConcernBucket, ConcernSignalSite,
+    ContextualOwnerSpansIr, ExtractedFile, FileContext, FileSuppressions, HelperFingerprintIr,
+    InlineTerminalUiPrimitiveSiteIr, LanguageAnalyzer, LanguageId, LineDisableDirective,
+    OpenerLineRange, PackageAnalysisResult, RelatedHookOwnerSpanIr, ResolvedCallerSite, SourceLoc,
+    StaticCatalogSiteIr, StructLiteralConstructionSiteIr, SubjectEffectOwner,
+    SuppressionDirectiveKind, SymbolKind, SymbolOutline, classify_file_context,
     compute_line_starts, extract_c_style_comment_suppressions,
     extract_normalized_signature_header, loc_from_line_starts, map_rust_allow_lint_to_rules,
     parse_comment_disable_directive, parse_python_suppression_directive, rule_list_matches,
@@ -70,12 +73,11 @@ pub use report::{
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
     build_extracted_report_with_packages, build_report_from_planner_context, build_rule_catalog,
     ci_config, ci_install, ci_upgrade, diagnose_why_not_active_common, explain_location,
-    explain_location_with_analyzers, explain_rule, format_design_report,
-    format_design_report_pretty, format_fix_report, format_install_report,
+    explain_location_with_analyzers, explain_rule, format_architecture_signal_explanation,
+    format_design_report, format_design_report_pretty, format_fix_report, format_install_report,
     format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
     format_terminal_report_pretty, format_why_report_text, install_dotore, parse_why_location,
-    render_code_frame, render_html_report,
-    write_and_open_html_report, write_json_report,
+    render_code_frame, render_html_report, write_and_open_html_report, write_json_report,
 };
 pub use rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,

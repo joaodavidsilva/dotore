@@ -15,8 +15,8 @@ use serde::Serialize;
 
 use crate::{
     ir::{
-        ByteSpan, ExtractedFile, LanguageId, ResolvedCallerSite, compute_line_starts,
-        loc_from_line_starts,
+        ArchitectureFileFacets, ByteSpan, ExtractedFile, LanguageId, ResolvedCallerSite,
+        compute_line_starts, loc_from_line_starts,
     },
     report::JsonReport,
     rules::{
@@ -77,6 +77,11 @@ pub trait PlannerContext {
     ) -> Option<SourceExcerpt> {
         None
     }
+
+    /// Returns the extracted [`ArchitectureFileFacets`] for `file`, if available.
+    fn architecture_facets_for_file(&self, _file: &Path) -> Option<&ArchitectureFileFacets> {
+        None
+    }
 }
 
 impl PlannerContext for [ExtractedFile] {
@@ -106,6 +111,21 @@ impl PlannerContext for [ExtractedFile] {
             })
             .unwrap_or_default()
     }
+
+    fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
+        self.iter()
+            .find(|f| f.path == file)
+            .map(|f| &f.architecture_facets)
+    }
+
+    fn find_rule_exemplar(
+        &self,
+        group: &RootCauseGroup,
+        diagnostics: &[Diagnostic],
+        sources: &HashMap<PathBuf, String>,
+    ) -> Option<SourceExcerpt> {
+        find_architecture_exemplar_in_extracted_files(self, group, diagnostics, sources)
+    }
 }
 
 impl PlannerContext for Vec<ExtractedFile> {
@@ -115,6 +135,20 @@ impl PlannerContext for Vec<ExtractedFile> {
 
     fn subject_spans_for_file(&self, file: &Path) -> Vec<(Option<String>, ByteSpan)> {
         self.as_slice().subject_spans_for_file(file)
+    }
+
+    fn architecture_facets_for_file(&self, file: &Path) -> Option<&ArchitectureFileFacets> {
+        self.as_slice().architecture_facets_for_file(file)
+    }
+
+    fn find_rule_exemplar(
+        &self,
+        group: &RootCauseGroup,
+        diagnostics: &[Diagnostic],
+        sources: &HashMap<PathBuf, String>,
+    ) -> Option<SourceExcerpt> {
+        self.as_slice()
+            .find_rule_exemplar(group, diagnostics, sources)
     }
 }
 
@@ -152,7 +186,12 @@ pub fn compute_root_cause_group_id(diag: &Diagnostic) -> String {
         );
     }
 
-    if diag.rule.as_str() == "duplicate-jsx-subtree" {
+    if matches!(
+        diag.rule,
+        RuleId::DuplicateJsxSubtree
+            | RuleId::ArchNoDuplicatedHelperLogic
+            | RuleId::ArchPreferFluentBuilder
+    ) {
         return format!(
             "rcg::{}::{}",
             diag.rule.as_str(),
@@ -161,6 +200,19 @@ pub fn compute_root_cause_group_id(diag: &Diagnostic) -> String {
     }
 
     let file_key = normalize_path_key(&diag.file);
+    if diag.rule.is_architecture_soc_or_reuse_rule() {
+        let slug_source = if diag.target_name.is_empty() {
+            diag.subject_name.as_deref().unwrap_or(diag.rule.as_str())
+        } else {
+            &diag.target_name
+        };
+        return format!(
+            "rcg::{}::{}::{}",
+            diag.rule.as_str(),
+            file_key,
+            normalize_slug(slug_source)
+        );
+    }
     if let Some(subject) = &diag.subject_name {
         format!(
             "rcg::{}::{}::{}",
@@ -590,6 +642,18 @@ pub fn build_fix_capsule<C: PlannerContext + ?Sized>(
             }
         }
     }
+    if caller_site_excerpts.is_empty()
+        && group.rule.is_architecture_soc_or_reuse_rule()
+        && let Some(facets) = ctx.architecture_facets_for_file(&group.file)
+        && let Some(source) = sources.get(&group.file)
+    {
+        for span in collect_architecture_signal_spans(facets) {
+            let excerpt = excerpt_from_span(&group.file, source, span);
+            if seen_callers.insert((group.file.clone(), excerpt.start_line, 1)) {
+                caller_site_excerpts.push(excerpt);
+            }
+        }
+    }
 
     let exemplar = find_repository_exemplar(ctx, group, diagnostics, sources);
     let invariants = invariants_for_rule(group.rule, group.tier);
@@ -729,6 +793,136 @@ fn find_repository_exemplar<C: PlannerContext + ?Sized>(
     None
 }
 
+fn collect_architecture_signal_spans(facets: &ArchitectureFileFacets) -> Vec<ByteSpan> {
+    let mut spans = Vec::new();
+    for sig in &facets.concern_signals {
+        if sig.span.end > sig.span.start {
+            spans.push(sig.span);
+        }
+    }
+    for cat in &facets.static_catalog_sites {
+        if cat.span.end > cat.span.start {
+            spans.push(cat.span);
+        }
+    }
+    for ui in &facets.inline_terminal_ui_sites {
+        if ui.span.end > ui.span.start {
+            spans.push(ui.span);
+        }
+    }
+    for lit in &facets.struct_literal_sites {
+        if lit.span.end > lit.span.start {
+            spans.push(lit.span);
+        }
+    }
+    for helper in &facets.helper_fingerprints {
+        if helper.span.end > helper.span.start {
+            spans.push(helper.span);
+        }
+    }
+    spans
+}
+
+fn find_architecture_exemplar_in_extracted_files(
+    files: &[ExtractedFile],
+    group: &RootCauseGroup,
+    diagnostics: &[Diagnostic],
+    sources: &HashMap<PathBuf, String>,
+) -> Option<SourceExcerpt> {
+    if !group.rule.is_architecture_soc_or_reuse_rule() {
+        return None;
+    }
+
+    let flagged_for_rule: BTreeSet<&Path> = diagnostics
+        .iter()
+        .filter(|d| d.rule == group.rule)
+        .map(|d| d.file.as_path())
+        .collect();
+
+    let mut ordered: Vec<&ExtractedFile> = files
+        .iter()
+        .filter(|f| f.path != group.file && !flagged_for_rule.contains(f.path.as_path()))
+        .collect();
+    ordered.sort_by(|a, b| {
+        let a_same = same_language_family(&group.file, &a.path);
+        let b_same = same_language_family(&group.file, &b.path);
+        b_same.cmp(&a_same).then_with(|| a.path.cmp(&b.path))
+    });
+
+    if group.rule == RuleId::ArchNoInlineTerminalUiPrimitives {
+        if let Some(ui_file) = ordered.iter().copied().find(|f| {
+            f.architecture_facets.is_ui_kit_module
+                || f.path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s == "ui" || s.ends_with("_ui"))
+        }) && let Some(ex) = excerpt_for_extracted_file(ui_file, sources)
+        {
+            return Some(ex);
+        }
+    } else if group.rule == RuleId::ArchPreferFluentBuilder
+        && let Some(builder_file) = ordered
+            .iter()
+            .copied()
+            .find(|f| {
+                f.architecture_facets
+                    .defined_builder_types
+                    .iter()
+                    .any(|t| t == &group.target_name)
+            })
+            .or_else(|| {
+                ordered
+                    .iter()
+                    .copied()
+                    .find(|f| !f.architecture_facets.defined_builder_types.is_empty())
+            })
+        && let Some(ex) = excerpt_for_extracted_file(builder_file, sources)
+    {
+        return Some(ex);
+    }
+
+    if let Some(cohesive) = ordered
+        .iter()
+        .copied()
+        .find(|f| f.architecture_facets.distinct_concern_buckets().len() == 1)
+        && let Some(ex) = excerpt_for_extracted_file(cohesive, sources)
+    {
+        return Some(ex);
+    }
+
+    for candidate in ordered {
+        if let Some(ex) = excerpt_for_extracted_file(candidate, sources) {
+            return Some(ex);
+        }
+    }
+
+    None
+}
+
+fn excerpt_for_extracted_file(
+    file: &ExtractedFile,
+    sources: &HashMap<PathBuf, String>,
+) -> Option<SourceExcerpt> {
+    let src = sources
+        .get(&file.path)
+        .map_or(file.source.as_str(), String::as_str);
+    if src.is_empty() {
+        return None;
+    }
+    if let Some((_, span, _)) = file.subject_spans.iter().find(|(n, _, _)| n.is_some()) {
+        return Some(excerpt_from_span(&file.path, src, *span));
+    }
+    if let Some(sym) = file.symbol_outlines.first() {
+        return Some(excerpt_from_span(&file.path, src, sym.span));
+    }
+    let end = u32::try_from(src.len()).unwrap_or(0);
+    Some(excerpt_from_span(
+        &file.path,
+        src,
+        ByteSpan { start: 0, end },
+    ))
+}
+
 fn same_language_family(a: &Path, b: &Path) -> bool {
     match (LanguageId::from_path(a), LanguageId::from_path(b)) {
         (
@@ -768,6 +962,33 @@ fn invariants_for_rule(rule: RuleId, tier: PrescriptionTier) -> Vec<&'static str
         }
         RuleId::NoFetchInEffect => {
             inv.push("Ensure in-flight requests are canceled or deduplicated so stale responses never overwrite newer state.");
+        }
+        RuleId::ArchThinEntrypoint => {
+            inv.push("Keep the entrypoint as a thin adapter that parses CLI/HTTP inputs, delegates to library modules, and maps results to exit/status codes.");
+        }
+        RuleId::ArchNoMixedIoAndPresentation => {
+            inv.push("Separate data/network/filesystem I/O functions from terminal/UI presentation into dedicated modules with pure data transfer structs at the boundary.");
+        }
+        RuleId::ArchSeparateStaticCatalogFromTypes => {
+            inv.push("Move large static data tables and constant registries into a dedicated catalog submodule while keeping core domain type definitions in a focused types module.");
+        }
+        RuleId::ArchNoMixedDomainMonolith => {
+            inv.push("Decompose unrelated domain symbol clusters into focused domain submodules and re-export the public contract at the package/module boundary.");
+        }
+        RuleId::ArchNoInlineTerminalUiPrimitives => {
+            inv.push("Route all ANSI escape sequences and Unicode box-drawing output through the shared terminal UI component kit instead of inline string literals.");
+        }
+        RuleId::ArchPreferFluentBuilder => {
+            inv.push("Provide a constructor or fluent `with_*` builder on the type and replace repetitive multi-field literal construction sites across modules.");
+        }
+        RuleId::ArchNoDuplicatedHelperLogic => {
+            inv.push("Extract duplicated private helper logic with identical AST structure into a shared internal utility or matcher module.");
+        }
+        RuleId::RsArchPreferPubCrateModules => {
+            inv.push("Narrow internal submodule declarations from `pub mod` to `pub(crate) mod` (or private `mod`) when the crate root already re-exports the public API surface.");
+        }
+        RuleId::RsArchNoLegacyModRs => {
+            inv.push("Replace `<dir>/mod.rs` with a sibling `<dir>.rs` module file alongside the `<dir>/` submodule directory.");
         }
         _ => match tier {
             PrescriptionTier::Refactor => {

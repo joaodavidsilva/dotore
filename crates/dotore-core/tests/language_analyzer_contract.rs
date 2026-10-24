@@ -750,7 +750,7 @@ fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submod
     use dotore_core::rules::catalog::{RULE_REGISTRY, TOTAL_RULES};
 
     let registry = rule_registry();
-    assert_eq!(TOTAL_RULES, 965);
+    assert_eq!(TOTAL_RULES, 974);
     assert_eq!(RULE_REGISTRY.len(), TOTAL_RULES);
     assert_eq!(registry.len(), TOTAL_RULES);
 
@@ -1022,7 +1022,7 @@ fn decomposed_report_submodules_expose_json_terminal_html_rules_why_and_ci_insta
             ..RulesListOptions::default()
         },
     );
-    assert_eq!(catalog.len(), 15);
+    assert_eq!(catalog.len(), 17);
     let cat_text = format_rule_catalog_text(&catalog);
     assert!(cat_text.contains("dotore/rs-perf-no-unnecessary-format"));
     let explained = explain_rule("no-derived-state", &DotoreConfig::default()).unwrap();
@@ -1074,6 +1074,508 @@ fn decomposed_report_submodules_expose_json_terminal_html_rules_why_and_ci_insta
     .unwrap();
     let inst_text = format_install_report(&inst_res);
     assert!(inst_text.contains("[dry-run] Installed /dotore skill:"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn architecture_soc_and_reuse_rule_catalog_metadata_and_non_autofix_invariants() {
+    use dotore_core::rules::ContextualOwnerPolicy;
+
+    let expected = [
+        (
+            RuleId::ArchThinEntrypoint,
+            "arch-thin-entrypoint",
+            "dotore/arch-thin-entrypoint",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::File,
+            PrescriptionTier::Refactor,
+        ),
+        (
+            RuleId::ArchNoMixedIoAndPresentation,
+            "arch-no-mixed-io-and-presentation",
+            "dotore/arch-no-mixed-io-and-presentation",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::File,
+            PrescriptionTier::Refactor,
+        ),
+        (
+            RuleId::ArchSeparateStaticCatalogFromTypes,
+            "arch-separate-static-catalog-from-types",
+            "dotore/arch-separate-static-catalog-from-types",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::File,
+            PrescriptionTier::Refactor,
+        ),
+        (
+            RuleId::ArchNoMixedDomainMonolith,
+            "arch-no-mixed-domain-monolith",
+            "dotore/arch-no-mixed-domain-monolith",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::File,
+            PrescriptionTier::Refactor,
+        ),
+        (
+            RuleId::ArchNoInlineTerminalUiPrimitives,
+            "arch-no-inline-terminal-ui-primitives",
+            "dotore/arch-no-inline-terminal-ui-primitives",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::Subject,
+            PrescriptionTier::Surgical,
+        ),
+        (
+            RuleId::ArchPreferFluentBuilder,
+            "arch-prefer-fluent-builder",
+            "dotore/arch-prefer-fluent-builder",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::Subject,
+            PrescriptionTier::Refactor,
+        ),
+        (
+            RuleId::ArchNoDuplicatedHelperLogic,
+            "arch-no-duplicated-helper-logic",
+            "dotore/arch-no-duplicated-helper-logic",
+            CapabilityPredicate::UNIVERSAL,
+            ContextualOwnerPolicy::Subject,
+            PrescriptionTier::Refactor,
+        ),
+        (
+            RuleId::RsArchPreferPubCrateModules,
+            "rs-arch-prefer-pub-crate-modules",
+            "dotore/rs-arch-prefer-pub-crate-modules",
+            CapabilityPredicate::RUST_ONLY,
+            ContextualOwnerPolicy::Line,
+            PrescriptionTier::Surgical,
+        ),
+        (
+            RuleId::RsArchNoLegacyModRs,
+            "rs-arch-no-legacy-mod-rs",
+            "dotore/rs-arch-no-legacy-mod-rs",
+            CapabilityPredicate::RUST_ONLY,
+            ContextualOwnerPolicy::File,
+            PrescriptionTier::Surgical,
+        ),
+    ];
+
+    for (rule_id, canonical, qualified, gate, owner, tier) in expected {
+        let meta = rule_id.metadata();
+        assert_eq!(meta.canonical_id, canonical);
+        assert_eq!(meta.qualified_key, qualified);
+        assert_eq!(meta.category, RuleCategory::Maintainability);
+        assert_eq!(meta.default_severity, RuleSeverity::Warning);
+        assert!(meta.default_enabled);
+        assert_eq!(meta.capability_gate, gate);
+        assert_eq!(meta.contextual_owner, owner);
+        assert_eq!(meta.default_tier, tier);
+        assert_ne!(meta.default_tier, PrescriptionTier::Autofix);
+        assert!(!meta.title.is_empty());
+        assert!(!meta.recipe_markdown.is_empty());
+        assert!(meta.docs_url.starts_with("https://"));
+        assert!(rule_id.is_architecture_soc_or_reuse_rule());
+    }
+
+    assert!(RuleId::DuplicateJsxSubtree.is_architecture_soc_or_reuse_rule());
+    assert!(RuleId::CircularDependency.is_architecture_soc_or_reuse_rule());
+    assert!(RuleId::PyArchNoCircularImports.is_architecture_soc_or_reuse_rule());
+    assert!(RuleId::RsArchNoUnusedPubCrateItems.is_architecture_soc_or_reuse_rule());
+    assert!(!RuleId::NoDerivedState.is_architecture_soc_or_reuse_rule());
+
+    assert_eq!(
+        map_rust_allow_lint_to_rules("rs_arch_prefer_pub_crate_modules"),
+        vec!["rs-arch-prefer-pub-crate-modules".to_string()]
+    );
+    assert_eq!(
+        map_rust_allow_lint_to_rules("mod_module_files"),
+        vec!["rs-arch-no-legacy-mod-rs".to_string()]
+    );
+}
+
+#[test]
+fn multi_signal_architecture_facets_thresholds_non_destructive_fixer_planner_and_why() {
+    use dotore_core::{
+        ArchitectureFileFacets, ArchitectureThresholdsConfig, AutofixPatch, ConcernBucket,
+        ConcernSignalSite, DotoreConfig, HelperFingerprintIr, InlineTerminalUiPrimitiveSiteIr,
+        ResolvedCallerSite, StaticCatalogSiteIr, StructLiteralConstructionSiteIr, apply_autofixes,
+        apply_patches_to_source, build_root_cause_groups_and_capsules,
+        compute_root_cause_group_id, explain_location_with_analyzers,
+        format_architecture_signal_explanation,
+    };
+
+    // 1. Configurable thresholds defaults and JSON deserialization
+    let default_cfg = DotoreConfig::default();
+    assert_eq!(
+        default_cfg.architecture,
+        ArchitectureThresholdsConfig {
+            min_helper_statements: 4,
+            min_duplicated_helper_modules: 2,
+            min_builder_fields: 5,
+            min_builder_sites: 3,
+            min_types_with_catalog: 3,
+            min_static_catalog_entries: 25,
+            max_entrypoint_statements: 25,
+            min_monolith_domain_clusters: 3,
+            min_monolith_symbols: 12,
+        }
+    );
+    let custom_cfg = DotoreConfig::from_json_str(
+        r#"{"architecture": {"minHelperStatements": 6, "maxEntrypointStatements": 40}}"#,
+    )
+    .unwrap();
+    assert_eq!(custom_cfg.architecture.min_helper_statements, 6);
+    assert_eq!(custom_cfg.architecture.max_entrypoint_statements, 40);
+    assert_eq!(custom_cfg.architecture.min_builder_fields, 5);
+
+    // 2. Multi-signal structural facets on ExtractedFile
+    let mixed_src = "use std::fs;\npub fn run() {\n    let _ = fs::read_to_string(\"a.txt\");\n    println!(\"\\x1b[31m┌──┐\\x1b[0m\");\n}\n";
+    let ui_kit_src = "pub struct AsciiBox;\nimpl AsciiBox {\n    pub fn render(&self) -> String { \"┌──┐\".to_string() }\n}\n";
+    let builder_src = "pub struct ConfigBuilder;\nimpl ConfigBuilder {\n    pub fn with_timeout(self) -> Self { self }\n}\n";
+
+    let facets = ArchitectureFileFacets {
+        concern_signals: vec![
+            ConcernSignalSite {
+                bucket: ConcernBucket::DataOrNetworkIo,
+                detail: "fs::read_to_string".to_string(),
+                loc: SourceLoc { line: 3, column: 13 },
+                span: ByteSpan { start: 40, end: 66 },
+            },
+            ConcernSignalSite {
+                bucket: ConcernBucket::TerminalOrUiPresentation,
+                detail: "ansi-escape".to_string(),
+                loc: SourceLoc { line: 4, column: 14 },
+                span: ByteSpan { start: 81, end: 103 },
+            },
+        ],
+        helper_fingerprints: vec![HelperFingerprintIr {
+            name: "normalize_key".to_string(),
+            normalized_hash: 0xABCD_1234,
+            statement_count: 5,
+            param_count: 2,
+            is_private: true,
+            loc: SourceLoc { line: 2, column: 1 },
+            span: ByteSpan { start: 13, end: 106 },
+        }],
+        struct_literal_sites: vec![StructLiteralConstructionSiteIr {
+            type_name: "Diagnostic".to_string(),
+            field_names: vec![
+                "rule".to_string(),
+                "file".to_string(),
+                "severity".to_string(),
+                "tier".to_string(),
+                "autofix".to_string(),
+            ],
+            default_or_literal_fields: vec!["autofix".to_string()],
+            loc: SourceLoc { line: 3, column: 5 },
+            span: ByteSpan { start: 32, end: 66 },
+        }],
+        inline_terminal_ui_sites: vec![InlineTerminalUiPrimitiveSiteIr {
+            kind: "ansi-escape".to_string(),
+            snippet: "\\x1b[31m".to_string(),
+            loc: SourceLoc { line: 4, column: 14 },
+            span: ByteSpan { start: 81, end: 103 },
+        }],
+        static_catalog_sites: vec![StaticCatalogSiteIr {
+            name: "RULES".to_string(),
+            entry_count: 30,
+            byte_len: 4096,
+            loc: SourceLoc { line: 1, column: 1 },
+            span: ByteSpan { start: 0, end: 12 },
+        }],
+        defined_builder_types: Vec::new(),
+        domain_clusters: vec!["io".to_string(), "ui".to_string(), "catalog".to_string()],
+        public_type_count: 3,
+        entrypoint_statement_count: 30,
+        is_entrypoint: true,
+        is_ui_kit_module: false,
+    };
+
+    assert!(facets.has_bucket(ConcernBucket::DataOrNetworkIo));
+    assert!(facets.has_bucket(ConcernBucket::TerminalOrUiPresentation));
+    assert!(!facets.has_bucket(ConcernBucket::AstOrValidationHelper));
+    assert_eq!(
+        facets.distinct_concern_buckets(),
+        vec![
+            ConcernBucket::DataOrNetworkIo,
+            ConcernBucket::TerminalOrUiPresentation
+        ]
+    );
+    let summary = facets.explain_signals_summary().expect("signals summary");
+    assert!(summary.contains("data-or-network-io"));
+    assert!(summary.contains("terminal-or-ui-presentation"));
+
+    let mixed_file = ExtractedFile::new(
+        PathBuf::from("src/mixed.rs"),
+        mixed_src.to_string(),
+        LanguageId::Rust,
+    )
+    .with_architecture_facets(facets.clone());
+
+    let mut ui_kit_file = ExtractedFile::new(
+        PathBuf::from("src/ui.rs"),
+        ui_kit_src.to_string(),
+        LanguageId::Rust,
+    )
+    .with_architecture_facets(ArchitectureFileFacets {
+        is_ui_kit_module: true,
+        concern_signals: vec![ConcernSignalSite {
+            bucket: ConcernBucket::TerminalOrUiPresentation,
+            detail: "AsciiBox".to_string(),
+            loc: SourceLoc { line: 1, column: 1 },
+            span: ByteSpan {
+                start: 0,
+                end: u32::try_from(ui_kit_src.len()).unwrap_or(0),
+            },
+        }],
+        ..ArchitectureFileFacets::default()
+    });
+    ui_kit_file.subject_spans.push((
+        Some("AsciiBox::render".to_string()),
+        ByteSpan {
+            start: 0,
+            end: u32::try_from(ui_kit_src.len()).unwrap_or(0),
+        },
+        SourceLoc { line: 1, column: 1 },
+    ));
+
+    let mut builder_file = ExtractedFile::new(
+        PathBuf::from("src/builder.rs"),
+        builder_src.to_string(),
+        LanguageId::Rust,
+    )
+    .with_architecture_facets(ArchitectureFileFacets {
+        defined_builder_types: vec!["Diagnostic".to_string(), "ConfigBuilder".to_string()],
+        concern_signals: vec![ConcernSignalSite {
+            bucket: ConcernBucket::TypeDefinitions,
+            detail: "ConfigBuilder".to_string(),
+            loc: SourceLoc { line: 1, column: 1 },
+            span: ByteSpan {
+                start: 0,
+                end: u32::try_from(builder_src.len()).unwrap_or(0),
+            },
+        }],
+        ..ArchitectureFileFacets::default()
+    });
+    builder_file.subject_spans.push((
+        Some("ConfigBuilder::with_timeout".to_string()),
+        ByteSpan {
+            start: 0,
+            end: u32::try_from(builder_src.len()).unwrap_or(0),
+        },
+        SourceLoc { line: 1, column: 1 },
+    ));
+
+    // 3. Non-destructive fixer guard: architecture rules are NEVER mutated even if patch attached
+    let mut arch_diag_with_rogue_patch = Diagnostic::for_rule(
+        RuleId::ArchNoMixedIoAndPresentation,
+        "src/mixed.rs",
+        SourceLoc { line: 2, column: 1 },
+        ByteSpan { start: 13, end: 106 },
+        "Module mixes I/O and terminal presentation.",
+    )
+    .with_patch(AutofixPatch::replace(
+        "Rogue split",
+        ByteSpan { start: 0, end: 12 },
+        "",
+    ));
+    // Even when tier was forced to Autofix by with_patch, fixer must refuse architecture rules:
+    assert_eq!(arch_diag_with_rogue_patch.tier, PrescriptionTier::Autofix);
+    let mut sources = HashMap::new();
+    sources.insert(PathBuf::from("src/mixed.rs"), mixed_src.to_string());
+    sources.insert(PathBuf::from("src/ui.rs"), ui_kit_src.to_string());
+    sources.insert(PathBuf::from("src/builder.rs"), builder_src.to_string());
+
+    let fix_results = apply_autofixes(
+        std::slice::from_ref(&arch_diag_with_rogue_patch),
+        &sources,
+        true,
+    )
+    .unwrap();
+    assert!(fix_results.is_empty());
+    let (rewritten, applied) =
+        apply_patches_to_source(mixed_src, std::slice::from_ref(&arch_diag_with_rogue_patch));
+    assert_eq!(rewritten, mixed_src);
+    assert!(applied.is_empty());
+
+    // Restore Refactor tier for planning checks
+    arch_diag_with_rogue_patch.tier = PrescriptionTier::Refactor;
+    arch_diag_with_rogue_patch.autofix = None;
+
+    // 4. Root-Cause Grouping & Fix Capsule exemplar + multi-signal evidence
+    let dup_helper_a = Diagnostic::new(
+        RuleId::ArchNoDuplicatedHelperLogic,
+        "src/mod_a.rs",
+        SourceLoc { line: 10, column: 1 },
+        ByteSpan { start: 0, end: 20 },
+        "fn::arity2::hash_abcd",
+        "Private helper `parse_token` duplicates AST logic in `src/mod_b.rs`.",
+    )
+    .with_caller_site(ResolvedCallerSite {
+        caller_file: PathBuf::from("src/ui.rs"),
+        parent_subject_name: Some("AsciiBox::render".to_string()),
+        component_name: "parse_token".to_string(),
+        loc: SourceLoc { line: 1, column: 1 },
+        span: ByteSpan { start: 0, end: 20 },
+        has_key: false,
+        passed_props: Vec::new(),
+    });
+    let dup_helper_b = Diagnostic::new(
+        RuleId::ArchNoDuplicatedHelperLogic,
+        "src/mod_b.rs",
+        SourceLoc { line: 14, column: 1 },
+        ByteSpan { start: 0, end: 20 },
+        "fn::arity2::hash_abcd",
+        "Private helper `norm_token` duplicates AST logic in `src/mod_a.rs`.",
+    );
+    assert_eq!(
+        compute_root_cause_group_id(&dup_helper_a),
+        "rcg::arch-no-duplicated-helper-logic::fn-arity2-hash-abcd"
+    );
+    assert_eq!(
+        compute_root_cause_group_id(&dup_helper_a),
+        compute_root_cause_group_id(&dup_helper_b)
+    );
+
+    let inline_ui_diag = Diagnostic::new(
+        RuleId::ArchNoInlineTerminalUiPrimitives,
+        "src/mixed.rs",
+        SourceLoc { line: 4, column: 14 },
+        ByteSpan { start: 81, end: 103 },
+        "ansi-escape",
+        "Avoid inline ANSI/box-drawing primitives outside the UI kit.",
+    );
+    let builder_diag = Diagnostic::new(
+        RuleId::ArchPreferFluentBuilder,
+        "src/mixed.rs",
+        SourceLoc { line: 3, column: 5 },
+        ByteSpan { start: 32, end: 66 },
+        "Diagnostic",
+        "Repeated 5-field `Diagnostic` struct literal construction across 3 sites.",
+    );
+
+    let extracted_slice = vec![mixed_file, ui_kit_file, builder_file];
+    let all_diags = vec![
+        arch_diag_with_rogue_patch.clone(),
+        inline_ui_diag,
+        builder_diag,
+    ];
+    let (groups, capsules) =
+        build_root_cause_groups_and_capsules(&extracted_slice, &all_diags, &sources);
+    assert_eq!(groups.len(), 3);
+    assert_eq!(capsules.len(), 3);
+
+    let ui_capsule = capsules
+        .iter()
+        .find(|c| c.rule == RuleId::ArchNoInlineTerminalUiPrimitives)
+        .expect("inline UI capsule");
+    let ui_exemplar = ui_capsule.exemplar.as_ref().expect("UI kit exemplar");
+    assert_eq!(ui_exemplar.file, PathBuf::from("src/ui.rs"));
+
+    let builder_capsule = capsules
+        .iter()
+        .find(|c| c.rule == RuleId::ArchPreferFluentBuilder)
+        .expect("builder capsule");
+    let builder_exemplar = builder_capsule
+        .exemplar
+        .as_ref()
+        .expect("builder type exemplar");
+    assert_eq!(builder_exemplar.file, PathBuf::from("src/builder.rs"));
+
+    let soc_capsule = capsules
+        .iter()
+        .find(|c| c.rule == RuleId::ArchNoMixedIoAndPresentation)
+        .expect("SoC capsule");
+    assert!(!soc_capsule.caller_site_excerpts.is_empty());
+    assert!(soc_capsule
+        .invariants
+        .iter()
+        .any(|inv| inv.contains("I/O") || inv.contains("presentation")));
+
+    // 5. `why` location explainability for architecture signals
+    let arch_exp = format_architecture_signal_explanation(
+        &arch_diag_with_rogue_patch,
+        Some(&facets),
+    )
+    .expect("architecture signal explanation");
+    assert!(arch_exp.contains("data-or-network-io"));
+    assert!(arch_exp.contains("terminal-or-ui-presentation"));
+    assert!(arch_exp.contains("fs::read_to_string"));
+
+    struct MockArchRustAnalyzer {
+        facets: ArchitectureFileFacets,
+    }
+    impl LanguageAnalyzer for MockArchRustAnalyzer {
+        fn language_id(&self) -> LanguageId {
+            LanguageId::Rust
+        }
+        fn supports_path(&self, path: &Path) -> bool {
+            path.extension().and_then(|e| e.to_str()) == Some("rs")
+        }
+        fn manifest_filenames(&self) -> &'static [&'static str] {
+            &["Cargo.toml"]
+        }
+        fn infer_capability_gate(
+            &self,
+            _package_dir: &Path,
+            _manifest_sources: &[(PathBuf, &str)],
+        ) -> CapabilityGate {
+            CapabilityGate::default_rust()
+        }
+        fn extract_file(&self, path: &Path, source: &str) -> ExtractedFile {
+            ExtractedFile::new(path.to_path_buf(), source.to_string(), LanguageId::Rust)
+                .with_architecture_facets(self.facets.clone())
+        }
+        fn analyze_package(
+            &self,
+            _package: &WorkspacePackage,
+            files: &[ExtractedFile],
+            _enabled_rules: Option<&[RuleId]>,
+        ) -> PackageAnalysisResult {
+            let mut diagnostics = Vec::new();
+            for file in files {
+                if file.architecture_facets.has_bucket(ConcernBucket::DataOrNetworkIo)
+                    && file
+                        .architecture_facets
+                        .has_bucket(ConcernBucket::TerminalOrUiPresentation)
+                {
+                    diagnostics.push(Diagnostic::new(
+                        RuleId::ArchNoMixedIoAndPresentation,
+                        file.path.clone(),
+                        SourceLoc { line: 2, column: 1 },
+                        ByteSpan { start: 13, end: 106 },
+                        "run",
+                        "Module mixes I/O (`fs::read_to_string`) and terminal UI presentation (`ansi-escape`).",
+                    ));
+                }
+            }
+            PackageAnalysisResult {
+                diagnostics,
+                subjects_scanned: files.len(),
+                effects_scanned: 0,
+            }
+        }
+        fn validate_syntax(&self, _path: &Path, _source: &str) -> bool {
+            true
+        }
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("dotore-arch-why-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(temp_dir.join("src")).unwrap();
+    std::fs::write(temp_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    std::fs::write(temp_dir.join("src/mixed.rs"), mixed_src).unwrap();
+
+    let mock_analyzer = MockArchRustAnalyzer { facets };
+    let analyzers: &[&dyn LanguageAnalyzer] = &[&mock_analyzer];
+    let why_rep =
+        explain_location_with_analyzers("src/mixed.rs:2", &temp_dir, analyzers).unwrap();
+    assert_eq!(why_rep.entries.len(), 1);
+    assert!(why_rep.entries[0]
+        .explanation
+        .contains("data-or-network-io"));
+    assert!(why_rep.entries[0]
+        .explanation
+        .contains("terminal-or-ui-presentation"));
+    assert!(!why_rep.entries[0].cascade_steps.is_empty());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

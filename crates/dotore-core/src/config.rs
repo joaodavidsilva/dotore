@@ -14,8 +14,8 @@ pub use capability_gate::{
     Capability, CapabilityGate, CapabilityPredicate, PackageRole, content_enables_react_compiler,
 };
 pub use loader::{
-    DotoreConfig, IgnoreConfig, IgnoreOverride, SupplyChainConfig, load_config_from_dir,
-    load_local_config_in_dir,
+    ArchitectureThresholdsConfig, DotoreConfig, IgnoreConfig, IgnoreOverride, SupplyChainConfig,
+    load_config_from_dir, load_local_config_in_dir,
 };
 pub use mutator::{ConfigMutation, ConfigTargetKind, MutateConfigResult, mutate_config_in_dir};
 pub use workspace::{
