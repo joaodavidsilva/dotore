@@ -32,9 +32,9 @@ pub use config::{
     ConfigTargetKind, DotoreConfig, IgnoreConfig, IgnoreOverride, MutateConfigResult, PackageRole,
     SupplyChainConfig, WorkspacePackage, content_enables_react_compiler,
     discover_workspace_packages, discover_workspace_packages_with_analyzers,
-    find_nearest_ancestor_file, load_config_from_dir, load_local_config_in_dir,
+    find_nearest_ancestor_file, is_cache_disabled, load_config_from_dir, load_local_config_in_dir,
     mutate_config_in_dir, normalize_path_buf, normalize_rel_path_str, relative_forward_slash,
-    resolve_package_for_file, strip_jsonc, strip_source_extension,
+    resolve_dotore_home_dir, resolve_package_for_file, strip_jsonc, strip_source_extension,
 };
 pub use diff::{
     BaselineDeltaResult, BaselineDiagnosticEntry, BaselineSummary, BlockingLevel,
@@ -71,15 +71,17 @@ pub use planner::{
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
-    JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
-    RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
+    JSON_REPORT_SCHEMA_VERSION, JsonReport, MAX_SCAN_CACHE_ENTRIES, ProjectCoverageMetadata,
+    ReportSummary, RuleCatalogEntry, RulesListOptions, SCAN_CACHE_SCHEMA_VERSION, ScanCacheEntry,
+    ScanResultCacheFile, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
     build_extracted_report_with_packages, build_report_from_planner_context, build_rule_catalog,
     ci_config, ci_install, ci_upgrade, diagnose_why_not_active_common, explain_location,
     explain_location_with_analyzers, explain_rule, format_architecture_signal_explanation,
     format_design_report, format_design_report_pretty, format_fix_report, format_install_report,
     format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
-    format_terminal_report_pretty, format_why_report_text, install_dotore, parse_why_location,
-    render_code_frame, render_html_report, write_and_open_html_report, write_json_report,
+    format_terminal_report_pretty, format_why_report_text, install_dotore, load_scan_result_cache,
+    lookup_scan_cache, parse_why_location, render_code_frame, render_html_report,
+    resolve_scan_cache_path, store_scan_cache, write_and_open_html_report, write_json_report,
 };
 pub use rules::{
     AutofixPatch, BlastRadius, BlastRadiusTier, ByteEdit, ContextualOwnerPolicy, Diagnostic,
@@ -141,4 +143,6 @@ pub struct CliOverrides {
     pub staged: bool,
     /// Compare against a saved baseline JSON report or git revision (`--baseline <path>`).
     pub baseline_path: Option<PathBuf>,
+    /// Bypass the persistent workspace scan result cache (`--no-cache`).
+    pub no_cache: bool,
 }

@@ -20,9 +20,11 @@ pub use ci_install::{
 };
 pub use html::{render_html_report, write_and_open_html_report};
 pub use json::{
-    JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
+    JSON_REPORT_SCHEMA_VERSION, JsonReport, MAX_SCAN_CACHE_ENTRIES, ProjectCoverageMetadata,
+    ReportSummary, SCAN_CACHE_SCHEMA_VERSION, ScanCacheEntry, ScanResultCacheFile,
     build_extracted_report, build_extracted_report_with_packages,
-    build_report_from_planner_context, write_json_report,
+    build_report_from_planner_context, load_scan_result_cache, lookup_scan_cache,
+    resolve_scan_cache_path, store_scan_cache, write_json_report,
 };
 pub use rules::{
     RuleCatalogEntry, RulesListOptions, build_rule_catalog, explain_rule, format_rule_catalog_text,

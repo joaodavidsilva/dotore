@@ -2621,7 +2621,7 @@ pub struct FixCapsule {
 }
 
 /// Clustered group of related diagnostics sharing a single underlying defect (see `GLOSSARY.md`: **Root-Cause Group**).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootCauseGroup {
     /// Deterministic **Root-Cause Group** identifier (`rcg::...`).
     pub id: String,
@@ -2895,5 +2895,95 @@ impl Serialize for Diagnostic {
         state.serialize_field("caller_sites", &self.caller_sites)?;
         state.serialize_field("autofix", &self.autofix)?;
         state.end()
+    }
+}
+
+const fn default_source_loc() -> SourceLoc {
+    SourceLoc { line: 1, column: 1 }
+}
+
+impl<'de> Deserialize<'de> for Diagnostic {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DiagnosticDe {
+            file: PathBuf,
+            #[serde(default)]
+            subject_name: Option<String>,
+            rule: RuleId,
+            #[serde(default)]
+            category: Option<RuleCategory>,
+            #[serde(default)]
+            severity: Option<RuleSeverity>,
+            #[serde(default)]
+            tier: Option<PrescriptionTier>,
+            #[serde(default)]
+            target_name: String,
+            #[serde(default)]
+            message: String,
+            #[serde(default = "default_source_loc")]
+            loc: SourceLoc,
+            #[serde(default)]
+            span: ByteSpan,
+            #[serde(default)]
+            cascade_steps: Vec<String>,
+            #[serde(default)]
+            caller_sites: Vec<ResolvedCallerSite>,
+            #[serde(default)]
+            autofix: Option<AutofixPatch>,
+        }
+        let raw = DiagnosticDe::deserialize(deserializer)?;
+        let meta = raw.rule.metadata();
+        Ok(Self {
+            file: raw.file,
+            subject_name: raw.subject_name,
+            rule: raw.rule,
+            category: raw.category.unwrap_or(meta.category),
+            severity: raw.severity.unwrap_or(meta.default_severity),
+            message_id: "",
+            tier: raw.tier.unwrap_or(meta.default_tier),
+            target_name: raw.target_name,
+            message: raw.message,
+            docs_url: meta.docs_url,
+            loc: raw.loc,
+            span: raw.span,
+            cascade_steps: raw.cascade_steps,
+            caller_sites: raw.caller_sites,
+            autofix: raw.autofix,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for FixCapsule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct FixCapsuleDe {
+            root_cause_group_id: String,
+            rule: RuleId,
+            tier: PrescriptionTier,
+            blast_radius: BlastRadius,
+            subject_excerpt: SourceExcerpt,
+            #[serde(default)]
+            caller_site_excerpts: Vec<SourceExcerpt>,
+            #[serde(default)]
+            exemplar: Option<SourceExcerpt>,
+        }
+        let raw = FixCapsuleDe::deserialize(deserializer)?;
+        Ok(Self {
+            root_cause_group_id: raw.root_cause_group_id,
+            rule: raw.rule,
+            tier: raw.tier,
+            blast_radius: raw.blast_radius,
+            subject_excerpt: raw.subject_excerpt,
+            caller_site_excerpts: raw.caller_site_excerpts,
+            recipe_markdown: raw.rule.metadata().recipe_markdown,
+            exemplar: raw.exemplar,
+            invariants: crate::planner::invariants_for_rule(raw.rule, raw.tier),
+        })
     }
 }

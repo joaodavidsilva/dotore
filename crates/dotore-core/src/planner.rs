@@ -1088,7 +1088,7 @@ fn same_language_family(a: &Path, b: &Path) -> bool {
     clippy::wildcard_enum_match_arm,
     reason = "Only state/effect rules add custom invariants beyond the tier-based default"
 )]
-fn invariants_for_rule(rule: RuleId, tier: PrescriptionTier) -> Vec<&'static str> {
+pub(crate) fn invariants_for_rule(rule: RuleId, tier: PrescriptionTier) -> Vec<&'static str> {
     let mut inv = vec![
         "Do not introduce inline suppression comments (`dotore-disable`, `eslint-disable`, `oxlint-disable`).",
         "Preserve existing TypeScript types, component props contract, and observable DOM/UI output.",

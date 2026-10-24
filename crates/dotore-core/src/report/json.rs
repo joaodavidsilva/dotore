@@ -77,7 +77,7 @@ pub struct ReportSummary {
 }
 
 /// Complete machine-readable report emitted by `dotore check --json` and `--json-out <path>`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonReport {
     /// Version of the machine-readable JSON report schema (`3`).
     pub schema_version: u32,
@@ -161,10 +161,14 @@ pub fn build_report_from_planner_context<C: PlannerContext + ?Sized>(
     ctx: &C,
     file_subject_counts: &[(PathBuf, usize)],
     effects_scanned: usize,
-    diagnostics: Vec<Diagnostic>,
+    mut diagnostics: Vec<Diagnostic>,
     sources: &HashMap<PathBuf, String>,
     packages: &[WorkspacePackage],
 ) -> JsonReport {
+    for diag in &mut diagnostics {
+        diag.message_id = "";
+        diag.docs_url = diag.rule.metadata().docs_url;
+    }
     let files_scanned = file_subject_counts
         .iter()
         .filter(|(path, _)| {
@@ -318,4 +322,139 @@ fn build_project_coverage_metadata(
             }
         })
         .collect()
+}
+
+/// Current schema version for `scan-results.json`.
+pub const SCAN_CACHE_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum number of workspace scan result entries retained in `scan-results.json`.
+pub const MAX_SCAN_CACHE_ENTRIES: usize = 16;
+
+/// A single cached workspace scan entry in `~/.dotore/cache/scan-results.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanCacheEntry {
+    /// Deterministic composite cache key (`scan::<hash>`).
+    pub key: String,
+    /// Canonical workspace root path.
+    pub workspace_root: String,
+    /// Git HEAD commit SHA (`"uncommitted"` or `"no-git"` when unavailable).
+    pub head_sha: String,
+    /// Tool version string (`env!("CARGO_PKG_VERSION")`).
+    pub tool_version: String,
+    /// Unix epoch timestamp (milliseconds) when this entry was last accessed/stored.
+    pub updated_at_ms: u64,
+    /// Cached full [`JsonReport`].
+    pub report: JsonReport,
+}
+
+/// Bounded LRU workspace scan cache stored at `~/.dotore/cache/scan-results.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanResultCacheFile {
+    /// Cache format version (`1`).
+    pub version: u32,
+    /// Most-recently-used ordered cache entries (capped at [`MAX_SCAN_CACHE_ENTRIES`]).
+    pub entries: Vec<ScanCacheEntry>,
+}
+
+/// Resolves the persistent workspace scan result cache path (`~/.dotore/cache/scan-results.json`),
+/// honoring `DOTORE_HOME`.
+#[must_use]
+pub fn resolve_scan_cache_path() -> Option<PathBuf> {
+    crate::config::resolve_dotore_home_dir()
+        .map(|home| home.join("cache").join("scan-results.json"))
+}
+
+/// Loads the bounded LRU scan result cache from `cache_path`, returning an empty cache if
+/// the file is missing, unreadable, malformed, or uses a different schema version.
+#[must_use]
+pub fn load_scan_result_cache(cache_path: &Path) -> ScanResultCacheFile {
+    let Ok(raw) = fs::read_to_string(cache_path) else {
+        return ScanResultCacheFile {
+            version: SCAN_CACHE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        };
+    };
+    let Ok(parsed) = serde_json::from_str::<ScanResultCacheFile>(&raw) else {
+        return ScanResultCacheFile {
+            version: SCAN_CACHE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        };
+    };
+    if parsed.version != SCAN_CACHE_SCHEMA_VERSION {
+        return ScanResultCacheFile {
+            version: SCAN_CACHE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        };
+    }
+    parsed
+}
+
+/// Looks up `key` in the workspace scan cache at `cache_path`.
+///
+/// On a cache hit, moves the matching [`ScanCacheEntry`] to index `0` (most-recently-used),
+/// updates `updated_at_ms`, persists the updated LRU order atomically, and returns the cached [`JsonReport`].
+#[must_use]
+pub fn lookup_scan_cache(cache_path: &Path, key: &str) -> Option<JsonReport> {
+    let mut cache = load_scan_result_cache(cache_path);
+    let pos = cache.entries.iter().position(|e| e.key == key)?;
+    let mut entry = cache.entries.remove(pos);
+    entry.updated_at_ms = current_unix_ms();
+    let report = entry.report.clone();
+    cache.entries.insert(0, entry);
+    cache.entries.truncate(MAX_SCAN_CACHE_ENTRIES);
+    let _ = write_scan_result_cache_atomic(cache_path, &cache);
+    Some(report)
+}
+
+/// Stores `entry` at the front of the bounded LRU workspace scan cache at `cache_path`,
+/// removing any prior entry with the same `key`, truncating to [`MAX_SCAN_CACHE_ENTRIES`],
+/// and writing the cache file atomically.
+///
+/// # Errors
+/// Returns an `io::Error` if serializing or writing the cache file fails.
+pub fn store_scan_cache(cache_path: &Path, entry: ScanCacheEntry) -> io::Result<()> {
+    let mut cache = load_scan_result_cache(cache_path);
+    cache.version = SCAN_CACHE_SCHEMA_VERSION;
+    cache.entries.retain(|e| e.key != entry.key);
+    cache.entries.insert(0, entry);
+    cache.entries.truncate(MAX_SCAN_CACHE_ENTRIES);
+    write_scan_result_cache_atomic(cache_path, &cache)
+}
+
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn write_scan_result_cache_atomic(
+    cache_path: &Path,
+    cache: &ScanResultCacheFile,
+) -> io::Result<()> {
+    if let Some(parent) = cache_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(cache)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = cache_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("scan-results.json");
+    let tmp_path = cache_path.with_file_name(format!(".{file_name}.tmp-{pid}-{nanos}-{seq}"));
+    fs::write(&tmp_path, format!("{json}\n"))?;
+    if let Err(err) = fs::rename(&tmp_path, cache_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
 }
