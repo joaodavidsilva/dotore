@@ -212,7 +212,10 @@ pub(super) fn check_no_unguarded_browser_global_in_render(
     }
     // Check if preceded by an availability early return in the component body
     let subj_span = semantic.nodes().get_node(subj_id).span();
-    let prefix = &semantic.source_text()[subj_span.start as usize..ident.span.start as usize];
+    let prefix = semantic
+        .source_text()
+        .get(subj_span.start as usize..ident.span.start as usize)
+        .unwrap_or("");
     if prefix.contains("typeof window") || prefix.contains("typeof document") {
         return;
     }

@@ -275,7 +275,7 @@ pub(crate) fn check_webgpu_sync_member_call(
         && ctx.resolve_expr_three_ctor(&mem.object).as_deref() == Some("WebGPURenderer")
         && let Expression::Identifier(renderer_id) = mem.object.without_parentheses()
     {
-        let before_slice = &ctx.source[..call.span.start as usize];
+        let before_slice = ctx.source.get(..call.span.start as usize).unwrap_or("");
         let awaited_init = before_slice.contains(&format!("await {}.init()", renderer_id.name));
         if !awaited_init {
             ctx.push_site(

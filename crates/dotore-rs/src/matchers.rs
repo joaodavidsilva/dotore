@@ -8,8 +8,8 @@ use dotore_core::{
     loc_from_line_starts,
 };
 use syn::{
-    Attribute, Expr, ExprClosure, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemTrait, Lit, Macro,
-    Pat, TraitItemFn, Type, Visibility,
+    Attribute, BinOp, Expr, ExprClosure, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemTrait, Lit,
+    Macro, Pat, TraitItemFn, Type, Visibility,
 };
 
 /// A candidate diagnostic site discovered during the single-pass `syn` AST traversal.
@@ -539,8 +539,24 @@ fn quote_like_expr(expr: &Expr) -> String {
             format!("{}.{}()", normalize_expr_key(&mc.receiver), mc.method)
         }
         Expr::Binary(bin) => {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "syn::BinOp is non-exhaustive; arithmetic and bitwise operators are formatted explicitly"
+            )]
+            let op_str = match bin.op {
+                BinOp::Sub(_) => "-",
+                BinOp::Mul(_) => "*",
+                BinOp::Div(_) => "/",
+                BinOp::Rem(_) => "%",
+                BinOp::BitAnd(_) => "&",
+                BinOp::BitOr(_) => "|",
+                BinOp::BitXor(_) => "^",
+                BinOp::Shl(_) => "<<",
+                BinOp::Shr(_) => ">>",
+                _ => "+",
+            };
             format!(
-                "{}+{}",
+                "{}{op_str}{}",
                 normalize_expr_key(&bin.left),
                 normalize_expr_key(&bin.right)
             )
@@ -864,5 +880,18 @@ mod tests {
         assert_eq!(diag.subject_name.as_deref(), Some("demo"));
         assert_eq!(diag.tier, PrescriptionTier::Autofix);
         assert!(diag.autofix.is_some());
+    }
+
+    #[test]
+    fn normalize_expr_key_preserves_binary_operators() {
+        let add_expr: Expr = parse_quote!(props[idx + 1]);
+        let sub_expr: Expr = parse_quote!(props[idx - 1]);
+        let rem_expr: Expr = parse_quote!(mask[idx % 4]);
+        let mul_expr: Expr = parse_quote!(buf[row * 4]);
+
+        assert_eq!(normalize_expr_key(&add_expr), "props[idx+1]");
+        assert_eq!(normalize_expr_key(&sub_expr), "props[idx-1]");
+        assert_eq!(normalize_expr_key(&rem_expr), "mask[idx%4]");
+        assert_eq!(normalize_expr_key(&mul_expr), "buf[row*4]");
     }
 }

@@ -451,7 +451,7 @@ pub(crate) fn extract_header_signature(
         let loc = loc_from_line_starts(line_starts, name_start);
         return (String::new(), loc.line);
     }
-    let raw_slice = &source[start..end];
+    let raw_slice = source.get(start..end).unwrap_or("");
     let trimmed = raw_slice.trim();
     let without_colon = strip_trailing_colon(trimmed);
     let collapsed = without_colon
@@ -561,7 +561,7 @@ fn extract_python_suppressions(
         }
         let comment_loc = loc_from_line_starts(line_starts, range.start().to_u32());
         let line_num = comment_loc.line;
-        let raw_comment = &source[start..end];
+        let raw_comment = source.get(start..end).unwrap_or("");
         let body = raw_comment.trim_start_matches('#').trim();
 
         let Some((kind, rules)) = parse_python_suppression_directive(body) else {

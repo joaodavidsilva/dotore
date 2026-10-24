@@ -889,14 +889,14 @@ fn parse_hex_or_rgb_color(val: &str) -> Option<(f64, f64, f64)> {
     let t = val.trim().to_ascii_lowercase();
     if let Some(hex) = t.strip_prefix('#') {
         if hex.len() == 3 {
-            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
-            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
-            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+            let r = u8::from_str_radix(hex.get(0..1)?, 16).ok()? * 17;
+            let g = u8::from_str_radix(hex.get(1..2)?, 16).ok()? * 17;
+            let b = u8::from_str_radix(hex.get(2..3)?, 16).ok()? * 17;
             return Some((f64::from(r), f64::from(g), f64::from(b)));
         } else if hex.len() == 6 {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            let r = u8::from_str_radix(hex.get(0..2)?, 16).ok()?;
+            let g = u8::from_str_radix(hex.get(2..4)?, 16).ok()?;
+            let b = u8::from_str_radix(hex.get(4..6)?, 16).ok()?;
             return Some((f64::from(r), f64::from(g), f64::from(b)));
         }
     }
@@ -910,8 +910,8 @@ fn parse_hex_or_rgb_color(val: &str) -> Option<(f64, f64, f64)> {
             .filter(|s| !s.is_empty())
             .filter_map(|s| s.parse::<f64>().ok())
             .collect();
-        if nums.len() >= 3 {
-            return Some((nums[0], nums[1], nums[2]));
+        if let &[r, g, b, ..] = nums.as_slice() {
+            return Some((r, g, b));
         }
     }
     None

@@ -138,12 +138,14 @@ fn format_package_rel_path(root_dir: &Path) -> String {
 }
 
 fn common_ancestor_dir(paths: &[PathBuf]) -> Option<PathBuf> {
-    let first = paths.first()?;
+    let [first, rest @ ..] = paths else {
+        return None;
+    };
     if !first.is_absolute() {
         return None;
     }
     let mut ancestor = first.clone();
-    for path in &paths[1..] {
+    for path in rest {
         if !path.is_absolute() {
             return None;
         }
@@ -1127,8 +1129,8 @@ fn compute_header_metrics(report: &JsonReport, state: &TuiState) -> FilteredHead
         .filter_map(|&idx| report.projects.get(idx).map(|p| p.subjects_scanned))
         .sum();
 
-    let (health_score, score_label) = if selected_indices.len() == 1
-        && let Some(pkg) = state.packages.get(selected_indices[0])
+    let (health_score, score_label) = if let &[only_idx] = selected_indices.as_slice()
+        && let Some(pkg) = state.packages.get(only_idx)
     {
         (pkg.health_score, pkg.score_label.clone())
     } else if selected_indices.is_empty() {
@@ -1451,7 +1453,9 @@ pub fn run_interactive_tui(report: &JsonReport, design_mode: bool) -> bool {
             if state.active_tab_idx >= state.tab_count {
                 state.active_tab_idx = state.tab_count - 1;
             }
-            let active_tab = &effective_tabs[state.active_tab_idx];
+            let Some(active_tab) = effective_tabs.get(state.active_tab_idx) else {
+                break;
+            };
             let filtered: Vec<&Diagnostic> = report
                 .diagnostics
                 .iter()
