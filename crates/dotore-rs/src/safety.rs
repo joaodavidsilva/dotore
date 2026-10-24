@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
-    BinOp, Block, Expr, ExprCall, ExprCast, ExprIf, ExprIndex, ExprMethodCall, ExprUnsafe, File,
-    ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, Lit, Pat, Signature, Stmt, TraitItemFn, Type,
-    UnOp, UseTree,
+    BinOp, Block, Expr, ExprCall, ExprCast, ExprClosure, ExprForLoop, ExprIf, ExprIndex,
+    ExprMethodCall, ExprUnsafe, File, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, Lit, Pat,
+    Signature, Stmt, TraitItemFn, Type, UnOp, UseTree,
     spanned::Spanned,
     visit::{self, Visit},
 };
@@ -171,7 +171,7 @@ impl SafetyVisitor<'_> {
     fn infer_expr_numeric_type(&self, expr: &Expr) -> Option<NumericType> {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "syn::Expr has dozens of variants; numeric inference inspects literals, paths, calls, casts, and unary/paren expressions"
+            reason = "syn::Expr has dozens of variants; numeric inference inspects literals, paths, fields, calls, binary/unary ops, and casts"
         )]
         match expr {
             Expr::Paren(paren) => self.infer_expr_numeric_type(&paren.expr),
@@ -180,9 +180,25 @@ impl SafetyVisitor<'_> {
                 if expr_path.qself.is_none()
                     && let Some(ident) = expr_path.path.get_ident()
                 {
-                    return self.local_types.get(&ident.to_string()).copied();
+                    let name = ident.to_string();
+                    if name == "self" {
+                        return Some(NumericType::U16);
+                    }
+                    return self.local_types.get(&name).copied();
                 }
                 None
+            }
+            Expr::Field(expr_field) => {
+                if let syn::Member::Named(ident) = &expr_field.member {
+                    match ident.to_string().as_str() {
+                        "start" | "end" | "line" | "column" | "index" => Some(NumericType::U32),
+                        "health_score" => Some(NumericType::U8),
+                        "value" => Some(NumericType::F64),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
             }
             Expr::Lit(expr_lit) => match &expr_lit.lit {
                 Lit::Int(lit_int) => {
@@ -203,6 +219,7 @@ impl SafetyVisitor<'_> {
                         Some(NumericType::F64)
                     }
                 }
+                Lit::Byte(_) => Some(NumericType::U8),
                 Lit::Bool(_) => Some(NumericType::Bool),
                 Lit::Char(_) => Some(NumericType::Char),
                 _ => None,
@@ -218,18 +235,75 @@ impl SafetyVisitor<'_> {
                     self.infer_expr_numeric_type(&expr_unary.expr)
                 }
             }
+            Expr::Binary(expr_bin) => self.infer_binary_numeric_type(expr_bin),
+            Expr::Call(expr_call) => {
+                if let Expr::Path(expr_path) = expr_call.func.as_ref() {
+                    let segs: Vec<String> = expr_path
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect();
+                    if let [ty_seg, fn_seg] = segs.as_slice()
+                        && matches!(
+                            fn_seg.as_str(),
+                            "from_be_bytes" | "from_le_bytes" | "from_ne_bytes" | "from"
+                        )
+                    {
+                        return NumericType::from_type_name(ty_seg);
+                    }
+                }
+                None
+            }
             Expr::MethodCall(method_call) => {
                 let method_name = method_call.method.to_string();
-                if matches!(
-                    method_name.as_str(),
-                    "len" | "count" | "capacity" | " saturating_sub" | "wrapping_add"
-                ) {
-                    Some(NumericType::Usize)
-                } else {
-                    None
+                match method_name.as_str() {
+                    "len" | "count" | "capacity" => Some(NumericType::Usize),
+                    "saturating_sub" | "saturating_add" | "wrapping_add" | "wrapping_sub"
+                    | "min" | "max" | "clamp" => self
+                        .infer_expr_numeric_type(&method_call.receiver)
+                        .or_else(|| {
+                            method_call
+                                .args
+                                .first()
+                                .and_then(|arg| self.infer_expr_numeric_type(arg))
+                                .filter(|t| !matches!(t, NumericType::UnsuffixedInt(_)))
+                        }),
+                    _ => None,
                 }
             }
             Expr::Cast(inner_cast) => extract_numeric_type(&inner_cast.ty),
+            _ => None,
+        }
+    }
+
+    fn infer_binary_numeric_type(&self, expr_bin: &syn::ExprBinary) -> Option<NumericType> {
+        let left_ty = self.infer_expr_numeric_type(&expr_bin.left);
+        let right_ty = self.infer_expr_numeric_type(&expr_bin.right);
+
+        if matches!(expr_bin.op, BinOp::BitAnd(_)) {
+            if let Some(NumericType::UnsuffixedInt(mask)) = right_ty
+                && mask >= 0
+            {
+                return Some(NumericType::UnsuffixedInt(mask));
+            }
+            if let Some(NumericType::UnsuffixedInt(mask)) = left_ty
+                && mask >= 0
+            {
+                return Some(NumericType::UnsuffixedInt(mask));
+            }
+        }
+
+        if matches!(expr_bin.op, BinOp::Shr(_) | BinOp::Shl(_)) {
+            return left_ty;
+        }
+
+        match (left_ty, right_ty) {
+            (Some(l), Some(NumericType::UnsuffixedInt(_))) => Some(l),
+            (Some(NumericType::UnsuffixedInt(_)), Some(r)) => Some(r),
+            (Some(l), Some(r)) if l == r => Some(l),
+            (Some(l), None) if !matches!(l, NumericType::UnsuffixedInt(_)) => Some(l),
+            (None, Some(r)) if !matches!(r, NumericType::UnsuffixedInt(_)) => Some(r),
             _ => None,
         }
     }
@@ -464,6 +538,29 @@ impl<'ast> Visit<'ast> for SafetyVisitor<'_> {
             }
         }
         visit::visit_stmt(self, s);
+    }
+
+    fn visit_expr_for_loop(&mut self, i: &'ast ExprForLoop) {
+        if let Expr::MethodCall(mc) = i.expr.as_ref()
+            && let Some(elem_ty) = match mc.method.to_string().as_str() {
+                "chars" => Some(NumericType::Char),
+                "bytes" => Some(NumericType::U8),
+                _ => None,
+            }
+            && let Some(ident) = extract_pat_ident(&i.pat)
+        {
+            self.local_types.insert(ident, elem_ty);
+        }
+        visit::visit_expr_for_loop(self, i);
+    }
+
+    fn visit_expr_closure(&mut self, i: &'ast ExprClosure) {
+        for input in &i.inputs {
+            if let Some((name, Some(explicit_ty))) = extract_local_ident_and_type(input) {
+                self.local_types.insert(name, explicit_ty);
+            }
+        }
+        visit::visit_expr_closure(self, i);
     }
 
     fn visit_expr_if(&mut self, i: &'ast ExprIf) {
@@ -725,13 +822,13 @@ fn is_lossy_or_sign_changing_cast(src_ty: Option<NumericType>, target_ty: Numeri
             src.bit_width_rank() > target_ty.bit_width_rank()
         }
         None => {
-            // Unknown source expression type: flag casts to narrower or sign-changing integer targets
+            // Unknown source expression type: flag casts to narrower or signed integer targets,
+            // while `as usize` is only flagged when the source is inferred as signed, 64/128-bit, or float.
             matches!(
                 target_ty,
                 NumericType::U8
                     | NumericType::U16
                     | NumericType::U32
-                    | NumericType::Usize
                     | NumericType::I8
                     | NumericType::I16
                     | NumericType::I32
@@ -979,4 +1076,107 @@ fn block_always_diverges(block: &Block) -> bool {
 
 fn expr_diverges(expr: &Expr) -> bool {
     matches!(expr, Expr::Return(_) | Expr::Break(_) | Expr::Continue(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_cast_findings(src: &str) -> Vec<RsCandidateFinding> {
+        let ast = syn::parse_file(src).expect("valid Rust syntax");
+        let lines: Vec<&str> = src.lines().collect();
+        let line_starts = dotore_core::compute_line_starts(src);
+        let mut findings = Vec::new();
+        extract_safety_findings(&ast, &lines, &line_starts, &mut findings);
+        findings
+            .into_iter()
+            .filter(|f| f.rule == RuleId::RsNoLossyNumericAsCast)
+            .collect()
+    }
+
+    #[test]
+    fn widening_span_fields_masked_casts_from_bytes_and_enum_discriminants_are_lossless() {
+        let src = r#"
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum Kind {
+    A = 0,
+    B = 1,
+}
+
+impl Kind {
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+    pub line: u32,
+    pub column: u32,
+    pub index: u32,
+    pub health_score: u8,
+}
+
+pub fn lossless_casts(span: Span, hdr: &[u8], ext: [u8; 2], buf: u32, bits: u32, text: &str) -> usize {
+    let a = span.start as usize;
+    let b = span.end.saturating_sub(span.start) as usize;
+    let c = (span.line - 1) as usize;
+    let d = span.column as usize + span.index as usize + span.health_score as usize;
+    let e = ((buf >> bits) & 0xff) as u8;
+    let f = (hdr.get(1).copied().unwrap_or(0) & 0x7f) as usize;
+    let g = u16::from_be_bytes(ext) as usize;
+    let h = u8::from_le_bytes([ext[0]]) as u32;
+    let mut char_sum = 0u32;
+    for ch in text.chars() {
+        char_sum += ch as u32;
+    }
+    a + b + c + d + usize::from(e) + f + g + (h as usize) + (char_sum as usize)
+}
+"#;
+        let findings = check_cast_findings(src);
+        assert!(
+            findings.is_empty(),
+            "Expected 0 lossy cast findings on lossless casts, got: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn narrowing_sign_changing_float_to_int_and_overwide_mask_casts_are_flagged() {
+        let src = r#"
+pub struct NumLit {
+    pub value: f64,
+}
+
+pub fn lossy_casts(
+    big: u64,
+    idx: usize,
+    signed: i32,
+    unsigned: u32,
+    flt: f64,
+    num: NumLit,
+) -> usize {
+    let a = big as u32;
+    let b = idx as u32;
+    let c = (big + 1) as u32;
+    let d = signed as u32;
+    let e = unsigned as i32;
+    let f = flt as u32;
+    let g = flt as usize;
+    let h = num.value as usize;
+    let i = signed as usize;
+    let j = big as usize;
+    let k = (big & 0x1ff) as u8;
+    (a as usize) + (b as usize) + (c as usize) + (d as usize) + (e as usize) + (f as usize) + g + h + i + j + usize::from(k)
+}
+"#;
+        let findings = check_cast_findings(src);
+        assert_eq!(
+            findings.len(),
+            12,
+            "Expected all 12 lossy casts (including `e as usize` from `i32`) to be flagged, got {}: {findings:#?}",
+            findings.len()
+        );
+    }
 }

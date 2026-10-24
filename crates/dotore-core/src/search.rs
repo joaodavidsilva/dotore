@@ -1083,7 +1083,7 @@ fn find_enclosing_block<'a>(
 
 fn find_closing_brace_line<'a>(lines: &'a [&'a str], open_line: u32) -> Option<(u32, &'a str)> {
     let mut depth = 0i32;
-    for line in open_line..=(lines.len() as u32) {
+    for line in open_line..=u32::try_from(lines.len()).unwrap_or(u32::MAX) {
         let text = lines
             .get((line as usize).saturating_sub(1))
             .copied()
@@ -1130,7 +1130,7 @@ fn create_comment_lines(start_line: u32, end_line: u32, lines: &[&str]) -> Vec<S
     let mut output = Vec::with_capacity(visible_count + 1);
 
     for idx in 0..visible_count {
-        let line = start_line + idx as u32;
+        let line = start_line + u32::try_from(idx).unwrap_or(0);
         let text = lines
             .get((line as usize).saturating_sub(1))
             .copied()
@@ -1140,7 +1140,7 @@ fn create_comment_lines(start_line: u32, end_line: u32, lines: &[&str]) -> Vec<S
 
     let hidden_count = line_count - visible_count;
     if hidden_count > 0 {
-        let last_visible_line = start_line + visible_count as u32 - 1;
+        let last_visible_line = start_line + u32::try_from(visible_count).unwrap_or(0) - 1;
         let last_text = lines
             .get((last_visible_line as usize).saturating_sub(1))
             .copied()
