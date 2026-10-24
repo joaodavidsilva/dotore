@@ -97,7 +97,7 @@ where
     let mut descriptions_by_file: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
     for diag in diagnostics {
-        if diag.tier != PrescriptionTier::Autofix {
+        if diag.tier != PrescriptionTier::Autofix || diag.rule.is_architecture_soc_or_reuse_rule() {
             continue;
         }
         let Some(patch) = &diag.autofix else {
@@ -218,7 +218,7 @@ where
     let mut descriptions: Vec<String> = Vec::new();
 
     for diag in diagnostics {
-        if diag.tier != PrescriptionTier::Autofix {
+        if diag.tier != PrescriptionTier::Autofix || diag.rule.is_architecture_soc_or_reuse_rule() {
             continue;
         }
         let Some(patch) = &diag.autofix else {

@@ -14,7 +14,10 @@ use crate::{
         CapabilityGate, DotoreConfig, IgnoreConfig, WorkspacePackage,
         discover_workspace_packages_with_analyzers, load_config_from_dir, resolve_package_for_file,
     },
-    ir::{ExtractedFile, FileContext, LanguageAnalyzer, compute_line_starts, loc_from_line_starts},
+    ir::{
+        ArchitectureFileFacets, ExtractedFile, FileContext, LanguageAnalyzer, compute_line_starts,
+        loc_from_line_starts,
+    },
     planner::{build_fix_capsule, build_root_cause_groups_and_capsules},
     rules::{
         BlastRadius, Diagnostic, FixCapsule, PrescriptionTier, RuleCategory, RuleId, RuleSeverity,
@@ -251,7 +254,7 @@ pub fn explain_location_with_analyzers(
                 .find(|g| g.diagnostic_indices.contains(&idx))
                 .unwrap_or(&groups[0]);
             let capsule = build_fix_capsule(&extracted_files, group, &active_at_line, &sources);
-            let explanation = format!(
+            let mut explanation = format!(
                 "Diagnostic `{}` fired at {}:{} because `{}` triggered rule `{}`.",
                 diag.rule.metadata().qualified_key,
                 parsed_loc.file.display(),
@@ -259,6 +262,14 @@ pub fn explain_location_with_analyzers(
                 diag.target_name,
                 diag.rule.as_str()
             );
+            if let Some(arch_exp) = format_architecture_signal_explanation(
+                diag,
+                Some(&target_extracted.architecture_facets),
+            ) {
+                let _ = write!(explanation, " Structural signals: {arch_exp}");
+            }
+            let cascade_steps =
+                architecture_or_existing_cascade_steps(diag, Some(&target_extracted.architecture_facets));
             entries.push(WhyEntry {
                 status: "active".to_string(),
                 rule: diag.rule.metadata().qualified_key.to_string(),
@@ -268,7 +279,7 @@ pub fn explain_location_with_analyzers(
                 message: diag.message.clone(),
                 explanation,
                 code_frame: render_code_frame(&target_source, diag.loc.line),
-                cascade_steps: diag.cascade_steps.clone(),
+                cascade_steps,
                 blast_radius: group.blast_radius.clone(),
                 fix_capsule: capsule,
             });
@@ -292,7 +303,7 @@ pub fn explain_location_with_analyzers(
                         || target_extracted
                             .suppressions
                             .matches_line_or_block(diag.rule, diag.loc.line));
-                let (status, explanation) = diagnose_why_not_active_common(
+                let (status, mut explanation) = diagnose_why_not_active_common(
                     diag,
                     &target_extracted.path,
                     target_extracted.file_context,
@@ -300,6 +311,16 @@ pub fn explain_location_with_analyzers(
                     &pkg.root_dir,
                     &pkg.capability_gate,
                     &pkg.config,
+                );
+                if let Some(arch_exp) = format_architecture_signal_explanation(
+                    diag,
+                    Some(&target_extracted.architecture_facets),
+                ) {
+                    let _ = write!(explanation, " Structural signals: {arch_exp}");
+                }
+                let cascade_steps = architecture_or_existing_cascade_steps(
+                    diag,
+                    Some(&target_extracted.architecture_facets),
                 );
                 entries.push(WhyEntry {
                     status,
@@ -310,7 +331,7 @@ pub fn explain_location_with_analyzers(
                     message: diag.message.clone(),
                     explanation,
                     code_frame: render_code_frame(&target_source, diag.loc.line),
-                    cascade_steps: diag.cascade_steps.clone(),
+                    cascade_steps,
                     blast_radius: group.blast_radius.clone(),
                     fix_capsule: capsule,
                 });
@@ -647,4 +668,87 @@ pub fn render_code_frame(source: &str, target_line: u32) -> String {
         let _ = writeln!(out, "{marker} {line_no:>4} | {line_text}");
     }
     out.trim_end().to_string()
+}
+
+/// Formats the multi-signal structural evidence explaining why an architectural, Separation of
+/// Concerns, or reuse [`Diagnostic`] fired, using the file's [`ArchitectureFileFacets`] when available.
+#[must_use]
+pub fn format_architecture_signal_explanation(
+    diag: &Diagnostic,
+    facets: Option<&ArchitectureFileFacets>,
+) -> Option<String> {
+    let facets_summary = facets.and_then(ArchitectureFileFacets::explain_signals_summary);
+    if !diag.rule.is_architecture_soc_or_reuse_rule() && facets_summary.is_none() {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    if let Some(summary) = facets_summary {
+        segments.push(summary);
+    }
+    if !diag.cascade_steps.is_empty() {
+        segments.push(format!("signals=[{}]", diag.cascade_steps.join(" -> ")));
+    }
+    if !diag.caller_sites.is_empty() {
+        let peers: Vec<String> = diag
+            .caller_sites
+            .iter()
+            .take(4)
+            .map(|c| format!("{}:{}", c.caller_file.display(), c.loc.line))
+            .collect();
+        segments.push(format!("peer_sites=[{}]", peers.join(", ")));
+    }
+    if segments.is_empty() {
+        segments.push(format!(
+            "rule={} target={}",
+            diag.rule.as_str(),
+            diag.target_name
+        ));
+    }
+    Some(segments.join("; "))
+}
+
+fn architecture_or_existing_cascade_steps(
+    diag: &Diagnostic,
+    facets: Option<&ArchitectureFileFacets>,
+) -> Vec<String> {
+    if !diag.cascade_steps.is_empty() {
+        return diag.cascade_steps.clone();
+    }
+    if !diag.rule.is_architecture_soc_or_reuse_rule() {
+        return Vec::new();
+    }
+    let Some(facets) = facets else {
+        return Vec::new();
+    };
+    let mut steps = Vec::new();
+    for sig in &facets.concern_signals {
+        let step = format!("{}: {}", sig.bucket.as_str(), sig.detail);
+        if !steps.contains(&step) {
+            steps.push(step);
+        }
+    }
+    for cat in &facets.static_catalog_sites {
+        steps.push(format!(
+            "static-catalog {}: {} entries ({}B)",
+            cat.name, cat.entry_count, cat.byte_len
+        ));
+    }
+    for ui in &facets.inline_terminal_ui_sites {
+        steps.push(format!("inline-ui {}: {}", ui.kind, ui.snippet));
+    }
+    for lit in &facets.struct_literal_sites {
+        steps.push(format!(
+            "struct-literal {}: {} fields",
+            lit.type_name,
+            lit.field_names.len()
+        ));
+    }
+    for helper in &facets.helper_fingerprints {
+        steps.push(format!(
+            "helper {}: hash=0x{:08x} ({} stmts)",
+            helper.name, helper.normalized_hash, helper.statement_count
+        ));
+    }
+    steps
 }

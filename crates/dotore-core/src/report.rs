@@ -34,5 +34,6 @@ pub use terminal::{
 };
 pub use why::{
     WhyEntry, WhyLocation, WhyReport, diagnose_why_not_active_common, explain_location,
-    explain_location_with_analyzers, format_why_report_text, parse_why_location, render_code_frame,
+    explain_location_with_analyzers, format_architecture_signal_explanation,
+    format_why_report_text, parse_why_location, render_code_frame,
 };

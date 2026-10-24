@@ -2187,6 +2187,24 @@ pub enum RuleId {
     RsPerfPreferVecWithCapacity,
     /// Unnecessary `format!(...)` allocation on a plain literal or single string argument.
     RsPerfNoUnnecessaryFormat,
+    /// Binary or service entrypoint embeds domain logic, direct I/O, or rendering instead of thin adapter delegation.
+    ArchThinEntrypoint,
+    /// Single module interleaves database/filesystem/network I/O with terminal or UI presentation.
+    ArchNoMixedIoAndPresentation,
+    /// Module combines core domain type definitions with a large static data catalog.
+    ArchSeparateStaticCatalogFromTypes,
+    /// Monolithic module combines unrelated domain symbol clusters and responsibilities.
+    ArchNoMixedDomainMonolith,
+    /// Raw ANSI escape sequences or Unicode box-drawing literals constructed inline outside the terminal UI kit.
+    ArchNoInlineTerminalUiPrimitives,
+    /// Multi-field struct, class, or object constructed repeatedly via boilerplate literals instead of a fluent builder.
+    ArchPreferFluentBuilder,
+    /// Private helper function with identical normalized AST fingerprint duplicated across sibling modules.
+    ArchNoDuplicatedHelperLogic,
+    /// Internal Rust submodule declared as `pub mod` when the crate root already re-exports its public API surface.
+    RsArchPreferPubCrateModules,
+    /// Legacy `<dir>/mod.rs` directory module file used instead of modern `<dir>.rs` layout.
+    RsArchNoLegacyModRs,
 }
 
 /// Static catalog metadata for a registered diagnostic rule.
@@ -2315,6 +2333,28 @@ impl RuleId {
     #[must_use]
     pub fn matches_key(self, candidate: &str) -> bool {
         Self::parse(candidate) == Some(self)
+    }
+
+    /// Returns `true` if this rule belongs to the Architecture, Separation of Concerns (SoC),
+    /// module visibility/layout, or structural reuse rule suite.
+    #[must_use]
+    pub const fn is_architecture_soc_or_reuse_rule(self) -> bool {
+        matches!(
+            self,
+            Self::ArchThinEntrypoint
+                | Self::ArchNoMixedIoAndPresentation
+                | Self::ArchSeparateStaticCatalogFromTypes
+                | Self::ArchNoMixedDomainMonolith
+                | Self::ArchNoInlineTerminalUiPrimitives
+                | Self::ArchPreferFluentBuilder
+                | Self::ArchNoDuplicatedHelperLogic
+                | Self::RsArchPreferPubCrateModules
+                | Self::RsArchNoLegacyModRs
+                | Self::DuplicateJsxSubtree
+                | Self::CircularDependency
+                | Self::PyArchNoCircularImports
+                | Self::RsArchNoUnusedPubCrateItems
+        )
     }
 }
 

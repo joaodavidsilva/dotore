@@ -96,6 +96,104 @@ impl Default for SupplyChainConfig {
     }
 }
 
+/// Multi-signal structural thresholds for Architecture, Separation of Concerns & Reuse rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchitectureThresholdsConfig {
+    /// Minimum statements in a private helper function before computing duplication fingerprints (`arch-no-duplicated-helper-logic`). Defaults to `4`.
+    #[serde(
+        default = "default_min_helper_statements",
+        alias = "min_helper_statements"
+    )]
+    pub min_helper_statements: usize,
+    /// Minimum distinct modules containing an identical helper fingerprint (`arch-no-duplicated-helper-logic`). Defaults to `2`.
+    #[serde(
+        default = "default_min_duplicated_helper_modules",
+        alias = "min_duplicated_helper_modules"
+    )]
+    pub min_duplicated_helper_modules: usize,
+    /// Minimum fields in a struct/object literal before requiring a fluent builder (`arch-prefer-fluent-builder`). Defaults to `5`.
+    #[serde(default = "default_min_builder_fields", alias = "min_builder_fields")]
+    pub min_builder_fields: usize,
+    /// Minimum construction sites sharing boilerplate/default fields (`arch-prefer-fluent-builder`). Defaults to `3`.
+    #[serde(default = "default_min_builder_sites", alias = "min_builder_sites")]
+    pub min_builder_sites: usize,
+    /// Minimum public/exported domain types in a file alongside a static catalog (`arch-separate-static-catalog-from-types`). Defaults to `3`.
+    #[serde(
+        default = "default_min_types_with_catalog",
+        alias = "min_types_with_catalog"
+    )]
+    pub min_types_with_catalog: usize,
+    /// Minimum static catalog entries in a file alongside domain types (`arch-separate-static-catalog-from-types`). Defaults to `25`.
+    #[serde(
+        default = "default_min_static_catalog_entries",
+        alias = "min_static_catalog_entries"
+    )]
+    pub min_static_catalog_entries: usize,
+    /// Maximum statements allowed in a thin binary/application entrypoint (`arch-thin-entrypoint`). Defaults to `25`.
+    #[serde(
+        default = "default_max_entrypoint_statements",
+        alias = "max_entrypoint_statements"
+    )]
+    pub max_entrypoint_statements: usize,
+    /// Minimum distinct domain clusters in a monolith file (`arch-no-mixed-domain-monolith`). Defaults to `3`.
+    #[serde(
+        default = "default_min_monolith_domain_clusters",
+        alias = "min_monolith_domain_clusters"
+    )]
+    pub min_monolith_domain_clusters: usize,
+    /// Minimum top-level symbols in a monolith file (`arch-no-mixed-domain-monolith`). Defaults to `12`.
+    #[serde(
+        default = "default_min_monolith_symbols",
+        alias = "min_monolith_symbols"
+    )]
+    pub min_monolith_symbols: usize,
+}
+
+const fn default_min_helper_statements() -> usize {
+    4
+}
+const fn default_min_duplicated_helper_modules() -> usize {
+    2
+}
+const fn default_min_builder_fields() -> usize {
+    5
+}
+const fn default_min_builder_sites() -> usize {
+    3
+}
+const fn default_min_types_with_catalog() -> usize {
+    3
+}
+const fn default_min_static_catalog_entries() -> usize {
+    25
+}
+const fn default_max_entrypoint_statements() -> usize {
+    25
+}
+const fn default_min_monolith_domain_clusters() -> usize {
+    3
+}
+const fn default_min_monolith_symbols() -> usize {
+    12
+}
+
+impl Default for ArchitectureThresholdsConfig {
+    fn default() -> Self {
+        Self {
+            min_helper_statements: default_min_helper_statements(),
+            min_duplicated_helper_modules: default_min_duplicated_helper_modules(),
+            min_builder_fields: default_min_builder_fields(),
+            min_builder_sites: default_min_builder_sites(),
+            min_types_with_catalog: default_min_types_with_catalog(),
+            min_static_catalog_entries: default_min_static_catalog_entries(),
+            max_entrypoint_statements: default_max_entrypoint_statements(),
+            min_monolith_domain_clusters: default_min_monolith_domain_clusters(),
+            min_monolith_symbols: default_min_monolith_symbols(),
+        }
+    }
+}
+
 /// Project configuration loaded from `dotore.config.*` or `package.json#dotore`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +231,9 @@ pub struct DotoreConfig {
     /// Whether warning-severity diagnostics are surfaced. Defaults to `true`.
     #[serde(default = "default_true")]
     pub warnings: bool,
+    /// Configurable multi-signal thresholds for Architecture, Separation of Concerns & Reuse rules.
+    #[serde(default)]
+    pub architecture: ArchitectureThresholdsConfig,
 }
 
 const fn default_true() -> bool {
@@ -153,6 +254,7 @@ impl Default for DotoreConfig {
             supply_chain: SupplyChainConfig::default(),
             respect_inline_disables: true,
             warnings: true,
+            architecture: ArchitectureThresholdsConfig::default(),
         }
     }
 }
@@ -896,6 +998,12 @@ impl<'a> ConfigCursor<'a> {
             return Err("Invalid numeric literal".to_string());
         }
         let raw = self.src[start..self.pos].replace(['_', ' '], "");
+        if let Ok(int_val) = raw.parse::<u64>() {
+            return Ok(Value::Number(serde_json::Number::from(int_val)));
+        }
+        if let Ok(int_val) = raw.parse::<i64>() {
+            return Ok(Value::Number(serde_json::Number::from(int_val)));
+        }
         let parsed = raw
             .parse::<f64>()
             .map_err(|e| format!("Invalid number {raw}: {e}"))?;
