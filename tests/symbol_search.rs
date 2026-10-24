@@ -710,6 +710,35 @@ fn persistent_symbol_outline_index_cache_reuses_unchanged_invalidates_edits_and_
     assert_eq!(edit_hits.len(), 1);
     assert_eq!(edit_hits[0].outline.name, "CounterViewRenamed");
 
+    // 4b. Searching an explicit single file path updates that file in `symbols.json` while preserving sibling files!
+    let sib_ts_path = temp_dir.join("root_helper.ts");
+    fs::write(
+        &sib_ts_path,
+        "export function CounterRootHelper() { return 1; }\n",
+    )
+    .expect("write root_helper.ts");
+    let _ = search_symbols("Counter", &options).expect("search with root_helper.ts");
+    let single_file_opts = SearchOptions {
+        paths: vec![sib_ts_path.clone()],
+        kinds: None,
+        limit: 50,
+        include_tests: true,
+    };
+    let (single_hits, _) =
+        search_symbols("CounterRootHelper", &single_file_opts).expect("single-file search");
+    assert_eq!(single_hits.len(), 1);
+    let cache_after_single =
+        load_symbol_index_cache(&cache_path).expect("reload cache after single-file search");
+    assert_eq!(
+        cache_after_single.files.len(),
+        4,
+        "single-file search must preserve sibling files in symbols.json"
+    );
+    assert!(cache_after_single.files.contains_key("root_helper.ts"));
+    assert!(cache_after_single.files.contains_key("src/Counter.tsx"));
+    assert!(cache_after_single.files.contains_key("src/service.py"));
+    assert!(cache_after_single.files.contains_key("src/engine.rs"));
+    fs::remove_file(&sib_ts_path).expect("remove root_helper.ts");
     // 5. Adding a file parses only the newly added file (`1` extractor call), and deleting a file prunes it.
     let added_path = src_dir.join("added.ts");
     fs::write(

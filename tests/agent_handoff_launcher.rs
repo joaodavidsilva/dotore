@@ -503,6 +503,21 @@ fn tui_y_and_a_keys_copy_filtered_handoff_prompt_and_launch_coding_agent() {
     assert!(agent_received.contains("src/Form.tsx"));
     assert!(!agent_received.contains("src/Editor.tsx"));
 
+    // 4. When multiple coding agents (`claude` and `cursor`) are available and no preference is stored,
+    // pressing `a` includes the available agent choices in `status_message`.
+    let _ = fs::remove_file(home_dir.join("preferences.json"));
+    #[cfg(unix)]
+    write_executable_script(&bin_dir.join("cursor"), "#!/bin/sh\necho cursor\n");
+    assert!(!state.handle_key(b"a", 20, 10));
+    let status_multi = state
+        .status_message
+        .clone()
+        .expect("status message with multiple agents");
+    assert!(
+        status_multi.contains("available: claude, cursor")
+            && status_multi.contains("--handoff <agent>"),
+        "unexpected multi-agent status: {status_multi}"
+    );
     unsafe {
         std::env::remove_var("DOTORE_HOME");
         std::env::remove_var("DOTORE_CLIPBOARD_CMD");

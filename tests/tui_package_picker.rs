@@ -329,6 +329,8 @@ fn tui_package_picker_fuzzy_filters_highlights_toggles_and_applies_package_filte
     assert!(!filtered_plain.contains("services/api/src/handler.ts"));
     assert!(filtered_plain.contains("Packages: 1/3 (web-react)"));
 
+    assert!(filtered_plain.contains("ALL (2 matching)"));
+    assert!(filtered_plain.contains("Press `/` to search by file, rule, or Subject"));
     // 7. Re-open picker (`p`), toggle all (`a`), then cancel with `ESC` -> does NOT exit TUI and preserves previous active filter
     assert!(!state.handle_key(b"p", 20, 10));
     assert!(state.in_package_picker);
@@ -375,6 +377,18 @@ fn tui_package_picker_arrow_navigation_path_matching_and_resizable_overlay_width
     assert_eq!(path_rows[0].package_idx, 1);
     assert_eq!(path_rows[0].path_matches, vec![0, 1, 2, 3, 4, 5, 6, 7]);
 
+    // Typing `a` while `picker_query` is non-empty appends to `picker_query` instead of toggling all,
+    // while Ctrl-A (`0x01`) toggles all even with a non-empty query.
+    assert!(!state.handle_key(b"/a", 20, 10));
+    assert_eq!(state.picker_query, "services/a");
+    assert_eq!(state.picker_selected, vec![true, false, true]);
+    assert!(!state.handle_key(&[0x01], 20, 10));
+    assert_eq!(state.picker_selected, vec![true, true, true]);
+    assert!(!state.handle_key(&[0x01], 20, 10));
+    assert_eq!(state.picker_selected, vec![false, false, false]);
+    assert!(!state.handle_key(&[0x01], 20, 10));
+    assert_eq!(state.picker_selected, vec![true, true, true]);
+    state.picker_selected[1] = false;
     // Verify resizable picker overlay renders cleanly across 80, 100, and 120 columns
     for cols in [80usize, 100, 120] {
         let lines = render_package_picker_lines(&state, cols);

@@ -1402,11 +1402,7 @@ export function ParentPage() {
 
 #[test]
 fn cli_pr_comment_format_and_ci_comment_subcommand_render_deterministic_summary() {
-    use dotore::{
-        BaselineSummary, OutputFormat, PR_COMMENT_MARKER, read_json_report, write_json_report,
-    };
-
-    let _ = OutputFormat::GithubPrComment;
+    use dotore::{BaselineSummary, PR_COMMENT_MARKER, read_json_report, write_json_report};
     let dir = unique_temp_dir("pr-comment-cli");
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
