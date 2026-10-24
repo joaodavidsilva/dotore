@@ -36,7 +36,9 @@ use crate::{
     rules::RuleId,
 };
 
-pub(super) fn build_same_file_memo_registry(semantic: &Semantic<'_>) -> HashMap<String, MemoStatus> {
+pub(super) fn build_same_file_memo_registry(
+    semantic: &Semantic<'_>,
+) -> HashMap<String, MemoStatus> {
     let mut registry = HashMap::new();
     for (_, node) in semantic.nodes().iter_enumerated() {
         match node.kind() {

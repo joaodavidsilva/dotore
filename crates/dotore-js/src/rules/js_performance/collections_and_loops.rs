@@ -1273,7 +1273,8 @@ pub(super) fn check_js_early_exit(
         subject_name,
         "jsEarlyExit",
         "if",
-        "Deeply nested `if` statements can be flattened with guard clauses and early returns.".to_string(),
+        "Deeply nested `if` statements can be flattened with guard clauses and early returns."
+            .to_string(),
         line_starts,
         if_stmt.span,
     );

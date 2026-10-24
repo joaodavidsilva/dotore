@@ -977,12 +977,7 @@ pub(super) fn check_extended_design_patterns(
         && unvariant_tokens.iter().any(|u| {
             matches!(
                 *u,
-                "min-h-screen"
-                    | "h-screen"
-                    | "min-h-dvh"
-                    | "h-dvh"
-                    | "min-h-[100vh]"
-                    | "h-[100vh]"
+                "min-h-screen" | "h-screen" | "min-h-dvh" | "h-dvh" | "min-h-[100vh]" | "h-[100vh]"
             )
         })
         && unvariant_tokens.contains(&"items-center")

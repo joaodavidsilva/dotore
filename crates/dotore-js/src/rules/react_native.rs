@@ -15,9 +15,7 @@ use std::path::Path;
 
 use oxc_ast::{
     AstKind,
-    ast::{
-        Expression, ImportDeclarationSpecifier, Program, Statement, VariableDeclarationKind,
-    },
+    ast::{Expression, ImportDeclarationSpecifier, Program, Statement, VariableDeclarationKind},
 };
 use oxc_semantic::Semantic;
 use oxc_span::Span;
@@ -37,8 +35,7 @@ use self::{
     animations_and_styles::check_rn_call_rules,
     lists_and_layout::check_rn_jsx_element_rules,
     navigation_and_expo::{
-        check_expo_env_destructuring, check_rn_import_rules,
-        check_rn_platform_namespace_shaking,
+        check_expo_env_destructuring, check_rn_import_rules, check_rn_platform_namespace_shaking,
     },
 };
 

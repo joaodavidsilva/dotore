@@ -52,11 +52,7 @@ pub(crate) struct MultiEffectCascade {
 impl ProjectGraph {
     /// Returns all resolved JSX **Caller Sites** rendering `component_name` declared in `target_file`.
     #[must_use]
-    pub fn callers_of(
-        &self,
-        target_file: &Path,
-        component_name: &str,
-    ) -> Vec<ResolvedCallerSite> {
+    pub fn callers_of(&self, target_file: &Path, component_name: &str) -> Vec<ResolvedCallerSite> {
         let key = ComponentTarget {
             file: target_file.to_path_buf(),
             component_name: component_name.to_string(),

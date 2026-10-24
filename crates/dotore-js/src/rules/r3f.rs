@@ -41,8 +41,9 @@ use crate::{
         },
     },
     matchers::{
-        collect_pattern_bound_names, find_last_jsx_attr, get_object_prop as matcher_get_object_prop,
-        has_jsx_truthy_attr, jsx_attr_expr, make_diag_for_subject, push_semantic_site,
+        collect_pattern_bound_names, find_last_jsx_attr,
+        get_object_prop as matcher_get_object_prop, has_jsx_truthy_attr, jsx_attr_expr,
+        make_diag_for_subject, push_semantic_site,
     },
     rules::{Diagnostic, RuleId, RuleSeverity},
 };
@@ -1362,7 +1363,8 @@ pub(crate) fn eval_static_array_len(expr: &Expression<'_>) -> Option<usize> {
         Expression::NewExpression(new_expr) => {
             let first = new_expr.arguments.first()?.as_expression()?;
             match first.without_parentheses() {
-                Expression::NumericLiteral(n) if n.value >= 0.0 && n.value.fract() == 0.0 => {
+                Expression::NumericLiteral(n) if n.value >= 0.0 && n.value.fract() == 0.0 =>
+                {
                     #[expect(
                         clippy::cast_possible_truncation,
                         clippy::cast_sign_loss,

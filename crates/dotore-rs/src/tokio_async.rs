@@ -210,8 +210,8 @@ impl TokioAsyncVisitor<'_> {
                     if self.is_tokio_sync_receiver(&mc.receiver) {
                         return None;
                     }
-                    let recv_name = extract_receiver_label(&mc.receiver)
-                        .unwrap_or_else(|| "mutex".to_string());
+                    let recv_name =
+                        extract_receiver_label(&mc.receiver).unwrap_or_else(|| "mutex".to_string());
                     return Some(format!("{recv_name}.{method}()"));
                 }
                 None

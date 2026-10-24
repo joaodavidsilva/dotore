@@ -209,7 +209,12 @@ fn group_b_performance_and_js_performance_rules_and_tosorted_autofix() {
     assert!(rewritten_tosorted.contains("items.toSorted((x, y) => x - y)"));
     assert!(rewritten_tosorted.contains("names.toReversed()"));
     assert!(
-        run_rule("src/sort.ts", &rewritten_tosorted, RuleId::JsTosortedImmutable).is_empty(),
+        run_rule(
+            "src/sort.ts",
+            &rewritten_tosorted,
+            RuleId::JsTosortedImmutable
+        )
+        .is_empty(),
         "Expected 0 diagnostics after js-tosorted-immutable autofix"
     );
 
@@ -659,8 +664,7 @@ fn group_e_react_builtins_jsx_and_class_lifecycle_rules_and_autofixes() {
     );
 
     // 2. jsx-fragments with Autofix round-trip
-    let frag_src =
-        "import React from 'react';\nexport const Comp = () => <React.Fragment><span>A</span><span>B</span></React.Fragment>;\n";
+    let frag_src = "import React from 'react';\nexport const Comp = () => <React.Fragment><span>A</span><span>B</span></React.Fragment>;\n";
     let frag_diags = run_rule("src/Comp.tsx", frag_src, RuleId::JsxFragments);
     assert_eq!(frag_diags.len(), 1);
     assert_eq!(

@@ -496,8 +496,8 @@ fn check_shader_material_pair_and_uniforms(
                 && !THREE_SHADER_BUILTINS.contains(&uname)
                 && !uname.starts_with("gl_")
             {
-                let has_binding = uniforms_expr
-                    .is_some_and(|u| u.span().source_text(ctx.source).contains(uname));
+                let has_binding =
+                    uniforms_expr.is_some_and(|u| u.span().source_text(ctx.source).contains(uname));
                 if !has_binding {
                     ctx.push_site(
                         sites,

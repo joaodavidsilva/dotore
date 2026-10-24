@@ -19,7 +19,7 @@ crates/
       rules.rs            # unified rule registry module root
       rules/
         types.rs          # RuleId, RuleMetadata, PrescriptionTier, Diagnostic, AutofixPatch, FixCapsule
-        catalog.rs        # 965-rule static metadata catalog assembled across domain submodules
+        catalog.rs        # 974-rule static metadata catalog assembled across domain submodules
         catalog/
           react_core.rs   # React Effect Node, State Slot, hooks, lifecycle, and architecture rule metadata
           three_r3f_webgl.rs # Three.js, WebGL, and React Three Fiber 60fps frame-loop rule metadata
@@ -89,6 +89,7 @@ crates/
           hoisting_and_compiler.rs # module-scope static/pure hoisting autofixes, nested components, and React Compiler memoization
           context_and_boundaries.rs # Context.Provider/useContext extraction, overloaded providers, and ancestral Suspense/ErrorBoundary checks
           component_contracts.rs # Subject size/complexity, boolean props, handler names, inline HOCs, and deprecated React APIs
+          soc_rules.rs    # JS/TS Separation of Concerns facets and single-file rules (thin entrypoints, mixed I/O + presentation, static catalogs, monoliths)
         bundle_size.rs    # barrel imports, heavy packages, and dynamic import rules
         correctness.rs    # unstable keys, numeric && render, DOM nesting, and input rules
         defensive_js.rs   # defensive JS/TS/DOM runtime safety rules root and shared guard inspectors

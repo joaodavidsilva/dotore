@@ -19,9 +19,8 @@ use oxc_ast::{
     AstKind,
     ast::{
         ArrayExpressionElement, BindingPattern, CallExpression, Expression,
-        ImportDeclarationSpecifier, JSXAttributeItem, JSXAttributeValue,
-        JSXElementName, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
-        UnaryOperator,
+        ImportDeclarationSpecifier, JSXAttributeItem, JSXAttributeValue, JSXElementName,
+        ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement, UnaryOperator,
     },
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
@@ -100,13 +99,7 @@ pub(crate) fn extract_remotion_and_ecosystem_sites(
                     line_starts,
                     sites,
                 );
-                check_tanstack_jsx_opening(
-                    semantic,
-                    opening,
-                    &subject_name,
-                    line_starts,
-                    sites,
-                );
+                check_tanstack_jsx_opening(semantic, opening, &subject_name, line_starts, sites);
                 check_ui_primitive_jsx_opening(
                     semantic,
                     node_id,
@@ -149,13 +142,7 @@ pub(crate) fn extract_remotion_and_ecosystem_sites(
                     line_starts,
                     sites,
                 );
-                check_redux_call_expression(
-                    semantic,
-                    call,
-                    &subject_name,
-                    line_starts,
-                    sites,
-                );
+                check_redux_call_expression(semantic, call, &subject_name, line_starts, sites);
             }
             _ => {}
         }
@@ -261,7 +248,8 @@ fn collect_file_imports(program: &Program<'_>, _semantic: &Semantic<'_>) -> File
                         out.radix_tabs_trigger_locals
                             .insert(format!("{}.Trigger", ns.local.name));
                     } else if src.starts_with("@base-ui") {
-                        out.base_ui_tab_locals.insert(format!("{}.Tab", ns.local.name));
+                        out.base_ui_tab_locals
+                            .insert(format!("{}.Tab", ns.local.name));
                     }
                 }
             }
@@ -288,8 +276,10 @@ fn collect_use_animate_bindings(semantic: &Semantic<'_>) -> HashSet<String> {
         {
             out.insert(second.name.to_string());
         }
-        if matches!(extract_callee_name(&call.callee), Some("useAnimation" | "useAnimationControls"))
-            && let BindingPattern::BindingIdentifier(ident) = &decl.id
+        if matches!(
+            extract_callee_name(&call.callee),
+            Some("useAnimation" | "useAnimationControls")
+        ) && let BindingPattern::BindingIdentifier(ident) = &decl.id
         {
             out.insert(ident.name.to_string());
         }
@@ -410,8 +400,10 @@ pub(crate) fn has_jsx_truthy_attr(attrs: &[JSXAttributeItem<'_>], target: &str) 
     match &attr.value {
         None => true,
         Some(JSXAttributeValue::ExpressionContainer(cont)) => {
-            if let Some(Expression::BooleanLiteral(b)) =
-                cont.expression.as_expression().map(Expression::without_parentheses)
+            if let Some(Expression::BooleanLiteral(b)) = cont
+                .expression
+                .as_expression()
+                .map(Expression::without_parentheses)
             {
                 b.value
             } else {
@@ -426,8 +418,10 @@ pub(crate) fn extract_attr_string_value<'a>(val: &'a JSXAttributeValue<'a>) -> O
     match val {
         JSXAttributeValue::StringLiteral(s) => s.value.as_str(),
         JSXAttributeValue::ExpressionContainer(cont) => {
-            if let Some(Expression::StringLiteral(s)) =
-                cont.expression.as_expression().map(Expression::without_parentheses)
+            if let Some(Expression::StringLiteral(s)) = cont
+                .expression
+                .as_expression()
+                .map(Expression::without_parentheses)
             {
                 s.value.as_str()
             } else {

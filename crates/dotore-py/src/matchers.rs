@@ -353,12 +353,7 @@ pub(crate) fn is_path_constructor_expr(expr: &Expr) -> bool {
         let callee = callee_qualified_name(&call.func);
         return matches!(
             callee.as_str(),
-            "Path"
-                | "pathlib.Path"
-                | "PurePath"
-                | "pathlib.PurePath"
-                | "PosixPath"
-                | "WindowsPath"
+            "Path" | "pathlib.Path" | "PurePath" | "pathlib.PurePath" | "PosixPath" | "WindowsPath"
         );
     }
     false
@@ -526,9 +521,7 @@ pub(crate) fn build_py_diagnostic_with_patch(
 mod tests {
     use std::{collections::HashSet, path::Path};
 
-    use dotore_core::{
-        AutofixPatch, ByteSpan, PrescriptionTier, RuleId, compute_line_starts,
-    };
+    use dotore_core::{AutofixPatch, ByteSpan, PrescriptionTier, RuleId, compute_line_starts};
     use ruff_python_ast::{ModModule, PySourceType, Stmt};
     use ruff_python_parser::{Parsed, parse_unchecked_source};
 
@@ -676,11 +669,7 @@ async def create_item(pos_only, /, normal: int = 1, *, kw_only: str = "x"):
         assert_eq!(diag.target_name, "except");
         assert!(diag.autofix.is_none());
 
-        let patch = AutofixPatch::replace(
-            "Use timezone.utc",
-            span,
-            "datetime.now(timezone.utc)",
-        );
+        let patch = AutofixPatch::replace("Use timezone.utc", span, "datetime.now(timezone.utc)");
         let autofix_diag = build_py_diagnostic_with_patch(
             Path::new("app/clock.py"),
             &line_starts,

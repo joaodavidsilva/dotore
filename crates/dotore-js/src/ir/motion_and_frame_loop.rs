@@ -1042,7 +1042,6 @@ fn collect_outgoing_calls_in_span(
     out
 }
 
-
 fn collect_helper_hazards_in_span(
     semantic: &Semantic<'_>,
     line_starts: &[u32],
@@ -1066,11 +1065,9 @@ fn collect_helper_hazards_in_span(
 
         match node.kind() {
             AstKind::NewExpression(new_expr) => {
-                if let Some(ctor) = resolve_callee_ctor_name(
-                    &new_expr.callee,
-                    imported_symbols,
-                    namespace_imports,
-                ) {
+                if let Some(ctor) =
+                    resolve_callee_ctor_name(&new_expr.callee, imported_symbols, namespace_imports)
+                {
                     hazards.push(FrameHelperHazard {
                         kind: FrameHelperHazardKind::NewAllocation(ctor),
                         loc,
@@ -1253,7 +1250,7 @@ mod tests {
     use std::path::Path;
 
     use crate::ir::{
-         parse_file_ir,
+        parse_file_ir,
         types::{FrameHelperHazardKind, FrameLoopRootKind},
     };
 

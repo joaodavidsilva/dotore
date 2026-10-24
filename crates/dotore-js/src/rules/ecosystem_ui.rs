@@ -873,8 +873,7 @@ fn check_ink_jsx_opening(
         });
     }
     // 3b. `ink-newline-inside-text`: `<Newline>` outside `<Text>`
-    if ink_el == Some("Newline") && !has_ink_text_ancestor(semantic, node_id, ink_imports, source)
-    {
+    if ink_el == Some("Newline") && !has_ink_text_ancestor(semantic, node_id, ink_imports, source) {
         sites.push(SemanticRuleSite {
             rule: RuleId::InkNewlineInsideText,
             subject_name: subject_name.clone(),

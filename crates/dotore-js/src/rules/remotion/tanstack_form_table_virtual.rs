@@ -7,10 +7,7 @@
 
 use oxc_ast::{
     AstKind,
-    ast::{
-        Argument, CallExpression, Expression, JSXAttributeValue,
-        ObjectPropertyKind,
-    },
+    ast::{Argument, CallExpression, Expression, JSXAttributeValue, ObjectPropertyKind},
 };
 use oxc_semantic::{NodeId, Semantic};
 use oxc_span::GetSpan;

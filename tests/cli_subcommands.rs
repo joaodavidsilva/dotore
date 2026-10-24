@@ -935,13 +935,8 @@ fn modular_cli_progress_and_tui_explorer_render_via_ui_kit() {
     let dir = unique_temp_dir("modular-cli-run");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("index.ts"), "export const x = 1;\n").unwrap();
-    let check_cli = Cli::try_parse_from([
-        "dotore",
-        "score",
-        dir.to_str().unwrap(),
-        "--no-fail",
-    ])
-    .unwrap();
+    let check_cli =
+        Cli::try_parse_from(["dotore", "score", dir.to_str().unwrap(), "--no-fail"]).unwrap();
     assert_eq!(run_cli(check_cli), std::process::ExitCode::SUCCESS);
     let _ = fs::remove_dir_all(&dir);
 }

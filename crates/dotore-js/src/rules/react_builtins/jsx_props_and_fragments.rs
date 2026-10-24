@@ -294,10 +294,10 @@ fn is_valid_button_type_param_binding(
                 return key_name.as_ref().and_then(|n| n.as_str()) == Some("type");
             }
             BindingPattern::AssignmentPattern(assign)
-            if assign
-                .left
-                .get_binding_identifier()
-                .is_some_and(|b| b.name.as_str() == local_name) =>
+                if assign
+                    .left
+                    .get_binding_identifier()
+                    .is_some_and(|b| b.name.as_str() == local_name) =>
             {
                 if key_name.as_ref().and_then(|n| n.as_str()) == Some("type") {
                     return true;
@@ -658,9 +658,7 @@ fn check_jsx_attributes_builtin(
                 subj_name.clone(),
                 "jsxCurlyBracePresence",
                 attr_name,
-                format!(
-                    "Curly braces are unnecessary around string literal prop `{attr_name}`."
-                ),
+                format!("Curly braces are unnecessary around string literal prop `{attr_name}`."),
                 line_starts,
                 attr.span,
                 Some(patch),
@@ -844,18 +842,30 @@ fn build_useless_fragment_autofix(
         }
     } else if meaningful.len() == 1 {
         match meaningful[0] {
-            oxc_ast::ast::JSXChild::Element(child_el) => {
-                Some(child_el.span.source_text(semantic.source_text()).to_string())
-            }
-            oxc_ast::ast::JSXChild::Fragment(child_frag) => {
-                Some(child_frag.span.source_text(semantic.source_text()).to_string())
-            }
-            oxc_ast::ast::JSXChild::Text(child_text) if in_jsx_parent => {
-                Some(child_text.span.source_text(semantic.source_text()).to_string())
-            }
-            oxc_ast::ast::JSXChild::ExpressionContainer(child_expr) if in_jsx_parent => {
-                Some(child_expr.span.source_text(semantic.source_text()).to_string())
-            }
+            oxc_ast::ast::JSXChild::Element(child_el) => Some(
+                child_el
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            oxc_ast::ast::JSXChild::Fragment(child_frag) => Some(
+                child_frag
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            oxc_ast::ast::JSXChild::Text(child_text) if in_jsx_parent => Some(
+                child_text
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            oxc_ast::ast::JSXChild::ExpressionContainer(child_expr) if in_jsx_parent => Some(
+                child_expr
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
             _ => None,
         }
     } else {
@@ -983,9 +993,10 @@ fn collect_meaningful_jsx_children<'a, 'b>(
         .iter()
         .filter(|c| match c {
             oxc_ast::ast::JSXChild::Text(t) => !t.value.trim().is_empty(),
-            oxc_ast::ast::JSXChild::ExpressionContainer(ec) => {
-                !matches!(ec.expression, oxc_ast::ast::JSXExpression::EmptyExpression(_))
-            }
+            oxc_ast::ast::JSXChild::ExpressionContainer(ec) => !matches!(
+                ec.expression,
+                oxc_ast::ast::JSXExpression::EmptyExpression(_)
+            ),
             _ => true,
         })
         .collect()
@@ -1034,14 +1045,13 @@ fn check_jsx_pascal_case_and_max_depth(
     }
 
     // 2. `jsx-max-depth`: flag leaf JSX element at depth > 4
-    let has_jsx_el_children =
-        if let AstKind::JSXElement(el) = semantic.nodes().kind(jsx_node_id) {
-            el.children
-                .iter()
-                .any(|c| matches!(c, oxc_ast::ast::JSXChild::Element(_)))
-        } else {
-            false
-        };
+    let has_jsx_el_children = if let AstKind::JSXElement(el) = semantic.nodes().kind(jsx_node_id) {
+        el.children
+            .iter()
+            .any(|c| matches!(c, oxc_ast::ast::JSXChild::Element(_)))
+    } else {
+        false
+    };
     if !has_jsx_el_children {
         let mut depth = 0_usize;
         for anc_id in semantic.nodes().ancestor_ids(jsx_node_id) {

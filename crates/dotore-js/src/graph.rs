@@ -9,8 +9,8 @@ pub(crate) mod resolution;
 
 use std::{collections::HashMap, path::PathBuf};
 
-pub use dotore_core::ir::ResolvedCallerSite;
 pub(crate) use callers_and_cascades::{MultiEffectCascade, find_multi_effect_cascades};
+pub use dotore_core::ir::ResolvedCallerSite;
 
 use crate::ir::{ByteSpan, FileIr, SourceLoc};
 

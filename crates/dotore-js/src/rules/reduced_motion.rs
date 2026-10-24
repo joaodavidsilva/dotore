@@ -1,7 +1,6 @@
 //! Single-pass motion library and CSS `@media (prefers-reduced-motion: reduce)` extraction
 //! and cross-file [`ProjectGraph`] evaluation for `require-reduced-motion` (WCAG 2.3.3).
 
-
 use std::{
     collections::HashSet,
     path::{Component, Path},
@@ -20,7 +19,6 @@ use crate::{
     matchers::make_diag_for_subject,
     rules::{Diagnostic, PrescriptionTier, RuleCategory, RuleId, RuleSeverity},
 };
-
 
 /// Evaluates project-wide `require-reduced-motion` across each [`WorkspacePackage`] in `graph`.
 pub fn evaluate_project_reduced_motion(

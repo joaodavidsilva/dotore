@@ -532,7 +532,10 @@ export class OrdersComponent {
     );
     assert_eq!(ctor_diags.len(), 1);
     assert_eq!(ctor_diags[0].rule, RuleId::AngularNoWorkInConstructor);
-    assert_eq!(ctor_diags[0].subject_name.as_deref(), Some("OrdersComponent"));
+    assert_eq!(
+        ctor_diags[0].subject_name.as_deref(),
+        Some("OrdersComponent")
+    );
 
     // Valid: work moved to `ngOnInit` and lightweight `inject()` in field initializer
     let valid_ctor = r#"
@@ -717,11 +720,10 @@ export class DashboardComponent {
         None,
     );
     assert!(
-        !react_only_report.diagnostics.iter().any(|d| {
-            d.rule
-                .as_str()
-                .starts_with("angular-")
-        }),
+        !react_only_report
+            .diagnostics
+            .iter()
+            .any(|d| { d.rule.as_str().starts_with("angular-") }),
         "Expected zero Angular diagnostics in React-only package, got: {:#?}",
         react_only_report.diagnostics
     );

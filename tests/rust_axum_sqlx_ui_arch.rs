@@ -155,8 +155,14 @@ pub async fn record_session(
         2,
         "Expected 2 rs-axum-no-contended-mutex-state diagnostics, got: {diags:#?}"
     );
-    assert_eq!(axum_diags[0].subject_name.as_deref(), Some("get_cache_entry"));
-    assert_eq!(axum_diags[1].subject_name.as_deref(), Some("record_session"));
+    assert_eq!(
+        axum_diags[0].subject_name.as_deref(),
+        Some("get_cache_entry")
+    );
+    assert_eq!(
+        axum_diags[1].subject_name.as_deref(),
+        Some("record_session")
+    );
 
     // Capability Gate check via Cargo.toml without `axum`
     let non_axum_report = analyze_project_sources(
@@ -368,7 +374,10 @@ pub fn execute_workflow(dry_run: bool) -> usize {
         1,
         "Expected 1 rs-arch-no-many-boolean-params diagnostic on deploy_release, got: {bool_diags:#?}"
     );
-    assert_eq!(bool_diags[0].subject_name.as_deref(), Some("deploy_release"));
+    assert_eq!(
+        bool_diags[0].subject_name.as_deref(),
+        Some("deploy_release")
+    );
 
     let unused_pub_crate_diags: Vec<_> = report
         .diagnostics

@@ -299,7 +299,11 @@ fn format_single_diagnostic(out: &mut String, diag: &Diagnostic, color: bool) {
         }
     }
     if let Some(fix) = &diag.autofix {
-        let _ = writeln!(out, "{dim}│{reset}  {green}autofix:{reset} {}", fix.description);
+        let _ = writeln!(
+            out,
+            "{dim}│{reset}  {green}autofix:{reset} {}",
+            fix.description
+        );
     }
     let _ = writeln!(out, "{dim}╰──{reset} docs:    {}\n", diag.docs_url);
 }

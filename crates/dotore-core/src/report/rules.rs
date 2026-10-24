@@ -220,8 +220,14 @@ pub fn format_rule_explanation_text(entry: &RuleCatalogEntry) -> String {
 
     let mut header_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH)
         .with_title(format!("{} — {}", entry.key, entry.title));
-    header_box.add_open_row(format!("  {:<18}{} {rule_badge}", "Category", entry.category));
-    header_box.add_open_row(format!("  {:<18}{}", "Default severity", entry.default_severity));
+    header_box.add_open_row(format!(
+        "  {:<18}{} {rule_badge}",
+        "Category", entry.category
+    ));
+    header_box.add_open_row(format!(
+        "  {:<18}{}",
+        "Default severity", entry.default_severity
+    ));
     header_box.add_open_row(format!(
         "  {:<18}{} ({})",
         "Current severity", entry.severity, entry.source

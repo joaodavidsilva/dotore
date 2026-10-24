@@ -1224,12 +1224,7 @@ mod tests {
             graph.files[graph.unused_file_indices[0]].path,
             PathBuf::from("src/orphan.ts")
         );
-        assert!(
-            graph
-                .unused_exports
-                .iter()
-                .any(|e| e.name == "deadExport")
-        );
+        assert!(graph.unused_exports.iter().any(|e| e.name == "deadExport"));
         assert_eq!(graph.circular_dependencies.len(), 1);
         assert_eq!(
             graph.circular_dependencies[0].cycle_paths,

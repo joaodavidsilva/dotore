@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use super::{
-     RUNTIME_SCAN_SCHEMA_VERSION, ReactBuildType, RuntimeScanConnection, RuntimeScanFormat,
+    RUNTIME_SCAN_SCHEMA_VERSION, ReactBuildType, RuntimeScanConnection, RuntimeScanFormat,
     RuntimeScanJsonlRecord, RuntimeScanReport, analysis::sanitize_runtime_text,
 };
 

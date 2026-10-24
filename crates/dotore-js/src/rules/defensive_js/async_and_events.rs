@@ -88,7 +88,8 @@ pub(super) fn check_jsx_event_handler_defensive_rules(
         }
 
         // 7. `no-enter-submit-without-ime-composition-guard`
-        if matches!(attr_name, "onKeyDown" | "onKeyPress" | "onKeyUp") && !has_composition_handlers {
+        if matches!(attr_name, "onKeyDown" | "onKeyPress" | "onKeyUp") && !has_composition_handlers
+        {
             check_enter_submit_without_ime_guard(
                 semantic,
                 expr,
@@ -347,12 +348,7 @@ fn has_state_setter_call_in_text(
     // Fallback heuristic for `set[A-Z]...(`
     for (idx, _) in text.match_indices("set") {
         let rest = &text[idx + 3..];
-        if rest
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase())
-            && rest.contains('(')
-        {
+        if rest.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && rest.contains('(') {
             return true;
         }
     }

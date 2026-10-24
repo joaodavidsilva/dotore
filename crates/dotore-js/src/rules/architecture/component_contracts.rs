@@ -367,7 +367,10 @@ pub(super) fn check_inline_hoc_and_render_in_render(
     // 1. `no-inline-hoc-on-component`: `with*(Comp)`, `memo(Comp)`, `forwardRef(...)`, `observer(Comp)`, `lazy(...)` called inside a component/hook render body
     let is_hoc_factory = matches!(c_name, "memo" | "forwardRef" | "observer" | "lazy")
         || (c_name.starts_with("with")
-            && c_name.chars().nth(4).is_some_and(|c| c.is_ascii_uppercase())
+            && c_name
+                .chars()
+                .nth(4)
+                .is_some_and(|c| c.is_ascii_uppercase())
             && call
                 .arguments
                 .first()
@@ -396,9 +399,15 @@ pub(super) fn check_inline_hoc_and_render_in_render(
 
     // 2. `no-render-in-render`: `renderFoo()` helper returning JSX called inside JSX
     if c_name.starts_with("render")
-        && c_name.chars().nth(6).is_some_and(|c| c.is_ascii_uppercase())
+        && c_name
+            .chars()
+            .nth(6)
+            .is_some_and(|c| c.is_ascii_uppercase())
         && let Expression::Identifier(ident) = call.callee.without_parentheses()
-        && is_reference_in_jsx(semantic, find_call_node_id(semantic, subject_node_id, call.span))
+        && is_reference_in_jsx(
+            semantic,
+            find_call_node_id(semantic, subject_node_id, call.span),
+        )
         && render_helper_returns_jsx(semantic, ident)
     {
         push_semantic_site(
@@ -432,7 +441,10 @@ fn check_export_default_inline_hoc(
     };
     let c_name = callee_id.name.as_str();
     if !c_name.starts_with("with")
-        || !c_name.chars().nth(4).is_some_and(|c| c.is_ascii_uppercase())
+        || !c_name
+            .chars()
+            .nth(4)
+            .is_some_and(|c| c.is_ascii_uppercase())
     {
         return;
     }

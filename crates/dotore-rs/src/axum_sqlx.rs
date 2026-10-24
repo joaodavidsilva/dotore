@@ -431,7 +431,12 @@ fn is_sqlx_query_macro(mac: &Macro) -> bool {
     };
     if !matches!(
         last,
-        "query" | "query_as" | "query_scalar" | "query_file" | "query_file_as" | "query_file_scalar"
+        "query"
+            | "query_as"
+            | "query_scalar"
+            | "query_file"
+            | "query_file_as"
+            | "query_file_scalar"
     ) {
         return false;
     }
@@ -459,7 +464,11 @@ fn type_contains_contended_mutex(ty: &Type) -> bool {
         reason = "syn::Type has many variants; Mutex detection walks Path, Reference, Tuple, Paren, Group"
     )]
     match ty {
-        Type::Path(tp) => tp.path.segments.iter().any(segment_contains_contended_mutex),
+        Type::Path(tp) => tp
+            .path
+            .segments
+            .iter()
+            .any(segment_contains_contended_mutex),
         Type::Reference(tr) => type_contains_contended_mutex(&tr.elem),
         Type::Paren(tp) => type_contains_contended_mutex(&tp.elem),
         Type::Group(tg) => type_contains_contended_mutex(&tg.elem),

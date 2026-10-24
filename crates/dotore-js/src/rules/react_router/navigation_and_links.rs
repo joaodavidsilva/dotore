@@ -23,8 +23,7 @@ use super::{
     get_object_prop, get_object_prop_static_str, has_jsx_attr, has_jsx_truthy_attr,
     jsx_element_tag_name,
     loaders_and_actions::{
-        check_redirect_in_try_catch, check_static_cookie_expires,
-        check_use_loader_data_in_error_ui,
+        check_redirect_in_try_catch, check_static_cookie_expires, check_use_loader_data_in_error_ui,
     },
     push_site,
     routes_and_middleware::{
@@ -268,7 +267,9 @@ pub(crate) fn check_jsx_element_rules(
                 subject_name.clone(),
                 "reactRouterNoNestedRouter",
                 &tag,
-                &format!("`<{tag}>` is nested inside another router component; keep a single router provider at the application root."),
+                &format!(
+                    "`<{tag}>` is nested inside another router component; keep a single router provider at the application root."
+                ),
                 opening.span,
                 None,
             );
@@ -285,7 +286,9 @@ pub(crate) fn check_jsx_element_rules(
             subject_name.clone(),
             "reactRouterNoClientModuleInServerRender",
             &tag,
-            &format!("Client-only component `<{tag}>` (imported from a `.client` module) cannot be rendered directly on the server; wrap it in a `<ClientOnly>` or hydration boundary."),
+            &format!(
+                "Client-only component `<{tag}>` (imported from a `.client` module) cannot be rendered directly on the server; wrap it in a `<ClientOnly>` or hydration boundary."
+            ),
             opening.span,
             None,
         );
@@ -308,7 +311,9 @@ pub(crate) fn check_jsx_element_rules(
             subject_name.clone(),
             "reactRouterInternalRouteAnchor",
             "a",
-            &format!("Anchor `<a href=\"{href_val}\">` triggers a full document reload for an internal route; use `<Link to=\"{href_val}\">` instead."),
+            &format!(
+                "Anchor `<a href=\"{href_val}\">` triggers a full document reload for an internal route; use `<Link to=\"{href_val}\">` instead."
+            ),
             opening.span,
             None,
         );
@@ -328,7 +333,9 @@ pub(crate) fn check_jsx_element_rules(
             subject_name,
             "reactRouterResourceLinkRequiresReload",
             &tag,
-            &format!("`<{tag} to=\"{to_val}\">` points to a static/resource asset without `reloadDocument`; add `reloadDocument` so the browser loads the resource directly."),
+            &format!(
+                "`<{tag} to=\"{to_val}\">` points to a static/resource asset without `reloadDocument`; add `reloadDocument` so the browser loads the resource directly."
+            ),
             opening.span,
             None,
         );
@@ -384,7 +391,9 @@ pub(crate) fn check_transition_navigation_promise(
                 subject_name.clone(),
                 "reactRouterReturnNavigationPromiseInTransition",
                 name,
-                &format!("`{name}()` inside `startTransition` is not returned or awaited, so transition pending state ends before navigation completes."),
+                &format!(
+                    "`{name}()` inside `startTransition` is not returned or awaited, so transition pending state ends before navigation completes."
+                ),
                 inner_call.span,
                 None,
             );
@@ -474,7 +483,10 @@ pub(crate) fn check_search_params_in_statements(
                         subject_name.clone(),
                         "reactRouterNoUnsynchronizedSearchParamsMutation",
                         &format!("{}.{}", obj_id.name, mem.property.name),
-                        &format!("Mutating `{}.{}(...)` in place does not trigger navigation or re-render; clone `URLSearchParams` and pass it to `setSearchParams`.", obj_id.name, mem.property.name),
+                        &format!(
+                            "Mutating `{}.{}(...)` in place does not trigger navigation or re-render; clone `URLSearchParams` and pass it to `setSearchParams`.",
+                            obj_id.name, mem.property.name
+                        ),
                         call.span,
                         None,
                     );
@@ -520,7 +532,9 @@ pub(crate) fn check_search_params_in_statements(
                         subject_name.clone(),
                         "reactRouterNoMultipleSetSearchParamsInTick",
                         setter_name,
-                        &format!("Calling `{setter_name}()` multiple times in the same tick overwrites earlier updates; combine search param changes into a single `{setter_name}()` call."),
+                        &format!(
+                            "Calling `{setter_name}()` multiple times in the same tick overwrites earlier updates; combine search param changes into a single `{setter_name}()` call."
+                        ),
                         span,
                         None,
                     );

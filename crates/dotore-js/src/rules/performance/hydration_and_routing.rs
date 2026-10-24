@@ -389,7 +389,8 @@ pub(super) fn check_react_router_loader_parallel_fetch(
             Some("loader".to_string()),
             "reactRouterLoaderParallelFetch",
             "fetch",
-            "Independent awaits run sequentially in this loader and create a navigation waterfall.".to_string(),
+            "Independent awaits run sequentially in this loader and create a navigation waterfall."
+                .to_string(),
             line_starts,
             span,
         );

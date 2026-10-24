@@ -37,9 +37,7 @@ use crate::{
 use super::{
     BOOLEAN_DOM_ATTRIBUTES, BUILTIN_UPPERCASE_CALLS, FORBIDDEN_DOM_PROPS, FORBIDDEN_ELEMENTS,
     INVALID_PARAGRAPH_CHILD_TAGS, NATIVE_LABEL_CONTROLS, VOID_DOM_TAGS,
-    dom_and_timer_teardown::{
-        check_class_unmount_teardown, check_remove_listener_inline_handler,
-    },
+    dom_and_timer_teardown::{check_class_unmount_teardown, check_remove_listener_inline_handler},
     is_at_module_scope, push_site, push_site_with_fix,
 };
 
@@ -149,7 +147,9 @@ pub(super) fn check_file_level_rules(
                 None,
                 "jsxFilenameExtension",
                 ext,
-                format!("JSX syntax is not allowed in `.{ext}` files; rename the file to `.jsx` or `.tsx`."),
+                format!(
+                    "JSX syntax is not allowed in `.{ext}` files; rename the file to `.jsx` or `.tsx`."
+                ),
                 jsx_span,
                 line_starts,
                 None,
@@ -162,7 +162,8 @@ pub(super) fn check_file_level_rules(
                 None,
                 "reactInJsxScope",
                 "React",
-                "`React` must be in scope when using JSX under the classic JSX transform.".to_string(),
+                "`React` must be in scope when using JSX under the classic JSX transform."
+                    .to_string(),
                 jsx_span,
                 line_starts,
                 None,
@@ -192,7 +193,9 @@ pub(super) fn check_file_level_rules(
                 Some(comp_name.clone()),
                 "noMultiComp",
                 comp_name.clone(),
-                format!("Declare only one React component per file; `{comp_name}` is an additional component in this module."),
+                format!(
+                    "Declare only one React component per file; `{comp_name}` is an additional component in this module."
+                ),
                 *comp_span,
                 line_starts,
                 None,
@@ -469,7 +472,9 @@ pub(super) fn check_class_component_rules(
                     Some(class_name.clone()),
                     "noSetState",
                     "setState",
-                    format!("Avoid `this.setState` in `{class_name}`; lift state up or use an external store."),
+                    format!(
+                        "Avoid `this.setState` in `{class_name}`; lift state up or use an external store."
+                    ),
                     call.span,
                     line_starts,
                     None,
@@ -481,7 +486,8 @@ pub(super) fn check_class_component_rules(
                     Some(class_name.clone()),
                     "noIsMounted",
                     "isMounted",
-                    "`this.isMounted()` is an anti-pattern and is removed in modern React.".to_string(),
+                    "`this.isMounted()` is an anti-pattern and is removed in modern React."
+                        .to_string(),
                     call.span,
                     line_starts,
                     None,
@@ -616,7 +622,8 @@ fn check_global_call_rules(
                     subj_name.clone(),
                     "forwardRefUsesRef",
                     "forwardRef",
-                    "`forwardRef` render function does not accept the second `ref` parameter.".to_string(),
+                    "`forwardRef` render function does not accept the second `ref` parameter."
+                        .to_string(),
                     call.span,
                     line_starts,
                     None,
@@ -667,7 +674,8 @@ fn check_global_call_rules(
             subj_name.clone(),
             "noFindDomNode",
             callee_text,
-            "`findDOMNode` is deprecated and removed in React 19; use `useRef` instead.".to_string(),
+            "`findDOMNode` is deprecated and removed in React 19; use `useRef` instead."
+                .to_string(),
             call.span,
             line_starts,
             None,
@@ -713,8 +721,7 @@ fn check_global_call_rules(
     if let Expression::StaticMemberExpression(mem) = callee
         && mem.property.name == "map"
         && let Expression::CallExpression(fill_call) = mem.object.without_parentheses()
-        && let Expression::StaticMemberExpression(fill_mem) =
-            fill_call.callee.without_parentheses()
+        && let Expression::StaticMemberExpression(fill_mem) = fill_call.callee.without_parentheses()
         && fill_mem.property.name == "fill"
         && let Some(map_cb) = call.arguments.first().and_then(|a| a.as_expression())
     {
@@ -833,7 +840,9 @@ fn check_jsx_element_rules(
             subj_name.clone(),
             "forbidElements",
             &tag_name,
-            format!("Element `<{tag_name}>` is forbidden; use an approved semantic HTML or UI primitive instead."),
+            format!(
+                "Element `<{tag_name}>` is forbidden; use an approved semantic HTML or UI primitive instead."
+            ),
             opening.span,
             line_starts,
             None,
@@ -1015,7 +1024,9 @@ fn check_jsx_opening_attributes(
                         subj_name.clone(),
                         "jsxPropsNoSpreadMulti",
                         tag_name,
-                        format!("Multiple prop spreads on `<{tag_name}>` can silently clobber earlier props."),
+                        format!(
+                            "Multiple prop spreads on `<{tag_name}>` can silently clobber earlier props."
+                        ),
                         spread.span,
                         line_starts,
                         None,
@@ -1051,7 +1062,9 @@ fn check_jsx_opening_attributes(
                         subj_name.clone(),
                         "forbidComponentProps",
                         attr_name,
-                        format!("Prop `{attr_name}` is forbidden on custom component `<{tag_name}>`."),
+                        format!(
+                            "Prop `{attr_name}` is forbidden on custom component `<{tag_name}>`."
+                        ),
                         attr.span,
                         line_starts,
                         None,
@@ -1081,7 +1094,9 @@ fn check_jsx_opening_attributes(
                         subj_name.clone(),
                         "noChildrenProp",
                         "children",
-                        format!("Pass children as nested elements between `<{tag_name}>...</{tag_name}>` instead of a `children` prop."),
+                        format!(
+                            "Pass children as nested elements between `<{tag_name}>...</{tag_name}>` instead of a `children` prop."
+                        ),
                         attr.span,
                         line_starts,
                         None,
@@ -1112,8 +1127,10 @@ fn check_jsx_opening_attributes(
                             s.value.as_str().map(|v| (v, s.span))
                         }
                         Some(JSXAttributeValue::ExpressionContainer(c)) => {
-                            if let Some(Expression::StringLiteral(s)) =
-                                c.expression.as_expression().map(Expression::without_parentheses)
+                            if let Some(Expression::StringLiteral(s)) = c
+                                .expression
+                                .as_expression()
+                                .map(Expression::without_parentheses)
                                 && matches!(s.value.as_str(), Some("false" | "true"))
                             {
                                 s.value.as_str().map(|v| (v, c.span))
@@ -1183,7 +1200,9 @@ fn check_jsx_opening_attributes(
                         subj_name.clone(),
                         "renderingSvgPrecision",
                         attr_name,
-                        format!("SVG `{attr_name}` attribute contains coordinates with more than 2 decimal places."),
+                        format!(
+                            "SVG `{attr_name}` attribute contains coordinates with more than 2 decimal places."
+                        ),
                         attr.span,
                         line_starts,
                         autofix,
@@ -1205,7 +1224,9 @@ fn check_jsx_opening_attributes(
                         subj_name.clone(),
                         "jsxNoJsxAsProp",
                         attr_name,
-                        format!("JSX element passed inline to prop `{attr_name}` on `<{tag_name}>` creates a new element on every render."),
+                        format!(
+                            "JSX element passed inline to prop `{attr_name}` on `<{tag_name}>` creates a new element on every render."
+                        ),
                         attr.span,
                         line_starts,
                         None,
@@ -1224,7 +1245,8 @@ fn check_jsx_opening_attributes(
                         subj_name.clone(),
                         "noRefCallbackCleanupBeforeReact19",
                         "ref",
-                        "Returning a cleanup function from a `ref` callback requires React 19+.".to_string(),
+                        "Returning a cleanup function from a `ref` callback requires React 19+."
+                            .to_string(),
                         attr.span,
                         line_starts,
                         None,
@@ -1382,7 +1404,8 @@ fn check_jsx_text_rules(
             subj_name.clone(),
             "jsxNoCommentTextnodes",
             "comment",
-            "Comment syntax inside JSX text will be rendered literally; wrap it in `{/* ... */}`.".to_string(),
+            "Comment syntax inside JSX text will be rendered literally; wrap it in `{/* ... */}`."
+                .to_string(),
             jsx_text.span,
             line_starts,
             None,
@@ -1390,17 +1413,16 @@ fn check_jsx_text_rules(
     }
 
     // 2. `no-unescaped-entities`
-    if let Some(ch) = raw
-        .chars()
-        .find(|&c| matches!(c, '\'' | '"' | '>' | '}'))
-    {
+    if let Some(ch) = raw.chars().find(|&c| matches!(c, '\'' | '"' | '>' | '}')) {
         push_site(
             sites,
             RuleId::NoUnescapedEntities,
             subj_name.clone(),
             "noUnescapedEntities",
             ch.to_string(),
-            format!("Unescaped `{ch}` in JSX text; escape it with an HTML entity or JSX expression."),
+            format!(
+                "Unescaped `{ch}` in JSX text; escape it with an HTML entity or JSX expression."
+            ),
             jsx_text.span,
             line_starts,
             None,

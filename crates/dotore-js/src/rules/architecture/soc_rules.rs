@@ -26,8 +26,7 @@ use crate::{
     ir::{
         ArchitectureFileFacets, ByteSpan, ConcernBucket, ConcernSignalSite, FileContext, FileIr,
         JsxElementIr, SourceLoc, StaticCatalogSiteIr, SubjectIr, SymbolKind, SymbolOutline,
-        loc_from_line_starts, react_ast::classify_jsx_element_name,
-        types::ModuleIr,
+        loc_from_line_starts, react_ast::classify_jsx_element_name, types::ModuleIr,
     },
     matchers::make_diag_for_subject,
     rules::types::{Diagnostic, PrescriptionTier, RuleId, RuleSeverity},

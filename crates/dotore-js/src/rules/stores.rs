@@ -19,8 +19,8 @@ use crate::{
     ir::{
         ByteSpan,
         react_ast::{
-            callee_name, find_enclosing_react_node, get_subject_name,
-            has_import_from, is_direct_render_phase_node, is_inside_use_effect,
+            callee_name, find_enclosing_react_node, get_subject_name, has_import_from,
+            is_direct_render_phase_node, is_inside_use_effect,
         },
         types::{SemanticRuleSite, loc_from_line_starts},
     },
@@ -728,10 +728,7 @@ fn check_mobx_call_rules(
 fn is_memo_or_observer_wrapped(semantic: &Semantic<'_>, expr: &Expression<'_>) -> bool {
     match expr.without_parentheses() {
         Expression::CallExpression(c) => {
-            matches!(
-                callee_name(&c.callee),
-                Some("memo" | "observer")
-            )
+            matches!(callee_name(&c.callee), Some("memo" | "observer"))
         }
         Expression::Identifier(ident) => {
             let Some(ref_id) = ident.reference_id.get() else {

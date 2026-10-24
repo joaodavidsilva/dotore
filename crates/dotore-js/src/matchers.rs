@@ -534,7 +534,6 @@ pub(crate) fn find_jsx_attr_ignore_case<'a, 'b>(
     })
 }
 
-
 /// Returns `true` if `attrs` contains an attribute named `target`.
 #[must_use]
 pub(crate) fn has_jsx_attr(attrs: &[JSXAttributeItem<'_>], target: &str) -> bool {
@@ -716,9 +715,7 @@ where
                     return true;
                 }
             }
-            JSXChild::Fragment(frag)
-                if jsx_children_have_tag_matching(&frag.children, pred) =>
-            {
+            JSXChild::Fragment(frag) if jsx_children_have_tag_matching(&frag.children, pred) => {
                 return true;
             }
             _ => {}
@@ -753,7 +750,9 @@ pub(crate) fn get_object_prop<'a, 'b>(
 ) -> Option<&'b ObjectProperty<'a>> {
     for prop in obj.properties.iter().rev() {
         if let ObjectPropertyKind::ObjectProperty(p) = prop
-            && p.key.static_name().is_some_and(|n| n.as_str() == Some(key_name))
+            && p.key
+                .static_name()
+                .is_some_and(|n| n.as_str() == Some(key_name))
         {
             return Some(p);
         }
@@ -1111,7 +1110,10 @@ export function Card(props: any) {
                     assert_eq!(get_object_prop_bool(style_obj, "hidden"), Some(false));
                     assert_eq!(get_object_prop_number(style_obj, "zIndex"), Some(9999.0));
                     let first_prop = get_object_prop(style_obj, "zIndex").expect("zIndex prop");
-                    assert_eq!(property_key_name(&first_prop.key).as_deref(), Some("zIndex"));
+                    assert_eq!(
+                        property_key_name(&first_prop.key).as_deref(),
+                        Some("zIndex")
+                    );
                 } else {
                     panic!("expected style object expression");
                 }

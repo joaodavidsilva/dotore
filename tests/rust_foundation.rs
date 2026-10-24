@@ -281,7 +281,8 @@ fn apply_patches_to_source_validates_rust_syntax_before_committing_edits() {
         }),
     };
 
-    let (rewritten, descriptions) = apply_patches_to_source(orig_rs, std::slice::from_ref(&valid_diag));
+    let (rewritten, descriptions) =
+        apply_patches_to_source(orig_rs, std::slice::from_ref(&valid_diag));
     assert_eq!(descriptions.len(), 1);
     assert!(rewritten.contains("x.unwrap_or_default()"));
     assert!(RsLanguageAnalyzer.validate_syntax(Path::new("src/lib.rs"), &rewritten));

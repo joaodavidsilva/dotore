@@ -173,11 +173,8 @@ pub fn explain_location_with_analyzers(
         &default_pkg
     };
 
-    let mut discovered_files = collect_source_files_for_analyzers(
-        std::slice::from_ref(&pkg.root_dir),
-        true,
-        &[*analyzer],
-    );
+    let mut discovered_files =
+        collect_source_files_for_analyzers(std::slice::from_ref(&pkg.root_dir), true, &[*analyzer]);
     if !discovered_files.contains(&resolved_file) {
         discovered_files.push(resolved_file.clone());
     }
@@ -262,14 +259,18 @@ pub fn explain_location_with_analyzers(
                 diag.target_name,
                 diag.rule.as_str()
             );
-            if let Some(arch_exp) = format_architecture_signal_explanation(
-                diag,
-                Some(&target_extracted.architecture_facets),
-            ) {
+            if diag.rule.is_architecture_soc_or_reuse_rule()
+                && let Some(arch_exp) = format_architecture_signal_explanation(
+                    diag,
+                    Some(&target_extracted.architecture_facets),
+                )
+            {
                 let _ = write!(explanation, " Structural signals: {arch_exp}");
             }
-            let cascade_steps =
-                architecture_or_existing_cascade_steps(diag, Some(&target_extracted.architecture_facets));
+            let cascade_steps = architecture_or_existing_cascade_steps(
+                diag,
+                Some(&target_extracted.architecture_facets),
+            );
             entries.push(WhyEntry {
                 status: "active".to_string(),
                 rule: diag.rule.metadata().qualified_key.to_string(),
@@ -312,10 +313,12 @@ pub fn explain_location_with_analyzers(
                     &pkg.capability_gate,
                     &pkg.config,
                 );
-                if let Some(arch_exp) = format_architecture_signal_explanation(
-                    diag,
-                    Some(&target_extracted.architecture_facets),
-                ) {
+                if diag.rule.is_architecture_soc_or_reuse_rule()
+                    && let Some(arch_exp) = format_architecture_signal_explanation(
+                        diag,
+                        Some(&target_extracted.architecture_facets),
+                    )
+                {
                     let _ = write!(explanation, " Structural signals: {arch_exp}");
                 }
                 let cascade_steps = architecture_or_existing_cascade_steps(
@@ -389,8 +392,8 @@ pub fn format_why_report_text(report: &WhyReport) -> String {
         let sev_badge = Badge::severity(entry.severity).render(mode);
         let tier_badge = Badge::tier(entry.tier).render(mode);
         let br_badge = Badge::blast_radius(entry.blast_radius.tier).render(mode);
-        let mut entry_box = AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH).with_title(
-            format!(
+        let mut entry_box =
+            AsciiBox::new(BoxBorderStyle::Rounded, DEFAULT_BOX_WIDTH).with_title(format!(
                 "[{}] {} ({} {}, tier: {}, category: {})",
                 entry.status,
                 entry.rule,
@@ -398,8 +401,7 @@ pub fn format_why_report_text(report: &WhyReport) -> String {
                 entry.severity.as_str(),
                 tier_badge,
                 entry.category.as_str()
-            ),
-        );
+            ));
         entry_box.add_open_row(format!("  Message:     {}", entry.message));
         entry_box.add_open_row(format!("  Explanation: {}", entry.explanation));
         entry_box.add_open_row(format!(
@@ -749,6 +751,11 @@ fn architecture_or_existing_cascade_steps(
             "helper {}: hash=0x{:08x} ({} stmts)",
             helper.name, helper.normalized_hash, helper.statement_count
         ));
+    }
+    if steps.is_empty()
+        && let Some(arch_exp) = format_architecture_signal_explanation(diag, Some(facets))
+    {
+        steps.push(arch_exp);
     }
     steps
 }

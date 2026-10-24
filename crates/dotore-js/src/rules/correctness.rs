@@ -821,7 +821,10 @@ fn check_no_fetch_response_used_without_status_check(
         return;
     };
     let method = mem.property.name.as_str();
-    if !matches!(method, "json" | "text" | "blob" | "arrayBuffer" | "formData") {
+    if !matches!(
+        method,
+        "json" | "text" | "blob" | "arrayBuffer" | "formData"
+    ) {
         return;
     }
 

@@ -141,10 +141,10 @@ impl<'a> AsyncioRuleVisitor<'a> {
                 self.sync_for_chained_vars_stack = saved_for_stack;
             }
             Stmt::Assign(assign) => {
-                let (coro_consumed, task_retained) = assign
-                    .targets
-                    .first()
-                    .map_or((false, false), |t| self.inspect_assign_target(t, &assign.value));
+                let (coro_consumed, task_retained) =
+                    assign.targets.first().map_or((false, false), |t| {
+                        self.inspect_assign_target(t, &assign.value)
+                    });
                 let prev_coro = self.in_coroutine_consumer;
                 let prev_task = self.in_task_consumer;
                 self.in_coroutine_consumer = coro_consumed;
@@ -264,7 +264,10 @@ impl<'a> AsyncioRuleVisitor<'a> {
                 if var == "_" {
                     (false, false)
                 } else {
-                    (self.is_coro_var_consumed(var), self.is_task_var_retained(var))
+                    (
+                        self.is_coro_var_consumed(var),
+                        self.is_task_var_retained(var),
+                    )
                 }
             }
             Expr::Attribute(_) | Expr::Subscript(_) => (true, true),
@@ -279,18 +282,12 @@ impl<'a> AsyncioRuleVisitor<'a> {
                 self.sync_http_session_vars.insert(var_name.to_string());
             } else if matches!(
                 callee.as_str(),
-                "httpx.AsyncClient"
-                    | "AsyncClient"
-                    | "aiohttp.ClientSession"
-                    | "ClientSession"
+                "httpx.AsyncClient" | "AsyncClient" | "aiohttp.ClientSession" | "ClientSession"
             ) {
                 self.async_http_client_vars.insert(var_name.to_string());
             } else if matches!(
                 callee.as_str(),
-                "asyncio.TaskGroup"
-                    | "TaskGroup"
-                    | "anyio.create_task_group"
-                    | "create_task_group"
+                "asyncio.TaskGroup" | "TaskGroup" | "anyio.create_task_group" | "create_task_group"
             ) {
                 self.task_group_vars.insert(var_name.to_string());
             } else if matches!(
@@ -588,10 +585,7 @@ impl<'a> AsyncioRuleVisitor<'a> {
         callee: &str,
     ) -> Option<(String, &'static str)> {
         if callee == "time.sleep" || self.sync_sleep_aliases.contains(callee) {
-            return Some((
-                callee.to_string(),
-                "use `await asyncio.sleep(...)` instead",
-            ));
+            return Some((callee.to_string(), "use `await asyncio.sleep(...)` instead"));
         }
         if matches!(
             callee,
@@ -642,10 +636,7 @@ impl<'a> AsyncioRuleVisitor<'a> {
                 "use `await asyncio.create_subprocess_exec(...)` or `await asyncio.to_thread(...)`",
             ));
         }
-        if matches!(
-            callee,
-            "open" | "io.open" | "builtins.open" | "codecs.open"
-        ) {
+        if matches!(callee, "open" | "io.open" | "builtins.open" | "codecs.open") {
             return Some((
                 callee.to_string(),
                 "use `aiofiles.open(...)` or offload file I/O with `await asyncio.to_thread(...)`",

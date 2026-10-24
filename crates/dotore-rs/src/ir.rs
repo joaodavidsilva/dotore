@@ -1194,6 +1194,9 @@ fn is_syntax_highlighting_fn(
 fn detect_ansi_escape_sequence(val: &str) -> Option<String> {
     if let Some(idx) = val.find("\x1b[") {
         let rest = &val[idx + 2..];
+        if rest.is_empty() {
+            return None;
+        }
         let end = rest
             .find(|c: char| c.is_ascii_alphabetic())
             .map_or_else(|| rest.len().min(8), |i| (i + 1).min(12));
@@ -1203,6 +1206,9 @@ fn detect_ansi_escape_sequence(val: &str) -> Option<String> {
 }
 
 fn detect_box_drawing_border(val: &str) -> Option<String> {
+    if val.chars().count() < 4 {
+        return None;
+    }
     const BOX_PATTERNS: &[&str] = &[
         "┌─",
         "╭─",

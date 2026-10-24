@@ -71,9 +71,7 @@ impl<'a> FastapiPydanticVisitor<'a> {
                 self.record_router_auth_from_ann_assign(ann_assign);
                 let handled_pydantic = self.check_class_ann_assign_pydantic(ann_assign);
                 self.visit_expr(&ann_assign.annotation);
-                if !handled_pydantic
-                    && let Some(val) = &ann_assign.value
-                {
+                if !handled_pydantic && let Some(val) = &ann_assign.value {
                     self.visit_expr(val);
                 }
             }
@@ -369,11 +367,11 @@ impl<'a> FastapiPydanticVisitor<'a> {
     }
 
     fn check_pydantic_field_call(&mut self, call: &ExprCall, field_name: Option<&str>) -> bool {
-        let has_default_factory = call
-            .arguments
-            .keywords
-            .iter()
-            .any(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "default_factory"));
+        let has_default_factory = call.arguments.keywords.iter().any(|kw| {
+            kw.arg
+                .as_ref()
+                .is_some_and(|a| a.as_str() == "default_factory")
+        });
         if has_default_factory {
             return true;
         }
@@ -504,7 +502,11 @@ impl<'a> FastapiPydanticVisitor<'a> {
         }
     }
 
-    fn check_fastapi_mutating_route_auth(&mut self, func_def: &StmtFunctionDef, subject_name: &str) {
+    fn check_fastapi_mutating_route_auth(
+        &mut self,
+        func_def: &StmtFunctionDef,
+        subject_name: &str,
+    ) {
         let Some(route_dec) = func_def
             .decorator_list
             .iter()
@@ -734,7 +736,9 @@ fn extract_fastapi_route_decorator(dec: &Decorator) -> Option<FastapiRouteDecora
     });
 
     let has_response_model = call.arguments.keywords.iter().any(|kw| {
-        kw.arg.as_ref().is_some_and(|a| a.as_str() == "response_model")
+        kw.arg
+            .as_ref()
+            .is_some_and(|a| a.as_str() == "response_model")
             && !matches!(kw.value, Expr::NoneLiteral(_))
     });
 
@@ -762,7 +766,9 @@ fn extract_fastapi_route_decorator(dec: &Decorator) -> Option<FastapiRouteDecora
     });
 
     let has_decorator_auth_dep = call.arguments.keywords.iter().any(|kw| {
-        kw.arg.as_ref().is_some_and(|a| a.as_str() == "dependencies")
+        kw.arg
+            .as_ref()
+            .is_some_and(|a| a.as_str() == "dependencies")
             && expr_contains_auth_dependency(&kw.value)
     });
 
@@ -842,7 +848,10 @@ fn expr_contains_auth_dependency(expr: &Expr) -> bool {
             if matches!(tail, "Depends" | "Security") {
                 return true;
             }
-            call.arguments.args.iter().any(expr_contains_auth_dependency)
+            call.arguments
+                .args
+                .iter()
+                .any(expr_contains_auth_dependency)
                 || call
                     .arguments
                     .keywords
@@ -865,7 +874,9 @@ fn is_authenticated_router_constructor(expr: &Expr) -> bool {
         return false;
     }
     call.arguments.keywords.iter().any(|kw| {
-        kw.arg.as_ref().is_some_and(|a| a.as_str() == "dependencies")
+        kw.arg
+            .as_ref()
+            .is_some_and(|a| a.as_str() == "dependencies")
             && expr_contains_auth_dependency(&kw.value)
     })
 }

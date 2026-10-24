@@ -178,10 +178,8 @@ impl PerfVisitor<'_> {
             }
             Stmt::Expr(Expr::MethodCall(mc), _) => {
                 let method = mc.method.to_string();
-                if matches!(
-                    method.as_str(),
-                    "reserve" | "reserve_exact" | "try_reserve"
-                ) && let Some(recv) = extract_expr_ident(&mc.receiver)
+                if matches!(method.as_str(), "reserve" | "reserve_exact" | "try_reserve")
+                    && let Some(recv) = extract_expr_ident(&mc.receiver)
                 {
                     unreserved_vecs.remove(&recv);
                 }
@@ -485,7 +483,5 @@ fn is_single_trivial_placeholder(s: &str) -> bool {
     !inner.contains('{')
         && !inner.contains('}')
         && !inner.contains(':')
-        && inner
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

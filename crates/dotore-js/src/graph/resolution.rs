@@ -1122,7 +1122,10 @@ pub(super) fn strip_platform_suffix(stem_str: &str) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::{Path, PathBuf}};
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
 
     use crate::{graph::ProjectGraph, ir::parse_file_ir};
 

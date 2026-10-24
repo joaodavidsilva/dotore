@@ -9,8 +9,8 @@ pub use dotore_core::report::{
     JSON_REPORT_SCHEMA_VERSION, JsonReport, ProjectCoverageMetadata, ReportSummary,
     RuleCatalogEntry, RulesListOptions, WhyEntry, WhyLocation, WhyReport, build_extracted_report,
     build_extracted_report_with_packages, build_rule_catalog, ci_config, ci_install, ci_upgrade,
-    explain_location_with_analyzers, explain_rule, format_design_report,
-    format_design_report_pretty, format_fix_report, format_install_report,
+    explain_location_with_analyzers, explain_rule, format_architecture_signal_explanation,
+    format_design_report, format_design_report_pretty, format_fix_report, format_install_report,
     format_rule_catalog_text, format_rule_explanation_text, format_terminal_report,
     format_terminal_report_pretty, format_why_report_text, install_dotore, parse_why_location,
     render_html_report, write_and_open_html_report, write_json_report,
@@ -263,7 +263,7 @@ fn explain_js_location(
                 .unwrap_or(&groups[0]);
             let capsule = build_fix_capsule(&graph, group, &active_at_line, &sources);
             let mismatch_note = detect_mismatched_inline_suppression(target_file_ir, diag);
-            let explanation = if let Some(note) = mismatch_note {
+            let mut explanation = if let Some(note) = mismatch_note {
                 format!(
                     "Diagnostic `{}` fired at {}:{}. {note}",
                     diag.rule.metadata().qualified_key,
@@ -280,6 +280,13 @@ fn explain_js_location(
                     diag.rule.as_str()
                 )
             };
+            let mut cascade_steps = diag.cascade_steps.clone();
+            append_js_architecture_signals(
+                target_file_ir,
+                diag,
+                &mut explanation,
+                &mut cascade_steps,
+            );
             entries.push(WhyEntry {
                 status: "active".to_string(),
                 rule: diag.rule.metadata().qualified_key.to_string(),
@@ -289,7 +296,7 @@ fn explain_js_location(
                 message: diag.message.clone(),
                 explanation,
                 code_frame: render_code_frame(&target_source, diag.loc.line),
-                cascade_steps: diag.cascade_steps.clone(),
+                cascade_steps,
                 blast_radius: group.blast_radius.clone(),
                 fix_capsule: capsule,
             });
@@ -316,7 +323,7 @@ fn explain_js_location(
                         &target_file_ir.jsx_elements,
                         &target_file_ir.subjects,
                     );
-                let (status, explanation) = diagnose_why_not_active_common(
+                let (status, mut explanation) = diagnose_why_not_active_common(
                     diag,
                     &target_file_ir.path,
                     target_file_ir.file_context,
@@ -324,6 +331,13 @@ fn explain_js_location(
                     &pkg.root_dir,
                     &pkg.capability_gate,
                     &pkg.config,
+                );
+                let mut cascade_steps = diag.cascade_steps.clone();
+                append_js_architecture_signals(
+                    target_file_ir,
+                    diag,
+                    &mut explanation,
+                    &mut cascade_steps,
                 );
                 entries.push(WhyEntry {
                     status,
@@ -334,7 +348,7 @@ fn explain_js_location(
                     message: diag.message.clone(),
                     explanation,
                     code_frame: render_code_frame(&target_source, diag.loc.line),
-                    cascade_steps: diag.cascade_steps.clone(),
+                    cascade_steps,
                     blast_radius: group.blast_radius.clone(),
                     fix_capsule: capsule,
                 });
@@ -398,7 +412,8 @@ fn diagnostic_matches_line(
         subject.for_each_effect_span(&mut |eff_span, _eff_line| {
             if !matched_eff && eff_span.start <= diag.span.start && diag.span.end <= eff_span.end {
                 let eff_start = loc_from_line_starts(line_starts, eff_span.start).line;
-                let eff_end = loc_from_line_starts(line_starts, eff_span.end.saturating_sub(1)).line;
+                let eff_end =
+                    loc_from_line_starts(line_starts, eff_span.end.saturating_sub(1)).line;
                 if eff_start <= target_line && target_line <= eff_end {
                     matched_eff = true;
                 }
@@ -438,4 +453,25 @@ fn detect_mismatched_inline_suppression(file_ir: &FileIr, diag: &Diagnostic) -> 
         }
     }
     None
+}
+
+#[cfg(feature = "js")]
+fn append_js_architecture_signals(
+    file_ir: &FileIr,
+    diag: &Diagnostic,
+    explanation: &mut String,
+    cascade_steps: &mut Vec<String>,
+) {
+    if !diag.rule.is_architecture_soc_or_reuse_rule() {
+        return;
+    }
+    let Some(arch_exp) =
+        format_architecture_signal_explanation(diag, Some(&file_ir.architecture_facets))
+    else {
+        return;
+    };
+    explanation.push_str(&format!(" Structural signals: {arch_exp}"));
+    if !cascade_steps.contains(&arch_exp) {
+        cascade_steps.push(arch_exp);
+    }
 }

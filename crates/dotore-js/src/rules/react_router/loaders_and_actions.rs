@@ -240,7 +240,9 @@ pub(crate) fn check_loader_or_action_statements(
                 Some(role_name.to_string()),
                 "reactRouterNoLoaderRequestBody",
                 &format!("request.{method}"),
-                &format!("`{role_name}` reads `request.{method}()`; loaders run on GET requests and must not read a request body (use `action` instead)."),
+                &format!(
+                    "`{role_name}` reads `request.{method}()`; loaders run on GET requests and must not read a request body (use `action` instead)."
+                ),
                 call_span,
                 None,
             );
@@ -259,7 +261,9 @@ pub(crate) fn check_loader_or_action_statements(
                     Some(role_name.to_string()),
                     "reactRouterNoSessionMutationInLoader",
                     &format!("session.{method}"),
-                    &format!("`{role_name}` mutates session state via `session.{method}(...)`; move session mutations into an `action`."),
+                    &format!(
+                        "`{role_name}` mutates session state via `session.{method}(...)`; move session mutations into an `action`."
+                    ),
                     *span,
                     None,
                 );
@@ -268,9 +272,7 @@ pub(crate) fn check_loader_or_action_statements(
             // In an `action`: verify `commitSession` or `destroySession` is called and Set-Cookie is returned
             let commits_session =
                 fn_src.contains("commitSession") || fn_src.contains("destroySession");
-            if !commits_session
-                && let Some((method, span)) = session_mutations.first()
-            {
+            if !commits_session && let Some((method, span)) = session_mutations.first() {
                 push_site(
                     sites,
                     line_starts,
@@ -310,7 +312,9 @@ pub(crate) fn check_loader_or_action_expr(
             Some(role_name.to_string()),
             "reactRouterNoLoaderRequestBody",
             &format!("request.{method}"),
-            &format!("`{role_name}` reads `request.{method}()`; loaders run on GET requests and must not read a request body."),
+            &format!(
+                "`{role_name}` reads `request.{method}()`; loaders run on GET requests and must not read a request body."
+            ),
             call_span,
             None,
         );
@@ -390,7 +394,11 @@ fn find_meta_data_param_or_access(
     match &first_param.pattern {
         BindingPattern::ObjectPattern(obj_pat) => {
             for prop in &obj_pat.properties {
-                if prop.key.static_name().is_some_and(|n| n.as_str() == Some("data")) {
+                if prop
+                    .key
+                    .static_name()
+                    .is_some_and(|n| n.as_str() == Some("data"))
+                {
                     return Some(prop.span);
                 }
             }
@@ -545,7 +553,9 @@ pub(crate) fn check_redirect_in_try_catch(
                         subject_name,
                         "reactRouterNoRedirectInTryCatch",
                         callee_name,
-                        &format!("`{callee_name}()` inside a `try` block can be swallowed or mishandled if thrown or caught; move `{callee_name}()` outside `try/catch`."),
+                        &format!(
+                            "`{callee_name}()` inside a `try` block can be swallowed or mishandled if thrown or caught; move `{callee_name}()` outside `try/catch`."
+                        ),
                         call.span,
                         None,
                     );

@@ -417,10 +417,8 @@ impl SubjectEffectOwner for (ByteSpan, u32) {
 impl FileSuppressions {
     /// Appends a single-line suppression directive for 1-based `target_line`.
     pub fn add_line_disable(&mut self, target_line: u32, rules: Vec<String>) {
-        self.line_directives.push(LineDisableDirective {
-            target_line,
-            rules,
-        });
+        self.line_directives
+            .push(LineDisableDirective { target_line, rules });
     }
 
     /// Appends a block or file-wide suppression range `[start_line, end_line]`.
@@ -649,8 +647,14 @@ pub fn parse_comment_disable_directive(
     let trimmed = comment.trim().trim_end_matches('}').trim();
     for &tool in tool_prefixes {
         for (suffix, kind) in [
-            ("-disable-next-line", SuppressionDirectiveKind::DisableNextLine),
-            ("-ignore-next-line", SuppressionDirectiveKind::DisableNextLine),
+            (
+                "-disable-next-line",
+                SuppressionDirectiveKind::DisableNextLine,
+            ),
+            (
+                "-ignore-next-line",
+                SuppressionDirectiveKind::DisableNextLine,
+            ),
             ("-disable-line", SuppressionDirectiveKind::DisableLine),
             ("-ignore-line", SuppressionDirectiveKind::DisableLine),
             ("-disable", SuppressionDirectiveKind::BlockDisable),
@@ -1255,7 +1259,10 @@ impl ArchitectureFileFacets {
                     )
                 })
                 .collect();
-            parts.push(format!("helper_fingerprints=[{}]", helper_labels.join(", ")));
+            parts.push(format!(
+                "helper_fingerprints=[{}]",
+                helper_labels.join(", ")
+            ));
         }
         if !self.domain_clusters.is_empty() {
             parts.push(format!(
@@ -1447,9 +1454,7 @@ pub fn extract_normalized_signature_header(
     {
         bs.min(decl_end)
     } else {
-        let start_usize = usize::try_from(decl_start)
-            .unwrap_or(0)
-            .min(source.len());
+        let start_usize = usize::try_from(decl_start).unwrap_or(0).min(source.len());
         let fallback_end = source[start_usize..].find('\n').map_or(decl_end, |rel| {
             decl_start.saturating_add(u32::try_from(rel).unwrap_or(0))
         });
@@ -1468,9 +1473,7 @@ pub fn extract_normalized_signature_header(
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            !trimmed.starts_with("///")
-                && !trimmed.starts_with("//!")
-                && !trimmed.starts_with("#[")
+            !trimmed.starts_with("///") && !trimmed.starts_with("//!") && !trimmed.starts_with("#[")
         })
         .collect();
     let collapsed = cleaned_lines

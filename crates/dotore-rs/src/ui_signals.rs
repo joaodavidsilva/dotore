@@ -78,28 +78,21 @@ impl UiSignalsAndArchVisitor<'_> {
     }
 
     fn check_many_boolean_params(&mut self, sig: &Signature, is_public_api: bool) {
-        if self.scope.in_test() {
+        if self.scope.in_test() || !is_public_api {
             return;
         }
         let mut bool_count = 0usize;
-        let mut consecutive_bools = 0usize;
-        let mut max_consecutive_bools = 0usize;
 
         for input in &sig.inputs {
             let FnArg::Typed(pat_type) = input else {
-                consecutive_bools = 0;
                 continue;
             };
             if is_bool_type(&pat_type.ty) {
                 bool_count += 1;
-                consecutive_bools += 1;
-                max_consecutive_bools = max_consecutive_bools.max(consecutive_bools);
-            } else {
-                consecutive_bools = 0;
             }
         }
 
-        if bool_count >= 3 || (is_public_api && max_consecutive_bools >= 2) {
+        if bool_count >= 3 {
             let span = self.span_to_bytes(sig.span());
             let ident_span = self.span_to_bytes(sig.ident.span());
             let loc = self.loc_at(ident_span.start);

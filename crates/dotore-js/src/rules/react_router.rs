@@ -235,10 +235,7 @@ pub(crate) fn get_object_prop<'a>(
     Some((prop.span, &prop.value))
 }
 
-pub(crate) fn get_object_prop_static_str(
-    obj: &ObjectExpression<'_>,
-    name: &str,
-) -> Option<String> {
+pub(crate) fn get_object_prop_static_str(obj: &ObjectExpression<'_>, name: &str) -> Option<String> {
     matcher_get_object_prop_static_str(obj, name).map(str::to_string)
 }
 
@@ -428,9 +425,7 @@ pub(crate) fn find_member_call_in_expr(
     methods: &[&str],
 ) -> Option<(String, Span)> {
     match expr.without_parentheses() {
-        Expression::AwaitExpression(aw) => {
-            find_member_call_in_expr(&aw.argument, objects, methods)
-        }
+        Expression::AwaitExpression(aw) => find_member_call_in_expr(&aw.argument, objects, methods),
         Expression::CallExpression(call) => {
             if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
                 && let Expression::Identifier(obj_id) = mem.object.without_parentheses()
