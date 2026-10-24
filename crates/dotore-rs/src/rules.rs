@@ -102,7 +102,10 @@ fn evaluate_rs_package_graph_rules(
         let Some(file) = files.iter().find(|f| &f.path == file_path) else {
             continue;
         };
-        if package.config.is_file_ignored(&file.path, &package.root_dir) {
+        if package
+            .config
+            .is_file_ignored(&file.path, &package.root_dir)
+        {
             continue;
         }
         emit_rs_finding_if_active(
@@ -126,9 +129,14 @@ fn emit_rs_finding_if_active(
     enabled_rules: Option<&[RuleId]>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some(severity) =
-        resolve_rs_rule_activation(finding.rule, file, package_root, gate, config, enabled_rules)
-    else {
+    let Some(severity) = resolve_rs_rule_activation(
+        finding.rule,
+        file,
+        package_root,
+        gate,
+        config,
+        enabled_rules,
+    ) else {
         return;
     };
     if is_finding_suppressed(file, finding, config) {
@@ -152,7 +160,9 @@ fn is_finding_suppressed(
         && (file.is_suppressed(finding.rule, finding.loc.line, finding.span)
             || file
                 .suppressions
-                .matches_line_or_block(finding.rule, finding.loc.line))
+                .matches_line_or_block(finding.rule, finding.loc.line)
+            || (finding.rule == RuleId::RsArchNoLegacyModRs
+                && file.suppressions.matches_line_or_block(finding.rule, 1)))
 }
 
 const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
@@ -169,6 +179,8 @@ const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
             | RuleId::RsUiNoDerivedSignalInEffect
             | RuleId::RsArchNoManyBooleanParams
             | RuleId::RsArchNoUnusedPubCrateItems
+            | RuleId::RsArchPreferPubCrateModules
+            | RuleId::RsArchNoLegacyModRs
             | RuleId::RsTokioNoStdLockAcrossAwait
             | RuleId::RsTokioNoBlockingInAsync
             | RuleId::RsTokioPreferBoundedChannel
