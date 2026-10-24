@@ -690,7 +690,10 @@ fn check_supabase_table_missing_rls(file: &FileIr, line_starts: &[u32], out: &mu
         if let Some(pos) = line.find("alter table")
             && line.contains("enable row level security")
         {
-            let after = line[pos + "alter table".len()..].trim();
+            let after = line
+                .get(pos + "alter table".len()..)
+                .unwrap_or_default()
+                .trim();
             let after_if = after.strip_prefix("if exists").unwrap_or(after).trim();
             let after_only = after_if.strip_prefix("only").unwrap_or(after_if).trim();
             let table_token = after_only
@@ -710,7 +713,10 @@ fn check_supabase_table_missing_rls(file: &FileIr, line_starts: &[u32], out: &mu
         let Some(pos) = l.find("create table") else {
             continue;
         };
-        let after = l[pos + "create table".len()..].trim();
+        let after = l
+            .get(pos + "create table".len()..)
+            .unwrap_or_default()
+            .trim();
         let after_if = after.strip_prefix("if not exists").unwrap_or(after).trim();
         let raw_table = after_if
             .split(|c: char| c.is_whitespace() || c == '(')

@@ -408,8 +408,8 @@ pub(crate) fn check_route_property_order(
         };
         if let Some(prev_idx) = last_idx
             && curr_idx < prev_idx
+            && let Some(&expected_before) = TANSTACK_ROUTE_PROPERTY_ORDER.get(prev_idx)
         {
-            let expected_before = TANSTACK_ROUTE_PROPERTY_ORDER[prev_idx];
             push_semantic_site(
                 sites,
                 RuleId::TanstackStartRoutePropertyOrder,

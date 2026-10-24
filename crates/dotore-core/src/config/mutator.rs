@@ -380,26 +380,28 @@ fn splice_object_property_in_source(
             let prop_indent = line_indent_at(raw_source, prop_span.start as usize);
             let formatted = format_value_with_indent(val, &prop_indent)?;
             let mut out = String::with_capacity(raw_source.len() + formatted.len());
-            out.push_str(&raw_source[..val_span.start as usize]);
+            out.push_str(raw_source.get(..val_span.start as usize).unwrap_or_default());
             out.push_str(&formatted);
-            out.push_str(&raw_source[val_span.end as usize..]);
+            out.push_str(raw_source.get(val_span.end as usize..).unwrap_or_default());
             return Ok(out);
         }
 
         if props.len() == 1 {
             let mut out = String::with_capacity(raw_source.len());
-            out.push_str(&raw_source[..obj_start]);
+            out.push_str(raw_source.get(..obj_start).unwrap_or_default());
             out.push_str("{}");
-            out.push_str(&raw_source[obj_end..]);
+            out.push_str(raw_source.get(obj_end..).unwrap_or_default());
             return Ok(out);
         }
 
         let (remove_start, remove_end) = if idx + 1 < props.len() {
             (prop_span.start as usize, props[idx + 1].1.start as usize)
         } else {
-            let prev_end = props[idx - 1].1.end as usize;
+            let prev_end = props
+                .get(idx.saturating_sub(1))
+                .map_or(prop_span.start as usize, |p| p.1.end as usize);
             let mut end = prop_span.end as usize;
-            let after = &raw_source[end..obj_end];
+            let after = raw_source.get(end..obj_end).unwrap_or_default();
             if let Some(stripped) = after.trim_start().strip_prefix(',') {
                 end = obj_end - stripped.len();
             }
@@ -407,8 +409,8 @@ fn splice_object_property_in_source(
         };
 
         let mut out = String::with_capacity(raw_source.len());
-        out.push_str(&raw_source[..remove_start]);
-        out.push_str(&raw_source[remove_end..]);
+        out.push_str(raw_source.get(..remove_start).unwrap_or_default());
+        out.push_str(raw_source.get(remove_end..).unwrap_or_default());
         return Ok(out);
     }
 
@@ -423,29 +425,34 @@ fn splice_object_property_in_source(
         let replacement =
             format!("{{\n{prop_indent}\"{managed_key}\": {formatted}\n{obj_indent}}}");
         let mut out = String::with_capacity(raw_source.len() + replacement.len());
-        out.push_str(&raw_source[..obj_start]);
+        out.push_str(raw_source.get(..obj_start).unwrap_or_default());
         out.push_str(&replacement);
-        out.push_str(&raw_source[obj_end..]);
+        out.push_str(raw_source.get(obj_end..).unwrap_or_default());
         return Ok(out);
     }
 
-    let last_prop_span = props[props.len() - 1].1;
+    let Some(last_prop) = props.last() else {
+        return Ok(raw_source.to_string());
+    };
+    let last_prop_span = last_prop.1;
     let prop_indent = line_indent_at(raw_source, last_prop_span.start as usize);
     let formatted = format_value_with_indent(val, &prop_indent)?;
-    let tail = &raw_source[last_prop_span.end as usize..obj_end];
+    let tail = raw_source
+        .get(last_prop_span.end as usize..obj_end)
+        .unwrap_or_default();
     let mut out = String::with_capacity(raw_source.len() + formatted.len() + 32);
     if let Some(comma_rel) = tail.find(',')
         && tail[..comma_rel].chars().all(char::is_whitespace)
     {
         let insert_at = last_prop_span.end as usize + comma_rel + 1;
-        out.push_str(&raw_source[..insert_at]);
+        out.push_str(raw_source.get(..insert_at).unwrap_or_default());
         out.push_str(&format!("\n{prop_indent}\"{managed_key}\": {formatted},"));
-        out.push_str(&raw_source[insert_at..]);
+        out.push_str(raw_source.get(insert_at..).unwrap_or_default());
     } else {
         let insert_at = last_prop_span.end as usize;
-        out.push_str(&raw_source[..insert_at]);
+        out.push_str(raw_source.get(..insert_at).unwrap_or_default());
         out.push_str(&format!(",\n{prop_indent}\"{managed_key}\": {formatted}"));
-        out.push_str(&raw_source[insert_at..]);
+        out.push_str(raw_source.get(insert_at..).unwrap_or_default());
     }
     Ok(out)
 }

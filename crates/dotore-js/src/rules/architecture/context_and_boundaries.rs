@@ -317,16 +317,6 @@ fn collect_consumers_for_provider(
                 has_key: false,
                 passed_props: consumer.read_fields.clone(),
             };
-            all_consumer_sites.push(ResolvedCallerSite {
-                caller_file: caller_site.caller_file.clone(),
-                parent_subject_name: caller_site.parent_subject_name.clone(),
-                component_name: caller_site.component_name.clone(),
-                loc: caller_site.loc,
-                span: caller_site.span,
-                has_key: caller_site.has_key,
-                passed_props: caller_site.passed_props.clone(),
-            });
-
             if !provider.state_slot_fields.is_empty()
                 && !consumer.read_fields.is_empty()
                 && consumer
@@ -339,9 +329,10 @@ fn collect_consumers_for_provider(
                         .subject_name
                         .clone()
                         .unwrap_or_else(|| "Consumer".to_string()),
-                    caller_site,
+                    caller_site.clone(),
                 ));
             }
+            all_consumer_sites.push(caller_site);
         }
     }
 

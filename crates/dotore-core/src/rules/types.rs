@@ -2296,7 +2296,9 @@ impl RuleId {
     /// Returns the static [`RuleMetadata`] for this rule.
     #[must_use]
     pub const fn metadata(self) -> &'static RuleMetadata {
-        &super::catalog::RULE_REGISTRY[self as usize]
+        let idx = self as usize;
+        assert!(idx < super::catalog::RULE_REGISTRY_ARRAY.len());
+        &super::catalog::RULE_REGISTRY_ARRAY[idx]
     }
 
     /// Returns the kebab-case CLI / config rule identifier.

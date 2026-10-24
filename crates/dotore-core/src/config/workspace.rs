@@ -272,8 +272,10 @@ pub fn filter_workspace_packages(
         let norm = normalize_project_filter(raw_filter);
         let mut any_match = false;
         for (idx, keys) in pkg_keys.iter().enumerate() {
-            if keys.iter().any(|k| k == &norm || k == raw_filter) {
-                matched_indices[idx] = true;
+            if keys.iter().any(|k| k == &norm || k == raw_filter)
+                && let Some(slot) = matched_indices.get_mut(idx)
+            {
+                *slot = true;
                 any_match = true;
             }
         }
@@ -292,7 +294,7 @@ pub fn filter_workspace_packages(
     let filtered: Vec<WorkspacePackage> = packages
         .iter()
         .enumerate()
-        .filter(|&(idx, _)| matched_indices[idx])
+        .filter(|&(idx, _)| matched_indices.get(idx).copied().unwrap_or(false))
         .map(|(_, pkg)| pkg.clone())
         .collect();
     Ok(filtered)

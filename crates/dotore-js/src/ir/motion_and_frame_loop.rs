@@ -152,7 +152,7 @@ fn has_reduced_motion_media_query(content: &str) -> bool {
     let bytes = lower.as_bytes();
     let mut search_from = 0;
 
-    while let Some(rel_idx) = lower[search_from..].find("@media") {
+    while let Some(rel_idx) = lower.get(search_from..).and_then(|s| s.find("@media")) {
         let media_idx = search_from + rel_idx;
         let after_media = media_idx + "@media".len();
         if after_media < bytes.len()
@@ -162,11 +162,11 @@ fn has_reduced_motion_media_query(content: &str) -> bool {
             search_from = after_media;
             continue;
         }
-        let Some(open_rel) = lower[after_media..].find('{') else {
+        let Some(open_rel) = lower.get(after_media..).and_then(|s| s.find('{')) else {
             break;
         };
         let open_brace = after_media + open_rel;
-        let prelude = &lower[after_media..open_brace];
+        let prelude = lower.get(after_media..open_brace).unwrap_or_default();
         if prelude.contains('}') || prelude.contains(';') {
             search_from = after_media;
             continue;
@@ -175,7 +175,7 @@ fn has_reduced_motion_media_query(content: &str) -> bool {
             && !contains_word_not(prelude)
             && let Some(close_brace) = find_matching_closing_brace(&sanitized, open_brace)
         {
-            let body = &sanitized[open_brace + 1..close_brace];
+            let body = sanitized.get(open_brace + 1..close_brace).unwrap_or_default();
             if has_css_declaration(body) {
                 return true;
             }

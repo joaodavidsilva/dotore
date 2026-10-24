@@ -370,13 +370,13 @@ impl<'a> PerfRuleVisitor<'a> {
         {
             return;
         }
-        let Some(first_arg) = call.arguments.args.first() else {
+        let Some((first_arg, rest_args)) = call.arguments.args.split_first() else {
             return;
         };
         if !matches!(first_arg, Expr::StringLiteral(_) | Expr::BytesLiteral(_)) {
             return;
         }
-        if !call.arguments.args[1..]
+        if !rest_args
             .iter()
             .all(is_constant_regex_flag_expr)
             || !call

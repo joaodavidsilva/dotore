@@ -738,7 +738,9 @@ fn has_enable_babel_runtime_version(babel_src: &str) -> bool {
             continue;
         }
         if let Some(idx) = trimmed.find("enableBabelRuntime") {
-            let after = &trimmed[idx + "enableBabelRuntime".len()..];
+            let after = trimmed
+                .get(idx + "enableBabelRuntime".len()..)
+                .unwrap_or_default();
             let after_colon = after.trim_start_matches(['"', '\'', ' ', ':']);
             if after_colon.starts_with('\'') || after_colon.starts_with('"') {
                 return true;

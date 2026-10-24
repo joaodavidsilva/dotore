@@ -44,29 +44,19 @@ pub(crate) fn extract_safety_findings(
             }
             Item::Const(item_const) => {
                 let len = extract_fixed_array_type_len(&item_const.ty)
-                    .or_else(|| extract_fixed_array_expr_len(&item_const.expr))
-                    .or_else(|| {
-                        if is_slice_type(&item_const.ty) {
-                            Some(1)
-                        } else {
-                            None
-                        }
-                    });
-                if let Some(n) = len {
+                    .or_else(|| extract_fixed_array_expr_len(&item_const.expr));
+                if let Some(n) = len
+                    && n > 0
+                {
                     const_array_lengths.insert(item_const.ident.to_string(), n);
                 }
             }
             Item::Static(item_static) => {
                 let len = extract_fixed_array_type_len(&item_static.ty)
-                    .or_else(|| extract_fixed_array_expr_len(&item_static.expr))
-                    .or_else(|| {
-                        if is_slice_type(&item_static.ty) {
-                            Some(1)
-                        } else {
-                            None
-                        }
-                    });
-                if let Some(n) = len {
+                    .or_else(|| extract_fixed_array_expr_len(&item_static.expr));
+                if let Some(n) = len
+                    && n > 0
+                {
                     const_array_lengths.insert(item_static.ident.to_string(), n);
                 }
             }
@@ -521,9 +511,6 @@ impl SafetyVisitor<'_> {
             }
         }
 
-        if is_known_index_table_pair(&coll_key, &idx_key) {
-            return true;
-        }
 
         let parsed_idx = idx_key.parse::<usize>().ok();
         for g in &all_guards {
@@ -592,9 +579,6 @@ impl SafetyVisitor<'_> {
             return true;
         }
 
-        if is_known_range_slice_safe(coll_key, start_key.as_deref(), end_key.as_deref()) {
-            return true;
-        }
 
         for g in all_guards {
             if !self.collections_share_len(&g.collection, coll_key) {
@@ -742,7 +726,7 @@ impl SafetyVisitor<'_> {
         if let Expr::Range(range) = i.expr.as_ref()
             && let Some(loop_var) = extract_pat_ident(&i.pat)
         {
-            self.collect_range_for_loop_guards(range, loop_var);
+            self.collect_range_for_loop_guards(range, &loop_var);
             return;
         }
         if let Expr::MethodCall(mc) = i.expr.as_ref() {
@@ -761,14 +745,14 @@ impl SafetyVisitor<'_> {
         }
     }
 
-    fn collect_range_for_loop_guards(&mut self, range: &syn::ExprRange, loop_var: String) {
+    fn collect_range_for_loop_guards(&mut self, range: &syn::ExprRange, loop_var: &str) {
         if let Some(start_expr) = &range.start
             && let Ok(start_lit) = normalize_expr_key(start_expr).parse::<usize>()
             && start_lit >= 1
         {
             self.active_guards.push(SliceGuard {
                 collection: String::new(),
-                index: Some(loop_var.clone()),
+                index: Some(loop_var.to_owned()),
                 min_len: start_lit,
                 inclusive_upper_bound: false,
             });
@@ -783,7 +767,7 @@ impl SafetyVisitor<'_> {
             let root_coll = self.len_equivalents.get(&coll).cloned().unwrap_or(coll);
             self.active_guards.push(SliceGuard {
                 collection: root_coll,
-                index: Some(loop_var),
+                index: Some(loop_var.to_owned()),
                 min_len: 1,
                 inclusive_upper_bound: false,
             });
@@ -793,14 +777,14 @@ impl SafetyVisitor<'_> {
         if let Ok(end_lit) = end_key.parse::<usize>() {
             self.active_guards.push(SliceGuard {
                 collection: String::new(),
-                index: Some(loop_var),
+                index: Some(loop_var.to_owned()),
                 min_len: end_lit,
                 inclusive_upper_bound: false,
             });
         } else if let Some(root_coll) = self.len_equivalents.get(&end_key).cloned() {
             self.active_guards.push(SliceGuard {
                 collection: root_coll,
-                index: Some(loop_var),
+                index: Some(loop_var.to_owned()),
                 min_len: 1,
                 inclusive_upper_bound: false,
             });
@@ -1742,20 +1726,6 @@ fn extract_fixed_array_type_len(ty: &Type) -> Option<usize> {
     }
 }
 
-fn is_slice_type(ty: &Type) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Only slice types and reference/group wrappers represent slices"
-    )]
-    match ty {
-        Type::Slice(_) => true,
-        Type::Reference(tr) => is_slice_type(&tr.elem),
-        Type::Paren(p) => is_slice_type(&p.elem),
-        Type::Group(g) => is_slice_type(&g.elem),
-        _ => false,
-    }
-}
-
 fn extract_fixed_array_expr_len(expr: &Expr) -> Option<usize> {
     #[expect(
         clippy::wildcard_enum_match_arm,
@@ -1773,9 +1743,6 @@ fn extract_fixed_array_expr_len(expr: &Expr) -> Option<usize> {
                 && let Some(first_arg) = mc.args.first()
             {
                 return normalize_expr_key(first_arg).parse::<usize>().ok();
-            }
-            if mc.method == "lines" && mc.args.is_empty() {
-                return Some(1);
             }
             None
         }
@@ -2446,158 +2413,6 @@ fn extract_len_or_saturating_sub_receiver(expr: &Expr) -> Option<(String, bool)>
     None
 }
 
-fn is_known_range_slice_safe(
-    coll_key: &str,
-    start_key: Option<&str>,
-    end_key: Option<&str>,
-) -> bool {
-    if matches!(
-        (coll_key, start_key, end_key),
-        ("pat", Some("1"), None)
-            | ("cand", Some("1"), None)
-            | ("raw_source", _, _)
-            | ("self.src", _, _)
-            | ("input", _, _)
-            | ("rest", _, _)
-            | ("after_open", _, _)
-            | ("after_sink", _, _)
-            | ("after_q", _, _)
-            | ("after", _, _)
-            | ("tail", _, _)
-            | ("catch_tail", _, _)
-            | ("compact", _, _)
-            | ("content", _, _)
-            | ("opener", _, _)
-            | ("s", _, _)
-            | ("t", _, _)
-            | ("line", _, _)
-            | ("l", _, _)
-            | ("trimmed", _, _)
-            | ("header", _, _)
-            | ("clean_spec", _, _)
-            | ("raw", _, _)
-            | ("lower", _, _)
-            | ("sanitized", _, _)
-            | ("opening_text", _, _)
-            | ("out", Some("start_idx"), None)
-            | ("template_source", _, _)
-            | ("components", None, _)
-            | ("to_comps", Some("common"), None)
-            | ("val", _, _)
-            | ("body", Some("start"), Some("i"))
-            | ("src", _, _)
-            | ("raw_value", None, Some("i"))
-            | ("pkg_raw", Some("block_start"), None)
-            | ("block_slice", None, Some("end_rel"))
-            | ("cycle", _, _)
-            | ("core", _, _)
-            | ("call.arguments.args", Some("1"), None)
-            | ("buf", _, _)
-            | ("self.read_buf", _, _)
-    ) {
-        return true;
-    }
-    false
-}
-
-fn is_known_index_table_pair(coll_key: &str, idx_key: &str) -> bool {
-    if coll_key == "super::catalog::RULE_REGISTRY" {
-        return true;
-    }
-    if idx_key == "0"
-        && matches!(
-            coll_key,
-            "indices"
-                | "group.diagnostic_indices"
-                | "a"
-                | "b"
-                | "cycle"
-                | "a.occurrences"
-                | "b.occurrences"
-                | "top_level_symbols"
-                | "occurrences"
-                | "run"
-                | "sites"
-                | "react_core::CORE_INITIAL_RULES"
-        )
-    {
-        return true;
-    }
-    if matches!(
-        coll_key,
-        "diagnostics"
-            | "report.diagnostics"
-            | "baseline_entries"
-            | "current_diagnostics"
-            | "base_keys"
-            | "head_keys"
-            | "matched_indices"
-            | "pkg_files"
-            | "pkg_subjects"
-            | "pkg_diag_counts"
-            | "pkg_groups"
-            | "out"
-            | "self.tabs"
-            | "targets"
-            | "is_entry_point"
-            | "is_root_or_excluded"
-            | "is_reachable"
-            | "visited"
-            | "adj"
-            | "adj_sets"
-            | "files"
-            | "graph.files"
-            | "file_irs"
-            | "self.extracted_files"
-            | "buckets"
-            | "state.indices"
-            | "state.lowlink"
-            | "state.on_stack"
-            | "cycle"
-            | "props"
-            | "bytes"
-            | "TANSTACK_ROUTE_PROPERTY_ORDER"
-            | "TANSTACK_MIDDLEWARE_METHOD_ORDER"
-            | "suggestions"
-    ) && matches!(
-        idx_key,
-        "i" | "idx"
-            | "a"
-            | "b"
-            | "u"
-            | "v"
-            | "w"
-            | "curr"
-            | "next"
-            | "sib"
-            | "node"
-            | "min_pos"
-            | "b_idx"
-            | "h_idx"
-            | "out_idx"
-            | "file_idx"
-            | "other_file_idx"
-            | "barrel_idx"
-            | "target_idx"
-            | "prev_idx"
-            | "primary_file_index"
-            | "edge.source"
-            | "unused_exp.file_index"
-            | "cycle.primary_file_index"
-            | "primary.file_index"
-            | "indices[0]"
-            | "group.diagnostic_indices[0]"
-            | "a[0]"
-            | "b[0]"
-            | "cycle[min_pos]"
-            | "idx-1"
-            | "index-1"
-    ) {
-        return true;
-    }
-    false
-}
-
 fn extract_while_body_reassignment_guards(
     body: &Block,
     cond_guards: &[SliceGuard],
@@ -3044,15 +2859,13 @@ pub fn substring_and_cursor_idioms(
     }
 
     #[test]
-    fn char_indices_take_while_subslice_ranges_and_index_tables_are_guarded() {
+    fn char_indices_take_while_and_subslice_ranges_are_guarded() {
         let src = r#"
 pub fn char_indices_and_subslice_idioms(
     spec: &str,
     stmt_line: &str,
     hint: &str,
     lines: &[&str],
-    diagnostics: &[u32],
-    indices: &[usize],
 ) -> Option<usize> {
     let mut acc = 0usize;
     for (idx, ch) in spec.char_indices() {
@@ -3080,33 +2893,24 @@ pub fn char_indices_and_subslice_idioms(
     let after = &spec[open + 1..];
     acc += after.len();
 
-    let first_diag = diagnostics[indices[0]];
-    acc += first_diag as usize;
-    for &idx in indices {
-        acc += diagnostics[idx] as usize;
-    }
     Some(acc)
 }
 "#;
         let findings = check_slice_index_findings(src);
         assert!(
             findings.is_empty(),
-            "Expected 0 slice index findings for char_indices/take_while/subslice/index tables, got: {findings:#?}"
+            "Expected 0 slice index findings for char_indices/take_while/subslice, got: {findings:#?}"
         );
     }
 
     #[test]
-    fn lowercase_as_bytes_equivalence_as_chunks_and_graph_indices_are_guarded() {
+    fn lowercase_as_bytes_equivalence_and_as_chunks_are_guarded() {
         let src = r#"
 pub fn lowercase_and_chunks_idioms(
     line: &str,
     input: &str,
     padded: &[u8],
     h: [u32; 8],
-    files: &[&str],
-    adj: &[Vec<usize>],
-    u: usize,
-    v: usize,
 ) -> usize {
     let mut acc = 0usize;
     let l = line.to_ascii_lowercase();
@@ -3134,40 +2938,40 @@ pub fn lowercase_and_chunks_idioms(
         out[idx * 4..idx * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     acc += usize::from(out[0]) + (w[0] as usize);
-
-    for &next in &adj[u] {
-        acc += files[next].len() + files[u].len() + files[v].len();
-    }
     acc
 }
 "#;
         let findings = check_slice_index_findings(src);
         assert!(
             findings.is_empty(),
-            "Expected 0 slice index findings for lowercase/as_bytes equivalence, as_chunks, and graph indices, got: {findings:#?}"
+            "Expected 0 slice index findings for lowercase/as_bytes equivalence and as_chunks, got: {findings:#?}"
         );
     }
 
     #[test]
-    fn unguarded_slice_and_string_indexing_sites_are_flagged() {
+    fn unguarded_slice_and_string_indexing_sites_including_s_and_files_are_flagged() {
         let src = r#"
 pub fn unguarded_sites(
     items: &[u64],
     groups: &[u32],
     hex: &str,
+    s: &str,
+    files: &[&str],
     idx: usize,
 ) -> u64 {
     let a = items[idx];
     let b = u64::from(groups[0]);
     let c = hex[0..2].len() as u64;
-    a + b + c
+    let d = (&s[0..5]).len() as u64;
+    let e = files[idx].len() as u64;
+    a + b + c + d + e
 }
 "#;
         let findings = check_slice_index_findings(src);
         assert_eq!(
             findings.len(),
-            3,
-            "Expected all 3 unguarded slice/string index sites to be flagged, got: {findings:#?}"
+            5,
+            "Expected all 5 unguarded slice/string index sites (including `&s[0..5]` and `files[idx]`) to be flagged, got: {findings:#?}"
         );
     }
 

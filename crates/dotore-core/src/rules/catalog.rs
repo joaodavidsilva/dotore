@@ -38,7 +38,8 @@ const SLICES: &[&[RuleMetadata]] = &[
 /// Total number of registered rules in `dotore`.
 pub const TOTAL_RULES: usize = 976;
 
-static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
+pub(crate) static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
+    assert!(!react_core::CORE_INITIAL_RULES.is_empty());
     let mut out = [react_core::CORE_INITIAL_RULES[0]; TOTAL_RULES];
     let mut out_idx = 0;
     let mut s_idx = 0;
@@ -48,6 +49,7 @@ static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
         while i < slice.len() {
             let meta = slice[i];
             assert!(meta.id as usize == out_idx);
+            assert!(out_idx < out.len());
             out[out_idx] = meta;
             out_idx += 1;
             i += 1;

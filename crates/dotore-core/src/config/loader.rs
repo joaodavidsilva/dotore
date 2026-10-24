@@ -724,7 +724,7 @@ impl<'a> ConfigCursor<'a> {
             }
             return;
         }
-        if let Some(ch) = self.src[self.pos..].chars().next() {
+        if let Some(ch) = self.src.get(self.pos..).and_then(|s| s.chars().next()) {
             self.pos += ch.len_utf8();
         } else {
             self.pos += 1;
@@ -982,7 +982,7 @@ impl<'a> ConfigCursor<'a> {
                 }
                 continue;
             }
-            if let Some(ch) = self.src[self.pos..].chars().next() {
+            if let Some(ch) = self.src.get(self.pos..).and_then(|s| s.chars().next()) {
                 out.push(ch);
                 self.pos += ch.len_utf8();
             } else {
@@ -1009,7 +1009,11 @@ impl<'a> ConfigCursor<'a> {
         if self.pos == num_start {
             return Err("Invalid numeric literal".to_string());
         }
-        let raw = self.src[start..self.pos].replace(['_', ' '], "");
+        let raw = self
+            .src
+            .get(start..self.pos)
+            .unwrap_or_default()
+            .replace(['_', ' '], "");
         if let Ok(int_val) = raw.parse::<u64>() {
             return Ok(Value::Number(serde_json::Number::from(int_val)));
         }
@@ -1118,14 +1122,14 @@ fn glob_matches(pattern: &str, candidate: &str) -> bool {
 }
 
 fn glob_segments_match(pat: &[&str], cand: &[&str]) -> bool {
-    match (pat.first(), cand.first()) {
-        (None, None) => true,
-        (Some(&"**"), _) => {
-            glob_segments_match(&pat[1..], cand)
-                || (!cand.is_empty() && glob_segments_match(pat, &cand[1..]))
+    match (pat, cand) {
+        ([], []) => true,
+        (["**", pat_rest @ ..], _) => {
+            glob_segments_match(pat_rest, cand)
+                || (cand.split_first().is_some_and(|(_, cand_rest)| glob_segments_match(pat, cand_rest)))
         }
-        (Some(p), Some(c)) if segment_wildcard_match(p, c) => {
-            glob_segments_match(&pat[1..], &cand[1..])
+        ([p, pat_rest @ ..], [c, cand_rest @ ..]) if segment_wildcard_match(p, c) => {
+            glob_segments_match(pat_rest, cand_rest)
         }
         _ => false,
     }

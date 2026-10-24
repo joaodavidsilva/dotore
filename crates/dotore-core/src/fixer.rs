@@ -117,11 +117,7 @@ where
             edits_by_target
                 .entry(target_path)
                 .or_default()
-                .push(ByteEdit {
-                    file: edit.file.clone(),
-                    span: edit.span,
-                    replacement: edit.replacement.clone(),
-                });
+                .push(edit.clone());
         }
 
         let all_targets_valid = edits_by_target.iter().all(|(target_path, new_edits)| {

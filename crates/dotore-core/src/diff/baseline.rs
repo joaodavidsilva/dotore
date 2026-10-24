@@ -345,7 +345,7 @@ pub fn compare_baseline_diagnostics(
     let fixed_count = unmatched_base.len();
     let introduced_diagnostics: Vec<Diagnostic> = unmatched_head
         .into_iter()
-        .map(|idx| current_diagnostics[idx].clone())
+        .filter_map(|idx| current_diagnostics.get(idx).cloned())
         .collect();
     let introduced_count = introduced_diagnostics.len();
 
@@ -371,20 +371,26 @@ fn match_multiset_by_key(
 ) {
     let mut base_buckets: HashMap<(RuleId, &str), Vec<usize>> = HashMap::new();
     for &b_idx in unmatched_base.iter() {
-        let entry = &baseline_entries[b_idx];
-        base_buckets
-            .entry((entry.rule, base_keys[b_idx].as_str()))
-            .or_default()
-            .push(b_idx);
+        if let Some(entry) = baseline_entries.get(b_idx)
+            && let Some(key) = base_keys.get(b_idx)
+        {
+            base_buckets
+                .entry((entry.rule, key.as_str()))
+                .or_default()
+                .push(b_idx);
+        }
     }
 
     let mut head_buckets: HashMap<(RuleId, &str), Vec<usize>> = HashMap::new();
     for &h_idx in unmatched_head.iter() {
-        let diag = &current_diagnostics[h_idx];
-        head_buckets
-            .entry((diag.rule, head_keys[h_idx].as_str()))
-            .or_default()
-            .push(h_idx);
+        if let Some(diag) = current_diagnostics.get(h_idx)
+            && let Some(key) = head_keys.get(h_idx)
+        {
+            head_buckets
+                .entry((diag.rule, key.as_str()))
+                .or_default()
+                .push(h_idx);
+        }
     }
 
     for ((rule, key), mut b_indices) in base_buckets {
@@ -395,15 +401,22 @@ fn match_multiset_by_key(
         let mut b_pos = 0;
         while b_pos < b_indices.len() && !h_indices.is_empty() {
             let b_idx = b_indices[b_pos];
-            let b_entry = &baseline_entries[b_idx];
+            let Some(b_entry) = baseline_entries.get(b_idx) else {
+                b_indices.remove(b_pos);
+                continue;
+            };
             if let Some((best_h_pos, _)) = h_indices
                 .iter()
                 .enumerate()
                 .filter(|&(_, &h_idx)| {
-                    paths_match_loosely(&current_diagnostics[h_idx].file, &b_entry.file)
+                    current_diagnostics
+                        .get(h_idx)
+                        .is_some_and(|d| paths_match_loosely(&d.file, &b_entry.file))
                 })
                 .min_by_key(|&(_, &h_idx)| {
-                    current_diagnostics[h_idx].loc.line.abs_diff(b_entry.line)
+                    current_diagnostics
+                        .get(h_idx)
+                        .map_or(u32::MAX, |d| d.loc.line.abs_diff(b_entry.line))
                 })
             {
                 let matched_h = h_indices.remove(best_h_pos);
@@ -419,12 +432,19 @@ fn match_multiset_by_key(
             if h_indices.is_empty() {
                 break;
             }
-            let b_line = baseline_entries[b_idx].line;
-            let (best_h_pos, _) = h_indices
+            let Some(b_entry) = baseline_entries.get(b_idx) else {
+                continue;
+            };
+            let b_line = b_entry.line;
+            let best_h_pos = h_indices
                 .iter()
                 .enumerate()
-                .min_by_key(|&(_, &h_idx)| current_diagnostics[h_idx].loc.line.abs_diff(b_line))
-                .unwrap_or((0, &h_indices[0]));
+                .min_by_key(|&(_, &h_idx)| {
+                    current_diagnostics
+                        .get(h_idx)
+                        .map_or(u32::MAX, |d| d.loc.line.abs_diff(b_line))
+                })
+                .map_or(0, |(pos, _)| pos);
             let matched_h = h_indices.remove(best_h_pos);
             unmatched_head.remove(&matched_h);
             unmatched_base.remove(&b_idx);

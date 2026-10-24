@@ -253,18 +253,15 @@ pub(super) fn index_file_caller_sites(
             passed_props: site.passed_props.clone(),
         };
 
-        for target in
-            resolve_caller_targets(&caller_file.path, site, targets, ts_mappings, pkg_manifests)
-        {
-            out.entry(target).or_default().push(ResolvedCallerSite {
-                caller_file: resolved.caller_file.clone(),
-                parent_subject_name: resolved.parent_subject_name.clone(),
-                component_name: resolved.component_name.clone(),
-                loc: resolved.loc,
-                span: resolved.span,
-                has_key: resolved.has_key,
-                passed_props: resolved.passed_props.clone(),
-            });
+        let resolved_targets =
+            resolve_caller_targets(&caller_file.path, site, targets, ts_mappings, pkg_manifests);
+        if let Some((last_target, prior_targets)) = resolved_targets.split_last() {
+            for target in prior_targets {
+                out.entry(target.clone())
+                    .or_default()
+                    .push(resolved.clone());
+            }
+            out.entry(last_target.clone()).or_default().push(resolved);
         }
     }
 }
@@ -325,7 +322,9 @@ fn match_targets_by_specifier(
     );
     let mut out = Vec::new();
     for idx in resolved_indices {
-        let target = &targets[idx];
+        let Some(target) = targets.get(idx) else {
+            continue;
+        };
         if target.component_names.iter().any(|p| p == component_name) {
             out.push(ComponentTarget {
                 file: target.path.clone(),

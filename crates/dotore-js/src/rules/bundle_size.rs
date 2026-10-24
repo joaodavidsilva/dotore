@@ -829,7 +829,9 @@ pub(crate) fn evaluate_barrel_imports<F>(
         let Some(barrel_idx) = graph.resolve_relative_import(&file.path, &imp.source) else {
             continue;
         };
-        let barrel_file = &graph.files[barrel_idx];
+        let Some(barrel_file) = graph.files.get(barrel_idx) else {
+            continue;
+        };
         if !is_barrel_index_file(barrel_file) {
             continue;
         }
@@ -954,7 +956,7 @@ fn resolve_barrel_export_file_path(
     if !visited.insert(barrel_idx) {
         return None;
     }
-    let barrel_file = &graph.files[barrel_idx];
+    let barrel_file = graph.files.get(barrel_idx)?;
 
     for exp in &barrel_file.module.exports {
         if exp.name != exported_name {
@@ -976,7 +978,7 @@ fn resolve_barrel_export_file_path(
         };
 
         let target_idx = graph.resolve_relative_import(&barrel_file.path, target_spec)?;
-        let target_file = &graph.files[target_idx];
+        let target_file = graph.files.get(target_idx)?;
         if is_barrel_index_file(target_file)
             && let Some(nested) =
                 resolve_barrel_export_file_path(graph, target_idx, target_imported_name, visited)
@@ -997,7 +999,9 @@ fn resolve_barrel_export_file_path(
             && let Some(src) = &exp.from_source
             && let Some(target_idx) = graph.resolve_relative_import(&barrel_file.path, src)
         {
-            let target_file = &graph.files[target_idx];
+            let Some(target_file) = graph.files.get(target_idx) else {
+                continue;
+            };
             if is_barrel_index_file(target_file) {
                 let mut sub_visited: HashSet<usize> = visited.iter().copied().collect();
                 if let Some(nested) = resolve_barrel_export_file_path(
@@ -1066,7 +1070,7 @@ fn relative_path_between_dirs(from_dir: &Path, to_path: &Path) -> String {
     for _ in common..from_comps.len() {
         parts.push("..".to_string());
     }
-    for comp in &to_comps[common..] {
+    for comp in to_comps.get(common..).unwrap_or_default() {
         parts.push(comp.as_os_str().to_string_lossy().to_string());
     }
     parts.join("/")

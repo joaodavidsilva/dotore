@@ -194,7 +194,9 @@ pub(crate) fn extract_angular_html_template_sites(
             i = open_paren + 1;
             continue;
         };
-        let header = &template_source[open_paren + 1..close_paren];
+        let header = template_source
+            .get(open_paren + 1..close_paren)
+            .unwrap_or_default();
         if let Some((track_target, reason)) = classify_for_header_track_violation(header) {
             let start = base_byte_offset + u32::try_from(at_pos).unwrap_or(0);
             let end = base_byte_offset + u32::try_from(close_paren).unwrap_or(0) + 1;

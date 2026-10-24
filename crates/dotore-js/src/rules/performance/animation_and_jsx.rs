@@ -548,7 +548,7 @@ fn srcset_has_width_descriptor(srcset: &str) -> bool {
 
 fn parse_blur_px(val: &str) -> Option<f64> {
     let idx = val.find("blur(")?;
-    let after = &val[idx + "blur(".len()..];
+    let after = val.get(idx + "blur(".len()..)?;
     let px_idx = after.find("px)")?;
     after[..px_idx].trim().parse::<f64>().ok()
 }

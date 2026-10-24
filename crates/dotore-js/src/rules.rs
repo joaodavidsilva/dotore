@@ -139,8 +139,12 @@ pub fn evaluate_file_in_package(
     }
     check_anchor_target_exists(graph, file, &is_active, out);
 
-    let core_effect_diag_spans: Vec<crate::ir::ByteSpan> =
-        out[start_idx..].iter().map(|d| d.span).collect();
+    let core_effect_diag_spans: Vec<crate::ir::ByteSpan> = out
+        .get(start_idx..)
+        .unwrap_or_default()
+        .iter()
+        .map(|d| d.span)
+        .collect();
 
     evaluate_file_ir_facets(
         graph,
@@ -191,7 +195,9 @@ pub fn evaluate_project_graph_rules(
 
     if run_dead_code {
         for &file_idx in &graph.unused_file_indices {
-            let file = &graph.files[file_idx];
+            let Some(file) = graph.files.get(file_idx) else {
+                continue;
+            };
             let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
                 continue;
             };
@@ -236,7 +242,9 @@ pub fn evaluate_project_graph_rules(
         }
 
         for unused_exp in &graph.unused_exports {
-            let file = &graph.files[unused_exp.file_index];
+            let Some(file) = graph.files.get(unused_exp.file_index) else {
+                continue;
+            };
             let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
                 continue;
             };
@@ -350,7 +358,9 @@ pub fn evaluate_project_graph_rules(
     }
 
     for cycle in &graph.circular_dependencies {
-        let file = &graph.files[cycle.primary_file_index];
+        let Some(file) = graph.files.get(cycle.primary_file_index) else {
+            continue;
+        };
         let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
             continue;
         };
@@ -407,7 +417,9 @@ pub fn evaluate_project_graph_rules(
         let Some(primary) = family.occurrences.first() else {
             continue;
         };
-        let file = &graph.files[primary.file_index];
+        let Some(file) = graph.files.get(primary.file_index) else {
+            continue;
+        };
         let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
             continue;
         };

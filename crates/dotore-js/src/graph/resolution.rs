@@ -650,7 +650,7 @@ pub(super) fn resolve_specifier_to_target_indices(
             if end < mapping.prefix.len() {
                 continue;
             }
-            &clean_spec[mapping.prefix.len()..end]
+            clean_spec.get(mapping.prefix.len()..end).unwrap_or_default()
         } else {
             if clean_spec != mapping.prefix {
                 continue;

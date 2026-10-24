@@ -854,11 +854,11 @@ fn extract_c_style_comments_on_line(line: &str) -> Vec<&str> {
     let mut rest = line;
 
     while let Some((idx, is_block)) = find_next_c_style_comment_start(rest) {
-        let after_open = &rest[idx + 2..];
+        let after_open = rest.get(idx + 2..).unwrap_or_default();
         if is_block {
             if let Some(end_idx) = after_open.find("*/") {
                 comments.push(after_open[..end_idx].trim());
-                rest = &after_open[end_idx + 2..];
+                rest = after_open.get(end_idx + 2..).unwrap_or_default();
             } else {
                 comments.push(after_open.trim());
                 break;

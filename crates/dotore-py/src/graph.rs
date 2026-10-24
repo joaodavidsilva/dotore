@@ -216,13 +216,7 @@ impl<'a> GraphAstWalker<'a> {
                         loc,
                     };
                     if !self.in_type_checking && self.fn_or_class_depth == 0 {
-                        self.info.runtime_imports.push(PyImportEdge {
-                            level: edge.level,
-                            module: edge.module.clone(),
-                            names: edge.names.clone(),
-                            span: edge.span,
-                            loc: edge.loc,
-                        });
+                        self.info.runtime_imports.push(edge.clone());
                     }
                     self.info.all_imports.push(edge);
                 }
@@ -706,10 +700,15 @@ fn evaluate_circular_imports(
                 if !emitted_files.insert(u) {
                     continue;
                 }
-                let Some((_, span, loc)) = adj[u].iter().find(|(t, _, _)| *t == v).copied() else {
+                let Some((_, span, loc)) = adj
+                    .get(u)
+                    .and_then(|edges| edges.iter().find(|(t, _, _)| *t == v).copied())
+                else {
                     continue;
                 };
-                let file = &files[u];
+                let Some(file) = files.get(u) else {
+                    continue;
+                };
                 let Some(effective_sev) = resolve_active_py_rule_severity(
                     package,
                     file,
@@ -721,9 +720,9 @@ fn evaluate_circular_imports(
                     continue;
                 };
                 let cycle_display = format_cycle_from_node(&cycle, u, files);
-                let target_file_name = files[v]
-                    .path
-                    .file_name()
+                let target_file_name = files
+                    .get(v)
+                    .and_then(|f| f.path.file_name())
                     .and_then(|s| s.to_str())
                     .unwrap_or("module")
                     .to_string();
@@ -753,7 +752,7 @@ fn find_cycle_from(
     path_stack: &mut Vec<usize>,
     visited: &mut HashSet<usize>,
 ) -> Option<Vec<usize>> {
-    for &(next, _, _) in &adj[curr] {
+    for &(next, _, _) in adj.get(curr)? {
         if next == start && path_stack.len() >= 2 {
             let mut cycle = Vec::with_capacity(path_stack.len() + 1);
             cycle.extend_from_slice(path_stack);
@@ -772,15 +771,16 @@ fn find_cycle_from(
 }
 
 fn format_cycle_from_node(cycle: &[usize], rotate_to: usize, files: &[ExtractedFile]) -> String {
-    let core = &cycle[..cycle.len().saturating_sub(1)];
+    let core = cycle.get(..cycle.len().saturating_sub(1)).unwrap_or_default();
     let pos = core.iter().position(|&n| n == rotate_to).unwrap_or(0);
-    let mut rotated: Vec<String> = core[pos..]
+    let (before_pos, from_pos) = core.split_at(pos.min(core.len()));
+    let mut rotated: Vec<String> = from_pos
         .iter()
-        .chain(core[..pos].iter())
+        .chain(before_pos.iter())
         .map(|&idx| {
-            files[idx]
-                .path
-                .file_name()
+            files
+                .get(idx)
+                .and_then(|f| f.path.file_name())
                 .and_then(|s| s.to_str())
                 .unwrap_or("module.py")
                 .to_string()
@@ -827,7 +827,7 @@ fn evaluate_unused_exports(
         {
             continue;
         }
-        let Some(ir) = file_irs[idx] else {
+        let Some(ir) = file_irs.get(idx).copied().flatten() else {
             continue;
         };
 
@@ -971,7 +971,7 @@ fn collect_imported_async_callees(
             if importer_idx == v {
                 continue;
             }
-            let Some(target_ir) = files[v].downcast_payload::<PyFileIr>() else {
+            let Some(target_ir) = files.get(v).and_then(|f| f.downcast_payload::<PyFileIr>()) else {
                 continue;
             };
             record_imported_async_names(
@@ -1472,24 +1472,30 @@ fn evaluate_duplicated_helper_logic_rule(
         if distinct_modules.len() < min_modules {
             continue;
         }
-        let primary_target_name = sites[0].1.name.as_str();
+        let Some(first_site) = sites.first() else {
+            continue;
+        };
+        let primary_target_name = first_site.1.name.as_str();
         for (site_pos, &(file_idx, helper, sev)) in sites.iter().enumerate() {
-            let file = &files[file_idx];
+            let Some(file) = files.get(file_idx) else {
+                continue;
+            };
             let caller_sites: Vec<ResolvedCallerSite> = sites
                 .iter()
                 .enumerate()
                 .filter(|&(other_pos, _)| other_pos != site_pos)
-                .map(
-                    |(_, &(other_file_idx, other_helper, _))| ResolvedCallerSite {
-                        caller_file: files[other_file_idx].path.clone(),
+                .filter_map(|(_, &(other_file_idx, other_helper, _))| {
+                    let other_file = files.get(other_file_idx)?;
+                    Some(ResolvedCallerSite {
+                        caller_file: other_file.path.clone(),
                         parent_subject_name: Some(other_helper.name.clone()),
                         component_name: other_helper.name.clone(),
                         loc: other_helper.loc,
                         span: other_helper.span,
                         has_key: false,
                         passed_props: Vec::new(),
-                    },
-                )
+                    })
+                })
                 .collect();
             let peer_files: Vec<String> = caller_sites
                 .iter()
@@ -1616,23 +1622,25 @@ fn evaluate_prefer_fluent_builder_rule(
             continue;
         }
         for (site_pos, &(file_idx, site, sev)) in qualifying_sites.iter().enumerate() {
-            let file = &files[file_idx];
+            let Some(file) = files.get(file_idx) else {
+                continue;
+            };
             let subject_name = enclosing_subject_for_span(file, site.span);
             let caller_sites: Vec<ResolvedCallerSite> = qualifying_sites
                 .iter()
                 .enumerate()
                 .filter(|&(other_pos, _)| other_pos != site_pos)
-                .map(|(_, &(other_file_idx, other_site, _))| ResolvedCallerSite {
-                    caller_file: files[other_file_idx].path.clone(),
-                    parent_subject_name: enclosing_subject_for_span(
-                        &files[other_file_idx],
-                        other_site.span,
-                    ),
-                    component_name: type_name.clone(),
-                    loc: other_site.loc,
-                    span: other_site.span,
-                    has_key: false,
-                    passed_props: other_site.field_names.clone(),
+                .filter_map(|(_, &(other_file_idx, other_site, _))| {
+                    let other_file = files.get(other_file_idx)?;
+                    Some(ResolvedCallerSite {
+                        caller_file: other_file.path.clone(),
+                        parent_subject_name: enclosing_subject_for_span(other_file, other_site.span),
+                        component_name: type_name.clone(),
+                        loc: other_site.loc,
+                        span: other_site.span,
+                        has_key: false,
+                        passed_props: other_site.field_names.clone(),
+                    })
                 })
                 .collect();
             let cascade_steps = vec![

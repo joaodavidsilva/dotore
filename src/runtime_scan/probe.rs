@@ -121,8 +121,10 @@ pub fn prompt_runtime_scan_url_with_io<R: std::io::BufRead, W: std::io::Write>(
                 continue;
             }
             if let Ok(index) = trimmed.parse::<usize>() {
-                if index >= 1 && index <= suggestions.len() {
-                    return Ok(Some(suggestions[index - 1].url.clone()));
+                if index >= 1
+                    && let Some(sug) = suggestions.get(index - 1)
+                {
+                    return Ok(Some(sug.url.clone()));
                 }
                 if index == suggestions.len() + 1 {
                     custom_mode = true;

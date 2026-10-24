@@ -267,7 +267,7 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
             let first = diagnostics.get(*indices.first()?)?;
             let severity = if indices
                 .iter()
-                .any(|&i| diagnostics[i].severity == RuleSeverity::Error)
+                .any(|&i| diagnostics.get(i).is_some_and(|d| d.severity == RuleSeverity::Error))
             {
                 RuleSeverity::Error
             } else {
@@ -343,12 +343,12 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
 fn group_prescription_tier(indices: &[usize], diagnostics: &[Diagnostic]) -> PrescriptionTier {
     if indices
         .iter()
-        .any(|&i| diagnostics[i].tier == PrescriptionTier::Refactor)
+        .any(|&i| diagnostics.get(i).is_some_and(|d| d.tier == PrescriptionTier::Refactor))
     {
         PrescriptionTier::Refactor
     } else if indices
         .iter()
-        .any(|&i| diagnostics[i].tier == PrescriptionTier::Surgical)
+        .any(|&i| diagnostics.get(i).is_some_and(|d| d.tier == PrescriptionTier::Surgical))
     {
         PrescriptionTier::Surgical
     } else {
@@ -363,7 +363,28 @@ fn compute_blast_radius<C: PlannerContext + ?Sized>(
     sources: &HashMap<PathBuf, String>,
     subject_spans_by_file: &HashMap<PathBuf, Vec<(Option<String>, ByteSpan)>>,
 ) -> BlastRadius {
-    let first = &diagnostics[indices[0]];
+    let Some(&first_idx) = indices.first() else {
+        return BlastRadius {
+            score: 0,
+            tier: BlastRadiusTier::P3,
+            fan_out: 0,
+            cascade_depth: 0,
+            render_frequency: RenderFrequency::Standard,
+            site_count: 0,
+            file_count: 0,
+        };
+    };
+    let Some(first) = diagnostics.get(first_idx) else {
+        return BlastRadius {
+            score: 0,
+            tier: BlastRadiusTier::P3,
+            fan_out: 0,
+            cascade_depth: 0,
+            render_frequency: RenderFrequency::Standard,
+            site_count: 0,
+            file_count: 0,
+        };
+    };
     let meta = first.rule.metadata();
 
     let render_frequency =
@@ -371,7 +392,7 @@ fn compute_blast_radius<C: PlannerContext + ?Sized>(
     let fan_out = compute_group_fan_out(ctx, indices, diagnostics, sources);
     let cascade_depth = indices
         .iter()
-        .map(|&i| diagnostics[i].cascade_steps.len())
+        .filter_map(|&i| diagnostics.get(i).map(|d| d.cascade_steps.len()))
         .max()
         .unwrap_or(0);
 
@@ -386,17 +407,18 @@ fn compute_blast_radius<C: PlannerContext + ?Sized>(
 
     let mut touched_files: BTreeSet<&Path> = BTreeSet::new();
     for &idx in indices {
-        let d = &diagnostics[idx];
-        touched_files.insert(d.file.as_path());
-        for caller in &d.caller_sites {
-            touched_files.insert(caller.caller_file.as_path());
+        if let Some(d) = diagnostics.get(idx) {
+            touched_files.insert(d.file.as_path());
+            for caller in &d.caller_sites {
+                touched_files.insert(caller.caller_file.as_path());
+            }
         }
     }
     let file_count = touched_files.len().max(1);
 
     let severity = if indices
         .iter()
-        .any(|&i| diagnostics[i].severity == RuleSeverity::Error)
+        .any(|&i| diagnostics.get(i).is_some_and(|d| d.severity == RuleSeverity::Error))
     {
         RuleSeverity::Error
     } else {
@@ -503,7 +525,9 @@ fn detect_render_frequency<C: PlannerContext + ?Sized>(
     let mut has_list_loop = false;
 
     for &idx in indices {
-        let diag = &diagnostics[idx];
+        let Some(diag) = diagnostics.get(idx) else {
+            continue;
+        };
         let meta = diag.rule.metadata();
 
         if matches!(
@@ -585,7 +609,9 @@ fn compute_group_fan_out<C: PlannerContext + ?Sized>(
     let mut child_components: BTreeSet<String> = BTreeSet::new();
 
     for &idx in indices {
-        let diag = &diagnostics[idx];
+        let Some(diag) = diagnostics.get(idx) else {
+            continue;
+        };
         for caller in &diag.caller_sites {
             caller_keys.insert((
                 caller.caller_file.clone(),
@@ -693,20 +719,29 @@ fn build_fix_capsule_cached<C: PlannerContext + ?Sized>(
     fallback_exemplar_cache: &mut HashMap<u8, Option<SourceExcerpt>>,
     rule_exemplar_cache: &mut HashMap<(RuleId, u8), Option<SourceExcerpt>>,
 ) -> FixCapsule {
-    let primary_diag = &diagnostics[group.diagnostic_indices[0]];
-    let subject_excerpt =
-        build_subject_excerpt_cached(ctx, primary_diag, sources, subject_spans_by_file);
+    let primary_idx = group.diagnostic_indices.first().copied().unwrap_or(0);
+    let subject_excerpt = diagnostics.get(primary_idx).map_or_else(
+        || SourceExcerpt {
+            file: group.file.clone(),
+            start_line: group.loc.line,
+            end_line: group.loc.line,
+            source: String::new(),
+        },
+        |d| build_subject_excerpt_cached(ctx, d, sources, subject_spans_by_file),
+    );
 
     let mut caller_site_excerpts = Vec::new();
     let mut seen_callers: BTreeSet<(PathBuf, u32, u32)> = BTreeSet::new();
     for &idx in &group.diagnostic_indices {
-        for caller in &diagnostics[idx].caller_sites {
-            if seen_callers.insert((
-                caller.caller_file.clone(),
-                caller.loc.line,
-                caller.loc.column,
-            )) {
-                caller_site_excerpts.push(build_caller_site_excerpt(caller, sources));
+        if let Some(diag) = diagnostics.get(idx) {
+            for caller in &diag.caller_sites {
+                if seen_callers.insert((
+                    caller.caller_file.clone(),
+                    caller.loc.line,
+                    caller.loc.column,
+                )) {
+                    caller_site_excerpts.push(build_caller_site_excerpt(caller, sources));
+                }
             }
         }
     }
@@ -880,7 +915,9 @@ fn find_repository_exemplar_cached<C: PlannerContext + ?Sized>(
 ) -> Option<SourceExcerpt> {
     if group.rule == RuleId::NoResetAllStateOnPropChange {
         for &idx in &group.diagnostic_indices {
-            if let Some(valid_caller) = diagnostics[idx].caller_sites.iter().find(|c| c.has_key) {
+            if let Some(diag) = diagnostics.get(idx)
+                && let Some(valid_caller) = diag.caller_sites.iter().find(|c| c.has_key)
+            {
                 return Some(build_caller_site_excerpt(valid_caller, sources));
             }
         }
@@ -1620,8 +1657,12 @@ pub fn render_rule_bundle_summary_text(rule: RuleId, report: &JsonReport) -> Str
         .map(|(idx, _)| idx)
         .collect();
     matching_indices.sort_by(|&a, &b| {
-        let da = &report.diagnostics[a];
-        let db = &report.diagnostics[b];
+        let Some(da) = report.diagnostics.get(a) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let Some(db) = report.diagnostics.get(b) else {
+            return std::cmp::Ordering::Equal;
+        };
         (
             &da.file,
             da.loc.line,
@@ -1640,7 +1681,7 @@ pub fn render_rule_bundle_summary_text(rule: RuleId, report: &JsonReport) -> Str
 
     let distinct_files: BTreeSet<&Path> = matching_indices
         .iter()
-        .map(|&idx| report.diagnostics[idx].file.as_path())
+        .filter_map(|&idx| report.diagnostics.get(idx).map(|d| d.file.as_path()))
         .collect();
     let effective_tier = if matching_indices.is_empty() {
         meta.default_tier
@@ -1693,7 +1734,9 @@ pub fn render_rule_bundle_summary_text(rule: RuleId, report: &JsonReport) -> Str
 
     let _ = writeln!(out, "Affected Sites ({}):", matching_indices.len());
     for idx in matching_indices {
-        let d = &report.diagnostics[idx];
+        let Some(d) = report.diagnostics.get(idx) else {
+            continue;
+        };
         let group_id = compute_root_cause_group_id(d);
         let subject = d.subject_name.as_deref().unwrap_or("<module>");
         let _ = writeln!(
@@ -2334,11 +2377,10 @@ pub fn filter_report_for_diagnostics(
     report: &JsonReport,
     selected_diagnostics: &[&Diagnostic],
 ) -> JsonReport {
-    let mut diagnostics = Vec::with_capacity(selected_diagnostics.len());
+    let diagnostics: Vec<Diagnostic> = selected_diagnostics.iter().copied().cloned().collect();
     let mut old_to_new: HashMap<usize, usize> = HashMap::with_capacity(selected_diagnostics.len());
 
-    for &sel in selected_diagnostics {
-        let new_idx = diagnostics.len();
+    for (new_idx, &sel) in selected_diagnostics.iter().enumerate() {
         if let Some(old_idx) = report
             .diagnostics
             .iter()
@@ -2346,23 +2388,6 @@ pub fn filter_report_for_diagnostics(
         {
             old_to_new.entry(old_idx).or_insert(new_idx);
         }
-        diagnostics.push(Diagnostic {
-            file: sel.file.clone(),
-            subject_name: sel.subject_name.clone(),
-            rule: sel.rule,
-            category: sel.category,
-            severity: sel.severity,
-            message_id: sel.message_id,
-            tier: sel.tier,
-            target_name: sel.target_name.clone(),
-            message: sel.message.clone(),
-            docs_url: sel.docs_url,
-            loc: sel.loc,
-            span: sel.span,
-            cascade_steps: sel.cascade_steps.clone(),
-            caller_sites: sel.caller_sites.clone(),
-            autofix: sel.autofix.clone(),
-        });
     }
 
     let mut root_cause_groups = Vec::new();
@@ -2376,21 +2401,12 @@ pub fn filter_report_for_diagnostics(
         if !remapped.is_empty() {
             kept_group_ids.insert(group.id.clone());
             root_cause_groups.push(RootCauseGroup {
-                id: group.id.clone(),
-                rule: group.rule,
-                category: group.category,
-                severity: group.severity,
-                tier: group.tier,
-                file: group.file.clone(),
-                subject_name: group.subject_name.clone(),
-                target_name: group.target_name.clone(),
-                loc: group.loc,
-                message: group.message.clone(),
                 blast_radius: BlastRadius {
                     site_count: remapped.len(),
                     ..group.blast_radius
                 },
                 diagnostic_indices: remapped,
+                ..group.clone()
             });
         }
     }

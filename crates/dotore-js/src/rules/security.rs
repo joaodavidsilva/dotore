@@ -228,7 +228,7 @@ pub(crate) fn find_function_body_in_source(source: &str, name: &str) -> Option<S
                 continue;
             }
             if let Some(end) = find_function_declaration_end(tail) {
-                return Some(tail[..end].to_string());
+                return tail.get(..end).map(str::to_string);
             }
             search_from = pos + prefix.len();
         }
@@ -505,14 +505,14 @@ pub(crate) fn split_top_level_args(s: &str) -> Vec<&str> {
             b'[' => bracket += 1,
             b']' => bracket = (bracket - 1).max(0),
             b',' if paren == 0 && brace == 0 && bracket == 0 => {
-                out.push(s[start..i].trim());
+                out.push(s.get(start..i).unwrap_or_default().trim());
                 start = i + 1;
             }
             _ => {}
         }
         i += 1;
     }
-    let tail = s[start..].trim();
+    let tail = s.get(start..).unwrap_or_default().trim();
     if !tail.is_empty() {
         out.push(tail);
     }
@@ -588,7 +588,7 @@ fn extract_jsx_attr_value(src: &str, tag: &str, attr: &str) -> Option<String> {
     let close = after_tag.find('>')?;
     let opener = &after_tag[..close];
     let attr_pos = opener.find(&format!("{attr}="))?;
-    let val_start = opener[attr_pos + attr.len() + 1..].trim_start();
+    let val_start = opener.get(attr_pos + attr.len() + 1..)?.trim_start();
     if let Some(inner) = val_start.strip_prefix('{') {
         let end = inner.find('}')?;
         return Some(inner[..end].trim().to_string());
@@ -601,7 +601,7 @@ fn extract_object_prop_after_call(src: &str, callees: &[&str], prop: &str) -> Op
         if let Some(pos) = src.find(callee) {
             let tail = &src[pos..];
             if let Some(prop_pos) = tail.find(&format!("{prop}:")) {
-                let after = tail[prop_pos + prop.len() + 1..].trim_start();
+                let after = tail.get(prop_pos + prop.len() + 1..)?.trim_start();
                 let val = after.split([',', '}', ')']).next().unwrap_or("").trim();
                 return Some(val.to_string());
             }
