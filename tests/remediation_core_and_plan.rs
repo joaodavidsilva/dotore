@@ -14,9 +14,11 @@ use std::{
 };
 
 use dotore::{
-    AutofixPatch, BlastRadiusTier, ByteEdit, ByteSpan, PrescriptionTier, RenderFrequency, RuleId,
-    analyze_project_sources, analyze_source, apply_autofixes, apply_patches_to_source,
-    plan_project,
+    AutofixPatch, BlastRadiusTier, ByteEdit, ByteSpan, MIGRATION_BUCKET_MIN_FILES,
+    PrescriptionTier, RenderFrequency, RuleCategory, RuleId, analyze_project_sources,
+    analyze_source, apply_autofixes, apply_patches_to_source, build_agent_handoff_prompt,
+    detect_migration_rule_buckets, plan_project, render_rule_bundle_summary_text,
+    write_diagnostics_bundle,
 };
 
 #[test]
@@ -689,6 +691,346 @@ export function App({ currentUserId }) {
         "Expected 0 findings after dotore fix, stdout: {}",
         String::from_utf8_lossy(&check_out.stdout)
     );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn detects_migration_rule_buckets_and_renders_per_rule_summary_text() {
+    assert_eq!(MIGRATION_BUCKET_MIN_FILES, 3);
+
+    let files = vec![
+        // Rule `no-derived-state` across 4 distinct files -> migration bucket (>= 3 files)
+        (
+            PathBuf::from("src/CartSummary.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function CartSummary({ price, qty }) {
+                const [total, setTotal] = useState(0);
+                useEffect(() => {
+                    setTotal(price * qty);
+                }, [price, qty]);
+                return <div>{total}</div>;
+            }
+            "#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("src/OrderRow.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function OrderRow({ subtotal, tax }) {
+                const [grandTotal, setGrandTotal] = useState(0);
+                useEffect(() => {
+                    setGrandTotal(subtotal + tax);
+                }, [subtotal, tax]);
+                return <div>{grandTotal}</div>;
+            }
+            "#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("src/InvoiceHeader.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function InvoiceHeader({ first, last }) {
+                const [fullName, setFullName] = useState('');
+                useEffect(() => {
+                    setFullName(first + ' ' + last);
+                }, [first, last]);
+                return <h1>{fullName}</h1>;
+            }
+            "#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("src/ReceiptFooter.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function ReceiptFooter({ items, discount }) {
+                const [net, setNet] = useState(0);
+                useEffect(() => {
+                    setNet(items - discount);
+                }, [items, discount]);
+                return <footer>{net}</footer>;
+            }
+            "#
+            .to_string(),
+        ),
+        // Rule `no-adjust-state-on-prop-change` in only 1 file -> NOT a migration bucket (< 3 files)
+        (
+            PathBuf::from("src/UserEditor.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function UserEditor({ userId }) {
+                const [draft, setDraft] = useState('');
+                const [dirty, setDirty] = useState(false);
+                useEffect(() => {
+                    if (userId) {
+                        setDraft('reset');
+                    }
+                }, [userId]);
+                return <div>{draft}{String(dirty)}</div>;
+            }
+            "#
+            .to_string(),
+        ),
+    ];
+
+    let report = analyze_project_sources(files, None);
+    let buckets = detect_migration_rule_buckets(&report);
+    assert_eq!(buckets.len(), 1, "Expected exactly 1 migration bucket, got {buckets:?}");
+
+    let bucket = &buckets[0];
+    assert_eq!(bucket.rule, RuleId::NoDerivedState);
+    assert_eq!(bucket.category, RuleCategory::Performance);
+    assert_eq!(bucket.tier, PrescriptionTier::Autofix);
+    assert_eq!(bucket.diagnostic_count, 4);
+    assert_eq!(
+        bucket.affected_files,
+        vec![
+            PathBuf::from("src/CartSummary.tsx"),
+            PathBuf::from("src/InvoiceHeader.tsx"),
+            PathBuf::from("src/OrderRow.tsx"),
+            PathBuf::from("src/ReceiptFooter.tsx"),
+        ]
+    );
+    assert!(bucket.summary_file.is_none());
+
+    let summary_txt = render_rule_bundle_summary_text(RuleId::NoDerivedState, &report);
+    assert!(summary_txt.contains("no-derived-state"));
+    assert!(summary_txt.contains("Performance"));
+    assert!(summary_txt.contains("autofix"));
+    assert!(summary_txt.contains("src/CartSummary.tsx"));
+    assert!(summary_txt.contains("src/InvoiceHeader.tsx"));
+    assert!(summary_txt.contains("src/OrderRow.tsx"));
+    assert!(summary_txt.contains("src/ReceiptFooter.tsx"));
+    assert!(summary_txt.contains("rcg::no-derived-state::"));
+}
+
+#[test]
+fn synthesizes_self_contained_agent_handoff_prompt_and_writes_diagnostics_bundle() {
+    let files = vec![
+        // 1. Multiple State Slots adjusted on prop change in UserEditor -> shared root_cause_group_id (`Surgical` tier)
+        (
+            PathBuf::from("src/UserEditor.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function UserEditor({ userId }) {
+                const [draftName, setDraftName] = useState('');
+                const [draftBio, setDraftBio] = useState('');
+                const [isDirty, setIsDirty] = useState(false);
+                useEffect(() => {
+                    if (userId) {
+                        setDraftName('default');
+                        setDraftBio('bio');
+                    }
+                }, [userId]);
+                return <div>{draftName}{draftBio}{String(isDirty)}</div>;
+            }
+            "#
+            .to_string(),
+        ),
+        // 2. Migration-scale rule (`no-derived-state`) across 3 distinct files
+        (
+            PathBuf::from("src/CartSummary.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function CartSummary({ price, qty }) {
+                const [total, setTotal] = useState(0);
+                useEffect(() => {
+                    setTotal(price * qty);
+                }, [price, qty]);
+                return <div>{total}</div>;
+            }
+            "#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("src/OrderRow.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function OrderRow({ subtotal, tax }) {
+                const [grandTotal, setGrandTotal] = useState(0);
+                useEffect(() => {
+                    setGrandTotal(subtotal + tax);
+                }, [subtotal, tax]);
+                return <div>{grandTotal}</div>;
+            }
+            "#
+            .to_string(),
+        ),
+        (
+            PathBuf::from("src/InvoiceHeader.tsx"),
+            r#"
+            import { useState, useEffect } from 'react';
+            export function InvoiceHeader({ first, last }) {
+                const [fullName, setFullName] = useState('');
+                useEffect(() => {
+                    setFullName(first + ' ' + last);
+                }, [first, last]);
+                return <h1>{fullName}</h1>;
+            }
+            "#
+            .to_string(),
+        ),
+    ];
+
+    let report = analyze_project_sources(files, None);
+
+    // 1. Prompt without bundle_dir
+    let standalone_prompt = build_agent_handoff_prompt(&report, None);
+    assert!(standalone_prompt.contains("Root-Cause Group"));
+    assert!(standalone_prompt.contains("Prescription Tier"));
+    assert!(standalone_prompt.contains("root_cause_group_id"));
+    assert!(standalone_prompt.contains("rcg::no-adjust-state-on-prop-change::src/UserEditor.tsx::user-editor"));
+    assert!(standalone_prompt.contains("surgical"));
+    assert!(standalone_prompt.contains("autofix"));
+    assert!(standalone_prompt.contains("src/UserEditor.tsx:"));
+    assert!(standalone_prompt.contains("Transformation Recipe"));
+    assert!(standalone_prompt.contains("Migration-Scale Rule Buckets"));
+    assert!(standalone_prompt.contains("Staged Remediation Guidance"));
+    assert!(standalone_prompt.contains("no-derived-state"));
+
+    // 2. Write diagnostics bundle directory
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let bundle_dir = std::env::temp_dir().join(format!("dotore-bundle-test-{nanos}"));
+    let bundle = write_diagnostics_bundle(&report, &bundle_dir).expect("write_diagnostics_bundle");
+
+    assert_eq!(bundle.bundle_dir, bundle_dir);
+    assert_eq!(bundle.diagnostics_json_path, bundle_dir.join("diagnostics.json"));
+    assert!(bundle.diagnostics_json_path.exists(), "diagnostics.json must exist");
+
+    let diag_json_str = fs::read_to_string(&bundle.diagnostics_json_path).expect("read diagnostics.json");
+    let diag_json: serde_json::Value = serde_json::from_str(&diag_json_str).expect("parse diagnostics.json");
+    assert_eq!(
+        diag_json["diagnostics"].as_array().map(Vec::len),
+        Some(report.diagnostics.len())
+    );
+    assert_eq!(
+        diag_json["root_cause_groups"].as_array().map(Vec::len),
+        Some(report.root_cause_groups.len())
+    );
+
+    // Verify per-rule .txt files exist for every distinct rule in the report and are referenced in prompt_markdown
+    assert!(bundle.rule_summary_files.len() >= 2);
+    assert!(
+        bundle
+            .rule_summary_files
+            .iter()
+            .any(|(r, _)| *r == RuleId::NoDerivedState)
+    );
+    assert!(
+        bundle
+            .rule_summary_files
+            .iter()
+            .any(|(r, _)| *r == RuleId::NoAdjustStateOnPropChange)
+    );
+    for (rule, rule_txt_path) in &bundle.rule_summary_files {
+        assert!(rule_txt_path.exists(), "Expected {} to exist", rule_txt_path.display());
+        assert_eq!(
+            rule_txt_path.file_name().and_then(|n| n.to_str()),
+            Some(format!("{}.txt", rule.as_str()).as_str())
+        );
+        let txt_content = fs::read_to_string(rule_txt_path).expect("read rule .txt");
+        assert!(txt_content.contains(rule.as_str()));
+        assert!(
+            bundle.prompt_markdown.contains(&format!("{}.txt", rule.as_str())),
+            "Expected prompt_markdown to reference {}.txt",
+            rule.as_str()
+        );
+    }
+
+    assert_eq!(bundle.migration_buckets.len(), 1);
+    assert_eq!(bundle.migration_buckets[0].rule, RuleId::NoDerivedState);
+    assert_eq!(
+        bundle.migration_buckets[0].summary_file,
+        Some(bundle_dir.join("no-derived-state.txt"))
+    );
+    assert!(bundle.prompt_markdown.contains("diagnostics.json"));
+
+    let _ = fs::remove_dir_all(&bundle_dir);
+}
+
+#[test]
+fn cli_plan_handoff_writes_diagnostics_bundle_and_prints_handoff_prompt() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let temp_dir = std::env::temp_dir().join(format!("dotore-cli-plan-handoff-{nanos}"));
+    let src_dir = temp_dir.join("src");
+    let plans_dir = temp_dir.join("plans");
+    let custom_bundle_dir = temp_dir.join("custom-bundle");
+    fs::create_dir_all(&src_dir).expect("create temp src dir");
+
+    for (name, comp) in [
+        ("One.tsx", "One"),
+        ("Two.tsx", "Two"),
+        ("Three.tsx", "Three"),
+    ] {
+        fs::write(
+            src_dir.join(name),
+            format!(
+                r#"import {{ useState, useEffect }} from 'react';
+export function {comp}({{ a, b }}) {{
+    const [sum, setSum] = useState(0);
+    useEffect(() => {{
+        setSum(a + b);
+    }}, [a, b]);
+    return <div>{{sum}}</div>;
+}}
+"#
+            ),
+        )
+        .expect("write fixture file");
+    }
+
+    let bin = env!("CARGO_BIN_EXE_dotore");
+
+    // 1. `dotore plan <src_dir> --out <plans_dir> --handoff`
+    let output = Command::new(bin)
+        .arg("plan")
+        .arg(&src_dir)
+        .arg("--out")
+        .arg(&plans_dir)
+        .arg("--handoff")
+        .current_dir(&temp_dir)
+        .output()
+        .expect("run dotore plan --handoff");
+
+    assert!(
+        output.status.success(),
+        "Expected dotore plan --handoff to exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("# Dotore Coding Agent Remediation Handoff"));
+    assert!(stdout.contains("Migration-Scale Rule Buckets"));
+    assert!(stdout.contains("Staged Remediation Guidance"));
+    assert!(stdout.contains("no-derived-state"));
+    assert!(stdout.contains("diagnostics.json"));
+    assert!(stdout.contains("no-derived-state.txt"));
+    assert!(plans_dir.join("diagnostics.json").exists());
+    assert!(plans_dir.join("no-derived-state.txt").exists());
+    assert!(plans_dir.join("README.md").exists());
+
+    // 2. `dotore plan <src_dir> --out <plans_dir> --handoff --bundle-dir <custom_bundle_dir>`
+    let output_custom = Command::new(bin)
+        .arg("plan")
+        .arg(&src_dir)
+        .arg("--out")
+        .arg(&plans_dir)
+        .arg("--handoff")
+        .arg("--bundle-dir")
+        .arg(&custom_bundle_dir)
+        .current_dir(&temp_dir)
+        .output()
+        .expect("run dotore plan --handoff --bundle-dir");
+    assert!(output_custom.status.success());
+    assert!(custom_bundle_dir.join("diagnostics.json").exists());
+    assert!(custom_bundle_dir.join("no-derived-state.txt").exists());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

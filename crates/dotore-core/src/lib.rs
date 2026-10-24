@@ -65,10 +65,12 @@ pub use ir::{
     tokenize_suppression_rules,
 };
 pub use planner::{
-    PlanResult, PlannerContext, build_caller_site_excerpt, build_fix_capsule,
-    build_root_cause_groups_and_capsules, compute_root_cause_group_id, excerpt_from_span,
-    find_architecture_exemplar_from_facets, format_plan_report, plan_project, slice_span,
-    spans_intersect,
+    DiagnosticsBundle, MIGRATION_BUCKET_MIN_FILES, MigrationRuleBucket, PlanResult, PlannerContext,
+    build_agent_handoff_prompt, build_caller_site_excerpt, build_fix_capsule,
+    build_root_cause_groups_and_capsules, compute_root_cause_group_id,
+    detect_migration_rule_buckets, excerpt_from_span, find_architecture_exemplar_from_facets,
+    format_plan_report, plan_project, render_rule_bundle_summary_text, slice_span, spans_intersect,
+    write_diagnostics_bundle,
 };
 pub use report::{
     CiActionResult, CiOptions, CiProviderKind, InstallOptions, InstallResult,
