@@ -106,7 +106,6 @@ pub(crate) fn extract_jsx_subtrees(
             composition_path.push(fn_name.clone());
         }
         composition_path.extend(ancestor_names);
-        composition_path.push(root_name.clone());
 
         let span = semantic.nodes().get_node(node_id).span();
         let loc = loc_from_line_starts(line_starts, span.start);
@@ -116,10 +115,13 @@ pub(crate) fn extract_jsx_subtrees(
             fingerprint,
             node_count,
             depth,
-            root_name,
+            root_name: root_name.clone(),
             enclosing_subject,
             composition_root_offset,
-            composition_path,
+            composition_path: {
+                composition_path.push(root_name);
+                composition_path
+            },
             span: ByteSpan {
                 start: span.start,
                 end: span.end,

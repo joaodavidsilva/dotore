@@ -2356,11 +2356,10 @@ fn extract_builder_facets_in_file(
             let Some(key_s) = key_name.as_str() else {
                 continue;
             };
-            let key_str = key_s.to_string();
             if is_default_or_boilerplate_literal(&prop.value) {
-                default_or_literal_fields.push(key_str.clone());
+                default_or_literal_fields.push(key_s.to_string());
             }
-            field_names.push(key_str);
+            field_names.push(key_s.to_string());
         }
 
         if field_names.len() < 3 || default_or_literal_fields.is_empty() {

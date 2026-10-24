@@ -223,7 +223,11 @@ impl ProjectGraph {
     ) -> Option<(&'a FileIr, String)> {
         for exp in &target_file.module.exports {
             if !exp.is_type_only && exp.from_source.is_none() && exp.name == exported_name {
-                let local = exp.local_name.clone().unwrap_or_else(|| exp.name.clone());
+                let local = exp
+                    .local_name
+                    .as_deref()
+                    .unwrap_or(exp.name.as_str())
+                    .to_string();
                 return Some((target_file, local));
             }
         }
@@ -860,7 +864,11 @@ pub(super) fn build_module_edges(
             let Some(from_src) = &exp.from_source else {
                 continue;
             };
-            let orig = exp.local_name.clone().unwrap_or_else(|| exp.name.clone());
+            let orig = exp
+                .local_name
+                .as_deref()
+                .unwrap_or(exp.name.as_str())
+                .to_string();
             re_exports_by_source
                 .entry(from_src.clone())
                 .or_default()

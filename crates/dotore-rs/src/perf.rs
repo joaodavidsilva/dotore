@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
-    Attribute, Block, Expr, ExprCall, ExprForLoop, ExprLoop, ExprMethodCall, ExprWhile, Fields,
-    File, FnArg, GenericArgument, ImplItemFn, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod,
-    ItemStatic, ItemStruct, Lit, Macro, Pat, PathArguments, Signature, Stmt, Token, TraitItemFn,
-    Type,
+    Attribute, Block, Expr, ExprBreak, ExprCall, ExprField, ExprForLoop, ExprLoop, ExprMethodCall,
+    ExprReturn, ExprStruct, ExprTuple, ExprWhile, Fields, File, FnArg, GenericArgument, ImplItemFn,
+    ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemStruct, Lit, Local, Macro, Pat,
+    PathArguments, Signature, Stmt, Token, TraitItemFn, Type,
     parse::Parser,
     punctuated::Punctuated,
     spanned::Spanned,
@@ -49,7 +49,11 @@ pub(crate) fn extract_perf_findings(
         findings,
         scope: RsScopeTracker::for_file(file),
         cheap_clone_vars: HashSet::new(),
+        loop_scoped_vars: Vec::new(),
         in_iter_closure: 0,
+        in_diverging_expr: 0,
+        in_owned_record_sink: 0,
+        in_borrow_query_arg: 0,
     };
     visitor.visit_file(file);
 }
@@ -59,7 +63,11 @@ struct PerfVisitor<'a> {
     findings: &'a mut Vec<RsCandidateFinding>,
     scope: RsScopeTracker,
     cheap_clone_vars: HashSet<String>,
+    loop_scoped_vars: Vec<HashSet<String>>,
     in_iter_closure: u32,
+    in_diverging_expr: u32,
+    in_owned_record_sink: u32,
+    in_borrow_query_arg: u32,
 }
 
 impl PerfVisitor<'_> {
@@ -121,8 +129,28 @@ impl PerfVisitor<'_> {
                 }
                 false
             }
+            Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                if matches!(method.as_str(), "chars" | "char_indices" | "bytes") {
+                    return true;
+                }
+                if matches!(
+                    method.as_str(),
+                    "peekable" | "fuse" | "enumerate" | "copied" | "cloned"
+                ) {
+                    return self.is_cheap_clone_receiver(&mc.receiver);
+                }
+                false
+            }
             _ => false,
         }
+    }
+
+    fn is_per_element_ownership_transfer(&self) -> bool {
+        if self.in_borrow_query_arg > 0 {
+            return false;
+        }
+        self.in_owned_record_sink > 0
     }
 
     fn check_regex_new_in_fn(&mut self, node: &ExprCall) {
@@ -303,6 +331,9 @@ impl PerfVisitor<'_> {
     }
 
     fn record_local_stmt_bindings(&mut self, local: &syn::Local) {
+        if let Some(loop_vars) = self.loop_scoped_vars.last_mut() {
+            collect_pat_idents(&local.pat, loop_vars);
+        }
         if let Pat::Type(pat_type) = &local.pat
             && let Some(ident) = extract_pat_ident(&pat_type.pat)
             && is_cheap_clone_type(&pat_type.ty)
@@ -316,7 +347,7 @@ impl PerfVisitor<'_> {
         let Some(ident) = extract_pat_ident(&local.pat) else {
             return;
         };
-        if is_cheap_clone_ctor(&init.expr) {
+        if is_cheap_clone_ctor(&init.expr) || self.is_cheap_clone_receiver(&init.expr) {
             self.cheap_clone_vars.insert(ident);
         }
     }
@@ -369,11 +400,13 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let snap = self.scope.enter_fn(i);
         let prev_cheap_vars = std::mem::take(&mut self.cheap_clone_vars);
+        let prev_loop_vars = std::mem::take(&mut self.loop_scoped_vars);
         self.populate_sig_vars(&i.sig);
 
         visit::visit_item_fn(self, i);
 
         self.cheap_clone_vars = prev_cheap_vars;
+        self.loop_scoped_vars = prev_loop_vars;
         self.scope.exit(snap);
     }
 
@@ -386,22 +419,26 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
         let snap = self.scope.enter_method(i);
         let prev_cheap_vars = std::mem::take(&mut self.cheap_clone_vars);
+        let prev_loop_vars = std::mem::take(&mut self.loop_scoped_vars);
         self.populate_sig_vars(&i.sig);
 
         visit::visit_impl_item_fn(self, i);
 
         self.cheap_clone_vars = prev_cheap_vars;
+        self.loop_scoped_vars = prev_loop_vars;
         self.scope.exit(snap);
     }
 
     fn visit_trait_item_fn(&mut self, i: &'ast TraitItemFn) {
         let snap = self.scope.enter_trait_fn(i);
         let prev_cheap_vars = std::mem::take(&mut self.cheap_clone_vars);
+        let prev_loop_vars = std::mem::take(&mut self.loop_scoped_vars);
         self.populate_sig_vars(&i.sig);
 
         visit::visit_trait_item_fn(self, i);
 
         self.cheap_clone_vars = prev_cheap_vars;
+        self.loop_scoped_vars = prev_loop_vars;
         self.scope.exit(snap);
     }
 
@@ -417,34 +454,108 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         }
     }
 
+    fn visit_local(&mut self, i: &'ast Local) {
+        for attr in &i.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_pat(&i.pat);
+        if let Some(init) = &i.init {
+            let prev_sink = self.in_owned_record_sink;
+            let prev_borrow = self.in_borrow_query_arg;
+            if is_bare_clone_call(&init.expr) || expr_has_branch_bare_clone(&init.expr) {
+                self.in_owned_record_sink = 0;
+                self.in_borrow_query_arg = 0;
+            }
+            self.visit_expr(&init.expr);
+            self.in_owned_record_sink = prev_sink;
+            self.in_borrow_query_arg = prev_borrow;
+            if let Some((_, diverge)) = &init.diverge {
+                self.in_diverging_expr += 1;
+                self.visit_expr(diverge);
+                self.in_diverging_expr -= 1;
+            }
+        }
+    }
+
+    fn visit_expr_return(&mut self, i: &'ast ExprReturn) {
+        self.in_diverging_expr += 1;
+        visit::visit_expr_return(self, i);
+        self.in_diverging_expr -= 1;
+    }
+
+    fn visit_expr_break(&mut self, i: &'ast ExprBreak) {
+        self.in_diverging_expr += 1;
+        visit::visit_expr_break(self, i);
+        self.in_diverging_expr -= 1;
+    }
+
+    fn visit_expr_struct(&mut self, i: &'ast ExprStruct) {
+        for attr in &i.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some(qself) = &i.qself {
+            self.visit_qself(qself);
+        }
+        self.visit_path(&i.path);
+        self.in_owned_record_sink += 1;
+        for field in &i.fields {
+            self.visit_field_value(field);
+        }
+        self.in_owned_record_sink -= 1;
+        if let Some(rest) = &i.rest {
+            self.visit_expr(rest);
+        }
+    }
+
+    fn visit_expr_tuple(&mut self, i: &'ast ExprTuple) {
+        for attr in &i.attrs {
+            self.visit_attribute(attr);
+        }
+        self.in_owned_record_sink += 1;
+        for elem in &i.elems {
+            self.visit_expr(elem);
+        }
+        self.in_owned_record_sink -= 1;
+    }
+
     fn visit_expr_for_loop(&mut self, i: &'ast ExprForLoop) {
         for attr in &i.attrs {
             self.visit_attribute(attr);
         }
         self.visit_pat(&i.pat);
         self.visit_expr(&i.expr);
+        let mut loop_vars = HashSet::new();
+        collect_pat_idents(&i.pat, &mut loop_vars);
+        self.loop_scoped_vars.push(loop_vars);
         let snap = self.scope.enter_loop();
         self.visit_block(&i.body);
         self.scope.exit(snap);
+        self.loop_scoped_vars.pop();
     }
 
     fn visit_expr_while(&mut self, i: &'ast ExprWhile) {
         for attr in &i.attrs {
             self.visit_attribute(attr);
         }
+        let mut loop_vars = HashSet::new();
+        collect_let_cond_idents(&i.cond, &mut loop_vars);
         self.visit_expr(&i.cond);
+        self.loop_scoped_vars.push(loop_vars);
         let snap = self.scope.enter_loop();
         self.visit_block(&i.body);
         self.scope.exit(snap);
+        self.loop_scoped_vars.pop();
     }
 
     fn visit_expr_loop(&mut self, i: &'ast ExprLoop) {
         for attr in &i.attrs {
             self.visit_attribute(attr);
         }
+        self.loop_scoped_vars.push(HashSet::new());
         let snap = self.scope.enter_loop();
         self.visit_block(&i.body);
         self.scope.exit(snap);
+        self.loop_scoped_vars.pop();
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
@@ -455,7 +566,15 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         if is_lazy_init {
             self.scope.in_static_or_lazy_init += 1;
         }
-        visit::visit_expr_call(self, node);
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.func);
+        self.in_owned_record_sink += 1;
+        for arg in &node.args {
+            self.visit_expr(arg);
+        }
+        self.in_owned_record_sink -= 1;
         if is_lazy_init {
             self.scope.in_static_or_lazy_init -= 1;
         }
@@ -466,9 +585,11 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
 
         if !self.scope.in_test()
             && self.scope.in_loop()
+            && self.in_diverging_expr == 0
             && method_name == "clone"
             && node.args.is_empty()
             && !self.is_cheap_clone_receiver(&node.receiver)
+            && !self.is_per_element_ownership_transfer()
         {
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
@@ -518,8 +639,37 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         if is_iter_adapter {
             self.in_iter_closure += 1;
         }
+        let is_collection_whole_item_push =
+            matches!(method_name.as_str(), "push" | "push_back" | "push_front")
+                && node.args.len() == 1
+                && node
+                    .args
+                    .first()
+                    .is_some_and(|arg| is_bare_loop_item_clone(arg, &self.loop_scoped_vars));
+        let is_borrow_query_method = matches!(
+            method_name.as_str(),
+            "contains"
+                | "contains_key"
+                | "get"
+                | "get_mut"
+                | "get_key_value"
+                | "remove"
+                | "remove_entry"
+        );
+        if !is_collection_whole_item_push && !is_borrow_query_method {
+            self.in_owned_record_sink += 1;
+        }
+        if is_borrow_query_method {
+            self.in_borrow_query_arg += 1;
+        }
         for arg in &node.args {
             self.visit_expr(arg);
+        }
+        if is_borrow_query_method {
+            self.in_borrow_query_arg -= 1;
+        }
+        if !is_collection_whole_item_push && !is_borrow_query_method {
+            self.in_owned_record_sink -= 1;
         }
         if is_iter_adapter {
             self.in_iter_closure -= 1;
@@ -548,6 +698,162 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
         }
         visit::visit_macro(self, mac);
     }
+}
+
+fn collect_pat_idents(pat: &Pat, out: &mut HashSet<String>) {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Pat has many variants; recursively extracts bound local identifiers"
+    )]
+    match pat {
+        Pat::Ident(pi) => {
+            out.insert(pi.ident.to_string());
+            if let Some((_, sub)) = &pi.subpat {
+                collect_pat_idents(sub, out);
+            }
+        }
+        Pat::Reference(r) => collect_pat_idents(&r.pat, out),
+        Pat::Type(t) => collect_pat_idents(&t.pat, out),
+        Pat::Tuple(t) => {
+            for elem in &t.elems {
+                collect_pat_idents(elem, out);
+            }
+        }
+        Pat::TupleStruct(ts) => {
+            for elem in &ts.elems {
+                collect_pat_idents(elem, out);
+            }
+        }
+        Pat::Struct(s) => {
+            for field in &s.fields {
+                collect_pat_idents(&field.pat, out);
+            }
+        }
+        Pat::Slice(sl) => {
+            for elem in &sl.elems {
+                collect_pat_idents(elem, out);
+            }
+        }
+        Pat::Or(or_pat) => {
+            for case in &or_pat.cases {
+                collect_pat_idents(case, out);
+            }
+        }
+        Pat::Paren(p) => collect_pat_idents(&p.pat, out),
+        _ => {}
+    }
+}
+
+fn collect_let_cond_idents(expr: &Expr, out: &mut HashSet<String>) {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; inspects Let and && chains in while-let conditions"
+    )]
+    match expr {
+        Expr::Let(expr_let) => collect_pat_idents(&expr_let.pat, out),
+        Expr::Binary(bin) => {
+            collect_let_cond_idents(&bin.left, out);
+            collect_let_cond_idents(&bin.right, out);
+        }
+        Expr::Paren(p) => collect_let_cond_idents(&p.expr, out),
+        Expr::Group(g) => collect_let_cond_idents(&g.expr, out),
+        _ => {}
+    }
+}
+
+fn extract_root_ident(expr: &Expr) -> Option<String> {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; walks receiver chain to find root local variable"
+    )]
+    match expr {
+        Expr::Paren(p) => extract_root_ident(&p.expr),
+        Expr::Group(g) => extract_root_ident(&g.expr),
+        Expr::Reference(r) => extract_root_ident(&r.expr),
+        Expr::Path(ep) if ep.qself.is_none() => ep.path.get_ident().map(ToString::to_string),
+        Expr::Field(ExprField { base, .. }) => extract_root_ident(base),
+        Expr::Index(idx) => extract_root_ident(&idx.expr),
+        Expr::MethodCall(mc) => extract_root_ident(&mc.receiver),
+        Expr::Try(t) => extract_root_ident(&t.expr),
+        Expr::Unary(u) => extract_root_ident(&u.expr),
+        _ => None,
+    }
+}
+
+fn is_bare_ident_receiver(expr: &Expr) -> bool {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; checks whether receiver is a bare identifier without field/index projection"
+    )]
+    match expr {
+        Expr::Paren(p) => is_bare_ident_receiver(&p.expr),
+        Expr::Group(g) => is_bare_ident_receiver(&g.expr),
+        Expr::Reference(r) => is_bare_ident_receiver(&r.expr),
+        Expr::Path(ep) => ep.qself.is_none() && ep.path.get_ident().is_some(),
+        _ => false,
+    }
+}
+
+fn is_bare_clone_call(expr: &Expr) -> bool {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; checks direct `.clone()` calls"
+    )]
+    match expr {
+        Expr::Paren(p) => is_bare_clone_call(&p.expr),
+        Expr::Group(g) => is_bare_clone_call(&g.expr),
+        Expr::MethodCall(mc) => mc.method == "clone" && mc.args.is_empty(),
+        _ => false,
+    }
+}
+
+fn is_bare_loop_item_clone(expr: &Expr, loop_scoped_vars: &[HashSet<String>]) -> bool {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; checks `item.clone()` on a bare loop variable"
+    )]
+    match expr {
+        Expr::Paren(p) => is_bare_loop_item_clone(&p.expr, loop_scoped_vars),
+        Expr::Group(g) => is_bare_loop_item_clone(&g.expr, loop_scoped_vars),
+        Expr::MethodCall(mc) if mc.method == "clone" && mc.args.is_empty() => {
+            is_bare_ident_receiver(&mc.receiver)
+                && extract_root_ident(&mc.receiver).is_some_and(|id| {
+                    loop_scoped_vars.iter().any(|set| set.contains(&id))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_branch_bare_clone(expr: &Expr) -> bool {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "syn::Expr has many variants; checks whether an if/match/block initializer has a bare `.clone()` tail expression"
+    )]
+    match expr {
+        Expr::Paren(p) => expr_has_branch_bare_clone(&p.expr),
+        Expr::Group(g) => expr_has_branch_bare_clone(&g.expr),
+        Expr::Block(b) => block_tail_is_bare_clone(&b.block),
+        Expr::If(expr_if) => {
+            block_tail_is_bare_clone(&expr_if.then_branch)
+                || expr_if
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, eb)| is_bare_clone_call(eb) || expr_has_branch_bare_clone(eb))
+        }
+        Expr::Match(expr_match) => expr_match
+            .arms
+            .iter()
+            .any(|arm| is_bare_clone_call(&arm.body) || expr_has_branch_bare_clone(&arm.body)),
+        _ => false,
+    }
+}
+
+fn block_tail_is_bare_clone(block: &Block) -> bool {
+    matches!(
+        block.stmts.last(),
+        Some(Stmt::Expr(tail, None)) if is_bare_clone_call(tail) || expr_has_branch_bare_clone(tail)
+    )
 }
 
 fn is_lazy_lock_init_call(node: &ExprCall) -> bool {

@@ -773,12 +773,12 @@ struct VirtualWorkspaceSplit {
 }
 
 fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualWorkspaceSplit {
-    let mut pkg_jsons: Vec<(PathBuf, String)> = Vec::new();
-    let mut angular_jsons: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    let mut pkg_jsons: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut angular_jsons: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut py_manifests: Vec<(PathBuf, PathBuf, String)> = Vec::new();
-    let mut cargo_tomls: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    let mut cargo_tomls: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
-    let mut compiler_configs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    let mut compiler_configs: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut manifests: HashMap<PathBuf, String> = HashMap::new();
     let mut source_files: Vec<(PathBuf, String)> = Vec::new();
 
@@ -798,13 +798,13 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             .replace('\\', "/")
             .contains("node_modules/");
         if file_name == "package.json" {
-            manifests.insert(path, content.clone());
             if !is_in_node_modules {
-                pkg_jsons.push((parent_dir, content));
+                pkg_jsons.push((parent_dir, path.clone()));
             }
+            manifests.insert(path, content);
         } else if file_name == "angular.json" {
             if !is_in_node_modules {
-                angular_jsons.push((parent_dir, path.clone(), content.clone()));
+                angular_jsons.push((parent_dir, path.clone()));
             }
             manifests.insert(path, content);
         } else if file_name == "pyproject.toml"
@@ -814,20 +814,22 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
         {
             py_manifests.push((parent_dir, path, content));
         } else if file_name == "Cargo.toml" {
-            manifests.insert(path.clone(), content.clone());
-            cargo_tomls.push((parent_dir, path, content));
+            cargo_tomls.push((parent_dir, path.clone()));
+            manifests.insert(path, content);
         } else if is_non_js_manifest_filename(file_name) {
             if is_compiler_config_name(file_name) {
-                compiler_configs.push((parent_dir, path.clone(), content.clone()));
+                compiler_configs.push((parent_dir, path.clone()));
             }
             manifests.insert(path, content);
         } else if file_name.starts_with("dotore.config.") {
             config_files.push((parent_dir, path, content));
         } else {
             if is_compiler_config_name(file_name) {
-                compiler_configs.push((parent_dir, path.clone(), content.clone()));
+                compiler_configs.push((parent_dir, path.clone()));
+                manifests.insert(path.clone(), content.clone());
+            } else if file_name.contains(".config.") || file_name.contains(".setup.") {
+                manifests.insert(path.clone(), content.clone());
             }
-            manifests.insert(path.clone(), content.clone());
             source_files.push((path, content));
         }
     }
@@ -840,7 +842,8 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             pkg_jsons
                 .iter()
                 .find(|(dir, _)| dir == Path::new("."))
-                .and_then(|(_, c)| DotoreConfig::from_package_json_str(c))
+                .and_then(|(_, p)| manifests.get(p))
+                .and_then(|c| DotoreConfig::from_package_json_str(c))
         })
         .or_else(|| {
             config_files
@@ -854,16 +857,21 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     #[cfg(feature = "js")]
     {
         let js_analyzer = JsLanguageAnalyzer;
-        for (dir, pkg_content) in &pkg_jsons {
+        for (dir, pkg_path) in &pkg_jsons {
+            let pkg_content = manifests.get(pkg_path).map_or("", String::as_str);
             let mut dir_manifest_sources: Vec<(PathBuf, &str)> =
-                vec![(dir.join("package.json"), pkg_content.as_str())];
-            for (ng_dir, ng_path, ng_text) in &angular_jsons {
-                if ng_dir == dir || ng_dir == Path::new(".") {
+                vec![(dir.join("package.json"), pkg_content)];
+            for (ng_dir, ng_path) in &angular_jsons {
+                if (ng_dir == dir || ng_dir == Path::new("."))
+                    && let Some(ng_text) = manifests.get(ng_path)
+                {
                     dir_manifest_sources.push((ng_path.clone(), ng_text.as_str()));
                 }
             }
-            for (c_dir, c_path, c_text) in &compiler_configs {
-                if c_dir == dir {
+            for (c_dir, c_path) in &compiler_configs {
+                if c_dir == dir
+                    && let Some(c_text) = manifests.get(c_path)
+                {
                     dir_manifest_sources.push((c_path.clone(), c_text.as_str()));
                 }
             }
@@ -888,12 +896,13 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             });
         }
 
-        for (ng_dir, ng_path, ng_text) in &angular_jsons {
+        for (ng_dir, ng_path) in &angular_jsons {
             if packages.iter().any(|p| &p.root_dir == ng_dir) {
                 continue;
             }
+            let ng_text = manifests.get(ng_path).map_or("", String::as_str);
             let dir_manifest_sources: Vec<(PathBuf, &str)> =
-                vec![(ng_path.clone(), ng_text.as_str())];
+                vec![(ng_path.clone(), ng_text)];
             let gate = js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources);
             let local_cfg = config_files
                 .iter()
@@ -917,25 +926,25 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     #[cfg(feature = "py")]
     {
         let py = PyLanguageAnalyzer::new();
-        let mut py_dirs: Vec<PathBuf> = Vec::new();
+        let mut py_dirs: Vec<&Path> = Vec::new();
         for (dir, _, _) in &py_manifests {
-            if !py_dirs.contains(dir) {
-                py_dirs.push(dir.clone());
+            if !py_dirs.contains(&dir.as_path()) {
+                py_dirs.push(dir.as_path());
             }
         }
         for dir in py_dirs {
             let dir_manifests: Vec<(PathBuf, &str)> = py_manifests
                 .iter()
-                .filter(|(d, _, _)| d == &dir)
+                .filter(|(d, _, _)| d.as_path() == dir)
                 .map(|(_, p, c)| (p.clone(), c.as_str()))
                 .collect();
-            let py_gate = py.infer_capability_gate(&dir, &dir_manifests);
+            let py_gate = py.infer_capability_gate(dir, &dir_manifests);
             if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == dir) {
                 existing.capability_gate.merge(&py_gate);
             } else {
                 let local_cfg = config_files
                     .iter()
-                    .find(|(c_dir, _, _)| c_dir == &dir)
+                    .find(|(c_dir, _, _)| c_dir.as_path() == dir)
                     .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
                     .unwrap_or_else(|| root_config.clone());
                 let name = dir
@@ -945,7 +954,7 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
                     .to_string();
                 packages.push(WorkspacePackage {
                     name,
-                    root_dir: dir,
+                    root_dir: dir.to_path_buf(),
                     capability_gate: py_gate,
                     config: local_cfg,
                 });
@@ -954,9 +963,10 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     }
 
     #[cfg(feature = "rs")]
-    for (dir, cargo_path, cargo_content) in &cargo_tomls {
+    for (dir, cargo_path) in &cargo_tomls {
+        let cargo_content = manifests.get(cargo_path).map_or("", String::as_str);
         let rs_gate = RsLanguageAnalyzer
-            .infer_capability_gate(dir, &[(cargo_path.clone(), cargo_content.as_str())]);
+            .infer_capability_gate(dir, &[(cargo_path.clone(), cargo_content)]);
         if let Some(existing) = packages.iter_mut().find(|p| &p.root_dir == dir) {
             existing.capability_gate.merge(&rs_gate);
         } else {
@@ -1539,12 +1549,13 @@ fn scan_design_js(
     let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
 
     let mut diagnostics = Vec::new();
+    let mut design_cfg = DotoreConfig::default();
     for file in &graph.files {
         tick_progress_file(&file.path);
         let Some(pkg) = resolve_package_for_file(&file.path, &packages) else {
             continue;
         };
-        let mut design_cfg = pkg.config.clone();
+        design_cfg.clone_from(&pkg.config);
         for &rule in &design_rules {
             if design_cfg.explicit_rule_override(rule).is_none() {
                 let meta = rule.metadata();
@@ -1621,7 +1632,7 @@ fn discover_filtered_workspace_packages_and_paths(
 
     for pkg in &mut packages {
         if let Some(cfg) = &explicit_cfg {
-            pkg.config = cfg.clone();
+            pkg.config.clone_from(cfg);
         }
         apply_cli_overrides_to_config(&mut pkg.config, overrides);
     }
@@ -1669,7 +1680,7 @@ fn apply_cli_overrides_to_config(config: &mut DotoreConfig, overrides: &CliOverr
     }
     for tag in &overrides.ignore_tags {
         if !config.ignore.tags.contains(tag) {
-            config.ignore.tags.push(tag.clone());
+            config.ignore.tags.push(tag.to_string());
         }
     }
 }

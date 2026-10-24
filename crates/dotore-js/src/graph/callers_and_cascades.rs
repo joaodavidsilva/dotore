@@ -94,7 +94,7 @@ impl ProjectGraph {
                 else {
                     break;
                 };
-                current_name = next_target.clone();
+                current_name.clone_from(next_target);
                 must_follow_import = current_file
                     .module
                     .imports
@@ -256,7 +256,15 @@ pub(super) fn index_file_caller_sites(
         for target in
             resolve_caller_targets(&caller_file.path, site, targets, ts_mappings, pkg_manifests)
         {
-            out.entry(target).or_default().push(resolved.clone());
+            out.entry(target).or_default().push(ResolvedCallerSite {
+                caller_file: resolved.caller_file.clone(),
+                parent_subject_name: resolved.parent_subject_name.clone(),
+                component_name: resolved.component_name.clone(),
+                loc: resolved.loc,
+                span: resolved.span,
+                has_key: resolved.has_key,
+                passed_props: resolved.passed_props.clone(),
+            });
         }
     }
 }

@@ -2,6 +2,7 @@
 //! unused dependency (`unused-dependency`), and Tarjan SCC circular dependency (`circular-dependency`) analysis.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
 };
@@ -161,10 +162,10 @@ pub(super) fn discover_entrypoints_and_roots(
 
     for file in files {
         for route_mod in &file.module.route_module_entries {
-            let rel_spec = if route_mod.starts_with('.') {
-                route_mod.clone()
+            let rel_spec: Cow<'_, str> = if route_mod.starts_with('.') {
+                Cow::Borrowed(route_mod.as_str())
             } else {
-                format!("./{route_mod}")
+                Cow::Owned(format!("./{route_mod}"))
             };
             for idx in resolve_specifier_to_target_indices(
                 &file.path,
@@ -479,8 +480,7 @@ pub(super) fn detect_dead_exports(
         }
     }
 
-    let mut used_exports: HashSet<(usize, String)> = HashSet::new();
-
+    let mut used_exports: HashMap<usize, HashSet<String>> = HashMap::new();
     for (idx, &is_entry) in is_entry_point.iter().enumerate().take(files.len()) {
         if !is_entry {
             continue;
@@ -542,17 +542,20 @@ pub(super) fn detect_dead_exports(
                 continue;
             }
         }
-        if used_exports.contains(&(idx, "*".to_string())) {
+        let file_used_exports = used_exports.get(&idx);
+        if file_used_exports.is_some_and(|s| s.contains("*")) {
             continue;
         }
 
-        let mut default_linked_locals = HashSet::new();
-        for exp in &file.module.exports {
-            if exp.name == "default"
-                && let Some(local) = &exp.local_name
-                && used_exports.contains(&(idx, "default".to_string()))
-            {
-                default_linked_locals.insert(local.clone());
+        let default_is_used = file_used_exports.is_some_and(|s| s.contains("default"));
+        let mut default_linked_locals: HashSet<&str> = HashSet::new();
+        if default_is_used {
+            for exp in &file.module.exports {
+                if exp.name == "default"
+                    && let Some(local) = &exp.local_name
+                {
+                    default_linked_locals.insert(local.as_str());
+                }
             }
         }
 
@@ -566,7 +569,7 @@ pub(super) fn detect_dead_exports(
             if ROUTE_CONVENTION_EXPORTS.contains(&exp.name.as_str()) {
                 continue;
             }
-            if used_exports.contains(&(idx, exp.name.clone())) {
+            if file_used_exports.is_some_and(|s| s.contains(exp.name.as_str())) {
                 continue;
             }
             if file
@@ -577,17 +580,16 @@ pub(super) fn detect_dead_exports(
             {
                 continue;
             }
-            if exp.name != "default" && default_linked_locals.contains(&exp.name) {
+            if exp.name != "default" && default_linked_locals.contains(exp.name.as_str()) {
                 continue;
             }
             if exp.name == "default"
                 && let Some(local) = &exp.local_name
-                && (used_exports.contains(&(idx, local.clone()))
+                && (file_used_exports.is_some_and(|s| s.contains(local.as_str()))
                     || file.module.local_references.binary_search(local).is_ok())
             {
                 continue;
             }
-
             findings.push(UnusedExportFinding {
                 file_index: idx,
                 name: exp.name.clone(),
@@ -606,20 +608,21 @@ fn mark_all_exports_used_recursive(
     files: &[FileIr],
     re_export_edges_by_source: &HashMap<usize, Vec<&ModuleEdge>>,
     platform_siblings: &HashMap<usize, Vec<usize>>,
-    used_exports: &mut HashSet<(usize, String)>,
+    used_exports: &mut HashMap<usize, HashSet<String>>,
     visited: &mut HashSet<usize>,
 ) {
+    let single_group = [module_idx];
     let group = platform_siblings
         .get(&module_idx)
-        .cloned()
-        .unwrap_or_else(|| vec![module_idx]);
-    for idx in group {
+        .map_or(&single_group[..], Vec::as_slice);
+    for &idx in group {
         if !visited.insert(idx) {
             continue;
         }
-        used_exports.insert((idx, "*".to_string()));
+        let entry = used_exports.entry(idx).or_default();
+        entry.insert("*".to_string());
         for exp in &files[idx].module.exports {
-            used_exports.insert((idx, exp.name.clone()));
+            entry.insert(exp.name.clone());
         }
         let Some(re_edges) = re_export_edges_by_source.get(&idx) else {
             continue;
@@ -642,7 +645,7 @@ fn propagate_re_export_edge(
     files: &[FileIr],
     re_export_edges_by_source: &HashMap<usize, Vec<&ModuleEdge>>,
     platform_siblings: &HashMap<usize, Vec<usize>>,
-    used_exports: &mut HashSet<(usize, String)>,
+    used_exports: &mut HashMap<usize, HashSet<String>>,
     visited: &mut HashSet<usize>,
 ) {
     for (orig_name, _, _) in &edge.re_export_mappings {
@@ -675,7 +678,7 @@ fn mark_imported_symbol_used(
     files: &[FileIr],
     re_export_edges_by_source: &HashMap<usize, Vec<&ModuleEdge>>,
     platform_siblings: &HashMap<usize, Vec<usize>>,
-    used_exports: &mut HashSet<(usize, String)>,
+    used_exports: &mut HashMap<usize, HashSet<String>>,
 ) {
     if !sym.is_namespace {
         let export_name = if sym.is_default {
@@ -737,18 +740,21 @@ fn mark_export_used_recursive(
     export_name: &str,
     re_export_edges_by_source: &HashMap<usize, Vec<&ModuleEdge>>,
     platform_siblings: &HashMap<usize, Vec<usize>>,
-    used_exports: &mut HashSet<(usize, String)>,
+    used_exports: &mut HashMap<usize, HashSet<String>>,
     visited: &mut HashSet<(usize, String)>,
 ) {
+    let single_group = [module_idx];
     let group = platform_siblings
         .get(&module_idx)
-        .cloned()
-        .unwrap_or_else(|| vec![module_idx]);
-    for idx in group {
+        .map_or(&single_group[..], Vec::as_slice);
+    for &idx in group {
         if !visited.insert((idx, export_name.to_string())) {
             continue;
         }
-        used_exports.insert((idx, export_name.to_string()));
+        used_exports
+            .entry(idx)
+            .or_default()
+            .insert(export_name.to_string());
         let Some(re_edges) = re_export_edges_by_source.get(&idx) else {
             continue;
         };
@@ -770,7 +776,7 @@ fn propagate_single_export_across_edge(
     export_name: &str,
     re_export_edges_by_source: &HashMap<usize, Vec<&ModuleEdge>>,
     platform_siblings: &HashMap<usize, Vec<usize>>,
-    used_exports: &mut HashSet<(usize, String)>,
+    used_exports: &mut HashMap<usize, HashSet<String>>,
     visited: &mut HashSet<(usize, String)>,
 ) {
     for (orig_name, exported_name, _) in &edge.re_export_mappings {

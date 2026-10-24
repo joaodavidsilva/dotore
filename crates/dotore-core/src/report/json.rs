@@ -303,7 +303,7 @@ fn build_project_coverage_metadata(
     for (file_path, subj_count) in file_subject_counts {
         if let Some(idx) = resolve_idx(file_path) {
             file_to_pkg_idx.insert(file_path.as_path(), idx);
-            pkg_files[idx].push(file_path.clone());
+            pkg_files[idx].push(file_path.to_path_buf());
             pkg_subjects[idx] += *subj_count;
         }
     }
@@ -326,7 +326,20 @@ fn build_project_coverage_metadata(
             .or_else(|| resolve_idx(&group.file));
         if let Some(idx) = idx_opt {
             file_to_pkg_idx.entry(group.file.as_path()).or_insert(idx);
-            pkg_groups[idx].push(group.clone());
+            pkg_groups[idx].push(RootCauseGroup {
+                id: group.id.clone(),
+                rule: group.rule,
+                category: group.category,
+                severity: group.severity,
+                tier: group.tier,
+                file: group.file.clone(),
+                subject_name: group.subject_name.clone(),
+                target_name: group.target_name.clone(),
+                loc: group.loc,
+                message: group.message.clone(),
+                blast_radius: group.blast_radius.clone(),
+                diagnostic_indices: group.diagnostic_indices.clone(),
+            });
         }
     }
 
