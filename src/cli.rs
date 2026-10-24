@@ -992,20 +992,20 @@ fn run_check(args: &CheckArgs) -> ExitCode {
     ExitCode::from(code)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Subcommand scan helper forwards CLI flags directly into ScanOptions and CliOverrides"
-)]
-fn scan_workspace_for_subcommand(
-    paths: &[PathBuf],
+struct SubcommandScanRequest<'a> {
+    paths: &'a [PathBuf],
     include_tests: bool,
     tiers: Option<Vec<PrescriptionTier>>,
     no_inline_disables: bool,
     custom_rules_only: bool,
-    ignore_tags: &[String],
-    config_path: Option<&PathBuf>,
+    ignore_tags: &'a [String],
+    config_path: Option<&'a PathBuf>,
     no_cache: bool,
-    projects: &[String],
+    projects: &'a [String],
+}
+
+fn scan_workspace_for_subcommand(
+    req: &SubcommandScanRequest<'_>,
 ) -> Result<
     (
         crate::JsonReport,
@@ -1014,18 +1014,18 @@ fn scan_workspace_for_subcommand(
     ExitCode,
 > {
     let options = ScanOptions {
-        paths: paths.to_vec(),
-        include_tests,
+        paths: req.paths.to_vec(),
+        include_tests: req.include_tests,
         rules: None,
-        tiers,
+        tiers: req.tiers.clone(),
     };
     let overrides = CliOverrides {
-        no_inline_disables,
-        custom_rules_only,
-        ignore_tags: ignore_tags.to_vec(),
-        config_path: config_path.cloned(),
-        no_cache,
-        projects: projects.to_vec(),
+        no_inline_disables: req.no_inline_disables,
+        custom_rules_only: req.custom_rules_only,
+        ignore_tags: req.ignore_tags.to_vec(),
+        config_path: req.config_path.cloned(),
+        no_cache: req.no_cache,
+        projects: req.projects.to_vec(),
         ..Default::default()
     };
     scan_workspace_with_overrides(&options, &overrides).map_err(|err| {
@@ -1037,17 +1037,17 @@ fn scan_workspace_for_subcommand(
 /// Runs `dotore fix`.
 #[must_use]
 fn run_fix(args: &FixArgs) -> ExitCode {
-    let (report, sources) = match scan_workspace_for_subcommand(
-        &args.paths,
-        args.include_tests,
-        Some(vec![PrescriptionTier::Autofix]),
-        args.no_inline_disables,
-        args.custom_rules_only,
-        &args.ignore_tags,
-        args.config.as_ref(),
-        args.no_cache,
-        &args.projects,
-    ) {
+    let (report, sources) = match scan_workspace_for_subcommand(&SubcommandScanRequest {
+        paths: &args.paths,
+        include_tests: args.include_tests,
+        tiers: Some(vec![PrescriptionTier::Autofix]),
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: &args.ignore_tags,
+        config_path: args.config.as_ref(),
+        no_cache: args.no_cache,
+        projects: &args.projects,
+    }) {
         Ok(res) => res,
         Err(code) => return code,
     };
@@ -1067,17 +1067,17 @@ fn run_fix(args: &FixArgs) -> ExitCode {
 /// Runs `dotore plan`.
 #[must_use]
 fn run_plan(args: &PlanArgs) -> ExitCode {
-    let (report, _) = match scan_workspace_for_subcommand(
-        &args.paths,
-        args.include_tests,
-        None,
-        args.no_inline_disables,
-        args.custom_rules_only,
-        &args.ignore_tags,
-        args.config.as_ref(),
-        args.no_cache,
-        &args.projects,
-    ) {
+    let (report, _) = match scan_workspace_for_subcommand(&SubcommandScanRequest {
+        paths: &args.paths,
+        include_tests: args.include_tests,
+        tiers: None,
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: &args.ignore_tags,
+        config_path: args.config.as_ref(),
+        no_cache: args.no_cache,
+        projects: &args.projects,
+    }) {
         Ok(res) => res,
         Err(code) => return code,
     };

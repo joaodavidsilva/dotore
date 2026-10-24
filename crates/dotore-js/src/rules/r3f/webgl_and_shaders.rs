@@ -52,10 +52,32 @@ pub(crate) fn check_shader_materials(ctx: &FileAnalysisCtx<'_>, sites: &mut Vec<
             .and_then(|e| extract_static_string(e).map(|s| (s, e.span())));
 
         if let Some((vsrc, vspan)) = &vert {
-            check_single_glsl_stage(ctx, node_id, vsrc, *vspan, true, is_raw, is_glsl3, sites);
+            check_single_glsl_stage(
+                ctx,
+                node_id,
+                &GlslStageSource {
+                    glsl: vsrc,
+                    span: *vspan,
+                    is_vertex: true,
+                    is_raw,
+                    is_glsl3,
+                },
+                sites,
+            );
         }
         if let Some((fsrc, fspan)) = &frag {
-            check_single_glsl_stage(ctx, node_id, fsrc, *fspan, false, is_raw, is_glsl3, sites);
+            check_single_glsl_stage(
+                ctx,
+                node_id,
+                &GlslStageSource {
+                    glsl: fsrc,
+                    span: *fspan,
+                    is_vertex: false,
+                    is_raw,
+                    is_glsl3,
+                },
+                sites,
+            );
         }
         check_shader_material_pair_and_uniforms(
             ctx,
@@ -85,20 +107,27 @@ fn extract_static_string(expr: &Expression<'_>) -> Option<String> {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Passes stage flags (is_vertex, is_raw, is_glsl3) directly to avoid wrapper struct boilerplate"
-)]
-fn check_single_glsl_stage(
-    ctx: &FileAnalysisCtx<'_>,
-    node_id: NodeId,
-    glsl: &str,
+struct GlslStageSource<'a> {
+    glsl: &'a str,
     span: Span,
     is_vertex: bool,
     is_raw: bool,
     is_glsl3: bool,
+}
+
+fn check_single_glsl_stage(
+    ctx: &FileAnalysisCtx<'_>,
+    node_id: NodeId,
+    stage: &GlslStageSource<'_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
+    let GlslStageSource {
+        glsl,
+        span,
+        is_vertex,
+        is_raw,
+        is_glsl3,
+    } = *stage;
     // 1. `three-shader-no-version-directive`
     if glsl.lines().any(|l| l.trim_start().starts_with("#version")) {
         ctx.push_site(

@@ -309,9 +309,11 @@ impl TokioAsyncVisitor<'_> {
         // 2. Synchronous `std::fs::*` and `std::net::*` calls inside async
         if is_blocking_std_fs_or_net_path(
             &path_str,
-            self.tokio_fs_imported,
-            self.std_fs_file_imported,
-            self.std_net_imported,
+            StdIoImports {
+                tokio_fs_imported: self.tokio_fs_imported,
+                std_fs_file_imported: self.std_fs_file_imported,
+                std_net_imported: self.std_net_imported,
+            },
         ) {
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
@@ -631,12 +633,19 @@ fn is_spawn_blocking_call(node: &ExprCall) -> bool {
     false
 }
 
-fn is_blocking_std_fs_or_net_path(
-    path_str: &str,
+#[derive(Clone, Copy)]
+struct StdIoImports {
     tokio_fs_imported: bool,
     std_fs_file_imported: bool,
     std_net_imported: bool,
-) -> bool {
+}
+
+fn is_blocking_std_fs_or_net_path(path_str: &str, imports: StdIoImports) -> bool {
+    let StdIoImports {
+        tokio_fs_imported,
+        std_fs_file_imported,
+        std_net_imported,
+    } = imports;
     if path_str.starts_with("tokio::") {
         return false;
     }

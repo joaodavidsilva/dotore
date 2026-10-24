@@ -8,19 +8,16 @@ use std::collections::HashMap;
 
 use oxc_ast::{
     AstKind,
-    ast::{
-        CallExpression, ConditionalExpression, Expression, JSXAttribute, JSXElement,
-        JSXOpeningElement,
-    },
+    ast::{CallExpression, ConditionalExpression, Expression, JSXAttribute, JSXOpeningElement},
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 use oxc_span::GetSpan;
 
 use super::{
-    is_attr_dynamic_non_undefined, is_attr_null_or_undefined, is_attr_statically_false,
-    is_attr_statically_true_or_true_str, is_attr_undefined, is_content_editable_tabbable,
-    is_disabled_element, is_focusable_element, is_hidden_from_screen_reader,
-    is_interactive_element, parse_attr_number, push_site,
+    JsxElementA11yCtx, is_attr_dynamic_non_undefined, is_attr_null_or_undefined,
+    is_attr_statically_false, is_attr_statically_true_or_true_str, is_attr_undefined,
+    is_content_editable_tabbable, is_disabled_element, is_focusable_element,
+    is_hidden_from_screen_reader, is_interactive_element, parse_attr_number, push_site,
     tables::{INTERACTIVE_ROLES, NON_INTERACTIVE_ELEMENTS, VALID_ARIA_ROLES},
 };
 use crate::{
@@ -35,26 +32,25 @@ use crate::{
     rules::RuleId,
 };
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates core JSX keyboard event, focusability, tabindex, and accessKey rules in one pass"
-)]
 pub(super) fn check_element_keyboard_and_focus_rules(
-    is_testlike: bool,
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    jsx_el: &JSXElement<'_>,
-    opening: &JSXOpeningElement<'_>,
-    tag: &str,
-    is_html: bool,
-    has_spread: bool,
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
-    loc: SourceLoc,
-    span: ByteSpan,
-    line_starts: &[u32],
+    ctx: &JsxElementA11yCtx<'_, '_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
+    let JsxElementA11yCtx {
+        is_testlike,
+        semantic,
+        node_id,
+        jsx_el,
+        opening,
+        tag,
+        is_html,
+        has_spread,
+        subject_name,
+        const_strings,
+        loc,
+        span,
+        line_starts,
+    } = *ctx;
     // 8. `click-events-have-key-events`
     if is_html
         && !is_hidden_from_screen_reader(opening, semantic, const_strings)
