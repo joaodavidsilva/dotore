@@ -52,13 +52,24 @@ crates/
   dotore-js/
     src/
       lib.rs              # JsLanguageAnalyzer (LanguageAnalyzer) and dotore-js crate root
+      matchers.rs         # shared oxc AST/semantic matchers, JSX attribute inspectors, and Diagnostic builders
       ir.rs               # IR module root re-exporting FileIr and SubjectIr
       ir/
-        types.rs          # FileIr, SubjectIr, StateSlot, EffectNode, CallerSite, JsxElementIr
-        extract.rs        # single-pass oxc AST + semantic extraction
+        types.rs          # FileIr, SubjectIr, StateSlot, EffectNode, CallerSite, JsxElementIr, MotionFileIr
+        extract.rs        # single-pass oxc AST + semantic extraction orchestrator
+        subject.rs        # Subject, StateSlot, and EffectNode single-pass extraction
+        module_ir.rs      # module import, export, barrel, directive, route, and call extraction
+        outlines_and_suppressions.rs # Symbol Outline and inline suppression extraction
+        motion_and_frame_loop.rs # MotionFileIr and 60fps FrameLoopRootIr/FrameHelperIr extraction
         dataflow.rs       # dependency tracking, mutations, async flows, store/fetch sites
         react_ast.rs      # React Subject, hook, and JSX classification
-      graph.rs            # ProjectGraph: Caller Sites, Render Cascades, module graph, JSX hashes
+        jsx_subtree.rs    # structural JSX subtree extraction and FNV-1a fingerprinting
+      graph.rs            # ProjectGraph root: Caller Sites, Render Cascades, module graph, JSX hashes
+      graph/
+        resolution.rs     # module, tsconfig, workspace package, platform sibling, and barrel resolution
+        callers_and_cascades.rs # cross-file Caller Site indexing and MultiEffectCascade linking
+        dead_code.rs      # entrypoint reachability, orphan files, dead exports, unused deps, circular deps
+        duplicate_jsx.rs  # duplicate JSX subtree family clustering and nested-subtree suppression
       planner.rs          # PlannerContext for ProjectGraph and cross-file autofix enrichment
       rules.rs            # rules engine dispatcher gated by Capability Gate
       rules/

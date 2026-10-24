@@ -10,9 +10,8 @@ use std::collections::{HashMap, HashSet};
 use oxc_ast::{
     AstKind,
     ast::{
-        Expression, ImportDeclarationSpecifier, JSXAttribute, JSXAttributeItem, JSXAttributeName,
-        JSXAttributeValue, JSXChild, JSXElement, JSXElementName, JSXOpeningElement, Program,
-        UnaryOperator, VariableDeclarationKind,
+        Expression, ImportDeclarationSpecifier, JSXAttribute, JSXAttributeItem, JSXAttributeValue,
+        JSXChild, JSXElement, JSXElementName, JSXOpeningElement, Program, VariableDeclarationKind,
     },
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
@@ -3542,183 +3541,12 @@ pub(crate) fn check_anchor_target_exists<F>(
     }
 }
 
-// --- Shared AST helpers ---
-
-pub(crate) fn get_jsx_tag_name(name: &JSXElementName<'_>) -> String {
-    match name {
-        JSXElementName::Identifier(id) => id.name.to_string(),
-        JSXElementName::IdentifierReference(id) => id.name.to_string(),
-        JSXElementName::NamespacedName(ns) => format!("{}:{}", ns.namespace.name, ns.name.name),
-        JSXElementName::MemberExpression(mem) => format_jsx_member(mem),
-        JSXElementName::ThisExpression(_) => "this".to_string(),
-    }
-}
-
-fn format_jsx_member(mem: &oxc_ast::ast::JSXMemberExpression<'_>) -> String {
-    let obj = match &mem.object {
-        oxc_ast::ast::JSXMemberExpressionObject::IdentifierReference(id) => id.name.to_string(),
-        oxc_ast::ast::JSXMemberExpressionObject::MemberExpression(inner) => {
-            format_jsx_member(inner)
-        }
-        oxc_ast::ast::JSXMemberExpressionObject::ThisExpression(_) => "this".to_string(),
-    };
-    format!("{obj}.{}", mem.property.name)
-}
-
-pub(crate) fn find_attr<'a, 'b>(
-    attrs: &'b [JSXAttributeItem<'a>],
-    target: &str,
-) -> Option<&'b JSXAttribute<'a>> {
-    attrs.iter().find_map(|item| {
-        let attr = item.as_attribute()?;
-        match &attr.name {
-            JSXAttributeName::Identifier(id) if id.name == target => Some(attr),
-            JSXAttributeName::NamespacedName(ns)
-                if format!("{}:{}", ns.namespace.name, ns.name.name) == target =>
-            {
-                Some(attr)
-            }
-            _ => None,
-        }
-    })
-}
-
-pub(crate) fn find_last_attr<'a, 'b>(
-    attrs: &'b [JSXAttributeItem<'a>],
-    target: &str,
-) -> Option<&'b JSXAttribute<'a>> {
-    attrs.iter().rev().find_map(|item| {
-        let attr = item.as_attribute()?;
-        match &attr.name {
-            JSXAttributeName::Identifier(id) if id.name == target => Some(attr),
-            _ => None,
-        }
-    })
-}
-
-pub(crate) fn find_attr_ignore_case<'a, 'b>(
-    attrs: &'b [JSXAttributeItem<'a>],
-    target: &str,
-) -> Option<&'b JSXAttribute<'a>> {
-    attrs.iter().rev().find_map(|item| {
-        let attr = item.as_attribute()?;
-        match &attr.name {
-            JSXAttributeName::Identifier(id) if id.name.eq_ignore_ascii_case(target) => Some(attr),
-            JSXAttributeName::NamespacedName(ns)
-                if format!("{}:{}", ns.namespace.name, ns.name.name)
-                    .eq_ignore_ascii_case(target) =>
-            {
-                Some(attr)
-            }
-            _ => None,
-        }
-    })
-}
-
-pub(crate) fn eval_static_str(
-    semantic: &Semantic<'_>,
-    expr: &Expression<'_>,
-    const_strings: &HashMap<SymbolId, String>,
-) -> Option<String> {
-    match expr.without_parentheses() {
-        Expression::StringLiteral(s) => s.value.as_str().map(str::to_string),
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => tpl
-            .quasis
-            .first()
-            .and_then(|q| q.value.cooked.as_ref().and_then(|c| c.as_str()))
-            .map(str::to_string),
-        Expression::Identifier(id) => id
-            .reference_id
-            .get()
-            .and_then(|r| semantic.scoping().get_reference(r).symbol_id())
-            .and_then(|sym_id| const_strings.get(&sym_id).cloned()),
-        _ => None,
-    }
-}
-
-pub(crate) fn get_attr_static_str(
-    semantic: &Semantic<'_>,
-    attr: &JSXAttribute<'_>,
-    const_strings: &HashMap<SymbolId, String>,
-) -> Option<String> {
-    match attr.value.as_ref()? {
-        JSXAttributeValue::StringLiteral(s) => s.value.as_str().map(str::to_string),
-        JSXAttributeValue::ExpressionContainer(c) => {
-            let expr = c.expression.as_expression()?;
-            eval_static_str(semantic, expr, const_strings)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn get_class_name_str(
-    opening: &JSXOpeningElement<'_>,
-    semantic: &Semantic<'_>,
-    const_strings: &HashMap<SymbolId, String>,
-) -> Option<String> {
-    let attr = find_attr(&opening.attributes, "className")?;
-    get_attr_static_str(semantic, attr, const_strings)
-}
-
-pub(crate) fn get_style_prop_str(
-    opening: &JSXOpeningElement<'_>,
-    prop_name: &str,
-    semantic: &Semantic<'_>,
-    const_strings: &HashMap<SymbolId, String>,
-) -> Option<String> {
-    let style_attr = find_attr(&opening.attributes, "style")?;
-    let JSXAttributeValue::ExpressionContainer(c) = style_attr.value.as_ref()? else {
-        return None;
-    };
-    let Expression::ObjectExpression(obj) = c.expression.as_expression()?.without_parentheses()
-    else {
-        return None;
-    };
-    for prop in obj.properties.iter().rev() {
-        if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop
-            && p.key
-                .static_name()
-                .is_some_and(|n| n.as_str() == Some(prop_name))
-        {
-            return eval_static_str(semantic, &p.value, const_strings);
-        }
-    }
-    None
-}
-
-pub(crate) fn get_style_prop_number(
-    opening: &JSXOpeningElement<'_>,
-    prop_name: &str,
-) -> Option<f64> {
-    let style_attr = find_attr(&opening.attributes, "style")?;
-    let JSXAttributeValue::ExpressionContainer(c) = style_attr.value.as_ref()? else {
-        return None;
-    };
-    let Expression::ObjectExpression(obj) = c.expression.as_expression()?.without_parentheses()
-    else {
-        return None;
-    };
-    for prop in obj.properties.iter().rev() {
-        if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop
-            && p.key
-                .static_name()
-                .is_some_and(|n| n.as_str() == Some(prop_name))
-        {
-            return eval_numeric_expr(&p.value);
-        }
-    }
-    None
-}
-
-pub(crate) fn eval_numeric_expr(expr: &Expression<'_>) -> Option<f64> {
-    match expr.without_parentheses() {
-        Expression::NumericLiteral(n) => Some(n.value),
-        Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation => {
-            eval_numeric_expr(&u.argument).map(|v| -v)
-        }
-        _ => None,
-    }
-}
+// --- Shared AST helpers (delegated to `crate::matchers`) ---
+pub(crate) use crate::matchers::{
+    eval_numeric_expr, eval_static_str, find_attr, find_attr_ignore_case, find_last_attr,
+    get_attr_static_str, get_class_name_str, get_jsx_tag_name, get_style_prop_number,
+    get_style_prop_str, subtree_has_tag_matching,
+};
 
 fn parse_attr_number(attr: &JSXAttribute<'_>) -> Option<f64> {
     match attr.value.as_ref()? {
@@ -4803,29 +4631,7 @@ fn resolve_jsx_root_import_source(
     imported_sources.get(&sym_id).cloned()
 }
 
-pub(crate) fn subtree_has_tag_matching<F>(jsx_el: &JSXElement<'_>, pred: F) -> bool
-where
-    F: Fn(&str) -> bool + Copy,
-{
-    for child in &jsx_el.children {
-        if let JSXChild::Element(el) = child {
-            let t = get_jsx_tag_name(&el.opening_element.name);
-            if pred(&t) || subtree_has_tag_matching(el, pred) {
-                return true;
-            }
-        } else if let JSXChild::Fragment(frag) = child {
-            for fchild in &frag.children {
-                if let JSXChild::Element(el) = fchild {
-                    let t = get_jsx_tag_name(&el.opening_element.name);
-                    if pred(&t) || subtree_has_tag_matching(el, pred) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
+
 
 fn subtree_has_attr(jsx_el: &JSXElement<'_>, attr_name: &str) -> bool {
     if find_attr_ignore_case(&jsx_el.opening_element.attributes, attr_name).is_some() {

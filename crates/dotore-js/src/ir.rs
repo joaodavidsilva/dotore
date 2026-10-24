@@ -6,9 +6,13 @@
 
 pub(crate) mod dataflow;
 pub(crate) mod extract;
+pub(crate) mod jsx_subtree;
+pub(crate) mod module_ir;
+pub(crate) mod motion_and_frame_loop;
+pub(crate) mod outlines_and_suppressions;
 pub(crate) mod react_ast;
+pub(crate) mod subject;
 pub(crate) mod types;
-
 pub use extract::{inspect_file_semantic, parse_file_ir};
 pub use types::{
     BlockDisableRange, ByteSpan, CallerSite, ContextualOwnerSpansIr, DepRef, DepsSpec, EffectNode,

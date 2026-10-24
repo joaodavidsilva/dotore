@@ -19,8 +19,8 @@ use oxc_ast::{
     ast::{
         Argument, ArrayExpressionElement, AssignmentOperator, AssignmentTarget, BinaryOperator,
         BindingPattern, CallExpression, Expression, FormalParameters, JSXAttributeItem,
-        JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement, JSXElementName,
-        JSXOpeningElement, LogicalOperator, ObjectExpression, ObjectPropertyKind, Program,
+        JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement, JSXOpeningElement,
+        LogicalOperator, ObjectExpression, ObjectPropertyKind, Program,
         UnaryOperator,
     },
 };
@@ -34,8 +34,8 @@ use crate::{
         ByteSpan, FileIr, SourceLoc,
         react_ast::{find_enclosing_react_node, get_subject_name},
         types::{
-            FrameCallTargetIr, FrameHelperHazard, FrameHelperHazardKind, FrameHelperIr,
-            FrameLoopRootIr, FrameLoopRootKind, ModuleIr, SemanticRuleSite, loc_from_line_starts,
+            FrameCallTargetIr, FrameHelperHazardKind, FrameHelperIr, FrameLoopRootIr,
+            FrameLoopRootKind, ModuleIr, SemanticRuleSite, loc_from_line_starts,
         },
     },
     rules::{Diagnostic, RuleId, RuleSeverity},
@@ -347,8 +347,21 @@ pub(crate) fn extract_r3f_webgl_file_ir(
     check_scene_and_canvas_contracts(&ctx, sites);
     check_shader_materials(&ctx, sites);
 
-    let frame_loop_roots = extract_frame_loop_roots(&ctx);
-    let frame_helpers = extract_frame_helpers(&ctx);
+    let frame_loop_roots = crate::ir::motion_and_frame_loop::extract_frame_loop_roots(
+        semantic,
+        line_starts,
+        &ctx.imported_symbols,
+        &ctx.namespace_imports,
+        |call| ctx.is_r3f_hook_call(call, "useFrame"),
+    );
+    let frame_helpers = crate::ir::motion_and_frame_loop::extract_frame_helpers(
+        semantic,
+        ctx.module,
+        line_starts,
+        &ctx.imported_symbols,
+        &ctx.namespace_imports,
+        &ctx.state_setters,
+    );
 
     (frame_loop_roots, frame_helpers)
 }
@@ -1163,30 +1176,7 @@ fn resolve_new_expr_ctor_name(
     resolve_callee_ctor_name(&new_expr.callee, imported_symbols, namespace_imports)
 }
 
-fn resolve_callee_ctor_name(
-    callee: &Expression<'_>,
-    imported_symbols: &HashMap<String, (String, String)>,
-    namespace_imports: &HashMap<String, String>,
-) -> Option<String> {
-    match callee.without_parentheses() {
-        Expression::Identifier(id) => {
-            if let Some((_src, orig)) = imported_symbols.get(id.name.as_str()) {
-                Some(orig.clone())
-            } else {
-                Some(id.name.to_string())
-            }
-        }
-        Expression::StaticMemberExpression(mem) => {
-            if let Expression::Identifier(ns) = mem.object.without_parentheses()
-                && (ns.name == "THREE" || namespace_imports.contains_key(ns.name.as_str()))
-            {
-                return Some(mem.property.name.to_string());
-            }
-            Some(mem.property.name.to_string())
-        }
-        _ => None,
-    }
-}
+pub(crate) use crate::ir::motion_and_frame_loop::resolve_callee_ctor_name;
 
 fn is_cached_loader_hook_call(
     call: &CallExpression<'_>,
@@ -1240,22 +1230,9 @@ fn collect_binding_identifiers(pat: &BindingPattern<'_>, out: &mut HashSet<Strin
     }
 }
 
-fn extract_callee_short<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
-    match callee.without_parentheses() {
-        Expression::Identifier(id) => Some(id.name.as_str()),
-        Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str()),
-        _ => None,
-    }
-}
-
-fn jsx_opening_tag_name(opening: &JSXOpeningElement<'_>) -> Option<String> {
-    match &opening.name {
-        JSXElementName::Identifier(id) => Some(id.name.to_string()),
-        JSXElementName::IdentifierReference(id) => Some(id.name.to_string()),
-        JSXElementName::MemberExpression(mem) => Some(mem.property.name.to_string()),
-        _ => None,
-    }
-}
+pub(crate) use crate::matchers::{
+    callee_name as extract_callee_short, jsx_opening_tag_name,
+};
 
 fn get_jsx_attr_item<'a>(
     opening: &'a JSXOpeningElement<'a>,
@@ -3406,52 +3383,9 @@ fn check_use_three_call(
     }
 }
 
-fn resolve_callback_body_span(cb: &Expression<'_>, semantic: &Semantic<'_>) -> Span {
-    match cb.without_parentheses() {
-        Expression::ArrowFunctionExpression(arrow) => arrow.body.span(),
-        Expression::FunctionExpression(func) => func.body.as_ref().map_or(func.span, |b| b.span),
-        Expression::Identifier(id) => {
-            if let Some(ref_id) = id.reference_id.get()
-                && let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id()
-            {
-                let decl_id = semantic.scoping().symbol_declaration(sym_id);
-                match semantic.nodes().kind(decl_id) {
-                    AstKind::Function(func) => {
-                        return func.body.as_ref().map_or(func.span, |b| b.span);
-                    }
-                    AstKind::VariableDeclarator(decl) => {
-                        if let Some(init) = decl.init.as_ref() {
-                            return resolve_callback_body_span(init, semantic);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            cb.span()
-        }
-        Expression::CallExpression(call)
-            if extract_callee_short(&call.callee) == Some("useCallback") =>
-        {
-            if let Some(first) = call.arguments.first().and_then(Argument::as_expression) {
-                resolve_callback_body_span(first, semantic)
-            } else {
-                call.span
-            }
-        }
-        _ => cb.span(),
-    }
-}
-
-fn find_enclosing_function_span(semantic: &Semantic<'_>, node_id: NodeId) -> Option<Span> {
-    for anc_id in semantic.nodes().ancestor_ids(node_id) {
-        match semantic.nodes().kind(anc_id) {
-            AstKind::Function(func) => return func.body.as_ref().map(|b| b.span),
-            AstKind::ArrowFunctionExpression(arrow) => return Some(arrow.body.span()),
-            _ => {}
-        }
-    }
-    None
-}
+pub(crate) use crate::ir::motion_and_frame_loop::{
+    find_enclosing_function_span, is_conditionally_executed_within, resolve_callback_body_span,
+};
 
 fn extract_callback_param_name(cb: &Expression<'_>, index: usize) -> Option<String> {
     let params: &FormalParameters<'_> = match cb.without_parentheses() {
@@ -3467,37 +3401,7 @@ fn extract_callback_param_name(cb: &Expression<'_>, index: usize) -> Option<Stri
     }
 }
 
-fn is_conditionally_executed_within(
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    boundary_span: Span,
-) -> bool {
-    for anc_id in semantic.nodes().ancestor_ids(node_id) {
-        let anc_node = semantic.nodes().get_node(anc_id);
-        if !boundary_span.contains_inclusive(anc_node.span()) {
-            break;
-        }
-        match anc_node.kind() {
-            AstKind::IfStatement(_)
-            | AstKind::ConditionalExpression(_)
-            | AstKind::LogicalExpression(_)
-            | AstKind::SwitchCase(_)
-            | AstKind::CatchClause(_) => return true,
-            AstKind::AssignmentExpression(assign)
-                if matches!(
-                    assign.operator,
-                    AssignmentOperator::LogicalNullish
-                        | AssignmentOperator::LogicalOr
-                        | AssignmentOperator::LogicalAnd
-                ) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
-}
+
 
 fn is_inside_loop_within(semantic: &Semantic<'_>, node_id: NodeId, boundary_span: Span) -> bool {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
@@ -5571,289 +5475,4 @@ fn has_early_return_before_target(glsl: &str, target: &str) -> bool {
     ret_pos < target_pos
 }
 
-// =============================================================================
-// 7. Cross-File 60fps Frame-Loop Call-Graph Extraction (`FrameLoopRootIr` & `FrameHelperIr`)
-// =============================================================================
 
-fn extract_frame_loop_roots(ctx: &FileAnalysisCtx<'_>) -> Vec<FrameLoopRootIr> {
-    let mut roots = Vec::new();
-
-    for (node_id, node) in ctx.semantic.nodes().iter_enumerated() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        let callee_short = extract_callee_short(&call.callee);
-        let kind = if ctx.is_r3f_hook_call(call, "useFrame") {
-            Some(FrameLoopRootKind::UseFrame)
-        } else if matches!(
-            callee_short,
-            Some("requestAnimationFrame" | "setAnimationLoop")
-        ) {
-            Some(FrameLoopRootKind::AnimationLoop)
-        } else {
-            None
-        };
-        let Some(root_kind) = kind else {
-            continue;
-        };
-        let Some(cb_expr) = call.arguments.first().and_then(Argument::as_expression) else {
-            continue;
-        };
-        let cb = cb_expr.without_parentheses();
-        if matches!(callee_short, Some("requestAnimationFrame"))
-            && matches!(cb, Expression::Identifier(_))
-            && find_enclosing_function_span(ctx.semantic, node_id)
-                == Some(resolve_callback_body_span(cb, ctx.semantic))
-        {
-            continue;
-        }
-        let cb_span = resolve_callback_body_span(cb, ctx.semantic);
-        if cb_span.start == cb_span.end {
-            continue;
-        }
-
-        let outgoing_calls = collect_outgoing_calls_in_span(ctx, cb_span);
-        if outgoing_calls.is_empty() {
-            continue;
-        }
-        let (loc, span) = ctx.loc_and_span(call.span);
-        roots.push(FrameLoopRootIr {
-            kind: root_kind,
-            subject_name: ctx.subject_for_node(node_id),
-            loc,
-            span,
-            outgoing_calls,
-        });
-    }
-
-    roots
-}
-
-fn extract_frame_helpers(ctx: &FileAnalysisCtx<'_>) -> Vec<FrameHelperIr> {
-    let mut helpers = Vec::new();
-
-    for (_node_id, node) in ctx.semantic.nodes().iter_enumerated() {
-        let (name, decl_span, body_span, param_names) = match node.kind() {
-            AstKind::Function(func) => {
-                let Some(id) = &func.id else {
-                    continue;
-                };
-                let Some(body) = &func.body else {
-                    continue;
-                };
-                let params = collect_param_names(&func.params);
-                (id.name.to_string(), func.span, body.span, params)
-            }
-            AstKind::VariableDeclarator(decl) => {
-                let BindingPattern::BindingIdentifier(id) = &decl.id else {
-                    continue;
-                };
-                let Some(init) = decl.init.as_ref().map(Expression::without_parentheses) else {
-                    continue;
-                };
-                match init {
-                    Expression::ArrowFunctionExpression(arrow) => (
-                        id.name.to_string(),
-                        decl.span,
-                        arrow.body.span(),
-                        collect_param_names(&arrow.params),
-                    ),
-                    Expression::FunctionExpression(func) => {
-                        let Some(body) = &func.body else {
-                            continue;
-                        };
-                        (
-                            id.name.to_string(),
-                            decl.span,
-                            body.span,
-                            collect_param_names(&func.params),
-                        )
-                    }
-                    _ => continue,
-                }
-            }
-            _ => continue,
-        };
-
-        let mut exported_names = Vec::new();
-        for exp in &ctx.module.exports {
-            if exp.from_source.is_none()
-                && (exp.name == name || exp.local_name.as_deref() == Some(name.as_str()))
-            {
-                exported_names.push(exp.name.clone());
-            }
-        }
-
-        let hazards = collect_helper_hazards_in_span(ctx, body_span, &param_names);
-        let outgoing_calls = collect_outgoing_calls_in_span(ctx, body_span);
-        let (loc, span) = ctx.loc_and_span(decl_span);
-        helpers.push(FrameHelperIr {
-            name,
-            exported_names,
-            loc,
-            span,
-            hazards,
-            outgoing_calls,
-        });
-    }
-
-    helpers
-}
-
-fn collect_param_names(params: &FormalParameters<'_>) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for p in &params.items {
-        collect_binding_identifiers(&p.pattern, &mut out);
-    }
-    out
-}
-
-fn collect_outgoing_calls_in_span(
-    ctx: &FileAnalysisCtx<'_>,
-    target_span: Span,
-) -> Vec<FrameCallTargetIr> {
-    let mut out = Vec::new();
-
-    for (node_id, node) in ctx.semantic.nodes().iter_enumerated() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        if !target_span.contains_inclusive(call.span)
-            || is_conditionally_executed_within(ctx.semantic, node_id, target_span)
-        {
-            continue;
-        }
-        let (call_loc, call_span) = ctx.loc_and_span(call.span);
-        match call.callee.without_parentheses() {
-            Expression::Identifier(id) => {
-                let callee_name = id.name.to_string();
-                if matches!(
-                    callee_name.as_str(),
-                    "useFrame" | "requestAnimationFrame" | "cancelAnimationFrame"
-                ) {
-                    continue;
-                }
-                if let Some((src, orig)) = ctx.imported_symbols.get(callee_name.as_str()) {
-                    out.push(FrameCallTargetIr {
-                        callee_name,
-                        imported_name: Some(orig.clone()),
-                        import_source: Some(src.clone()),
-                        call_loc,
-                        call_span,
-                    });
-                } else {
-                    out.push(FrameCallTargetIr {
-                        callee_name,
-                        imported_name: None,
-                        import_source: None,
-                        call_loc,
-                        call_span,
-                    });
-                }
-            }
-            Expression::StaticMemberExpression(mem) => {
-                if let Expression::Identifier(ns) = mem.object.without_parentheses()
-                    && let Some(src) = ctx.namespace_imports.get(ns.name.as_str())
-                {
-                    out.push(FrameCallTargetIr {
-                        callee_name: mem.property.name.to_string(),
-                        imported_name: Some(mem.property.name.to_string()),
-                        import_source: Some(src.clone()),
-                        call_loc,
-                        call_span,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    out
-}
-
-fn collect_helper_hazards_in_span(
-    ctx: &FileAnalysisCtx<'_>,
-    body_span: Span,
-    param_names: &HashSet<String>,
-) -> Vec<FrameHelperHazard> {
-    let mut hazards = Vec::new();
-
-    for (node_id, node) in ctx.semantic.nodes().iter_enumerated() {
-        let nspan = node.span();
-        if !body_span.contains_inclusive(nspan)
-            || is_conditionally_executed_within(ctx.semantic, node_id, body_span)
-        {
-            continue;
-        }
-        let (loc, span) = ctx.loc_and_span(nspan);
-
-        match node.kind() {
-            AstKind::NewExpression(new_expr) => {
-                if let Some(ctor) = resolve_callee_ctor_name(
-                    &new_expr.callee,
-                    &ctx.imported_symbols,
-                    &ctx.namespace_imports,
-                ) {
-                    hazards.push(FrameHelperHazard {
-                        kind: FrameHelperHazardKind::NewAllocation(ctor),
-                        loc,
-                        span,
-                    });
-                }
-            }
-            AstKind::ArrayExpression(_) => {
-                hazards.push(FrameHelperHazard {
-                    kind: FrameHelperHazardKind::ArrayAllocation,
-                    loc,
-                    span,
-                });
-            }
-            AstKind::ObjectExpression(_) => {
-                hazards.push(FrameHelperHazard {
-                    kind: FrameHelperHazardKind::ObjectAllocation,
-                    loc,
-                    span,
-                });
-            }
-            AstKind::CallExpression(call) => {
-                let callee_short = extract_callee_short(&call.callee);
-                if callee_short == Some("clone") {
-                    let recv = match call.callee.without_parentheses() {
-                        Expression::StaticMemberExpression(m) => {
-                            m.object.span().source_text(ctx.source).to_string()
-                        }
-                        _ => "object".to_string(),
-                    };
-                    hazards.push(FrameHelperHazard {
-                        kind: FrameHelperHazardKind::CloneAllocation(recv),
-                        loc,
-                        span,
-                    });
-                } else if let Some(m) = callee_short {
-                    if SYNC_WEBGL_READBACK_METHODS.contains(&m) {
-                        hazards.push(FrameHelperHazard {
-                            kind: FrameHelperHazardKind::SyncReadback(m.to_string()),
-                            loc,
-                            span,
-                        });
-                    } else if ctx.state_setters.contains(m)
-                        || m == "setState"
-                        || (m.starts_with("set")
-                            && m.len() > 3
-                            && m.as_bytes()[3].is_ascii_uppercase()
-                            && param_names.contains(m))
-                    {
-                        hazards.push(FrameHelperHazard {
-                            kind: FrameHelperHazardKind::StateUpdate(m.to_string()),
-                            loc,
-                            span,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    hazards
-}

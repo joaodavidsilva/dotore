@@ -1,6 +1,8 @@
 //! Diagnostic rules engine gated by **Capability Gate**, user configuration (`dotore.config.*` / `package.json#dotore`),
 //! file context (`test-noise` / `migration-hint`), library role, and inline suppression directives.
 
+pub(crate) use crate::matchers::push_simple_diagnostic;
+
 pub(crate) mod a11y;
 pub(crate) mod angular;
 pub(crate) mod architecture;
@@ -941,37 +943,4 @@ fn evaluate_jsx_element_rules<F>(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Constructs a Diagnostic from rule metadata and site location without intermediate builder allocation"
-)]
-fn push_simple_diagnostic(
-    out: &mut Vec<Diagnostic>,
-    file: &FileIr,
-    subject_name: Option<String>,
-    rule: RuleId,
-    message_id: &'static str,
-    target_name: &str,
-    message: String,
-    loc: crate::ir::SourceLoc,
-    span: crate::ir::ByteSpan,
-) {
-    let meta = rule.metadata();
-    out.push(Diagnostic {
-        file: file.path.clone(),
-        subject_name,
-        rule,
-        category: meta.category,
-        severity: meta.default_severity,
-        message_id,
-        tier: meta.default_tier,
-        target_name: target_name.to_string(),
-        message,
-        docs_url: meta.docs_url,
-        loc,
-        span,
-        cascade_steps: Vec::new(),
-        caller_sites: Vec::new(),
-        autofix: None,
-    });
-}
+
