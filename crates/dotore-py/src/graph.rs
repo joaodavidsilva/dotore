@@ -216,7 +216,13 @@ impl<'a> GraphAstWalker<'a> {
                         loc,
                     };
                     if !self.in_type_checking && self.fn_or_class_depth == 0 {
-                        self.info.runtime_imports.push(edge.clone());
+                        self.info.runtime_imports.push(PyImportEdge {
+                            level: edge.level,
+                            module: edge.module.clone(),
+                            names: edge.names.clone(),
+                            span: edge.span,
+                            loc: edge.loc,
+                        });
                     }
                     self.info.all_imports.push(edge);
                 }
@@ -749,7 +755,8 @@ fn find_cycle_from(
 ) -> Option<Vec<usize>> {
     for &(next, _, _) in &adj[curr] {
         if next == start && path_stack.len() >= 2 {
-            let mut cycle = path_stack.clone();
+            let mut cycle = Vec::with_capacity(path_stack.len() + 1);
+            cycle.extend_from_slice(path_stack);
             cycle.push(start);
             return Some(cycle);
         }
@@ -1465,7 +1472,7 @@ fn evaluate_duplicated_helper_logic_rule(
         if distinct_modules.len() < min_modules {
             continue;
         }
-        let primary_target_name = sites[0].1.name.clone();
+        let primary_target_name = sites[0].1.name.as_str();
         for (site_pos, &(file_idx, helper, sev)) in sites.iter().enumerate() {
             let file = &files[file_idx];
             let caller_sites: Vec<ResolvedCallerSite> = sites
@@ -1512,7 +1519,7 @@ fn evaluate_duplicated_helper_logic_rule(
                 .with_subject(Some(helper.name.clone()))
                 .with_severity(sev)
                 .with_message_id("archNoDuplicatedHelperLogic")
-                .with_target_name(primary_target_name.clone())
+                .with_target_name(primary_target_name)
                 .with_caller_sites(caller_sites)
                 .with_cascade_steps(cascade_steps),
             );

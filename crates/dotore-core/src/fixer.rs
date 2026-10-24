@@ -109,11 +109,19 @@ where
 
         let mut edits_by_target: HashMap<PathBuf, Vec<ByteEdit>> = HashMap::new();
         for edit in &patch.edits {
-            let target_path = edit.file.clone().unwrap_or_else(|| diag.file.clone());
+            let target_path = edit
+                .file
+                .as_deref()
+                .unwrap_or(diag.file.as_path())
+                .to_path_buf();
             edits_by_target
                 .entry(target_path)
                 .or_default()
-                .push(edit.clone());
+                .push(ByteEdit {
+                    file: edit.file.clone(),
+                    span: edit.span,
+                    replacement: edit.replacement.clone(),
+                });
         }
 
         let all_targets_valid = edits_by_target.iter().all(|(target_path, new_edits)| {

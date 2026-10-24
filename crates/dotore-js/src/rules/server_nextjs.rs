@@ -947,7 +947,8 @@ fn check_nextjs_async_dynamic_api_not_awaited(
         }
 
         // Propagate aliases (`const alias = pendingCookies as any`)
-        for existing in pending_bindings.clone() {
+        let mut new_aliases = Vec::new();
+        for existing in &pending_bindings {
             let Some(eq_pos) = trimmed.find('=') else {
                 continue;
             };
@@ -956,13 +957,14 @@ fn check_nextjs_async_dynamic_api_not_awaited(
             }
             let lhs = trimmed[..eq_pos].trim();
             let rhs = trimmed[eq_pos + 1..].trim();
-            if rhs.starts_with(&existing)
+            if rhs.starts_with(existing.as_str())
                 && !rhs.contains("await ")
                 && let Some(alias_id) = extract_assigned_ident_before(&format!("{lhs} ="))
             {
-                pending_bindings.insert(alias_id);
+                new_aliases.push(alias_id);
             }
         }
+        pending_bindings.extend(new_aliases);
 
         // Check synchronous consumption of any `pending_bindings` on this line
         for pending in &pending_bindings {

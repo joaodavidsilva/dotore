@@ -225,7 +225,11 @@ fn collect_state_slots(
             }
             _ => (None, None),
         };
-        let Some(display_name) = state_name.clone().or_else(|| setter_name.clone()) else {
+        let Some(display_name) = state_name
+            .as_deref()
+            .or(setter_name.as_deref())
+            .map(str::to_string)
+        else {
             continue;
         };
 

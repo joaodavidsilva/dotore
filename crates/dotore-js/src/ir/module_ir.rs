@@ -413,15 +413,15 @@ fn extract_import_bindings(
                         &local,
                         jsx_elements,
                     );
-                names.push(local.clone());
                 bindings.push(ImportBindingIr {
                     is_default: imported == "default",
                     imported_name: imported,
-                    local_name: local,
+                    local_name: local.clone(),
                     is_namespace: false,
                     is_type_only,
                     has_runtime_value_reference,
                 });
+                names.push(local);
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                 let local = s.local.name.to_string();
@@ -432,15 +432,15 @@ fn extract_import_bindings(
                         &local,
                         jsx_elements,
                     );
-                names.push(local.clone());
                 bindings.push(ImportBindingIr {
                     imported_name: "default".to_string(),
-                    local_name: local,
+                    local_name: local.clone(),
                     is_default: true,
                     is_namespace: false,
                     is_type_only: decl_type_only,
                     has_runtime_value_reference,
                 });
+                names.push(local);
             }
             ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                 let local = s.local.name.to_string();
@@ -451,15 +451,15 @@ fn extract_import_bindings(
                         &local,
                         jsx_elements,
                     );
-                names.push(local.clone());
                 bindings.push(ImportBindingIr {
                     imported_name: "*".to_string(),
-                    local_name: local,
+                    local_name: local.clone(),
                     is_default: false,
                     is_namespace: true,
                     is_type_only: decl_type_only,
                     has_runtime_value_reference,
                 });
+                names.push(local);
             }
         }
     }

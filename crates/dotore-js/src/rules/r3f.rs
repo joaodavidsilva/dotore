@@ -473,14 +473,17 @@ where
                         &mut resolve_specifier,
                     ) {
                         let next_crossed = crossed || next_file_idx != root_file_idx;
-                        let mut next_chain = chain.clone();
-                        next_chain.push(next_helper_name.clone());
+                        let mut next_chain = Vec::with_capacity(chain.len() + 1);
+                        next_chain.extend_from_slice(&chain);
                         queue.push_back((
                             next_file_idx,
-                            next_helper_name,
+                            next_helper_name.clone(),
                             initial_call_loc,
                             initial_call_span,
-                            next_chain,
+                            {
+                                next_chain.push(next_helper_name);
+                                next_chain
+                            },
                             next_crossed,
                         ));
                     }

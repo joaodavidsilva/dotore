@@ -241,17 +241,14 @@ pub fn parse_changed_line_ranges(
         let line = raw_line.trim_end_matches('\r');
         if include_deletions && let Some(renamed_to) = line.strip_prefix("rename to ") {
             let file_path = PathBuf::from(renamed_to.trim());
-            if !map.contains_key(&file_path) {
+            map.entry(file_path.clone()).or_insert_with(|| {
                 order.push(file_path.clone());
-                map.insert(
-                    file_path.clone(),
-                    ChangedFileLineRanges {
-                        file: file_path,
-                        ranges: Vec::new(),
-                        deletion_lines: Vec::new(),
-                    },
-                );
-            }
+                ChangedFileLineRanges {
+                    file: file_path,
+                    ranges: Vec::new(),
+                    deletion_lines: Vec::new(),
+                }
+            });
             continue;
         }
 
@@ -263,17 +260,14 @@ pub fn parse_changed_line_ranges(
             }
             let stripped = target.strip_prefix("b/").unwrap_or(target);
             let file_path = PathBuf::from(stripped);
-            if !map.contains_key(&file_path) {
+            map.entry(file_path.clone()).or_insert_with(|| {
                 order.push(file_path.clone());
-                map.insert(
-                    file_path.clone(),
-                    ChangedFileLineRanges {
-                        file: file_path.clone(),
-                        ranges: Vec::new(),
-                        deletion_lines: Vec::new(),
-                    },
-                );
-            }
+                ChangedFileLineRanges {
+                    file: file_path.clone(),
+                    ranges: Vec::new(),
+                    deletion_lines: Vec::new(),
+                }
+            });
             current_file = Some(file_path);
             continue;
         }
@@ -435,15 +429,15 @@ pub fn collect_git_diff(
             .filter(|s| !s.is_empty())
         {
             let p = PathBuf::from(raw);
-            if !changed_files.contains(&p) {
-                changed_files.push(p.clone());
-            }
             if !line_ranges.iter().any(|r| r.file == p) {
                 line_ranges.push(ChangedFileLineRanges {
-                    file: p,
+                    file: p.clone(),
                     ranges: vec![(1, u32::MAX)],
                     deletion_lines: Vec::new(),
                 });
+            }
+            if !changed_files.contains(&p) {
+                changed_files.push(p);
             }
         }
     }

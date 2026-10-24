@@ -2346,7 +2346,23 @@ pub fn filter_report_for_diagnostics(
         {
             old_to_new.entry(old_idx).or_insert(new_idx);
         }
-        diagnostics.push(sel.clone());
+        diagnostics.push(Diagnostic {
+            file: sel.file.clone(),
+            subject_name: sel.subject_name.clone(),
+            rule: sel.rule,
+            category: sel.category,
+            severity: sel.severity,
+            message_id: sel.message_id,
+            tier: sel.tier,
+            target_name: sel.target_name.clone(),
+            message: sel.message.clone(),
+            docs_url: sel.docs_url,
+            loc: sel.loc,
+            span: sel.span,
+            cascade_steps: sel.cascade_steps.clone(),
+            caller_sites: sel.caller_sites.clone(),
+            autofix: sel.autofix.clone(),
+        });
     }
 
     let mut root_cause_groups = Vec::new();
@@ -2358,11 +2374,24 @@ pub fn filter_report_for_diagnostics(
             .filter_map(|old_idx| old_to_new.get(old_idx).copied())
             .collect();
         if !remapped.is_empty() {
-            let mut cloned_group = group.clone();
-            cloned_group.blast_radius.site_count = remapped.len();
-            cloned_group.diagnostic_indices = remapped;
-            kept_group_ids.insert(cloned_group.id.clone());
-            root_cause_groups.push(cloned_group);
+            kept_group_ids.insert(group.id.clone());
+            root_cause_groups.push(RootCauseGroup {
+                id: group.id.clone(),
+                rule: group.rule,
+                category: group.category,
+                severity: group.severity,
+                tier: group.tier,
+                file: group.file.clone(),
+                subject_name: group.subject_name.clone(),
+                target_name: group.target_name.clone(),
+                loc: group.loc,
+                message: group.message.clone(),
+                blast_radius: BlastRadius {
+                    site_count: remapped.len(),
+                    ..group.blast_radius
+                },
+                diagnostic_indices: remapped,
+            });
         }
     }
 

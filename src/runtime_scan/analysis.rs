@@ -362,12 +362,13 @@ pub fn merge_probe_snapshots(
         return Err("At least one runtime scan probe snapshot is required.".to_string());
     }
     // Deduplicate by timeOrigin in insertion order (replacing earlier entry at the end).
-    let mut snapshots: Vec<RuntimeScanProbeSnapshot> = Vec::with_capacity(captured_snapshots.len());
+    let mut snapshots: Vec<&RuntimeScanProbeSnapshot> =
+        Vec::with_capacity(captured_snapshots.len());
     for snap in captured_snapshots {
         snapshots.retain(|existing| (existing.time_origin - snap.time_origin).abs() > f64::EPSILON);
-        snapshots.push(snap.clone());
+        snapshots.push(snap);
     }
-    let Some(final_snapshot) = snapshots.last().cloned() else {
+    let Some(&final_snapshot) = snapshots.last() else {
         return Err("At least one runtime scan probe snapshot is required.".to_string());
     };
     let time_origin = snapshots
@@ -375,14 +376,14 @@ pub fn merge_probe_snapshots(
         .map(|s| s.time_origin)
         .fold(f64::INFINITY, f64::min);
 
-    let mut creation_order: Vec<&RuntimeScanProbeSnapshot> = snapshots.iter().collect();
+    let mut creation_order: Vec<&RuntimeScanProbeSnapshot> = snapshots.clone();
     creation_order.sort_by(|a, b| a.time_origin.total_cmp(&b.time_origin));
 
     let mut all_loafs: Vec<RuntimeScanLongAnimationFrame> = Vec::new();
     let mut all_components: Vec<RuntimeScanComponentEvent> = Vec::new();
     let mut all_interactions: Vec<RuntimeScanInteraction> = Vec::new();
 
-    for snap in &snapshots {
+    for &snap in &snapshots {
         let offset = snap.time_origin - time_origin;
         let doc_index = creation_order
             .iter()
@@ -482,7 +483,7 @@ pub fn merge_probe_snapshots(
 
     Ok(RuntimeScanProbeSnapshot {
         time_origin,
-        final_url: final_snapshot.final_url,
+        final_url: final_snapshot.final_url.clone(),
         support: RuntimeScanProbeSupport {
             react_detected: snapshots.iter().any(|s| s.support.react_detected),
             react_version: latest_react.and_then(|s| s.support.react_version.clone()),
@@ -554,24 +555,24 @@ fn build_deduplicated_interactions(
 
 fn build_script_hotspots(snapshot: &RuntimeScanProbeSnapshot) -> Vec<RuntimeScanScriptHotspot> {
     #[derive(Hash, PartialEq, Eq, Clone)]
-    struct ScriptKey {
-        source_url: String,
-        source_function_name: String,
+    struct ScriptKey<'a> {
+        source_url: &'a str,
+        source_function_name: &'a str,
         source_char_position: i64,
-        invoker: String,
+        invoker: &'a str,
     }
 
-    let mut order: Vec<ScriptKey> = Vec::new();
-    let mut hotspots: HashMap<ScriptKey, RuntimeScanScriptHotspot> = HashMap::new();
+    let mut order: Vec<ScriptKey<'_>> = Vec::new();
+    let mut hotspots: HashMap<ScriptKey<'_>, RuntimeScanScriptHotspot> = HashMap::new();
 
     for frame in &snapshot.long_animation_frames {
-        let mut keys_in_frame: HashSet<ScriptKey> = HashSet::new();
+        let mut keys_in_frame: HashSet<ScriptKey<'_>> = HashSet::new();
         for script in &frame.scripts {
             let key = ScriptKey {
-                source_url: script.source_url.clone(),
-                source_function_name: script.source_function_name.clone(),
+                source_url: script.source_url.as_str(),
+                source_function_name: script.source_function_name.as_str(),
                 source_char_position: script.source_char_position,
-                invoker: script.invoker.clone(),
+                invoker: script.invoker.as_str(),
             };
             if let Some(existing) = hotspots.get_mut(&key) {
                 existing.total_duration_ms += script.duration_ms;
@@ -582,9 +583,19 @@ fn build_script_hotspots(snapshot: &RuntimeScanProbeSnapshot) -> Vec<RuntimeScan
                     existing.frame_count += 1;
                 }
             } else {
-                order.push(key.clone());
+                order.push(ScriptKey {
+                    source_url: script.source_url.as_str(),
+                    source_function_name: script.source_function_name.as_str(),
+                    source_char_position: script.source_char_position,
+                    invoker: script.invoker.as_str(),
+                });
                 hotspots.insert(
-                    key.clone(),
+                    ScriptKey {
+                        source_url: script.source_url.as_str(),
+                        source_function_name: script.source_function_name.as_str(),
+                        source_char_position: script.source_char_position,
+                        invoker: script.invoker.as_str(),
+                    },
                     RuntimeScanScriptHotspot {
                         source_url: script.source_url.clone(),
                         function_name: if script.source_function_name.is_empty() {
@@ -618,18 +629,18 @@ fn build_script_hotspots(snapshot: &RuntimeScanProbeSnapshot) -> Vec<RuntimeScan
 fn build_component_hotspots(
     snapshot: &RuntimeScanProbeSnapshot,
 ) -> Vec<RuntimeScanComponentHotspot> {
-    let mut order: Vec<(ComponentEventSource, String)> = Vec::new();
-    let mut hotspots: HashMap<(ComponentEventSource, String), RuntimeScanComponentHotspot> =
+    let mut order: Vec<(ComponentEventSource, &str)> = Vec::new();
+    let mut hotspots: HashMap<(ComponentEventSource, &str), RuntimeScanComponentHotspot> =
         HashMap::new();
 
     for event in &snapshot.component_events {
-        let key = (event.source, event.name.clone());
+        let key = (event.source, event.name.as_str());
         if let Some(existing) = hotspots.get_mut(&key) {
             existing.render_count += 1;
             existing.total_duration_ms += event.duration_ms;
             existing.max_duration_ms = existing.max_duration_ms.max(event.duration_ms);
         } else {
-            order.push(key.clone());
+            order.push(key);
             hotspots.insert(
                 key,
                 RuntimeScanComponentHotspot {
@@ -642,7 +653,6 @@ fn build_component_hotspots(
             );
         }
     }
-
     let mut result: Vec<RuntimeScanComponentHotspot> = order
         .into_iter()
         .filter_map(|k| hotspots.remove(&k))

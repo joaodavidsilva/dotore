@@ -1180,11 +1180,11 @@ impl<'a> PyArchFacetWalker<'a> {
             let Some(arg_id) = &kw.arg else {
                 continue;
             };
-            let key = arg_id.to_string();
+            let key_str = arg_id.as_str();
             if is_default_or_literal_expr(&kw.value) {
-                default_or_literal_fields.push(key.clone());
+                default_or_literal_fields.push(key_str.to_string());
             }
-            field_names.push(key);
+            field_names.push(key_str.to_string());
         }
         if field_names.len() >= 3 {
             self.facets
