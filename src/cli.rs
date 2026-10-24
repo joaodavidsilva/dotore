@@ -255,13 +255,29 @@ pub struct ReportArgs {
     #[arg(long)]
     pub custom_rules_only: bool,
 
-    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
-    #[arg(long = "ignore-tag", value_name = "TAG")]
+    /// Ignore rules carrying the specified tag (repeatable or comma-separated, e.g. `--ignore-tag design`).
+    #[arg(long = "ignore-tag", value_name = "TAG", value_delimiter = ',')]
     pub ignore_tags: Vec<String>,
 
     /// Explicit path to a `dotore.config.*` file.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Filter by rule ID or legacy alias (repeatable or comma-separated).
+    #[arg(long = "rule", value_name = "RULE_ID", value_delimiter = ',')]
+    pub rules: Vec<String>,
+
+    /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
+    #[arg(long = "category", value_name = "CATEGORY", value_delimiter = ',')]
+    pub categories: Vec<String>,
+
+    /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.; repeatable or comma-separated).
+    #[arg(long = "only", value_name = "FILTER", value_delimiter = ',')]
+    pub only: Vec<String>,
+
+    /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
+    #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
+    pub tiers: Vec<String>,
 }
 
 /// Output format for `dotore search`.
@@ -912,18 +928,44 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
 /// Runs `dotore report`.
 #[must_use]
 fn run_report(args: &ReportArgs) -> ExitCode {
-    let (report, _) = match scan_workspace_for_subcommand(
+    let options = match build_scan_options(
         &args.paths,
         args.include_tests,
-        None,
-        args.no_inline_disables,
-        args.custom_rules_only,
-        &args.ignore_tags,
-        args.config.as_ref(),
+        &args.rules,
+        &args.categories,
+        &args.only,
+        &args.tiers,
     ) {
-        Ok(res) => res,
-        Err(code) => return code,
+        Ok(opts) => opts,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(2);
+        }
     };
+    let overrides = CliOverrides {
+        no_inline_disables: args.no_inline_disables,
+        custom_rules_only: args.custom_rules_only,
+        ignore_tags: args.ignore_tags.clone(),
+        config_path: args.config.clone(),
+        scope: DiffScope::Full,
+        base_ref: None,
+        staged: false,
+        baseline_path: None,
+    };
+    let spinner_guard = if should_launch_tui(false) {
+        LiveSpinner::start()
+    } else {
+        None
+    };
+    let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
+        Ok(res) => res,
+        Err(err) => {
+            drop(spinner_guard);
+            eprintln!("error scanning workspace: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    drop(spinner_guard);
     match write_and_open_html_report(&report, args.output.as_deref(), !args.no_open) {
         Ok(path) => {
             println!("HTML report written to {}", path.display());
