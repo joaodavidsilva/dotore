@@ -293,12 +293,18 @@ def _helper(items=None):  # dotore-disable-line py-no-mutable-default-arg
         assert!(extracted.is_suppressed(
             RuleId::PyNoUnguardedParseOrKeyAccess,
             13,
-            ByteSpan { start: 320, end: 340 },
+            ByteSpan {
+                start: 320,
+                end: 340
+            },
         ));
         assert!(extracted.is_suppressed(
             RuleId::PyNoMutableDefaultArg,
             15,
-            ByteSpan { start: 350, end: 365 },
+            ByteSpan {
+                start: 350,
+                end: 365
+            },
         ));
 
         // Contextual Owner spans
@@ -325,5 +331,527 @@ def _helper(items=None):  # dotore-disable-line py-no-mutable-default-arg
             Path::new("app/broken.py"),
             "def add(a: int, :\n    return a\n"
         ));
+    }
+
+    #[test]
+    fn detects_thin_entrypoint_and_mixed_io_presentation_while_allowing_cohesive_modules() {
+        let analyzer = PyLanguageAnalyzer::new();
+        let pkg = dotore_core::WorkspacePackage {
+            name: "billing-service".to_string(),
+            root_dir: PathBuf::from("services/billing"),
+            capability_gate: dotore_core::CapabilityGate::default_python(),
+            config: dotore_core::DotoreConfig::default(),
+        };
+
+        let bloated_main = r#"from pydantic import BaseModel
+import httpx
+
+class InvoicePayload(BaseModel):
+    invoice_id: str
+    amount_cents: int
+
+def main() -> None:
+    resp = httpx.get("https://api.example.com/invoices")
+    data = resp.json()
+    for row in data:
+        payload = InvoicePayload(invoice_id=row["id"], amount_cents=row["amount"])
+        httpx.post("https://api.example.com/ledger", json=payload.model_dump())
+
+if __name__ == "__main__":
+    main()
+"#;
+        let mixed_report = r#"from rich.console import Console
+
+def render_overdue_invoices(session) -> None:
+    rows = session.execute("SELECT id, total FROM invoices WHERE overdue = 1")
+    console = Console()
+    for row in rows:
+        console.print(f"\x1b[31mOverdue invoice {row[0]}: ${row[1]}\x1b[0m")
+"#;
+        let thin_main = r#"import sys
+from billing.runner import run_cli
+
+def main() -> int:
+    return run_cli(sys.argv[1:])
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#;
+
+        let files = vec![
+            analyzer.extract_file(Path::new("services/billing/main.py"), bloated_main),
+            analyzer.extract_file(Path::new("services/billing/report.py"), mixed_report),
+            analyzer.extract_file(Path::new("services/billing/__main__.py"), thin_main),
+        ];
+
+        assert!(files[0].architecture_facets.is_entrypoint);
+        assert!(files[2].architecture_facets.is_entrypoint);
+
+        let res = analyzer.analyze_package(
+            &pkg,
+            &files,
+            Some(&[
+                RuleId::ArchThinEntrypoint,
+                RuleId::ArchNoMixedIoAndPresentation,
+            ]),
+        );
+
+        let thin_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchThinEntrypoint)
+            .collect();
+        assert_eq!(thin_diags.len(), 1);
+        assert_eq!(
+            thin_diags[0].file,
+            PathBuf::from("services/billing/main.py")
+        );
+        assert_eq!(thin_diags[0].severity, dotore_core::RuleSeverity::Warning);
+        assert_eq!(thin_diags[0].tier, dotore_core::PrescriptionTier::Refactor);
+        assert!(thin_diags[0].autofix.is_none());
+
+        let mixed_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchNoMixedIoAndPresentation)
+            .collect();
+        assert_eq!(mixed_diags.len(), 1);
+        assert_eq!(
+            mixed_diags[0].file,
+            PathBuf::from("services/billing/report.py")
+        );
+        assert_eq!(mixed_diags[0].severity, dotore_core::RuleSeverity::Warning);
+        assert_eq!(mixed_diags[0].tier, dotore_core::PrescriptionTier::Refactor);
+        assert!(mixed_diags[0].autofix.is_none());
+    }
+
+    #[test]
+    fn detects_static_catalog_with_types_domain_monolith_and_inline_terminal_ui_primitives() {
+        let analyzer = PyLanguageAnalyzer::new();
+        let pkg = dotore_core::WorkspacePackage {
+            name: "catalog-pkg".to_string(),
+            root_dir: PathBuf::from("pkg"),
+            capability_gate: dotore_core::CapabilityGate::default_python(),
+            config: dotore_core::DotoreConfig::default(),
+        };
+
+        let mut catalog_entries = String::new();
+        for i in 0..26 {
+            catalog_entries.push_str(&format!("    \"RULE_{i:02}\": {{\"code\": {i}}},\n"));
+        }
+        let types_with_catalog = format!(
+            r#"from dataclasses import dataclass
+from enum import Enum
+from pydantic import BaseModel
+
+class Severity(Enum):
+    WARN = "warn"
+    ERROR = "error"
+
+@dataclass
+class RuleSpec:
+    code: int
+
+class RuleRecord(BaseModel):
+    id: str
+
+DEFAULT_RULE_CATALOG = {{
+{catalog_entries}}}
+"#
+        );
+
+        let monolith_src = r#"from pydantic import BaseModel
+from rich.console import Console
+import httpx
+
+class OrderModel(BaseModel):
+    order_id: str
+
+class PaymentModel(BaseModel):
+    payment_id: str
+
+class ShipmentModel(BaseModel):
+    shipment_id: str
+
+def fetch_orders():
+    return httpx.get("https://api.example.com/orders").json()
+
+def fetch_payments():
+    return httpx.get("https://api.example.com/payments").json()
+
+def render_order_box(order_id: str) -> None:
+    Console().print(f"╭───╮\n│ {order_id} │\n╰───╯")
+
+def render_payment_ansi(payment_id: str) -> None:
+    Console().print(f"\x1b[32mPaid {payment_id}\x1b[0m")
+
+def parse_order_node(node):
+    return str(node)
+
+def validate_payment_schema(item):
+    return bool(item)
+
+def transform_shipment_row(row):
+    return row
+
+def compute_tax_cents(amount: int) -> int:
+    return amount * 10
+
+def normalize_currency_code(code: str) -> str:
+    return code.upper()
+"#;
+
+        let ui_kit_src = r#"def draw_banner(title: str) -> str:
+    return f"\x1b[1m╭──────╮\n│ {title} │\n╰──────╯\x1b[0m"
+"#;
+
+        let cohesive_parser_src = r#"def parse_header(line: str) -> str:
+    return line.strip()
+
+def parse_key(line: str) -> str:
+    return line.split("=")[0].strip()
+
+def parse_value(line: str) -> str:
+    return line.split("=")[-1].strip()
+
+def parse_section(lines: list[str]) -> dict[str, str]:
+    return {parse_key(l): parse_value(l) for l in lines}
+
+def parse_int_token(tok: str) -> int:
+    return int(tok)
+
+def parse_float_token(tok: str) -> float:
+    return float(tok)
+
+def parse_bool_token(tok: str) -> bool:
+    return tok == "true"
+
+def parse_list_tokens(raw: str) -> list[str]:
+    return [x.strip() for x in raw.split(",")]
+
+def parse_comment(line: str) -> str:
+    return line.lstrip('#').strip()
+
+def parse_identifier(raw: str) -> str:
+    return raw.strip("_")
+
+def parse_quoted(raw: str) -> str:
+    return raw.strip('"')
+
+def parse_document(text: str) -> dict[str, str]:
+    return parse_section(text.splitlines())
+"#;
+
+        let files = vec![
+            analyzer.extract_file(Path::new("pkg/models.py"), &types_with_catalog),
+            analyzer.extract_file(Path::new("pkg/monolith.py"), monolith_src),
+            analyzer.extract_file(Path::new("pkg/ui.py"), ui_kit_src),
+            analyzer.extract_file(Path::new("pkg/parser.py"), cohesive_parser_src),
+        ];
+
+        let res = analyzer.analyze_package(
+            &pkg,
+            &files,
+            Some(&[
+                RuleId::ArchSeparateStaticCatalogFromTypes,
+                RuleId::ArchNoMixedDomainMonolith,
+                RuleId::ArchNoInlineTerminalUiPrimitives,
+            ]),
+        );
+
+        let catalog_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchSeparateStaticCatalogFromTypes)
+            .collect();
+        assert_eq!(catalog_diags.len(), 1);
+        assert_eq!(catalog_diags[0].file, PathBuf::from("pkg/models.py"));
+        assert_eq!(
+            catalog_diags[0].tier,
+            dotore_core::PrescriptionTier::Refactor
+        );
+
+        let monolith_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchNoMixedDomainMonolith)
+            .collect();
+        assert_eq!(monolith_diags.len(), 1);
+        assert_eq!(monolith_diags[0].file, PathBuf::from("pkg/monolith.py"));
+        assert_eq!(
+            monolith_diags[0].tier,
+            dotore_core::PrescriptionTier::Refactor
+        );
+
+        let ui_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchNoInlineTerminalUiPrimitives)
+            .collect();
+        assert!(!ui_diags.is_empty());
+        assert!(
+            ui_diags
+                .iter()
+                .all(|d| d.file == Path::new("pkg/monolith.py"))
+        );
+        assert!(
+            ui_diags
+                .iter()
+                .all(|d| d.tier == dotore_core::PrescriptionTier::Surgical)
+        );
+    }
+
+    #[test]
+    fn detects_duplicated_private_helpers_and_repeated_multi_field_constructor_calls() {
+        let analyzer = PyLanguageAnalyzer::new();
+        let pkg = dotore_core::WorkspacePackage {
+            name: "orders-pkg".to_string(),
+            root_dir: PathBuf::from("orders"),
+            capability_gate: dotore_core::CapabilityGate::default_python(),
+            config: dotore_core::DotoreConfig::default(),
+        };
+
+        let module_a = r#"from orders.models import DispatchJob, BuiltConfig
+
+def _normalize_headers(raw_headers: dict[str, str]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, val in raw_headers.items():
+        norm_key = key.strip().lower()
+        if norm_key:
+            cleaned[norm_key] = val.strip()
+    return cleaned
+
+def _tiny_helper(x: int) -> int:
+    return x + 1
+
+def enqueue_first() -> DispatchJob:
+    return DispatchJob(
+        job_id="job-1",
+        endpoint="https://api.example.com/v1",
+        retries=0,
+        timeout_ms=None,
+        dry_run=False,
+        headers={},
+    )
+
+def enqueue_second() -> DispatchJob:
+    return DispatchJob(
+        job_id="job-2",
+        endpoint="https://api.example.com/v2",
+        retries=0,
+        timeout_ms=None,
+        dry_run=False,
+        headers={},
+    )
+"#;
+
+        let module_b = r#"from orders.models import DispatchJob, BuiltConfig
+
+def _normalize_headers(input_map: dict[str, str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for k, v in input_map.items():
+        normalized = k.strip().lower()
+        if normalized:
+            result[normalized] = v.strip()
+    return result
+
+def _tiny_helper(y: int) -> int:
+    return y + 1
+
+def enqueue_third() -> DispatchJob:
+    return DispatchJob(
+        job_id="job-3",
+        endpoint="https://api.example.com/v3",
+        retries=0,
+        timeout_ms=None,
+        dry_run=False,
+        headers={},
+    )
+
+def build_with_existing_builder() -> list[BuiltConfig]:
+    return [
+        BuiltConfig(a=1, b=None, c=False, d="", e=[]),
+        BuiltConfig(a=2, b=None, c=False, d="", e=[]),
+        BuiltConfig(a=3, b=None, c=False, d="", e=[]),
+    ]
+"#;
+
+        let models_src = r#"from dataclasses import dataclass
+
+@dataclass
+class DispatchJob:
+    job_id: str
+    endpoint: str
+    retries: int
+    timeout_ms: int | None
+    dry_run: bool
+    headers: dict[str, str]
+
+@dataclass
+class BuiltConfig:
+    a: int
+    b: int | None
+    c: bool
+    d: str
+    e: list[str]
+
+    @classmethod
+    def from_defaults(cls, a: int) -> "BuiltConfig":
+        return cls(a=a, b=None, c=False, d="", e=[])
+"#;
+
+        let files = vec![
+            analyzer.extract_file(Path::new("orders/service_a.py"), module_a),
+            analyzer.extract_file(Path::new("orders/service_b.py"), module_b),
+            analyzer.extract_file(Path::new("orders/models.py"), models_src),
+        ];
+
+        let res = analyzer.analyze_package(
+            &pkg,
+            &files,
+            Some(&[
+                RuleId::ArchNoDuplicatedHelperLogic,
+                RuleId::ArchPreferFluentBuilder,
+            ]),
+        );
+
+        let dup_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchNoDuplicatedHelperLogic)
+            .collect();
+        assert!(
+            !dup_diags.is_empty(),
+            "Expected ArchNoDuplicatedHelperLogic diagnostic"
+        );
+        assert!(
+            dup_diags
+                .iter()
+                .all(|d| d.target_name == "_normalize_headers")
+        );
+        assert!(dup_diags.iter().all(|d| !d.caller_sites.is_empty()));
+        assert!(
+            dup_diags
+                .iter()
+                .all(|d| d.tier == dotore_core::PrescriptionTier::Refactor)
+        );
+
+        let builder_diags: Vec<_> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == RuleId::ArchPreferFluentBuilder)
+            .collect();
+        assert!(
+            !builder_diags.is_empty(),
+            "Expected ArchPreferFluentBuilder diagnostic"
+        );
+        assert!(builder_diags.iter().all(|d| d.target_name == "DispatchJob"));
+        assert!(
+            builder_diags
+                .iter()
+                .all(|d| d.tier == dotore_core::PrescriptionTier::Refactor)
+        );
+    }
+
+    #[test]
+    fn respects_architecture_thresholds_suppressions_contextual_owner_spans_and_single_file_packages()
+     {
+        let analyzer = PyLanguageAnalyzer::new();
+
+        // 1. Single-file package with custom threshold override (`max_entrypoint_statements = 3`)
+        let mut custom_cfg = dotore_core::DotoreConfig::default();
+        custom_cfg.architecture.max_entrypoint_statements = 3;
+        custom_cfg.architecture.min_types_with_catalog = 2;
+        custom_cfg.architecture.min_static_catalog_entries = 4;
+        let custom_pkg = dotore_core::WorkspacePackage {
+            name: "cli-pkg".to_string(),
+            root_dir: PathBuf::from("cli"),
+            capability_gate: dotore_core::CapabilityGate::default_python(),
+            config: custom_cfg,
+        };
+
+        let single_cli_src = r#"from dataclasses import dataclass
+
+@dataclass
+class FlagSpec:
+    name: str
+
+@dataclass
+class CommandSpec:
+    cmd: str
+
+STATIC_COMMANDS = ["run", "check", "fix", "plan", "why"]
+
+def main() -> int:
+    a = 1
+    b = 2
+    c = a + b
+    return c
+"#;
+        let single_file = vec![analyzer.extract_file(Path::new("cli/cli.py"), single_cli_src)];
+        let single_res = analyzer.analyze_package(
+            &custom_pkg,
+            &single_file,
+            Some(&[
+                RuleId::ArchThinEntrypoint,
+                RuleId::ArchSeparateStaticCatalogFromTypes,
+            ]),
+        );
+        assert_eq!(single_res.diagnostics.len(), 2);
+
+        // 2. Inline suppressions (`# dotore-disable-next-line` and `# noqa`)
+        let suppressed_src = r#"from pathlib import Path
+import streamlit as st
+
+def save_and_render(content: str) -> None:
+    Path("report.txt").write_text(content)
+    # dotore-disable-next-line arch-no-mixed-io-and-presentation
+    st.markdown(content)
+    # noqa: arch-no-inline-terminal-ui-primitives
+    banner = "\x1b[33mWarning\x1b[0m"
+"#;
+        let default_pkg = dotore_core::WorkspacePackage {
+            name: "app-pkg".to_string(),
+            root_dir: PathBuf::from("app"),
+            capability_gate: dotore_core::CapabilityGate::default_python(),
+            config: dotore_core::DotoreConfig::default(),
+        };
+        let suppressed_file = vec![analyzer.extract_file(Path::new("app/view.py"), suppressed_src)];
+        let suppressed_res = analyzer.analyze_package(
+            &default_pkg,
+            &suppressed_file,
+            Some(&[
+                RuleId::ArchNoMixedIoAndPresentation,
+                RuleId::ArchNoInlineTerminalUiPrimitives,
+            ]),
+        );
+        assert!(
+            suppressed_res.diagnostics.is_empty(),
+            "Expected inline suppressions to silence diagnostics, got: {:?}",
+            suppressed_res.diagnostics
+        );
+
+        // 3. ContextualOwner spans include multi-keyword struct literal construction sites
+        let builder_call_src = r#"def make_req():
+    return JobRequest(
+        id="1",
+        name="sync",
+        retries=0,
+        timeout=None,
+        dry_run=False,
+    )
+"#;
+        let extracted_req = analyzer.extract_file(Path::new("app/req.py"), builder_call_src);
+        assert_eq!(
+            extracted_req.architecture_facets.struct_literal_sites.len(),
+            1
+        );
+        let lit_span = extracted_req.architecture_facets.struct_literal_sites[0].span;
+        assert!(
+            extracted_req
+                .contextual_owner_spans
+                .element_spans
+                .contains(&lit_span)
+        );
     }
 }
