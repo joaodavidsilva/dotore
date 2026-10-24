@@ -23,10 +23,11 @@ use crate::{
     mutate_config_in_dir, plan_project,
     progress::LiveSpinner,
     prompt_runtime_scan_url_with_io, record_runtime_trace, resolve_runtime_scan_format,
-    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols,
+    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols_with_cache,
     should_highlight_stdout,
     tui::{run_interactive_tui, should_launch_tui},
-    validate_warning_exit_code, write_and_open_html_report, write_json_report,
+    validate_warning_exit_code, write_and_open_html_report, write_diagnostics_bundle,
+    write_json_report,
 };
 
 /// Top-level `dotore` CLI parser.
@@ -166,6 +167,9 @@ pub struct CheckArgs {
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
     pub no_cache: bool,
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
 }
 
 /// CLI arguments for `dotore fix`.
@@ -202,6 +206,9 @@ pub struct FixArgs {
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
     pub no_cache: bool,
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
 }
 
 /// CLI arguments for `dotore plan`.
@@ -238,6 +245,17 @@ pub struct PlanArgs {
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
     pub no_cache: bool,
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
+
+    /// Synthesize a coding-agent handoff prompt and write a diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`).
+    #[arg(long)]
+    pub handoff: bool,
+
+    /// Explicit directory for the diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`, defaults to `--out`).
+    #[arg(long = "bundle-dir", value_name = "DIR")]
+    pub bundle_dir: Option<PathBuf>,
 }
 
 /// CLI arguments for `dotore report`.
@@ -294,6 +312,9 @@ pub struct ReportArgs {
     /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
     #[arg(long = "no-cache")]
     pub no_cache: bool,
+    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
+    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
+    pub projects: Vec<String>,
 }
 
 /// Output format for `dotore search`.
@@ -331,6 +352,10 @@ pub struct SearchArgs {
     /// Disable ANSI syntax highlighting in text output.
     #[arg(long)]
     pub no_color: bool,
+
+    /// Bypass reading and writing the persistent per-project Symbol Outline disk cache.
+    #[arg(long = "no-cache")]
+    pub no_cache: bool,
 }
 
 /// CLI arguments for `dotore scan`.
@@ -801,6 +826,7 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         staged: args.staged,
         baseline_path: args.baseline.clone(),
         no_cache: args.no_cache,
+        projects: args.projects.clone(),
     };
 
     let show_live_spinner = !args.score && !args.json && should_launch_tui(args.no_pager);
@@ -854,7 +880,7 @@ fn run_check(args: &CheckArgs) -> ExitCode {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "internal CLI helper forwarding shared scan flags across fix and plan subcommands"
+    reason = "Subcommand scan helper forwards CLI flags directly into ScanOptions and CliOverrides"
 )]
 fn scan_workspace_for_subcommand(
     paths: &[PathBuf],
@@ -865,6 +891,7 @@ fn scan_workspace_for_subcommand(
     ignore_tags: &[String],
     config_path: Option<&PathBuf>,
     no_cache: bool,
+    projects: &[String],
 ) -> Result<
     (
         crate::JsonReport,
@@ -884,6 +911,7 @@ fn scan_workspace_for_subcommand(
         ignore_tags: ignore_tags.to_vec(),
         config_path: config_path.cloned(),
         no_cache,
+        projects: projects.to_vec(),
         ..Default::default()
     };
     scan_workspace_with_overrides(&options, &overrides).map_err(|err| {
@@ -904,6 +932,7 @@ fn run_fix(args: &FixArgs) -> ExitCode {
         &args.ignore_tags,
         args.config.as_ref(),
         args.no_cache,
+        &args.projects,
     ) {
         Ok(res) => res,
         Err(code) => return code,
@@ -933,21 +962,36 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
         &args.ignore_tags,
         args.config.as_ref(),
         args.no_cache,
+        &args.projects,
     ) {
         Ok(res) => res,
         Err(code) => return code,
     };
 
-    match plan_project(&report, &args.out) {
-        Ok(result) => {
-            print!("{}", format_plan_report(&result));
-            ExitCode::SUCCESS
-        }
+    let plan_result = match plan_project(&report, &args.out) {
+        Ok(result) => result,
         Err(err) => {
             eprintln!("error writing remediation plans: {err}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
+        }
+    };
+
+    if args.handoff || args.bundle_dir.is_some() {
+        let target_bundle_dir = args.bundle_dir.as_deref().unwrap_or(&args.out);
+        match write_diagnostics_bundle(&report, target_bundle_dir) {
+            Ok(bundle) => {
+                print!("{}", bundle.prompt_markdown);
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                eprintln!("error writing diagnostics bundle: {err}");
+                return ExitCode::from(2);
+            }
         }
     }
+
+    print!("{}", format_plan_report(&plan_result));
+    ExitCode::SUCCESS
 }
 
 /// Runs `dotore report`.
@@ -977,6 +1021,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         staged: false,
         baseline_path: None,
         no_cache: args.no_cache,
+        projects: args.projects.clone(),
     };
     let spinner_guard = if should_launch_tui(false) {
         LiveSpinner::start()
@@ -1050,7 +1095,7 @@ fn run_search(args: &SearchArgs) -> ExitCode {
         include_tests: true,
     };
 
-    let (results, sources) = match search_symbols(&args.query, &options) {
+    let (results, sources) = match search_symbols_with_cache(&args.query, &options, args.no_cache) {
         Ok(res) => res,
         Err(err) => {
             eprintln!("error searching symbols: {err}");
@@ -1410,6 +1455,7 @@ fn run_design(args: &CheckArgs) -> ExitCode {
         custom_rules_only: args.custom_rules_only,
         ignore_tags: args.ignore_tags.clone(),
         config_path: args.config.clone(),
+        projects: args.projects.clone(),
         ..Default::default()
     };
     let show_live_spinner = !args.json && should_launch_tui(args.no_pager);

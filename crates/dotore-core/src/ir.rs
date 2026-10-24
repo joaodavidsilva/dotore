@@ -242,7 +242,7 @@ impl SymbolKind {
 }
 
 /// A declared symbol extracted with its signature and adjacent doc comment (see `GLOSSARY.md`: **Symbol Outline**).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolOutline {
     /// Symbol identifier name.
     pub name: String,
