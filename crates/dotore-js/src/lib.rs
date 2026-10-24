@@ -24,6 +24,8 @@ use dotore_core::{
 pub mod graph;
 /// React **Subject**, **State Slot**, **Effect Node**, and **Caller Site** IR.
 pub mod ir;
+/// Shared `oxc` AST/semantic matchers, JSX attribute inspectors, and diagnostic builders.
+pub(crate) mod matchers;
 /// [`dotore_core::PlannerContext`] implementation for [`ProjectGraph`] and cross-file autofix enrichment.
 pub mod planner;
 /// Diagnostic rules engine over [`SubjectIr`] and [`ProjectGraph`].

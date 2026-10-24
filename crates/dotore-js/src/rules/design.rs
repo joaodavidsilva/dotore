@@ -23,14 +23,12 @@ use crate::{
         react_ast::{find_enclosing_react_node, get_subject_name},
         types::{SemanticRuleSite, loc_from_line_starts},
     },
-    rules::{
-        AutofixPatch, ByteEdit, RuleId,
-        a11y::{
-            eval_numeric_expr, eval_static_str, find_attr, find_attr_ignore_case,
-            get_attr_static_str, get_class_name_str, get_jsx_tag_name, get_style_prop_number,
-            get_style_prop_str, subtree_has_tag_matching,
-        },
+    matchers::{
+        eval_numeric_expr, eval_static_str, find_attr, find_attr_ignore_case, get_attr_static_str,
+        get_class_name_str, get_jsx_tag_name, get_style_prop_number, get_style_prop_str,
+        subtree_has_tag_matching,
     },
+    rules::{AutofixPatch, ByteEdit, RuleId},
 };
 
 const VAGUE_BUTTON_LABELS: &[&str] = &[
