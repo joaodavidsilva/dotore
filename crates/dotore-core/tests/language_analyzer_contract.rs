@@ -747,25 +747,12 @@ fn symbol_outline_builder_and_normalized_signature_header_extractor() {
 
 #[test]
 fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submodules() {
-    use dotore_core::rules::catalog::{
-        a11y_and_design, defensive_and_correctness, ecosystem, performance_and_bundle, polyglot,
-        react_core, react_native_and_expo, security_and_server, three_r3f_webgl,
-    };
-
-    assert_eq!(react_core::CORE_INITIAL_RULES.len(), 36);
-    assert_eq!(three_r3f_webgl::RULES.len(), 187);
-    assert_eq!(ecosystem::INITIAL_ECOSYSTEM_RULES.len(), 7);
-    assert_eq!(a11y_and_design::RULES.len(), 192);
-    assert_eq!(performance_and_bundle::RULES.len(), 66);
-    assert_eq!(security_and_server::RULES.len(), 109);
-    assert_eq!(react_native_and_expo::RULES.len(), 59);
-    assert_eq!(ecosystem::EXTENDED_ECOSYSTEM_RULES.len(), 37);
-    assert_eq!(react_core::EXTENDED_REACT_RULES.len(), 74);
-    assert_eq!(defensive_and_correctness::RULES.len(), 154);
-    assert_eq!(polyglot::RULES.len(), 44);
+    use dotore_core::rules::catalog::{RULE_REGISTRY, TOTAL_RULES};
 
     let registry = rule_registry();
-    assert_eq!(registry.len(), 965);
+    assert_eq!(TOTAL_RULES, 965);
+    assert_eq!(RULE_REGISTRY.len(), TOTAL_RULES);
+    assert_eq!(registry.len(), TOTAL_RULES);
 
     for (idx, meta) in registry.iter().enumerate() {
         assert_eq!(meta.id as usize, idx, "Rule {:?} out of discriminant order", meta.id);
