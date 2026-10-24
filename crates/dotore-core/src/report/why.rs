@@ -246,10 +246,13 @@ pub fn explain_location_with_analyzers(
         let (groups, _) =
             build_root_cause_groups_and_capsules(&extracted_files, &active_at_line, &sources);
         for (idx, diag) in active_at_line.iter().enumerate() {
-            let group = groups
+            let Some(group) = groups
                 .iter()
                 .find(|g| g.diagnostic_indices.contains(&idx))
-                .unwrap_or(&groups[0]);
+                .or_else(|| groups.first())
+            else {
+                continue;
+            };
             let capsule = build_fix_capsule(&extracted_files, group, &active_at_line, &sources);
             let mut explanation = format!(
                 "Diagnostic `{}` fired at {}:{} because `{}` triggered rule `{}`.",
@@ -294,10 +297,13 @@ pub fn explain_location_with_analyzers(
             let (groups, _) =
                 build_root_cause_groups_and_capsules(&extracted_files, &probe_at_line, &sources);
             for (idx, diag) in probe_at_line.iter().enumerate() {
-                let group = groups
+                let Some(group) = groups
                     .iter()
                     .find(|g| g.diagnostic_indices.contains(&idx))
-                    .unwrap_or(&groups[0]);
+                    .or_else(|| groups.first())
+                else {
+                    continue;
+                };
                 let capsule = build_fix_capsule(&extracted_files, group, &probe_at_line, &sources);
                 let is_suppressed = pkg.config.respect_inline_disables
                     && (target_extracted.is_suppressed(diag.rule, diag.loc.line, diag.span)

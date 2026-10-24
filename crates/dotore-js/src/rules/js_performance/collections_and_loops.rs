@@ -755,9 +755,10 @@ pub(super) fn check_js_length_check_first(
             }
             AstKind::Function(f) => {
                 if let Some(b) = &f.body
-                    && b.span.source_text(semantic.source_text())
-                        [..(call.span.start - b.span.start) as usize]
-                        .contains(".length")
+                    && b.span
+                        .source_text(semantic.source_text())
+                        .get(..(call.span.start.saturating_sub(b.span.start)) as usize)
+                        .is_some_and(|s| s.contains(".length"))
                 {
                     return;
                 }
@@ -766,9 +767,10 @@ pub(super) fn check_js_length_check_first(
             AstKind::ArrowFunctionExpression(a) => {
                 let b_span = a.body.span();
                 if call.span.start >= b_span.start
-                    && b_span.source_text(semantic.source_text())
-                        [..(call.span.start - b_span.start) as usize]
-                        .contains(".length")
+                    && b_span
+                        .source_text(semantic.source_text())
+                        .get(..(call.span.start - b_span.start) as usize)
+                        .is_some_and(|s| s.contains(".length"))
                 {
                     return;
                 }

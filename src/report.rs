@@ -263,10 +263,13 @@ fn explain_js_location(
     if !active_at_line.is_empty() {
         let (groups, _) = build_root_cause_groups_and_capsules(&graph, &active_at_line, &sources);
         for (idx, diag) in active_at_line.iter().enumerate() {
-            let group = groups
+            let Some(group) = groups
                 .iter()
                 .find(|g| g.diagnostic_indices.contains(&idx))
-                .unwrap_or(&groups[0]);
+                .or_else(|| groups.first())
+            else {
+                continue;
+            };
             let capsule = build_fix_capsule(&graph, group, &active_at_line, &sources);
             let mismatch_note = detect_mismatched_inline_suppression(target_file_ir, diag);
             let mut explanation = if let Some(note) = mismatch_note {
@@ -317,10 +320,13 @@ fn explain_js_location(
             let (groups, _) =
                 build_root_cause_groups_and_capsules(&graph, &probe_at_line, &sources);
             for (idx, diag) in probe_at_line.iter().enumerate() {
-                let group = groups
+                let Some(group) = groups
                     .iter()
                     .find(|g| g.diagnostic_indices.contains(&idx))
-                    .unwrap_or(&groups[0]);
+                    .or_else(|| groups.first())
+                else {
+                    continue;
+                };
                 let capsule = build_fix_capsule(&graph, group, &probe_at_line, &sources);
                 let is_suppressed = pkg.config.respect_inline_disables
                     && target_file_ir.suppressions.is_suppressed(

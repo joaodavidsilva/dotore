@@ -613,7 +613,11 @@ pub(crate) fn check_call_expressions(ctx: &FileAnalysisCtx<'_>, sites: &mut Vec<
                         call.span,
                     );
                 } else if method == "compute"
-                    && !ctx.source[..call.span.start as usize].contains(".init(")
+                    && !ctx
+                        .source
+                        .get(..call.span.start as usize)
+                        .unwrap_or("")
+                        .contains(".init(")
                 {
                     ctx.push_site(
                         sites,
