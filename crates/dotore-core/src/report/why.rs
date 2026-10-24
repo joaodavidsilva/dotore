@@ -723,7 +723,13 @@ fn architecture_or_existing_cascade_steps(
     let Some(facets) = facets else {
         return Vec::new();
     };
-    let mut steps = Vec::new();
+    let mut steps = Vec::with_capacity(
+        facets.concern_signals.len()
+            + facets.static_catalog_sites.len()
+            + facets.inline_terminal_ui_sites.len()
+            + facets.struct_literal_sites.len()
+            + facets.helper_fingerprints.len(),
+    );
     for sig in &facets.concern_signals {
         let step = format!("{}: {}", sig.bucket.as_str(), sig.detail);
         if !steps.contains(&step) {
