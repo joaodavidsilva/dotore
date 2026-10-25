@@ -474,7 +474,7 @@ pub async fn suppressed_examples(pool: &sqlx::PgPool, filter: &str) {
         .await;
 }
 
-#[allow(fn_params_excessive_bools)]
+#[allow(fn_params_excessive_bools, reason = "legacy API")]
 pub fn legacy_flags(a: bool, b: bool, c: bool, d: bool) -> bool {
     a && b && c && d
 }
@@ -881,4 +881,103 @@ pub fn abstains_on_indeterminate_bindings(user: &str, check: bool, param_cmd: &m
         diags.is_empty(),
         "Expected 0 diagnostics when bindings exceed 8 hops, are reassigned, or are shadowed: {diags:#?}"
     );
+}
+
+#[test]
+fn eight_rust_structure_and_allow_hygiene_rules_detect_violations_and_autofix() {
+    let mut oversized_fn = String::from("pub fn giant_function(mut x: i32) -> i32 {\n");
+    for i in 0..155 {
+        oversized_fn.push_str(&format!("    x = x.wrapping_add({i});\n"));
+    }
+    oversized_fn.push_str("    x\n}\n");
+
+    let lib_rs = format!(
+        r#"#![allow(dead_code, reason = "file-wide allow is still flagged by crate-level-allow")]
+mod used_child;
+#[allow(unused_variables)]
+pub fn unreasoned_allow_fn(a: i32) -> i32 {{ 1 }}
+#[allow(dead_code, reason = "a")]
+#[allow(unused_variables, reason = "b")]
+pub fn stacked_two_allows(x: i32) -> i32 {{ x }}
+#[allow(dead_code, unused_variables, unused_mut, non_snake_case, reason = "four lints")]
+pub fn stacked_wide_allow(mut X: i32) -> i32 {{ 1 }}
+pub fn deeply_complex_logic(a: i32, b: i32, c: i32, d: i32) -> i32 {{
+    let mut acc = 0;
+    if a > 0 {{
+        if b > 0 {{
+            for i in 0..a {{
+                if c > i && d > 0 {{
+                    match i % 4 {{
+                        0 => {{ if a > b {{ acc += 1; }} else {{ acc -= 1; }} }}
+                        1 => {{ while acc < 10 {{ acc += 2; }} }}
+                        _ => acc += 3,
+                    }}
+                }}
+            }}
+        }}
+    }}
+    acc
+}}
+#[cfg(feature = "undeclared_ghost_feature")]
+pub fn ghost_gated() {{}}
+pub fn clone_alpha(items: &[i64], scale: i64, offset: i64) -> i64 {{
+    let mut total = 0;
+    for item in items {{
+        if *item > 0 {{
+            let adjusted = (*item * scale) + offset;
+            total += adjusted;
+        }} else {{
+            total -= offset;
+        }}
+    }}
+    total
+}}
+{oversized_fn}"#
+    );
+    let used_child_rs = r#"pub fn clone_beta(values: &[i64], factor: i64, bias: i64) -> i64 {
+    let mut sum = 0;
+    for val in values {
+        if *val > 0 {
+            let scaled = (*val * factor) + bias;
+            sum += scaled;
+        } else {
+            sum -= bias;
+        }
+    }
+    sum
+}"#;
+    let cargo_toml = "[package]\nname = \"structure-suite\"\nversion = \"0.1.0\"\n[features]\ndefault = []\nunused_dead_feature = []\n";
+    let structure_rules = [
+        RuleId::RsStructureCrateLevelAllow,
+        RuleId::RsStructureUnreasonedAllow,
+        RuleId::RsStructureStackedAllow,
+        RuleId::RsStructureComplexFunction,
+        RuleId::RsStructureOversizedUnit,
+        RuleId::RsStructureOrphanModuleFile,
+        RuleId::RsStructureUnreferencedFeature,
+        RuleId::RsStructureNearDuplicateFunction,
+    ];
+    let report = analyze_project_sources(
+        vec![
+            (PathBuf::from("Cargo.toml"), cargo_toml.to_string()),
+            (PathBuf::from("src/lib.rs"), lib_rs.clone()),
+            (PathBuf::from("src/used_child.rs"), used_child_rs.to_string()),
+            (PathBuf::from("src/orphan_dead.rs"), "pub fn dead() {}\n".to_string()),
+        ],
+        Some(&structure_rules),
+    );
+    let count = |r: RuleId| report.diagnostics.iter().filter(|d| d.rule == r).count();
+    assert_eq!(count(RuleId::RsStructureCrateLevelAllow), 1);
+    assert_eq!(count(RuleId::RsStructureUnreasonedAllow), 1);
+    assert_eq!(count(RuleId::RsStructureStackedAllow), 2);
+    assert_eq!(count(RuleId::RsStructureComplexFunction), 1);
+    assert_eq!(count(RuleId::RsStructureOversizedUnit), 1);
+    assert_eq!(count(RuleId::RsStructureOrphanModuleFile), 1);
+    assert_eq!(count(RuleId::RsStructureUnreferencedFeature), 2);
+    assert!(count(RuleId::RsStructureNearDuplicateFunction) >= 1);
+    let unreasoned = report.diagnostics.iter().find(|d| d.rule == RuleId::RsStructureUnreasonedAllow).unwrap();
+    assert_eq!(unreasoned.tier, PrescriptionTier::Autofix);
+    let (rewritten, applied) = dotore::apply_patches_to_source(&lib_rs, std::slice::from_ref(unreasoned));
+    assert_eq!(applied.len(), 1);
+    assert!(rewritten.contains("#[expect(unused_variables, reason = \"explain lint suppression\")]"));
 }
