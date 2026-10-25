@@ -28,6 +28,7 @@ use crate::{
     perf::extract_perf_diagnostics,
     safety::extract_safety_diagnostics,
     security::extract_security_diagnostics,
+    zen::extract_zen_diagnostics,
 };
 
 /// Single-pass intermediate representation for a Python source file (`.py` or `.pyi`).
@@ -111,6 +112,14 @@ pub(crate) fn extract_python_file(path: &Path, source: &str) -> ExtractedFile {
         &mut potential_unawaited_calls,
     );
     extract_perf_diagnostics(
+        path,
+        source,
+        &line_starts,
+        is_stub_file,
+        suite,
+        &mut candidate_diagnostics,
+    );
+    extract_zen_diagnostics(
         path,
         source,
         &line_starts,

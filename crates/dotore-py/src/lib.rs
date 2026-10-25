@@ -21,6 +21,7 @@ pub(crate) mod orm;
 pub(crate) mod perf;
 pub(crate) mod safety;
 pub(crate) mod security;
+pub(crate) mod zen;
 
 pub use ir::PyFileIr;
 
