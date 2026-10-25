@@ -758,7 +758,7 @@ fn decomposed_rule_catalog_preserves_all_965_rules_discriminant_order_and_submod
     use dotore_core::rules::catalog::{RULE_REGISTRY, TOTAL_RULES};
 
     let registry = rule_registry();
-    assert_eq!(TOTAL_RULES, 976);
+    assert_eq!(TOTAL_RULES, 1076);
     assert_eq!(RULE_REGISTRY.len(), TOTAL_RULES);
     assert_eq!(registry.len(), TOTAL_RULES);
 

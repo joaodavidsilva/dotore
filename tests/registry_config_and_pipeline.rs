@@ -2152,3 +2152,880 @@ fn workspace_discovery_infers_nested_capabilities_for_react_router_remotion_redu
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn capability_gate_infers_ngrx_angular_material_and_rust_ecosystem_crates() {
+    let report = analyze_project_sources(
+        vec![
+            (
+                PathBuf::from("apps/ng-portal/package.json"),
+                r#"{
+                    "name": "ng-portal",
+                    "dependencies": {
+                        "@angular/core": "^19.0.0",
+                        "@angular/material": "^19.0.0",
+                        "@ngrx/store": "^19.0.0",
+                        "@ngrx/effects": "^19.0.0"
+                    }
+                }"#
+                .to_string(),
+            ),
+            (
+                PathBuf::from("apps/ng-portal/src/app.component.ts"),
+                "export class AppComponent {}".to_string(),
+            ),
+            (
+                PathBuf::from("services/api-rs/Cargo.toml"),
+                r#"[package]
+name = "api-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reqwest = "0.12"
+diesel = "2.2"
+sea-orm = "1.1"
+rusqlite = "0.32"
+tokio-postgres = "0.7"
+futures = "0.3"
+tower-http = "0.6"
+actix-cors = "0.7"
+cookie = "0.18"
+jsonwebtoken = "9.3"
+"#
+                .to_string(),
+            ),
+            (
+                PathBuf::from("services/api-rs/src/lib.rs"),
+                "pub fn health() -> &'static str { \"ok\" }\n".to_string(),
+            ),
+        ],
+        None,
+    );
+
+    let ng_proj = report
+        .projects
+        .iter()
+        .find(|p| p.name == "ng-portal")
+        .expect("ng-portal project in report");
+    for cap in [
+        Capability::Angular,
+        Capability::NgRx,
+        Capability::AngularMaterial,
+        Capability::TypeScript,
+    ] {
+        assert!(
+            ng_proj.capabilities.contains(&cap),
+            "Expected ng-portal to have {cap:?}, got: {:?}",
+            ng_proj.capabilities
+        );
+    }
+
+    let rs_proj = report
+        .projects
+        .iter()
+        .find(|p| p.name == "api-rs")
+        .expect("api-rs project in report");
+    for cap in [
+        Capability::Rust,
+        Capability::Reqwest,
+        Capability::Diesel,
+        Capability::SeaOrm,
+        Capability::Rusqlite,
+        Capability::Postgres,
+        Capability::Futures,
+        Capability::TowerHttp,
+        Capability::ActixCors,
+        Capability::Cookie,
+        Capability::Jsonwebtoken,
+    ] {
+        assert!(
+            rs_proj.capabilities.contains(&cap),
+            "Expected api-rs to have {cap:?}, got: {:?}",
+            rs_proj.capabilities
+        );
+    }
+}
+
+#[test]
+fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_explain() {
+    let cfg = DotoreConfig::default();
+    let catalog = build_rule_catalog(&cfg, &RulesListOptions::default());
+
+    let expected_mappings: &[(RuleId, &str, &[&str])] = &[
+        // #52 Angular AST rules (30)
+        (
+            RuleId::AngularNoUncalledSignals,
+            "angular-no-uncalled-signals",
+            &["@angular-eslint/no-uncalled-signals", "angular/no-uncalled-signals"],
+        ),
+        (
+            RuleId::AngularPreferSignalModel,
+            "angular-prefer-signal-model",
+            &["@angular-eslint/prefer-signal-model", "angular/prefer-signal-model"],
+        ),
+        (
+            RuleId::AngularPreferSignals,
+            "angular-prefer-signals",
+            &["@angular-eslint/prefer-signals", "angular/prefer-signals"],
+        ),
+        (
+            RuleId::AngularNoConflictingLifecycle,
+            "angular-no-conflicting-lifecycle",
+            &["@angular-eslint/no-conflicting-lifecycle", "angular/no-conflicting-lifecycle"],
+        ),
+        (
+            RuleId::AngularContextualLifecycle,
+            "angular-contextual-lifecycle",
+            &["@angular-eslint/contextual-lifecycle", "angular/contextual-lifecycle"],
+        ),
+        (
+            RuleId::AngularContextualDecorator,
+            "angular-contextual-decorator",
+            &["@angular-eslint/contextual-decorator", "angular/contextual-decorator"],
+        ),
+        (
+            RuleId::AngularNoAsyncLifecycleMethod,
+            "angular-no-async-lifecycle-method",
+            &["@angular-eslint/no-async-lifecycle-method", "angular/no-async-lifecycle-method"],
+        ),
+        (
+            RuleId::AngularNoLifecycleCall,
+            "angular-no-lifecycle-call",
+            &["@angular-eslint/no-lifecycle-call", "angular/no-lifecycle-call"],
+        ),
+        (
+            RuleId::AngularRequireLifecycleOnPrototype,
+            "angular-require-lifecycle-on-prototype",
+            &[
+                "@angular-eslint/require-lifecycle-on-prototype",
+                "angular/require-lifecycle-on-prototype",
+            ],
+        ),
+        (
+            RuleId::AngularNoEmptyLifecycleMethod,
+            "angular-no-empty-lifecycle-method",
+            &["@angular-eslint/no-empty-lifecycle-method", "angular/no-empty-lifecycle-method"],
+        ),
+        (
+            RuleId::AngularUseLifecycleInterface,
+            "angular-use-lifecycle-interface",
+            &["@angular-eslint/use-lifecycle-interface", "angular/use-lifecycle-interface"],
+        ),
+        (
+            RuleId::AngularUsePipeTransformInterface,
+            "angular-use-pipe-transform-interface",
+            &[
+                "@angular-eslint/use-pipe-transform-interface",
+                "angular/use-pipe-transform-interface",
+            ],
+        ),
+        (
+            RuleId::AngularNoPipeImpure,
+            "angular-no-pipe-impure",
+            &["@angular-eslint/no-pipe-impure", "angular/no-pipe-impure"],
+        ),
+        (
+            RuleId::AngularNoOutputNative,
+            "angular-no-output-native",
+            &["@angular-eslint/no-output-native", "angular/no-output-native"],
+        ),
+        (
+            RuleId::AngularNoOutputOnPrefix,
+            "angular-no-output-on-prefix",
+            &["@angular-eslint/no-output-on-prefix", "angular/no-output-on-prefix"],
+        ),
+        (
+            RuleId::AngularRelativeUrlPrefix,
+            "angular-relative-url-prefix",
+            &["@angular-eslint/relative-url-prefix", "angular/relative-url-prefix"],
+        ),
+        (
+            RuleId::AngularPreferStandalone,
+            "angular-prefer-standalone",
+            &["@angular-eslint/prefer-standalone", "angular/prefer-standalone"],
+        ),
+        (
+            RuleId::AngularPreferInject,
+            "angular-prefer-inject",
+            &["@angular-eslint/prefer-inject", "angular/prefer-inject"],
+        ),
+        (
+            RuleId::AngularUseInjectableProvidedIn,
+            "angular-use-injectable-provided-in",
+            &[
+                "@angular-eslint/use-injectable-provided-in",
+                "angular/use-injectable-provided-in",
+            ],
+        ),
+        (
+            RuleId::AngularPreferHostMetadataProperty,
+            "angular-prefer-host-metadata-property",
+            &[
+                "@angular-eslint/prefer-host-metadata-property",
+                "angular/prefer-host-metadata-property",
+            ],
+        ),
+        (
+            RuleId::AngularNoDuplicatesInMetadataArrays,
+            "angular-no-duplicates-in-metadata-arrays",
+            &[
+                "@angular-eslint/no-duplicates-in-metadata-arrays",
+                "angular/no-duplicates-in-metadata-arrays",
+            ],
+        ),
+        (
+            RuleId::AngularNoForwardRef,
+            "angular-no-forward-ref",
+            &["@angular-eslint/no-forward-ref", "angular/no-forward-ref"],
+        ),
+        (
+            RuleId::AngularNoInputsMetadataProperty,
+            "angular-no-inputs-metadata-property",
+            &[
+                "@angular-eslint/no-inputs-metadata-property",
+                "angular/no-inputs-metadata-property",
+            ],
+        ),
+        (
+            RuleId::AngularNoOutputsMetadataProperty,
+            "angular-no-outputs-metadata-property",
+            &[
+                "@angular-eslint/no-outputs-metadata-property",
+                "angular/no-outputs-metadata-property",
+            ],
+        ),
+        (
+            RuleId::AngularNoQueriesMetadataProperty,
+            "angular-no-queries-metadata-property",
+            &[
+                "@angular-eslint/no-queries-metadata-property",
+                "angular/no-queries-metadata-property",
+            ],
+        ),
+        (
+            RuleId::AngularPreferOutputReadonly,
+            "angular-prefer-output-readonly",
+            &["@angular-eslint/prefer-output-readonly", "angular/prefer-output-readonly"],
+        ),
+        (
+            RuleId::AngularPreferOutputEmitterRef,
+            "angular-prefer-output-emitter-ref",
+            &[
+                "@angular-eslint/prefer-output-emitter-ref",
+                "angular/prefer-output-emitter-ref",
+            ],
+        ),
+        (
+            RuleId::AngularUseComponentViewEncapsulation,
+            "angular-use-component-view-encapsulation",
+            &[
+                "@angular-eslint/use-component-view-encapsulation",
+                "angular/use-component-view-encapsulation",
+            ],
+        ),
+        (
+            RuleId::AngularNoAttributeDecorator,
+            "angular-no-attribute-decorator",
+            &["@angular-eslint/no-attribute-decorator", "angular/no-attribute-decorator"],
+        ),
+        (
+            RuleId::AngularComponentMaxInlineDeclarations,
+            "angular-component-max-inline-declarations",
+            &[
+                "@angular-eslint/component-max-inline-declarations",
+                "angular/component-max-inline-declarations",
+            ],
+        ),
+        // #53 Angular Template rules (8) + NgRx/Material rules (7)
+        (
+            RuleId::AngularTemplateNoAny,
+            "angular-template-no-any",
+            &["@angular-eslint/template/no-any", "angular-template/no-any"],
+        ),
+        (
+            RuleId::AngularTemplateAltText,
+            "angular-template-alt-text",
+            &["@angular-eslint/template/alt-text", "angular-template/alt-text"],
+        ),
+        (
+            RuleId::AngularTemplateClickEventsHaveKeyEvents,
+            "angular-template-click-events-have-key-events",
+            &[
+                "@angular-eslint/template/click-events-have-key-events",
+                "angular-template/click-events-have-key-events",
+            ],
+        ),
+        (
+            RuleId::AngularTemplateMouseEventsHaveKeyEvents,
+            "angular-template-mouse-events-have-key-events",
+            &[
+                "@angular-eslint/template/mouse-events-have-key-events",
+                "angular-template/mouse-events-have-key-events",
+            ],
+        ),
+        (
+            RuleId::AngularTemplateElementsHaveContent,
+            "angular-template-elements-have-content",
+            &[
+                "@angular-eslint/template/elements-have-content",
+                "angular-template/elements-have-content",
+            ],
+        ),
+        (
+            RuleId::AngularTemplateInteractiveSupportsFocus,
+            "angular-template-interactive-supports-focus",
+            &[
+                "@angular-eslint/template/interactive-supports-focus",
+                "angular-template/interactive-supports-focus",
+            ],
+        ),
+        (
+            RuleId::AngularTemplateTableScope,
+            "angular-template-table-scope",
+            &["@angular-eslint/template/table-scope", "angular-template/table-scope"],
+        ),
+        (
+            RuleId::AngularTemplateValidAria,
+            "angular-template-valid-aria",
+            &["@angular-eslint/template/valid-aria", "angular-template/valid-aria"],
+        ),
+        (
+            RuleId::NgrxNoMultipleActionsInEffects,
+            "ngrx-no-multiple-actions-in-effects",
+            &["@ngrx/no-multiple-actions-in-effects"],
+        ),
+        (
+            RuleId::NgrxNoEffectDecoratorAndCreator,
+            "ngrx-no-effect-decorator-and-creator",
+            &["@ngrx/no-effect-decorator-and-creator", "@ngrx/no-effect-decorator"],
+        ),
+        (
+            RuleId::NgrxNoCyclicActionCreators,
+            "ngrx-no-cyclic-action-creators",
+            &["@ngrx/no-cyclic-action-creators"],
+        ),
+        (
+            RuleId::NgrxNoTypedGlobalStore,
+            "ngrx-no-typed-global-store",
+            &["@ngrx/no-typed-global-store"],
+        ),
+        (
+            RuleId::NgrxOnFunctionExplicitReturnType,
+            "ngrx-on-function-explicit-return-type",
+            &["@ngrx/on-function-explicit-return-type"],
+        ),
+        (
+            RuleId::NgrxSelectStyle,
+            "ngrx-select-style",
+            &["@ngrx/select-style"],
+        ),
+        (
+            RuleId::AngularMaterialNoConflictingMixins,
+            "angular-material-no-conflicting-mixins",
+            &["@angular/material/no-conflicting-mixins"],
+        ),
+        // #54 Python Zen & Wildcard rules (7)
+        (
+            RuleId::PyZenComplexFunction,
+            "py-zen-complex-function",
+            &["zen/complex-function", "radon/CC", "radon/CC18", "C901"],
+        ),
+        (
+            RuleId::PyZenDeepNesting,
+            "py-zen-deep-nesting",
+            &["zen/deep-nesting"],
+        ),
+        (
+            RuleId::PyZenLongFunction,
+            "py-zen-long-function",
+            &["zen/long-function", "PLR0915"],
+        ),
+        (
+            RuleId::PyZenTooManyParams,
+            "py-zen-too-many-params",
+            &["zen/too-many-params", "PLR0913"],
+        ),
+        (
+            RuleId::PyZenLargeClass,
+            "py-zen-large-class",
+            &["zen/large-class", "PLR0904"],
+        ),
+        (
+            RuleId::PyZenNoDenseSemicolonStatements,
+            "py-zen-no-dense-semicolon-statements",
+            &["zen/dense-code", "E702"],
+        ),
+        (
+            RuleId::PyNoWildcardImport,
+            "py-no-wildcard-import",
+            &["imports/star", "F403"],
+        ),
+        // #55 Python Bandit & Structure rules (7)
+        (
+            RuleId::PySecurityHttpRequestRequiresTimeout,
+            "py-security-http-request-requires-timeout",
+            &["bandit/B113", "B113", "S113"],
+        ),
+        (
+            RuleId::PySecurityNoDisabledTlsVerify,
+            "py-security-no-disabled-tls-verify",
+            &["bandit/B501", "B501", "S501"],
+        ),
+        (
+            RuleId::PySecurityNoWeakCryptoOrRandom,
+            "py-security-no-weak-crypto-or-random",
+            &["bandit/B303", "bandit/B311", "bandit/B324", "B303", "B311", "B324"],
+        ),
+        (
+            RuleId::PySecurityNoXxeOrUnsafeArchive,
+            "py-security-no-xxe-or-unsafe-archive",
+            &["bandit/B202", "bandit/B314", "bandit/B320", "B202", "B314", "B320"],
+        ),
+        (
+            RuleId::PySecurityNoHardcodedSecretOrTmp,
+            "py-security-no-hardcoded-secret-or-tmp",
+            &["bandit/B105", "bandit/B106", "bandit/B107", "bandit/B108", "B105", "B108"],
+        ),
+        (
+            RuleId::PyStructureMissingPyTyped,
+            "py-structure-missing-py-typed",
+            &["structure/no-py-typed", "no-py-typed"],
+        ),
+        (
+            RuleId::PyStructureLowTypeHintCoverage,
+            "py-structure-low-type-hint-coverage",
+            &["structure/type-hints", "type-hints"],
+        ),
+        // #56 Rust SourceKernel rules (9)
+        (
+            RuleId::RsTokioNoBlockInPlaceOnCurrentThread,
+            "rs-tokio-no-block-in-place-on-current-thread",
+            &[
+                "rust_doctor::source::block_in_place_on_current_thread",
+                "block_in_place_on_current_thread",
+            ],
+        ),
+        (
+            RuleId::RsAsyncNoBlockOnInAsync,
+            "rs-async-no-block-on-in-async",
+            &["rust_doctor::source::block_on_in_async", "block_on_in_async"],
+        ),
+        (
+            RuleId::RsSecurityNoDisabledTlsVerification,
+            "rs-security-no-disabled-tls-verification",
+            &[
+                "rust_doctor::source::disabled_tls_verification",
+                "disabled_tls_verification",
+            ],
+        ),
+        (
+            RuleId::RsSecurityNoDynamicShellCommand,
+            "rs-security-no-dynamic-shell-command",
+            &["rust_doctor::source::dynamic_shell_command", "dynamic_shell_command"],
+        ),
+        (
+            RuleId::RsHttpNoUncheckedResponseStatus,
+            "rs-http-no-unchecked-response-status",
+            &["rust_doctor::source::unchecked_http_status", "unchecked_http_status"],
+        ),
+        (
+            RuleId::RsSecurityNoSecretEnvFallback,
+            "rs-security-no-secret-env-fallback",
+            &["rust_doctor::source::secret_env_fallback", "secret_env_fallback"],
+        ),
+        (
+            RuleId::RsSecurityNoPermissiveCors,
+            "rs-security-no-permissive-cors",
+            &["rust_doctor::source::permissive_cors", "permissive_cors"],
+        ),
+        (
+            RuleId::RsSecurityNoInsecureAuthCookie,
+            "rs-security-no-insecure-auth-cookie",
+            &["rust_doctor::source::insecure_auth_cookie", "insecure_auth_cookie"],
+        ),
+        (
+            RuleId::RsSecurityNoDisabledJwtValidation,
+            "rs-security-no-disabled-jwt-validation",
+            &[
+                "rust_doctor::source::disabled_jwt_validation",
+                "disabled_jwt_validation",
+            ],
+        ),
+        // #57 Rust Cargo, Structure & Clippy rules (26)
+        (
+            RuleId::RsCargoDuplicateMajorVersions,
+            "rs-cargo-duplicate-major-versions",
+            &[
+                "rust_doctor::cargo::duplicate_major_versions",
+                "duplicate_major_versions",
+            ],
+        ),
+        (
+            RuleId::RsCargoMissingLockfile,
+            "rs-cargo-missing-lockfile",
+            &["rust_doctor::cargo::missing_lockfile", "missing_lockfile"],
+        ),
+        (
+            RuleId::RsCargoPathDepOutsideWorkspace,
+            "rs-cargo-path-dep-outside-workspace",
+            &[
+                "rust_doctor::cargo::path_dependency_outside_workspace",
+                "path_dependency_outside_workspace",
+            ],
+        ),
+        (
+            RuleId::RsCargoPermissiveLintTable,
+            "rs-cargo-permissive-lint-table",
+            &["rust_doctor::cargo::permissive_lint_table", "permissive_lint_table"],
+        ),
+        (
+            RuleId::RsCargoPermissiveRustflags,
+            "rs-cargo-permissive-rustflags",
+            &["rust_doctor::cargo::permissive_rustflags", "permissive_rustflags"],
+        ),
+        (
+            RuleId::RsCargoReleaseDebugSymbols,
+            "rs-cargo-release-debug-symbols",
+            &["rust_doctor::cargo::release_debug_symbols", "release_debug_symbols"],
+        ),
+        (
+            RuleId::RsCargoUncheckedReleaseOverflow,
+            "rs-cargo-unchecked-release-overflow",
+            &[
+                "rust_doctor::cargo::unchecked_release_overflow",
+                "unchecked_release_overflow",
+            ],
+        ),
+        (
+            RuleId::RsCargoUnusedDependency,
+            "rs-cargo-unused-dependency",
+            &["rust_doctor::cargo::unused_dependency", "unused_dependency"],
+        ),
+        (
+            RuleId::RsCargoTestOnlyDependency,
+            "rs-cargo-test-only-dependency",
+            &["rust_doctor::cargo::test_only_dependency", "test_only_dependency"],
+        ),
+        (
+            RuleId::RsCargoUnboundedWildcardDependency,
+            "rs-cargo-unbounded-wildcard-dependency",
+            &[
+                "rust_doctor::cargo::unbounded_registry_dependency",
+                "unbounded_registry_dependency",
+            ],
+        ),
+        (
+            RuleId::RsCargoUnpinnedGitDependency,
+            "rs-cargo-unpinned-git-dependency",
+            &["rust_doctor::cargo::unpinned_git_dependency", "unpinned_git_dependency"],
+        ),
+        (
+            RuleId::RsStructureCrateLevelAllow,
+            "rs-structure-crate-level-allow",
+            &["rust_doctor::structure::crate_level_allow", "crate_level_allow"],
+        ),
+        (
+            RuleId::RsStructureUnreasonedAllow,
+            "rs-structure-unreasoned-allow",
+            &[
+                "rust_doctor::structure::unreasoned_allow_attribute",
+                "unreasoned_allow_attribute",
+                "clippy::allow_attributes_without_reason",
+            ],
+        ),
+        (
+            RuleId::RsStructureStackedAllow,
+            "rs-structure-stacked-allow",
+            &[
+                "rust_doctor::structure::stacked_allow_attribute",
+                "stacked_allow_attribute",
+            ],
+        ),
+        (
+            RuleId::RsStructureComplexFunction,
+            "rs-structure-complex-function",
+            &[
+                "rust_doctor::structure::complex_function",
+                "complex_function",
+                "clippy::cognitive_complexity",
+            ],
+        ),
+        (
+            RuleId::RsStructureOversizedUnit,
+            "rs-structure-oversized-unit",
+            &[
+                "rust_doctor::structure::oversized_unit",
+                "oversized_unit",
+                "clippy::too_many_lines",
+            ],
+        ),
+        (
+            RuleId::RsStructureOrphanModuleFile,
+            "rs-structure-orphan-module-file",
+            &["rust_doctor::structure::orphan_module_file", "orphan_module_file"],
+        ),
+        (
+            RuleId::RsStructureUnreferencedFeature,
+            "rs-structure-unreferenced-feature",
+            &[
+                "rust_doctor::structure::unreferenced_feature",
+                "unreferenced_feature",
+            ],
+        ),
+        (
+            RuleId::RsStructureNearDuplicateFunction,
+            "rs-structure-near-duplicate-function",
+            &[
+                "rust_doctor::structure::near_duplicate_function_body",
+                "rust_doctor::structure::duplicate_function_body",
+            ],
+        ),
+        (
+            RuleId::RsNoAwaitHoldingRefcell,
+            "rs-no-await-holding-refcell",
+            &["clippy::await_holding_refcell_ref", "await_holding_refcell_ref"],
+        ),
+        (
+            RuleId::RsNoPanicOrTodoInProduction,
+            "rs-no-panic-or-todo-in-production",
+            &[
+                "clippy::panic",
+                "clippy::todo",
+                "clippy::unimplemented",
+                "clippy::exit",
+                "clippy::panic_in_result_fn",
+            ],
+        ),
+        (
+            RuleId::RsNoDbgOrPrintInLibrary,
+            "rs-no-dbg-or-print-in-library",
+            &["clippy::dbg_macro", "clippy::print_stdout", "clippy::print_stderr"],
+        ),
+        (
+            RuleId::RsSecurityNoWorldWritablePermissions,
+            "rs-security-no-world-writable-permissions",
+            &["clippy::permissions_set_readonly_false", "permissions_set_readonly_false"],
+        ),
+        (
+            RuleId::RsNoZombieChildProcess,
+            "rs-no-zombie-child-process",
+            &["clippy::zombie_processes", "zombie_processes"],
+        ),
+        (
+            RuleId::RsNoTransmuteWithoutTypeAnnotations,
+            "rs-no-transmute-without-type-annotations",
+            &[
+                "clippy::missing_transmute_annotations",
+                "clippy::crosspointer_transmute",
+            ],
+        ),
+        (
+            RuleId::RsRequireSafetyDocOnPubUnsafeFn,
+            "rs-require-safety-doc-on-pub-unsafe-fn",
+            &["clippy::missing_safety_doc", "missing_safety_doc"],
+        ),
+        // #58 Trust-Boundary Security rules (6)
+        (
+            RuleId::CiWorkflowSecurityRisk,
+            "ci-workflow-security-risk",
+            &["rust_doctor::repo::secret_in_build_step", "secret_in_build_step"],
+        ),
+        (
+            RuleId::ElectronWebviewBridgeRisk,
+            "electron-webview-bridge-risk",
+            &[],
+        ),
+        (
+            RuleId::UntrustedHostHeaderOrigin,
+            "untrusted-host-header-origin",
+            &[],
+        ),
+        (
+            RuleId::PrivateResponsePublicCache,
+            "private-response-public-cache",
+            &[],
+        ),
+        (
+            RuleId::LlmPromptRoleAndToolSinkRisk,
+            "llm-prompt-role-and-tool-sink-risk",
+            &[],
+        ),
+        (
+            RuleId::SupabaseServiceRoleUnscopedQuery,
+            "supabase-service-role-unscoped-query",
+            &[],
+        ),
+    ];
+
+    assert_eq!(expected_mappings.len(), 100);
+
+    for &(rule_id, canonical_id, aliases) in expected_mappings {
+        assert_eq!(rule_id.as_str(), canonical_id);
+        assert_eq!(RuleId::parse(canonical_id), Some(rule_id));
+        assert_eq!(
+            RuleId::parse(&format!("dotore/{canonical_id}")),
+            Some(rule_id)
+        );
+        assert!(
+            catalog.iter().any(|entry| entry.id == canonical_id),
+            "Expected `{canonical_id}` in `dotore rules list` catalog"
+        );
+        let explained_canonical = explain_rule(canonical_id, &cfg)
+            .unwrap_or_else(|| panic!("explain_rule({canonical_id}) returned None"));
+        assert_eq!(explained_canonical.id, canonical_id);
+
+        for &alias in aliases {
+            assert_eq!(
+                RuleId::parse(alias),
+                Some(rule_id),
+                "Expected alias `{alias}` to resolve to `{canonical_id}`"
+            );
+            let explained_alias = explain_rule(alias, &cfg)
+                .unwrap_or_else(|| panic!("explain_rule({alias}) returned None"));
+            assert_eq!(explained_alias.id, canonical_id);
+        }
+    }
+}
+
+#[test]
+fn mask_credentials_redacts_live_secrets_across_frames_capsules_reports_and_handoffs() {
+    use std::collections::HashMap;
+
+    use dotore::{
+        ByteSpan, Diagnostic, ExtractedFile, SourceLoc, WorkspacePackage,
+        build_agent_handoff_prompt, build_report_from_planner_context, excerpt_from_span,
+        format_terminal_report_pretty, mask_credentials, render_code_frame, render_html_report,
+        render_rule_bundle_summary_text,
+    };
+
+    let aws_tail = "Q3VJ7RNYH2KXW4PZ";
+    let aws_key = format!("AKIA{aws_tail}");
+    let ghp_tail = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
+    let ghp_token = format!("ghp_{ghp_tail}");
+    let gh_pat_tail = "11AAbbCCddEEffGGhhIIjjKKllMMnnOOpp";
+    let gh_pat = format!("github_pat_{gh_pat_tail}");
+    let sk_tail = "proj_9876543210abcdefghijKLMNOP";
+    let sk_key = format!("sk-{sk_tail}");
+    let slack_tail = "1234567890-abcdefABCDEF";
+    let slack_token = format!("xoxb-{slack_tail}");
+    let pem_body = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7";
+    let pem_block = format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{pem_body}\n-----END RSA PRIVATE KEY-----"
+    );
+    let db_secret = "V3ryS3cr3tPr0dP4ss!";
+    let db_url = format!("postgres://app_user:{db_secret}@db.prod.internal:5432/orders");
+
+    // 1. Direct unit checks on `mask_credentials`
+    let combined = format!(
+        "aws={aws_key}\ngithub={ghp_token}\npat={gh_pat}\nopenai={sk_key}\nslack={slack_token}\ndb={db_url}\n{pem_block}"
+    );
+    let redacted = mask_credentials(&combined);
+    for leaked_fragment in [
+        aws_tail,
+        ghp_tail,
+        gh_pat_tail,
+        sk_tail,
+        slack_tail,
+        pem_body,
+        db_secret,
+    ] {
+        assert!(
+            !redacted.contains(leaked_fragment),
+            "Expected `{leaked_fragment}` to be redacted, got:\n{redacted}"
+        );
+    }
+    assert!(redacted.contains("AKIA<redacted>"));
+    assert!(redacted.contains("ghp_<redacted>"));
+    assert!(redacted.contains("gith<redacted>"));
+    assert!(redacted.contains("sk-p<redacted>"));
+    assert!(redacted.contains("xoxb<redacted>"));
+    assert!(redacted.contains("<redacted>@db.prod.internal:5432/orders"));
+
+    // 2. Non-secret text and placeholder DB URLs must remain untouched
+    let safe_source = concat!(
+        "const model = 'sk-learn';\n",
+        "const shortCode = 'AKIA123';\n",
+        "const localUrl = 'postgres://user:password@localhost:5432/dev';\n",
+        "const envUrl = 'postgresql://user:${DB_PASSWORD}@db.prod.internal:5432/prod';\n",
+        "const tplUrl = 'redis://default:<password>@cache.prod.internal:6379';\n",
+    );
+    assert_eq!(mask_credentials(safe_source), safe_source);
+
+    // 3. End-to-end redaction across code frames, FixCapsule excerpts, JSON/terminal/HTML reports, and handoff prompts
+    let file_path = PathBuf::from("src/config.ts");
+    let file_source = format!(
+        "export function initClient() {{\n  const key = \"{aws_key}\";\n  const token = \"{ghp_token}\";\n  const db = \"{db_url}\";\n  return {{ key, token, db }};\n}}\n"
+    );
+
+    let frame = render_code_frame(&file_source, 2);
+    assert!(!frame.contains(aws_tail), "render_code_frame leaked AWS key:\n{frame}");
+    assert!(!frame.contains(ghp_tail), "render_code_frame leaked GitHub PAT:\n{frame}");
+    assert!(!frame.contains(db_secret), "render_code_frame leaked DB password:\n{frame}");
+    assert!(frame.contains("AKIA<redacted>"));
+
+    let span = ByteSpan {
+        start: 0,
+        end: file_source.len() as u32,
+    };
+    let excerpt = excerpt_from_span(&file_path, &file_source, span);
+    assert!(!excerpt.source.contains(aws_tail));
+    assert!(!excerpt.source.contains(ghp_tail));
+    assert!(!excerpt.source.contains(db_secret));
+
+    let diag = Diagnostic::for_rule(
+        RuleId::NoSecretsInClientCode,
+        &file_path,
+        SourceLoc { line: 2, column: 15 },
+        span,
+        format!("Hardcoded credential `{aws_key}` and `{sk_key}` exposed in client bundle."),
+    )
+    .with_subject(Some("initClient".to_string()));
+
+    let extracted = vec![ExtractedFile::new(
+        file_path.clone(),
+        file_source.clone(),
+        dotore::LanguageId::TypeScript,
+    )];
+    let mut sources = HashMap::new();
+    sources.insert(file_path.clone(), file_source);
+    let packages = vec![WorkspacePackage {
+        name: "web".to_string(),
+        root_dir: PathBuf::from("."),
+        capability_gate: CapabilityGate::default_react(),
+        config: DotoreConfig::default(),
+    }];
+    let report = build_report_from_planner_context(
+        extracted.as_slice(),
+        &[(file_path, 1)],
+        0,
+        vec![diag],
+        &sources,
+        &packages,
+    );
+
+    assert!(!report.diagnostics[0].message.contains(aws_tail));
+    assert!(!report.diagnostics[0].message.contains(sk_tail));
+    assert!(!report.root_cause_groups[0].message.contains(aws_tail));
+    assert!(!report.fix_capsules[0].subject_excerpt.source.contains(aws_tail));
+    assert!(!report.fix_capsules[0].subject_excerpt.source.contains(ghp_tail));
+    assert!(!report.fix_capsules[0].subject_excerpt.source.contains(db_secret));
+
+    let terminal_out = format_terminal_report_pretty(&report, false);
+    assert!(!terminal_out.contains(aws_tail));
+    assert!(!terminal_out.contains(sk_tail));
+
+    let html_out = render_html_report(&report);
+    assert!(!html_out.contains(aws_tail));
+    assert!(!html_out.contains(ghp_tail));
+    assert!(!html_out.contains(db_secret));
+
+    let handoff_out = build_agent_handoff_prompt(&report, None);
+    assert!(!handoff_out.contains(aws_tail));
+    assert!(!handoff_out.contains(ghp_tail));
+    assert!(!handoff_out.contains(db_secret));
+
+    let bundle_summary = render_rule_bundle_summary_text(RuleId::NoSecretsInClientCode, &report);
+    assert!(!bundle_summary.contains(aws_tail));
+    assert!(!bundle_summary.contains(sk_tail));
+}

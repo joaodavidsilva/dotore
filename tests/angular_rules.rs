@@ -137,7 +137,7 @@ fn all_seven_angular_rules_registered_with_metadata_and_recipes() {
             ..RulesListOptions::default()
         },
     );
-    assert_eq!(ng_catalog.len(), 7);
+    assert_eq!(ng_catalog.len(), 45);
 
     for (rule_id, canonical_id, category, tier) in expected_rules {
         assert_eq!(RuleId::parse(canonical_id), Some(rule_id));
