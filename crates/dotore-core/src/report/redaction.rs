@@ -206,8 +206,10 @@ fn pattern_ranges<'a>(
     std::iter::from_fn(move || {
         while let Some(offset) = line.get(from..)?.find(pattern.prefix) {
             let start = from + offset;
-            let boundary = start == 0
-                || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let boundary = start
+                .checked_sub(1)
+                .and_then(|prev| bytes.get(prev))
+                .is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_');
             let tail_start = start + pattern.prefix.len();
             let tail_length = bytes
                 .get(tail_start..)

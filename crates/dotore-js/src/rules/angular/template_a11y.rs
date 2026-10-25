@@ -179,8 +179,8 @@ fn scan_template_no_any(
     let bytes = template_source.as_bytes();
     let mut i = 0;
     while i + 5 <= bytes.len() {
-        if template_source[i..].starts_with("<!--") {
-            if let Some(end_comment) = template_source[i + 4..].find("-->") {
+        if template_source.get(i..).is_some_and(|s| s.starts_with("<!--")) {
+            if let Some(end_comment) = template_source.get(i + 4..).and_then(|s| s.find("-->")) {
                 i += 4 + end_comment + 3;
                 continue;
             }
@@ -238,8 +238,8 @@ fn scan_template_elements(
             i += 1;
             continue;
         }
-        if template_source[i..].starts_with("<!--") {
-            if let Some(end_c) = template_source[i + 4..].find("-->") {
+        if template_source.get(i..).is_some_and(|s| s.starts_with("<!--")) {
+            if let Some(end_c) = template_source.get(i + 4..).and_then(|s| s.find("-->")) {
                 i += 4 + end_c + 3;
                 continue;
             }
@@ -283,7 +283,7 @@ fn parse_opening_element(src: &str, open_lt: usize) -> Option<ParsedTemplateElem
     if cursor == open_lt + 1 {
         return None;
     }
-    let tag_lower = src[open_lt + 1..cursor].to_ascii_lowercase();
+    let tag_lower = src.get(open_lt + 1..cursor)?.to_ascii_lowercase();
     let mut attrs = Vec::new();
 
     while cursor < bytes.len() {
@@ -678,7 +678,9 @@ fn check_element_table_scope(
         if el.tag_lower != "th" {
             let mut remove_start = attr.start;
             let bytes = template_source.as_bytes();
-            while remove_start > el.open_start && bytes[remove_start - 1].is_ascii_whitespace() {
+            while remove_start > el.open_start
+                && bytes.get(remove_start - 1).is_some_and(u8::is_ascii_whitespace)
+            {
                 remove_start -= 1;
             }
             let patch = AutofixPatch::delete(
@@ -820,7 +822,7 @@ fn element_has_non_empty_inner_content(src: &str, el: &ParsedTemplateElement<'_>
         .to_ascii_lowercase()
         .find(&close_needle)
         .unwrap_or(after_open.len());
-    let inner = &after_open[..close_rel];
+    let inner = after_open.get(..close_rel).unwrap_or(after_open);
     let stripped = strip_html_comments(inner);
     !stripped.trim().is_empty()
 }
@@ -829,14 +831,14 @@ fn strip_html_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
-        if text[i..].starts_with("<!--") {
-            if let Some(end_c) = text[i + 4..].find("-->") {
+        if text.get(i..).is_some_and(|s| s.starts_with("<!--")) {
+            if let Some(end_c) = text.get(i + 4..).and_then(|s| s.find("-->")) {
                 i += 4 + end_c + 3;
                 continue;
             }
             break;
         }
-        if let Some(ch) = text[i..].chars().next() {
+        if let Some(ch) = text.get(i..).and_then(|s| s.chars().next()) {
             out.push(ch);
             i += ch.len_utf8();
         } else {

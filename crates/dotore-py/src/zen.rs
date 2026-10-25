@@ -287,8 +287,12 @@ impl<'a> ZenRuleVisitor<'a> {
             }
             if end_idx > idx {
                 let run = &suite[idx..=end_idx];
-                let first_span = text_range_to_byte_span(run[0].range());
-                let last_span = text_range_to_byte_span(run[run.len() - 1].range());
+                let Some((first_stmt, last_stmt)) = run.first().zip(run.last()) else {
+                    idx = end_idx + 1;
+                    continue;
+                };
+                let first_span = text_range_to_byte_span(first_stmt.range());
+                let last_span = text_range_to_byte_span(last_stmt.range());
                 let full_span = ByteSpan {
                     start: first_span.start,
                     end: last_span.end,

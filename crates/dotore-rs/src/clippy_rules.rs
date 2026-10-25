@@ -21,8 +21,8 @@ use syn::{
 
 use crate::{
     matchers::{
-        RsCandidateFinding, RsScopeTracker, extract_expr_ident, extract_pat_ident,
-        extract_receiver_label, is_pub, loc_at, path_to_string, span_to_bytes,
+        RsCandidateFinding, RsScopeTracker, extract_dropped_guard_ident, extract_expr_ident,
+        extract_pat_ident, extract_receiver_label, is_pub, loc_at, path_to_string, span_to_bytes,
     },
     source_kernel::{
         FnBodyResolver, KernelContext, RsAliasMap, literal_bool, strip_parens, strip_wrappers,
@@ -188,23 +188,12 @@ impl ClippyAstVisitor<'_> {
     }
 
     fn check_drop_refcell_guard(&mut self, node: &ExprCall) {
-        if node.args.len() != 1 {
-            return;
-        }
-        let Expr::Path(expr_path) = strip_parens(&node.func) else {
+        let Some(ident) = extract_dropped_guard_ident(node) else {
             return;
         };
-        let path_str = path_to_string(&expr_path.path);
-        if matches!(
-            path_str.as_str(),
-            "drop" | "std::mem::drop" | "core::mem::drop" | "mem::drop"
-        ) && let Some(first_arg) = node.args.first()
-            && let Some(ident) = extract_expr_ident(first_arg)
-        {
-            for guard in &mut self.active_refcell_guards {
-                if guard.guard_name == ident {
-                    guard.dropped = true;
-                }
+        for guard in &mut self.active_refcell_guards {
+            if guard.guard_name == ident {
+                guard.dropped = true;
             }
         }
     }

@@ -168,7 +168,9 @@ fn is_sensitive_wildcard_postmessage_in_line(line: &str, src: &str) -> bool {
     let Some(pos) = call_pos else {
         return false;
     };
-    let after = &line[pos + "postMessage(".len()..];
+    let Some(after) = line.get(pos + "postMessage(".len()..) else {
+        return false;
+    };
     let Some((inside, _)) = split_balanced_parens(after) else {
         return false;
     };

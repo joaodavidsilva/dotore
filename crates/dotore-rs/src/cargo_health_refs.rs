@@ -382,14 +382,14 @@ fn contains_crate_identifier(haystack: &str, needle: &str, excluded: &[ByteSpan]
         b.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
     };
     let mut from = 0;
-    while let Some(pos) = haystack[from..].find(needle) {
+    while let Some(pos) = haystack.get(from..).and_then(|s| s.find(needle)) {
         let start = from + pos;
         let end = start + needle.len();
         let in_excluded = u32::try_from(start).is_ok_and(|off| {
             excluded.iter().any(|sp| sp.start <= off && off < sp.end)
         });
         if !in_excluded
-            && is_boundary(start.checked_sub(1).map(|i| bytes[i]))
+            && is_boundary(start.checked_sub(1).and_then(|i| bytes.get(i).copied()))
             && is_boundary(bytes.get(end).copied())
         {
             return true;

@@ -15,7 +15,7 @@ use syn::{
 
 use crate::{
     matchers::{
-        RsCandidateFinding, RsScopeTracker, extract_expr_ident, extract_pat_ident,
+        RsCandidateFinding, RsScopeTracker, extract_dropped_guard_ident, extract_pat_ident,
         extract_receiver_label, loc_at, path_to_string, slice_source, span_to_bytes,
     },
     source_kernel::{FnBodyResolver, KernelContext, RsAliasMap, strip_parens},
@@ -462,23 +462,12 @@ impl TokioAsyncVisitor<'_> {
     }
 
     fn check_drop_call(&mut self, node: &ExprCall) {
-        if node.args.len() != 1 {
-            return;
-        }
-        let Expr::Path(expr_path) = node.func.as_ref() else {
+        let Some(ident) = extract_dropped_guard_ident(node) else {
             return;
         };
-        let path_str = path_to_string(&expr_path.path);
-        if matches!(
-            path_str.as_str(),
-            "drop" | "std::mem::drop" | "core::mem::drop" | "mem::drop"
-        ) && let Some(first_arg) = node.args.first()
-            && let Some(ident) = extract_expr_ident(first_arg)
-        {
-            for guard in &mut self.active_sync_guards {
-                if guard.guard_name == ident {
-                    guard.dropped = true;
-                }
+        for guard in &mut self.active_sync_guards {
+            if guard.guard_name == ident {
+                guard.dropped = true;
             }
         }
     }

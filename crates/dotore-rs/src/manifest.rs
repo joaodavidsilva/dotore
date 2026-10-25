@@ -30,10 +30,14 @@ pub fn infer_cargo_toml_capability_gate(
                 || s.ends_with(".cargo/config")
         });
     let disk_cargo = package_dir.join("Cargo.toml");
+    let matches_disk_cargo = manifest_sources.iter().any(|(p, src)| {
+        p.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
+            && fs::read_to_string(&disk_cargo).ok().as_deref() == Some(*src)
+    });
     let is_virtual_only = manifest_sources
         .iter()
         .any(|(p, _)| p == Path::new("__virtual__"))
-        || (has_any_rust_manifest && !package_dir.is_absolute());
+        || (has_any_rust_manifest && !package_dir.is_absolute() && !matches_disk_cargo);
     if !has_cargo_manifest
         && !is_virtual_only
         && let Ok(content) = fs::read_to_string(&disk_cargo)
@@ -41,21 +45,49 @@ pub fn infer_cargo_toml_capability_gate(
         loaded_from_disk.push((disk_cargo.clone(), content));
     }
 
+    let own_has_workspace = manifest_sources.iter().any(|(p, src)| {
+        p.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
+            && src.contains("[workspace]")
+    }) || loaded_from_disk
+        .iter()
+        .any(|(_, src)| src.contains("[workspace]"));
+
     let mut ancestor_cargos = Vec::new();
-    if !is_virtual_only && (!has_cargo_manifest || package_dir.is_absolute()) {
+    if !is_virtual_only
+        && !own_has_workspace
+        && (!has_cargo_manifest || package_dir.is_absolute() || matches_disk_cargo)
+    {
         let mut ancestor_opt = package_dir.parent();
-        while let Some(anc) = ancestor_opt {
-            if anc.as_os_str().is_empty() {
-                break;
-            }
+        let mut visited_dot = false;
+        while let Some(raw_anc) = ancestor_opt {
+            let anc = if raw_anc.as_os_str().is_empty() {
+                if visited_dot {
+                    break;
+                }
+                visited_dot = true;
+                Path::new(".")
+            } else {
+                if raw_anc == Path::new(".") {
+                    visited_dot = true;
+                }
+                raw_anc
+            };
             let anc_cargo = anc.join("Cargo.toml");
             if anc_cargo.is_file()
                 && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
                 && let Ok(content) = fs::read_to_string(&anc_cargo)
             {
+                let found_ws = content.contains("[workspace]");
                 ancestor_cargos.push((anc.to_path_buf(), anc_cargo, content));
+                if found_ws {
+                    break;
+                }
             }
-            ancestor_opt = anc.parent();
+            ancestor_opt = if visited_dot && raw_anc.as_os_str().is_empty() {
+                None
+            } else {
+                raw_anc.parent()
+            };
         }
     }
 
@@ -144,6 +176,10 @@ fn populate_disk_lockfile_and_cargo_config(
     gate.dependencies.insert(
         "__owns_workspace_manifests".to_string(),
         if owns_ws { "true" } else { "false" }.to_string(),
+    );
+    gate.dependencies.insert(
+        "__workspace_root".to_string(),
+        ws_root.to_string_lossy().to_string(),
     );
 
     if !gate.dependencies.contains_key("__manifest:Cargo.lock") {

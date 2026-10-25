@@ -21,8 +21,8 @@ use crate::{
     matchers::{RsCandidateFinding, RsScopeTracker, loc_at, path_to_string, span_to_bytes},
     source_kernel::{
         CHAIN_DEPTH, FnBodyResolver, IdentUsageKind, KernelContext, LocalBinding, RsAliasMap,
-        bare_identifier, literal_bool, literal_string, reads_secret_env_var,
-        secret_fallback_message, strip_wrappers,
+        bare_identifier, into_stripped_wrappers, literal_bool, literal_string,
+        reads_secret_env_var, secret_fallback_message, strip_wrappers,
     },
     tokio_async::{is_offloading_method_call, is_spawn_blocking_call},
 };
@@ -352,27 +352,17 @@ impl SourceKernelDetectorsVisitor<'_> {
 
     // 5a. `rs-security-no-permissive-cors` (constructor call)
     fn check_permissive_cors_call(&mut self, call: &ExprCall) {
-        if self.scope.in_test() {
-            return;
-        }
-        let ctx = self.ctx();
-        let Some(alias_req) = ctx.matches_any_path(
-            &call.func,
+        self.check_matched_path_call(
+            call,
             &[
                 &["tower_http", "cors", "CorsLayer", "very_permissive"],
                 &["actix_cors", "Cors", "permissive"],
             ],
-        ) else {
-            return;
-        };
-        let span = self.span_to_bytes(call.span());
-        self.push_finding(
             RuleId::RsSecurityNoPermissiveCors,
             "permissive_cors",
             "rsSecurityNoPermissiveCors",
             "The CORS policy accepts any origin, method and header, credentials included.",
-            span,
-            alias_req,
+            self.span_to_bytes(call.span()),
         );
     }
 
@@ -411,7 +401,7 @@ impl SourceKernelDetectorsVisitor<'_> {
                 let Some(resolved) = ctx.resolve_value(strip_wrappers(&expr)) else {
                     break;
                 };
-                let Expr::MethodCall(link) = strip_wrappers(&resolved) else {
+                let Expr::MethodCall(link) = into_stripped_wrappers(resolved) else {
                     break;
                 };
                 if link.method == "allow_origin"
@@ -422,7 +412,7 @@ impl SourceKernelDetectorsVisitor<'_> {
                     any_origin_alias_req = Some(req);
                     break;
                 }
-                expr = (*link.receiver).clone();
+                expr = *link.receiver;
             }
         }
 
@@ -507,28 +497,42 @@ impl SourceKernelDetectorsVisitor<'_> {
 
     // 7b. `rs-security-no-disabled-jwt-validation` (`jsonwebtoken::dangerous::insecure_decode`)
     fn check_disabled_jwt_call(&mut self, call: &ExprCall) {
-        if self.scope.in_test() {
-            return;
-        }
-        let ctx = self.ctx();
-        let Some(alias_req) = ctx.matches_any_path(
-            &call.func,
+        self.check_matched_path_call(
+            call,
             &[
                 &["jsonwebtoken", "dangerous", "insecure_decode"],
                 &["jsonwebtoken", "dangerous_insecure_decode"],
             ],
-        ) else {
-            return;
-        };
-        let span = self.span_to_bytes(call.func.span());
-        self.push_finding(
             RuleId::RsSecurityNoDisabledJwtValidation,
             "insecure_decode",
             "rsSecurityNoDisabledJwtValidation",
             "The JWT is decoded without checking its signature.",
-            span,
-            alias_req,
+            self.span_to_bytes(call.func.span()),
         );
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Shared path-matched ExprCall detector helper takes rule metadata and span"
+    )]
+    fn check_matched_path_call(
+        &mut self,
+        call: &ExprCall,
+        paths: &[&[&str]],
+        rule: RuleId,
+        target_name: &str,
+        group_key: &'static str,
+        message: &'static str,
+        span: ByteSpan,
+    ) {
+        if self.scope.in_test() {
+            return;
+        }
+        let ctx = self.ctx();
+        let Some(alias_req) = ctx.matches_any_path(&call.func, paths) else {
+            return;
+        };
+        self.push_finding(rule, target_name, group_key, message, span, alias_req);
     }
 }
 
@@ -725,10 +729,12 @@ fn resolve_shell_argv(
             clippy::wildcard_enum_match_arm,
             reason = "Walks method chain links back to the root Command::new(shell) constructor"
         )]
-        match strip_wrappers(&resolved) {
+        match into_stripped_wrappers(resolved) {
             Expr::MethodCall(mc) => {
-                current = (*mc.receiver).clone();
-                calls.push(mc.clone());
+                if matches!(mc.method.to_string().as_str(), "arg" | "args") {
+                    calls.push(extract_command_arg_elements(&mc)?);
+                }
+                current = *mc.receiver;
             }
             Expr::Call(cmd_call) => {
                 ctx.matches_call_path(&cmd_call.func, "std", &["process", "Command"], "new")?;
@@ -744,10 +750,8 @@ fn resolve_shell_argv(
                     .to_ascii_lowercase();
                 let (_, flags) = SHELLS.iter().find(|(sh, _)| *sh == bin_name)?;
                 let mut elements = Vec::new();
-                for mc in calls.iter().rev() {
-                    if matches!(mc.method.to_string().as_str(), "arg" | "args") {
-                        elements.extend(extract_command_arg_elements(mc)?);
-                    }
+                for chunk in calls.into_iter().rev() {
+                    elements.extend(chunk);
                 }
                 return Some((flags, elements));
             }
@@ -769,16 +773,16 @@ fn resolve_unchecked_response_root(
             clippy::wildcard_enum_match_arm,
             reason = "Unwinds method calls, `?`, `.await`, and response bindings back to the reqwest root call"
         )]
-        match strip_wrappers(&current) {
+        match into_stripped_wrappers(current) {
             Expr::MethodCall(link) => {
-                sent |= is_unchecked_http_link(link)?;
-                current = (*link.receiver).clone();
+                sent |= is_unchecked_http_link(&link)?;
+                current = *link.receiver;
             }
-            Expr::Try(tr) => current = (*tr.expr).clone(),
-            Expr::Await(aw) => current = (*aw.base).clone(),
-            Expr::Call(root) => return Some((root.clone(), sent)),
+            Expr::Try(tr) => current = *tr.expr,
+            Expr::Await(aw) => current = *aw.base,
+            Expr::Call(root) => return Some((root, sent)),
             bound => {
-                current = resolve_unchecked_response_binding(ctx, bound, read_span)?;
+                current = resolve_unchecked_response_binding(ctx, &bound, read_span)?;
             }
         }
     }

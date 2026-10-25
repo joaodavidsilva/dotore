@@ -342,7 +342,7 @@ fn check_run_untrusted_interpolation_and_secrets_in_build(
         return;
     };
     let mut walk = WorkflowWalk::default();
-    let mut stack: Vec<(usize, &str)> = Vec::new();
+    let mut stack: Vec<(usize, &str)> = Vec::with_capacity(8);
     for entry in &entries {
         while stack.last().is_some_and(|(col, _)| *col >= entry.column) {
             stack.pop();

@@ -448,6 +448,39 @@ pub(crate) fn strip_parens(mut expr: &Expr) -> &Expr {
     }
 }
 
+/// Unwraps outer `Paren` and `Group` expressions by value.
+#[must_use]
+fn into_stripped_parens(mut expr: Expr) -> Expr {
+    loop {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "Only Paren and Group expressions are unwrapped here"
+        )]
+        match expr {
+            Expr::Paren(p) => expr = *p.expr,
+            Expr::Group(g) => expr = *g.expr,
+            other => return other,
+        }
+    }
+}
+
+/// Unwraps outer `Paren`, `Group`, and `Reference` (`&` / `&mut`) expressions by value.
+#[must_use]
+pub(crate) fn into_stripped_wrappers(mut expr: Expr) -> Expr {
+    loop {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "Only Paren, Group, and Reference expressions are unwrapped here"
+        )]
+        match expr {
+            Expr::Paren(p) => expr = *p.expr,
+            Expr::Group(g) => expr = *g.expr,
+            Expr::Reference(r) => expr = *r.expr,
+            other => return other,
+        }
+    }
+}
+
 /// Extracts a bare single-segment identifier from `expr` (no path qualifier, no generic arguments).
 #[must_use]
 pub(crate) fn bare_identifier(expr: &Expr) -> Option<String> {
@@ -633,7 +666,7 @@ impl<'a> KernelContext<'a> {
     pub(crate) fn resolve_value(&self, expr: &Expr) -> Option<Expr> {
         let mut current = expr.clone();
         for _ in 0..BINDING_DEPTH {
-            current = strip_parens(&current).clone();
+            current = into_stripped_parens(current);
             let Some(name) = bare_identifier(&current) else {
                 return Some(current);
             };
@@ -657,17 +690,17 @@ impl<'a> KernelContext<'a> {
     pub(crate) fn chain_root(&self, expr: &Expr) -> Option<Expr> {
         let mut current = expr.clone();
         for _ in 0..CHAIN_DEPTH {
-            let unwrapped = strip_wrappers(&current).clone();
-            let resolved = self.resolve_value(&unwrapped)?;
+            let unwrapped = into_stripped_wrappers(current);
+            let resolved = into_stripped_wrappers(self.resolve_value(&unwrapped)?);
             #[expect(
                 clippy::wildcard_enum_match_arm,
                 reason = "Unwinds MethodCall, Try (`?`), and Await (`.await`) links; any other expression is the chain root"
             )]
-            match strip_wrappers(&resolved) {
-                Expr::MethodCall(mc) => current = (*mc.receiver).clone(),
-                Expr::Try(tr) => current = (*tr.expr).clone(),
-                Expr::Await(aw) => current = (*aw.base).clone(),
-                other => return Some(other.clone()),
+            match resolved {
+                Expr::MethodCall(mc) => current = *mc.receiver,
+                Expr::Try(tr) => current = *tr.expr,
+                Expr::Await(aw) => current = *aw.base,
+                other => return Some(other),
             }
         }
         None
@@ -766,7 +799,7 @@ impl<'a> KernelContext<'a> {
                     if let Some(ty) = &boxed.1 {
                         return self.is_numeric_type(ty, site);
                     }
-                    current = strip_wrappers(&boxed.0).clone();
+                    current = into_stripped_wrappers(boxed.0);
                 }
                 LocalBinding::Typed(ty) => return self.is_numeric_type(&ty, site),
                 LocalBinding::Unbound | LocalBinding::Indeterminate => return false,

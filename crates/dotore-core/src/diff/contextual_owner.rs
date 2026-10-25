@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -118,34 +118,18 @@ fn candidate_path_keys(root: &Path, path: &Path) -> Vec<PathBuf> {
     } else {
         root.join(path)
     };
-    let lex = lexical_normalize(&joined);
+    let lex = crate::config::workspace::clean_lexical_components(&joined);
     keys.push(lex.clone());
     if let Ok(canon) = fs::canonicalize(&joined)
         && !keys.contains(&canon)
     {
         keys.push(canon);
     }
-    let rel_lex = lexical_normalize(path);
+    let rel_lex = crate::config::workspace::clean_lexical_components(path);
     if !keys.contains(&rel_lex) {
         keys.push(rel_lex);
     }
     keys
-}
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                out.push(comp.as_os_str());
-            }
-        }
-    }
-    out
 }
 
 #[derive(Debug, Clone)]

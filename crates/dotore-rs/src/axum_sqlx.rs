@@ -18,7 +18,8 @@ use syn::{
 use crate::{
     matchers::{RsCandidateFinding, RsScopeTracker, extract_pat_ident, loc_at, span_to_bytes},
     source_kernel::{
-        FnBodyResolver, KernelContext, RsAliasMap, bare_identifier, strip_parens, strip_wrappers,
+        FnBodyResolver, KernelContext, RsAliasMap, bare_identifier, into_stripped_wrappers,
+        strip_parens,
     },
 };
 
@@ -608,18 +609,21 @@ fn match_sql_query_call_function(ctx: &KernelContext<'_>, callee: &Expr) -> Opti
 fn strip_transparent_sql_methods(expr: &Expr) -> Expr {
     let mut current = expr.clone();
     loop {
-        current = strip_wrappers(&current).clone();
-        let Expr::MethodCall(mc) = &current else {
-            return current;
-        };
-        if matches!(
-            mc.method.to_string().as_str(),
-            "as_ref" | "as_str" | "clone" | "into_boxed_str" | "leak"
-        ) && mc.args.is_empty()
-        {
-            current = (*mc.receiver).clone();
-        } else {
-            return current;
+        current = into_stripped_wrappers(current);
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "Only zero-arg string conversion MethodCalls are unwrapped here"
+        )]
+        match current {
+            Expr::MethodCall(mc)
+                if matches!(
+                    mc.method.to_string().as_str(),
+                    "as_ref" | "as_str" | "clone" | "into_boxed_str" | "leak"
+                ) && mc.args.is_empty() =>
+            {
+                current = *mc.receiver;
+            }
+            other => return other,
         }
     }
 }

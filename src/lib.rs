@@ -1010,37 +1010,14 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
                 packages.retain(|p| &p.root_dir != ng_dir);
             }
             for spec in ng_projects {
-                let proj_dir = if spec.root_rel.is_empty() {
-                    ng_dir.clone()
-                } else if ng_dir == Path::new(".") {
-                    PathBuf::from(&spec.root_rel)
-                } else {
-                    ng_dir.join(&spec.root_rel)
-                };
-                if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
-                    existing.name.clone_from(&spec.name);
-                    existing.capability_gate.merge(&base_gate);
-                    existing.capability_gate.package_role = spec.package_role;
-                    existing
-                        .capability_gate
-                        .entrypoints
-                        .extend(spec.entrypoints);
-                } else {
-                    let mut gate = base_gate.clone();
-                    gate.package_role = spec.package_role;
-                    gate.entrypoints.extend(spec.entrypoints);
-                    let local_cfg = config_files
-                        .iter()
-                        .find(|(c_dir, _, _)| c_dir == &proj_dir)
-                        .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-                        .unwrap_or_else(|| base_cfg.clone());
-                    packages.push(WorkspacePackage {
-                        name: spec.name,
-                        root_dir: proj_dir,
-                        capability_gate: gate,
-                        config: local_cfg,
-                    });
-                }
+                apply_virtual_angular_project_spec(
+                    ng_dir,
+                    &base_gate,
+                    &base_cfg,
+                    &config_files,
+                    spec,
+                    &mut packages,
+                );
             }
         }
     }
@@ -1216,6 +1193,48 @@ fn find_pyproject_config_in_dir(
         packages,
         manifests,
         source_files,
+    }
+}
+
+#[cfg(feature = "js")]
+fn apply_virtual_angular_project_spec(
+    ng_dir: &Path,
+    base_gate: &CapabilityGate,
+    base_cfg: &DotoreConfig,
+    config_files: &[(PathBuf, PathBuf, String)],
+    spec: dotore_core::AngularWorkspaceProject,
+    packages: &mut Vec<WorkspacePackage>,
+) {
+    let proj_dir = if spec.root_rel.is_empty() {
+        ng_dir.to_path_buf()
+    } else if ng_dir == Path::new(".") {
+        PathBuf::from(&spec.root_rel)
+    } else {
+        ng_dir.join(&spec.root_rel)
+    };
+    if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
+        existing.name.clone_from(&spec.name);
+        existing.capability_gate.merge(base_gate);
+        existing.capability_gate.package_role = spec.package_role;
+        existing
+            .capability_gate
+            .entrypoints
+            .extend(spec.entrypoints);
+    } else {
+        let mut gate = base_gate.clone();
+        gate.package_role = spec.package_role;
+        gate.entrypoints.extend(spec.entrypoints);
+        let local_cfg = config_files
+            .iter()
+            .find(|(c_dir, _, _)| c_dir == &proj_dir)
+            .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
+            .unwrap_or_else(|| base_cfg.clone());
+        packages.push(WorkspacePackage {
+            name: spec.name,
+            root_dir: proj_dir,
+            capability_gate: gate,
+            config: local_cfg,
+        });
     }
 }
 

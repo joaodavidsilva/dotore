@@ -106,7 +106,7 @@ fn check_effect_decorators(
         let mut del_end = dec.span.end as usize;
         let bytes = source.as_bytes();
         let limit = (member_end as usize).min(bytes.len());
-        while del_end < limit && bytes[del_end].is_ascii_whitespace() {
+        while del_end < limit && bytes.get(del_end).is_some_and(u8::is_ascii_whitespace) {
             del_end += 1;
         }
         let patch = AutofixPatch::delete(

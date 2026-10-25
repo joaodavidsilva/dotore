@@ -271,13 +271,7 @@ impl RsScopeTracker {
     /// Enters a free function (`fn name(...)`).
     #[must_use]
     pub(crate) fn enter_fn(&mut self, item: &ItemFn) -> RsScopeSnapshot {
-        let snap = self.snapshot();
-        self.in_test_context = self.in_test_context || attrs_indicate_test_context(&item.attrs);
-        self.current_subject_name = Some(item.sig.ident.to_string());
-        self.async_depth = usize::from(item.sig.asyncness.is_some());
-        self.loop_depth = 0;
-        self.in_executable_body += 1;
-        snap
+        self.enter_fn_sig(&item.attrs, &item.sig)
     }
 
     /// Enters an inherent or trait `impl` method (`fn method(...)`).
@@ -301,10 +295,14 @@ impl RsScopeTracker {
     /// Enters a `trait` method declaration or default implementation.
     #[must_use]
     pub(crate) fn enter_trait_fn(&mut self, item: &TraitItemFn) -> RsScopeSnapshot {
+        self.enter_fn_sig(&item.attrs, &item.sig)
+    }
+
+    fn enter_fn_sig(&mut self, attrs: &[Attribute], sig: &syn::Signature) -> RsScopeSnapshot {
         let snap = self.snapshot();
-        self.in_test_context = self.in_test_context || attrs_indicate_test_context(&item.attrs);
-        self.current_subject_name = Some(item.sig.ident.to_string());
-        self.async_depth = usize::from(item.sig.asyncness.is_some());
+        self.in_test_context = self.in_test_context || attrs_indicate_test_context(attrs);
+        self.current_subject_name = Some(sig.ident.to_string());
+        self.async_depth = usize::from(sig.asyncness.is_some());
         self.loop_depth = 0;
         self.in_executable_body += 1;
         snap
@@ -771,6 +769,26 @@ fn has_test_attr(attrs: &[Attribute]) -> bool {
 #[must_use]
 pub(crate) fn attrs_indicate_test_context(attrs: &[Attribute]) -> bool {
     has_test_attr(attrs) || attrs.iter().any(is_cfg_test_attr)
+}
+
+/// Extracts the variable identifier passed to a single-argument `drop(ident)` or `std::mem::drop(ident)` call.
+#[must_use]
+pub(crate) fn extract_dropped_guard_ident(node: &syn::ExprCall) -> Option<String> {
+    if node.args.len() != 1 {
+        return None;
+    }
+    let Expr::Path(expr_path) = crate::source_kernel::strip_parens(&node.func) else {
+        return None;
+    };
+    let path_str = path_to_string(&expr_path.path);
+    if matches!(
+        path_str.as_str(),
+        "drop" | "std::mem::drop" | "core::mem::drop" | "mem::drop"
+    ) {
+        extract_expr_ident(node.args.first()?)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

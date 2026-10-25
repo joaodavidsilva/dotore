@@ -890,19 +890,25 @@ fn extract_path_attr_value(attrs: &[Attribute]) -> Option<String> {
         }
         if attr.path().is_ident("cfg_attr")
             && let Ok(list) = attr.meta.require_list()
+            && let Some(val) = extract_cfg_attr_path_tokens(&list.tokens)
         {
-            let flat: Vec<TokenTree> = list.tokens.clone().into_iter().collect();
-            for (idx, tt) in flat.iter().enumerate() {
-                if let TokenTree::Ident(id) = tt
-                    && id == "path"
-                    && let Some(TokenTree::Punct(p)) = flat.get(idx + 1)
-                    && p.as_char() == '='
-                    && let Some(TokenTree::Literal(lit)) = flat.get(idx + 2)
-                    && let Ok(lit_str) = syn::parse_str::<syn::LitStr>(&lit.to_string())
-                {
-                    return Some(lit_str.value());
-                }
-            }
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn extract_cfg_attr_path_tokens(tokens: &TokenStream) -> Option<String> {
+    let flat: Vec<TokenTree> = tokens.clone().into_iter().collect();
+    for (idx, tt) in flat.iter().enumerate() {
+        if let TokenTree::Ident(id) = tt
+            && id == "path"
+            && let Some(TokenTree::Punct(p)) = flat.get(idx + 1)
+            && p.as_char() == '='
+            && let Some(TokenTree::Literal(lit)) = flat.get(idx + 2)
+            && let Ok(lit_str) = syn::parse_str::<syn::LitStr>(&lit.to_string())
+        {
+            return Some(lit_str.value());
         }
     }
     None

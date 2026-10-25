@@ -475,14 +475,16 @@ pub(super) fn check_supabase_service_role_unscoped_query(
     }
 
     let mut search_from = 0;
-    while let Some(rel) = src[search_from..].find(".from(") {
+    while let Some(rel) = src.get(search_from..).and_then(|s| s.find(".from(")) {
         let hit = search_from + rel;
-        let tail = &src[hit..];
+        let Some(tail) = src.get(hit..) else {
+            break;
+        };
         let chain_end = tail
             .find(';')
             .or_else(|| tail.find("\n\n"))
             .unwrap_or(tail.len());
-        let chain = &tail[..chain_end];
+        let chain = tail.get(..chain_end).unwrap_or(tail);
 
         let has_data_op = chain.contains(".select(")
             || chain.contains(".update(")

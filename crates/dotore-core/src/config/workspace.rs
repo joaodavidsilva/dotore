@@ -318,39 +318,57 @@ fn expand_angular_projects_on_disk(root_dir: &Path, packages: &mut Vec<Workspace
             packages.retain(|p| p.root_dir != ng_dir);
         }
         for spec in ng_projects {
-            let proj_dir = if spec.root_rel.is_empty() {
-                ng_dir.clone()
-            } else {
-                ng_dir.join(&spec.root_rel)
-            };
-            if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
-                existing.name.clone_from(&spec.name);
-                existing.capability_gate.merge(&base_gate);
-                existing.capability_gate.package_role = spec.package_role;
-                existing
-                    .capability_gate
-                    .entrypoints
-                    .extend(spec.entrypoints);
-            } else {
-                let mut gate = base_gate.clone();
-                if proj_dir.join("package.json").is_file() {
-                    gate.merge(&CapabilityGate::discover(&proj_dir));
-                }
-                gate.package_role = spec.package_role;
-                gate.entrypoints.extend(spec.entrypoints);
-                let config = if proj_dir == root_dir {
-                    base_config.clone()
-                } else {
-                    load_local_config_in_dir(&proj_dir).unwrap_or_else(|| base_config.clone())
-                };
-                packages.push(WorkspacePackage {
-                    name: spec.name,
-                    root_dir: proj_dir,
-                    capability_gate: gate,
-                    config,
-                });
-            }
+            apply_angular_project_spec_on_disk(
+                &ng_dir,
+                root_dir,
+                &base_gate,
+                &base_config,
+                spec,
+                packages,
+            );
         }
+    }
+}
+
+fn apply_angular_project_spec_on_disk(
+    ng_dir: &Path,
+    root_dir: &Path,
+    base_gate: &CapabilityGate,
+    base_config: &DotoreConfig,
+    spec: AngularWorkspaceProject,
+    packages: &mut Vec<WorkspacePackage>,
+) {
+    let proj_dir = if spec.root_rel.is_empty() {
+        ng_dir.to_path_buf()
+    } else {
+        ng_dir.join(&spec.root_rel)
+    };
+    if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
+        existing.name.clone_from(&spec.name);
+        existing.capability_gate.merge(base_gate);
+        existing.capability_gate.package_role = spec.package_role;
+        existing
+            .capability_gate
+            .entrypoints
+            .extend(spec.entrypoints);
+    } else {
+        let mut gate = base_gate.clone();
+        if proj_dir.join("package.json").is_file() {
+            gate.merge(&CapabilityGate::discover(&proj_dir));
+        }
+        gate.package_role = spec.package_role;
+        gate.entrypoints.extend(spec.entrypoints);
+        let config = if proj_dir == root_dir {
+            base_config.clone()
+        } else {
+            load_local_config_in_dir(&proj_dir).unwrap_or_else(|| base_config.clone())
+        };
+        packages.push(WorkspacePackage {
+            name: spec.name,
+            root_dir: proj_dir,
+            capability_gate: gate,
+            config,
+        });
     }
 }
 
@@ -829,7 +847,7 @@ fn normalize_path_with_cwd(path: &Path, cwd: Option<&Path>) -> PathBuf {
     }
 }
 
-fn clean_lexical_components(path: &Path) -> PathBuf {
+pub(crate) fn clean_lexical_components(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {

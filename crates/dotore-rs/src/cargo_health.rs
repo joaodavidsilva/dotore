@@ -491,7 +491,7 @@ fn inspect_single_dep_declaration(
             let ver_opt = spec.get("version").and_then(Value::as_str);
 
             if let Some(dep_path) = path_opt
-                && path_dep_leaves_workspace(&package.root_dir, dep_path)
+                && path_dep_leaves_workspace(package, dep_path)
             {
                 emit_manifest_diagnostic_if_active(
                     package,
@@ -560,15 +560,27 @@ fn inspect_single_dep_declaration(
     }
 }
 
-fn path_dep_leaves_workspace(package_root: &Path, dep_path: &str) -> bool {
+fn path_dep_leaves_workspace(package: &WorkspacePackage, dep_path: &str) -> bool {
+    let package_root = &package.root_dir;
+    let ws_root = package
+        .capability_gate
+        .dependencies
+        .get("__workspace_root")
+        .map(PathBuf::from);
     let p = Path::new(dep_path);
     if p.is_absolute() {
-        return !package_root.is_absolute() || !p.starts_with(package_root);
+        let root_to_check = ws_root.as_deref().unwrap_or(package_root);
+        return !root_to_check.is_absolute() || !p.starts_with(root_to_check);
     }
 
+    let rel_pkg = ws_root
+        .as_deref()
+        .and_then(|ws| package_root.strip_prefix(ws).ok())
+        .unwrap_or(package_root.as_path());
+
     let mut pkg_depth = 0_isize;
-    if !package_root.is_absolute() && package_root != Path::new(".") {
-        for comp in package_root.components() {
+    if !rel_pkg.is_absolute() && rel_pkg != Path::new(".") {
+        for comp in rel_pkg.components() {
             if let Component::Normal(_) = comp {
                 pkg_depth += 1;
             }

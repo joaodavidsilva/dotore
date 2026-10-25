@@ -20,8 +20,8 @@ use crate::{
     tokio_async::{is_offloading_method_call, is_resolved_blocking_item, is_spawn_blocking_call},
 };
 pub(crate) use crate::source_kernel_bindings::{
-    FnBodyResolver, IdentUsageKind, KernelContext, LocalBinding, bare_identifier, literal_bool,
-    literal_string, strip_parens, strip_wrappers,
+    FnBodyResolver, IdentUsageKind, KernelContext, LocalBinding, bare_identifier,
+    into_stripped_wrappers, literal_bool, literal_string, strip_parens, strip_wrappers,
 };
 
 /// Maximum number of local `let`/`const` hops followed from one expression.
