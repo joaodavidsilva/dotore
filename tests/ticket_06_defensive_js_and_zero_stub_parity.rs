@@ -10,8 +10,9 @@ use std::{
 };
 
 use dotore::{
-    DotoreConfig, PrescriptionTier, RuleId, RulesListOptions, analyze_source,
-    apply_patches_to_source, build_rule_catalog, explain_rule, rule_registry,
+    CliOverrides, DotoreConfig, PrescriptionTier, RuleId, RulesListOptions, ScanOptions,
+    analyze_source, apply_patches_to_source, build_rule_catalog, explain_rule, rule_registry,
+    scan_workspace_with_overrides,
 };
 
 struct RuleTestCase {
@@ -669,8 +670,8 @@ fn zero_stub_parity_invariant_all_921_rule_variants_have_active_detectors() {
     let cfg = DotoreConfig::default();
     let catalog = build_rule_catalog(&cfg, &RulesListOptions::default());
     assert!(
-        registry.len() >= 921,
-        "Expected at least 921 total RuleId entries in rule_registry(), got {}",
+        registry.len() >= 1076,
+        "Expected at least 1076 total RuleId entries in rule_registry(), got {}",
         registry.len()
     );
     assert_eq!(
@@ -1648,9 +1649,12 @@ fn collect_rs_sources_excluding_types(dir: &Path, out: &mut String) {
         let entry = entry.unwrap_or_else(|e| panic!("dir entry failed: {e}"));
         let path = entry.path();
         if path.is_dir() {
+            if path.ends_with("src/rules/catalog") {
+                continue;
+            }
             collect_rs_sources_excluding_types(&path, out);
         } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if path.ends_with("src/rules/types.rs") {
+            if path.ends_with("src/rules/types.rs") || path.ends_with("src/rules/catalog.rs") {
                 continue;
             }
             let content =
@@ -1658,5 +1662,237 @@ fn collect_rs_sources_excluding_types(dir: &Path, out: &mut String) {
             out.push_str(&content);
             out.push('\n');
         }
+    }
+}
+
+#[test]
+fn polyglot_100_new_rules_and_reference_aliases_resolve_via_parse_and_explain_rule() {
+    let registry = rule_registry();
+    assert_eq!(registry.len(), 1076);
+
+    let cfg = DotoreConfig::default();
+    let catalog = build_rule_catalog(&cfg, &RulesListOptions::default());
+    assert_eq!(catalog.len(), 1076);
+
+    // Verify every single registered rule (including all 100 new rules 976..=1075)
+    // and every one of its legacy aliases resolves via `RuleId::parse` and `explain_rule`.
+    for meta in &registry[976..1076] {
+        assert_eq!(
+            RuleId::parse(meta.canonical_id),
+            Some(meta.id),
+            "Canonical ID {:?} failed to resolve to {:?}",
+            meta.canonical_id,
+            meta.id
+        );
+        assert_eq!(
+            RuleId::parse(meta.qualified_key),
+            Some(meta.id),
+            "Qualified key {:?} failed to resolve to {:?}",
+            meta.qualified_key,
+            meta.id
+        );
+        let explained_canonical = explain_rule(meta.canonical_id, &cfg)
+            .unwrap_or_else(|| panic!("explain_rule({:?}) returned None", meta.canonical_id));
+        assert_eq!(explained_canonical.id, meta.canonical_id);
+
+        assert!(
+            !meta.legacy_aliases.is_empty(),
+            "New polyglot/security rule {} ({:?}) must declare at least one reference alias",
+            meta.canonical_id,
+            meta.id
+        );
+        for &alias in meta.legacy_aliases {
+            let parsed = RuleId::parse(alias).unwrap_or_else(|| {
+                panic!(
+                    "Reference alias {alias:?} for {} ({:?}) failed to resolve via RuleId::parse",
+                    meta.canonical_id, meta.id
+                )
+            });
+            assert_eq!(
+                parsed, meta.id,
+                "Reference alias {alias:?} resolved to {parsed:?}, expected {:?}",
+                meta.id
+            );
+            let explained = explain_rule(alias, &cfg)
+                .unwrap_or_else(|| panic!("explain_rule({alias:?}) returned None"));
+            assert_eq!(explained.id, meta.canonical_id);
+        }
+    }
+
+    // Explicitly verify reference aliases from angular-doctor, python-doctor, rust-doctor, and security-audit-skill.
+    let expected_reference_aliases: &[(&str, RuleId)] = &[
+        // angular-doctor (30 core + 8 template + 7 NgRx/Material = 45 rules)
+        ("@angular-eslint/no-uncalled-signals", RuleId::AngularNoUncalledSignals),
+        ("@angular-eslint/prefer-signal-model", RuleId::AngularPreferSignalModel),
+        ("@angular-eslint/prefer-signals", RuleId::AngularPreferSignals),
+        ("@angular-eslint/no-conflicting-lifecycle", RuleId::AngularNoConflictingLifecycle),
+        ("@angular-eslint/contextual-lifecycle", RuleId::AngularContextualLifecycle),
+        ("@angular-eslint/contextual-decorator", RuleId::AngularContextualDecorator),
+        ("@angular-eslint/no-async-lifecycle-method", RuleId::AngularNoAsyncLifecycleMethod),
+        ("@angular-eslint/no-lifecycle-call", RuleId::AngularNoLifecycleCall),
+        ("@angular-eslint/require-lifecycle-on-prototype", RuleId::AngularRequireLifecycleOnPrototype),
+        ("@angular-eslint/no-empty-lifecycle-method", RuleId::AngularNoEmptyLifecycleMethod),
+        ("@angular-eslint/use-lifecycle-interface", RuleId::AngularUseLifecycleInterface),
+        ("@angular-eslint/use-pipe-transform-interface", RuleId::AngularUsePipeTransformInterface),
+        ("@angular-eslint/no-pipe-impure", RuleId::AngularNoPipeImpure),
+        ("@angular-eslint/no-output-native", RuleId::AngularNoOutputNative),
+        ("@angular-eslint/no-output-on-prefix", RuleId::AngularNoOutputOnPrefix),
+        ("@angular-eslint/relative-url-prefix", RuleId::AngularRelativeUrlPrefix),
+        ("@angular-eslint/prefer-standalone", RuleId::AngularPreferStandalone),
+        ("@angular-eslint/prefer-inject", RuleId::AngularPreferInject),
+        ("@angular-eslint/use-injectable-provided-in", RuleId::AngularUseInjectableProvidedIn),
+        ("@angular-eslint/prefer-host-metadata-property", RuleId::AngularPreferHostMetadataProperty),
+        ("@angular-eslint/no-duplicates-in-metadata-arrays", RuleId::AngularNoDuplicatesInMetadataArrays),
+        ("@angular-eslint/no-forward-ref", RuleId::AngularNoForwardRef),
+        ("@angular-eslint/no-inputs-metadata-property", RuleId::AngularNoInputsMetadataProperty),
+        ("@angular-eslint/no-outputs-metadata-property", RuleId::AngularNoOutputsMetadataProperty),
+        ("@angular-eslint/no-queries-metadata-property", RuleId::AngularNoQueriesMetadataProperty),
+        ("@angular-eslint/prefer-output-readonly", RuleId::AngularPreferOutputReadonly),
+        ("@angular-eslint/prefer-output-emitter-ref", RuleId::AngularPreferOutputEmitterRef),
+        ("@angular-eslint/use-component-view-encapsulation", RuleId::AngularUseComponentViewEncapsulation),
+        ("@angular-eslint/no-attribute-decorator", RuleId::AngularNoAttributeDecorator),
+        ("@angular-eslint/component-max-inline-declarations", RuleId::AngularComponentMaxInlineDeclarations),
+        ("@angular-eslint/template/no-any", RuleId::AngularTemplateNoAny),
+        ("@angular-eslint/template/alt-text", RuleId::AngularTemplateAltText),
+        ("@angular-eslint/template/click-events-have-key-events", RuleId::AngularTemplateClickEventsHaveKeyEvents),
+        ("@angular-eslint/template/mouse-events-have-key-events", RuleId::AngularTemplateMouseEventsHaveKeyEvents),
+        ("@angular-eslint/template/elements-have-content", RuleId::AngularTemplateElementsHaveContent),
+        ("@angular-eslint/template/interactive-supports-focus", RuleId::AngularTemplateInteractiveSupportsFocus),
+        ("@angular-eslint/template/table-scope", RuleId::AngularTemplateTableScope),
+        ("@angular-eslint/template/valid-aria", RuleId::AngularTemplateValidAria),
+        ("@ngrx/no-multiple-actions-in-effects", RuleId::NgrxNoMultipleActionsInEffects),
+        ("@ngrx/no-effect-decorator-and-creator", RuleId::NgrxNoEffectDecoratorAndCreator),
+        ("@ngrx/no-effect-decorator", RuleId::NgrxNoEffectDecoratorAndCreator),
+        ("@ngrx/no-cyclic-action-creators", RuleId::NgrxNoCyclicActionCreators),
+        ("@ngrx/no-typed-global-store", RuleId::NgrxNoTypedGlobalStore),
+        ("@ngrx/on-function-explicit-return-type", RuleId::NgrxOnFunctionExplicitReturnType),
+        ("@ngrx/select-style", RuleId::NgrxSelectStyle),
+        ("@angular/material/no-conflicting-mixins", RuleId::AngularMaterialNoConflictingMixins),
+        // python-doctor (7 Zen/imports + 5 Bandit + 2 structure = 14 rules)
+        ("zen/complex-function", RuleId::PyZenComplexFunction),
+        ("radon/CC", RuleId::PyZenComplexFunction),
+        ("zen/deep-nesting", RuleId::PyZenDeepNesting),
+        ("zen/long-function", RuleId::PyZenLongFunction),
+        ("zen/too-many-params", RuleId::PyZenTooManyParams),
+        ("zen/large-class", RuleId::PyZenLargeClass),
+        ("zen/dense-code", RuleId::PyZenNoDenseSemicolonStatements),
+        ("E702", RuleId::PyZenNoDenseSemicolonStatements),
+        ("imports/star", RuleId::PyNoWildcardImport),
+        ("F403", RuleId::PyNoWildcardImport),
+        ("bandit/B113", RuleId::PySecurityHttpRequestRequiresTimeout),
+        ("bandit/B501", RuleId::PySecurityNoDisabledTlsVerify),
+        ("bandit/B303", RuleId::PySecurityNoWeakCryptoOrRandom),
+        ("bandit/B311", RuleId::PySecurityNoWeakCryptoOrRandom),
+        ("bandit/B324", RuleId::PySecurityNoWeakCryptoOrRandom),
+        ("bandit/B202", RuleId::PySecurityNoXxeOrUnsafeArchive),
+        ("bandit/B314", RuleId::PySecurityNoXxeOrUnsafeArchive),
+        ("bandit/B320", RuleId::PySecurityNoXxeOrUnsafeArchive),
+        ("bandit/B105", RuleId::PySecurityNoHardcodedSecretOrTmp),
+        ("bandit/B106", RuleId::PySecurityNoHardcodedSecretOrTmp),
+        ("bandit/B108", RuleId::PySecurityNoHardcodedSecretOrTmp),
+        ("structure/no-py-typed", RuleId::PyStructureMissingPyTyped),
+        ("structure/type-hints", RuleId::PyStructureLowTypeHintCoverage),
+        // rust-doctor (9 SourceKernel + 11 Cargo + 8 Structure + 7 Clippy = 35 rules)
+        ("rust_doctor::source::block_in_place_on_current_thread", RuleId::RsTokioNoBlockInPlaceOnCurrentThread),
+        ("rust_doctor::source::block_on_in_async", RuleId::RsAsyncNoBlockOnInAsync),
+        ("rust_doctor::source::disabled_tls_verification", RuleId::RsSecurityNoDisabledTlsVerification),
+        ("rust_doctor::source::dynamic_shell_command", RuleId::RsSecurityNoDynamicShellCommand),
+        ("rust_doctor::source::unchecked_http_status", RuleId::RsHttpNoUncheckedResponseStatus),
+        ("rust_doctor::source::secret_env_fallback", RuleId::RsSecurityNoSecretEnvFallback),
+        ("rust_doctor::source::permissive_cors", RuleId::RsSecurityNoPermissiveCors),
+        ("rust_doctor::source::insecure_auth_cookie", RuleId::RsSecurityNoInsecureAuthCookie),
+        ("rust_doctor::source::disabled_jwt_validation", RuleId::RsSecurityNoDisabledJwtValidation),
+        ("rust_doctor::cargo::duplicate_major_versions", RuleId::RsCargoDuplicateMajorVersions),
+        ("rust_doctor::cargo::missing_lockfile", RuleId::RsCargoMissingLockfile),
+        ("rust_doctor::cargo::path_dependency_outside_workspace", RuleId::RsCargoPathDepOutsideWorkspace),
+        ("rust_doctor::cargo::permissive_lint_table", RuleId::RsCargoPermissiveLintTable),
+        ("rust_doctor::cargo::permissive_rustflags", RuleId::RsCargoPermissiveRustflags),
+        ("rust_doctor::cargo::release_debug_symbols", RuleId::RsCargoReleaseDebugSymbols),
+        ("rust_doctor::cargo::unchecked_release_overflow", RuleId::RsCargoUncheckedReleaseOverflow),
+        ("rust_doctor::cargo::unused_dependency", RuleId::RsCargoUnusedDependency),
+        ("rust_doctor::cargo::test_only_dependency", RuleId::RsCargoTestOnlyDependency),
+        ("rust_doctor::cargo::unbounded_registry_dependency", RuleId::RsCargoUnboundedWildcardDependency),
+        ("rust_doctor::cargo::unpinned_git_dependency", RuleId::RsCargoUnpinnedGitDependency),
+        ("rust_doctor::structure::crate_level_allow", RuleId::RsStructureCrateLevelAllow),
+        ("rust_doctor::structure::unreasoned_allow_attribute", RuleId::RsStructureUnreasonedAllow),
+        ("rust_doctor::structure::stacked_allow_attribute", RuleId::RsStructureStackedAllow),
+        ("rust_doctor::structure::complex_function", RuleId::RsStructureComplexFunction),
+        ("rust_doctor::structure::oversized_unit", RuleId::RsStructureOversizedUnit),
+        ("rust_doctor::structure::orphan_module_file", RuleId::RsStructureOrphanModuleFile),
+        ("rust_doctor::structure::unreferenced_feature", RuleId::RsStructureUnreferencedFeature),
+        ("rust_doctor::structure::near_duplicate_function_body", RuleId::RsStructureNearDuplicateFunction),
+        ("rust_doctor::structure::duplicate_function_body", RuleId::RsStructureNearDuplicateFunction),
+        ("clippy::await_holding_refcell_ref", RuleId::RsNoAwaitHoldingRefcell),
+        ("clippy::panic", RuleId::RsNoPanicOrTodoInProduction),
+        ("clippy::todo", RuleId::RsNoPanicOrTodoInProduction),
+        ("clippy::dbg_macro", RuleId::RsNoDbgOrPrintInLibrary),
+        ("clippy::print_stdout", RuleId::RsNoDbgOrPrintInLibrary),
+        ("clippy::permissions_set_readonly_false", RuleId::RsSecurityNoWorldWritablePermissions),
+        ("clippy::zombie_processes", RuleId::RsNoZombieChildProcess),
+        ("clippy::missing_transmute_annotations", RuleId::RsNoTransmuteWithoutTypeAnnotations),
+        ("clippy::missing_safety_doc", RuleId::RsRequireSafetyDocOnPubUnsafeFn),
+        // security-audit-skill & rust_doctor::repo (6 rules)
+        ("rust_doctor::repo::secret_in_build_step", RuleId::CiWorkflowSecurityRisk),
+        ("workflow-injection", RuleId::CiWorkflowSecurityRisk),
+        ("ci-workflow-security-risk", RuleId::CiWorkflowSecurityRisk),
+        ("electron-webview-bridge-risk", RuleId::ElectronWebviewBridgeRisk),
+        ("untrusted-host-header-origin", RuleId::UntrustedHostHeaderOrigin),
+        ("private-response-public-cache", RuleId::PrivateResponsePublicCache),
+        ("llm-prompt-role-and-tool-sink-risk", RuleId::LlmPromptRoleAndToolSinkRisk),
+        ("supabase-service-role-unscoped-query", RuleId::SupabaseServiceRoleUnscopedQuery),
+    ];
+
+    for &(alias, expected_id) in expected_reference_aliases {
+        assert_eq!(
+            RuleId::parse(alias),
+            Some(expected_id),
+            "Expected reference alias {alias:?} to parse to {expected_id:?}"
+        );
+        let explained = explain_rule(alias, &cfg)
+            .unwrap_or_else(|| panic!("explain_rule({alias:?}) returned None"));
+        assert_eq!(explained.id, expected_id.as_str());
+    }
+}
+
+#[test]
+fn self_hosting_workspace_scan_reports_zero_findings_and_100_health_score() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (report, _) = scan_workspace_with_overrides(
+        &ScanOptions {
+            paths: vec![manifest_dir],
+            include_tests: false,
+            ..Default::default()
+        },
+        &CliOverrides {
+            no_cache: true,
+            ..Default::default()
+        },
+    )
+    .expect("Self-hosting scan_workspace_with_overrides must succeed");
+
+    assert!(
+        report.diagnostics.is_empty(),
+        "Expected 0 self-hosting diagnostics across dotore workspace, got {}:\n{:#?}",
+        report.diagnostics.len(),
+        report.diagnostics
+    );
+    assert_eq!(report.summary.health_score, 100);
+    assert_eq!(report.summary.score_label, "Excellent");
+    assert!(
+        report.projects.len() >= 5,
+        "Expected at least 5 workspace packages, got {}",
+        report.projects.len()
+    );
+    for proj in &report.projects {
+        assert_eq!(
+            proj.diagnostic_count, 0,
+            "Expected 0 findings in workspace package {}, got {}",
+            proj.name, proj.diagnostic_count
+        );
+        assert_eq!(
+            proj.health_score, 100,
+            "Expected 100/100 score in workspace package {}, got {}",
+            proj.name, proj.health_score
+        );
     }
 }
