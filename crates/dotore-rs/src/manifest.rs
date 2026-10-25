@@ -136,6 +136,10 @@ fn collect_cargo_dep_table(gate: &mut CapabilityGate, dep_table: &toml::map::Map
         record_rust_dep_and_capabilities(gate, dep_key, &version);
         if let Some(pkg_name) = actual_pkg {
             record_rust_dep_and_capabilities(gate, pkg_name, &version);
+            if pkg_name != dep_key {
+                gate.dependencies
+                    .insert(format!("alias:{dep_key}"), pkg_name.to_string());
+            }
         }
     }
 }

@@ -765,3 +765,164 @@ pub fn good_resolve_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
         "GoodCachePayload must not be flagged: {serialize_diags:#?}"
     );
 }
+
+#[test]
+fn rs_tokio_no_block_in_place_on_current_thread_and_rs_async_no_block_on_in_async_detect_violations()
+ {
+    let invalid_src = r#"
+use tokio::task::block_in_place as bip;
+use futures::executor::block_on as fut_block_on;
+use tokio::runtime::{Builder, Handle, Runtime};
+
+#[tokio::test]
+async fn test_on_default_current_thread() {
+    let _ = bip(|| 42);
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    tokio::task::block_in_place(|| {});
+}
+
+pub async fn async_with_block_on() {
+    let _ = fut_block_on(async { 1 });
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {});
+    let handle = Handle::current();
+    handle.block_on(async {});
+}
+
+pub fn sync_with_async_block() {
+    let _ = async {
+        let rt = Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {});
+    };
+}
+"#;
+
+    let diags = analyze_source(
+        Path::new("src/runtime_hazards.rs"),
+        invalid_src,
+        Some(&[
+            RuleId::RsTokioNoBlockInPlaceOnCurrentThread,
+            RuleId::RsAsyncNoBlockOnInAsync,
+        ]),
+    );
+    let bip_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == RuleId::RsTokioNoBlockInPlaceOnCurrentThread)
+        .collect();
+    let block_on_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.rule == RuleId::RsAsyncNoBlockOnInAsync)
+        .collect();
+
+    assert_eq!(
+        bip_diags.len(),
+        2,
+        "Expected 2 RsTokioNoBlockInPlaceOnCurrentThread diagnostics (default #[tokio::test] + current_thread #[tokio::main]), got: {bip_diags:#?}"
+    );
+    assert_eq!(
+        block_on_diags.len(),
+        4,
+        "Expected 4 RsAsyncNoBlockOnInAsync diagnostics (futures::executor::block_on, Runtime::block_on, Handle::block_on, Builder::block_on in async block), got: {block_on_diags:#?}"
+    );
+
+    let valid_src = r#"
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multi_thread() {
+    let _ = tokio::task::block_in_place(|| 42);
+}
+
+#[tokio::main]
+async fn main() {
+    let _ = tokio::task::block_in_place(|| 42);
+}
+
+fn sync_entry() {
+    let _ = tokio::task::block_in_place(|| 42);
+    let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+    rt.block_on(async {});
+    let _ = futures::executor::block_on(async { 1 });
+}
+
+struct CustomPool;
+impl CustomPool {
+    fn block_on(&self) {}
+}
+async fn non_runtime_block_on(pool: CustomPool) {
+    pool.block_on();
+}
+"#;
+    let valid_diags = analyze_source(
+        Path::new("src/runtime_valid.rs"),
+        valid_src,
+        Some(&[
+            RuleId::RsTokioNoBlockInPlaceOnCurrentThread,
+            RuleId::RsAsyncNoBlockOnInAsync,
+        ]),
+    );
+    assert!(
+        valid_diags.is_empty(),
+        "Expected 0 diagnostics on valid runtime code, got: {valid_diags:#?}"
+    );
+}
+
+#[test]
+fn rs_tokio_no_blocking_in_async_catches_4_hop_sync_helpers_command_and_reqwest_blocking() {
+    let src = r#"
+use std::process::Command as SysCmd;
+
+fn hop4() -> String {
+    std::fs::read_to_string("config.toml").unwrap_or_default()
+}
+fn hop3() -> String {
+    hop4()
+}
+fn hop2() -> String {
+    hop3()
+}
+fn hop1() -> String {
+    hop2()
+}
+
+fn hop5() -> String {
+    hop1()
+}
+
+struct Worker;
+impl Worker {
+    fn sync_step(&self) {
+        let _ = reqwest::blocking::get("https://example.com");
+    }
+
+    pub async fn run_async(&self, prog: &str) {
+        // 1. 4-hop free function helper reaching std::fs::read_to_string
+        let _ = hop1();
+        // 2. self.sync_step() method helper reaching reqwest::blocking::get
+        self.sync_step();
+        // 3. Command::new(...).output() via let-bound builder and use-alias
+        let mut cmd = SysCmd::new(prog);
+        let _ = cmd.output();
+        // 4. Direct reqwest::blocking::Client::new()
+        let _ = reqwest::blocking::Client::new();
+
+        // Safe: 5 hops exceeds 4-hop bound
+        let _ = hop5();
+        // Safe: wrapped in spawn_blocking
+        let _ = tokio::task::spawn_blocking(|| hop1()).await;
+    }
+}
+"#;
+
+    let diags = analyze_source(
+        Path::new("src/worker.rs"),
+        src,
+        Some(&[RuleId::RsTokioNoBlockingInAsync]),
+    );
+    assert_eq!(
+        diags.len(),
+        4,
+        "Expected 4 RsTokioNoBlockingInAsync diagnostics (4-hop helper, self method helper, Command::output, reqwest::blocking), got: {diags:#?}"
+    );
+}

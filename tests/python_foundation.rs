@@ -9,9 +9,10 @@
 use std::path::{Path, PathBuf};
 
 use dotore::{
-    Capability, CapabilityGate, DotoreConfig, LanguageAnalyzer, LanguageId, PrescriptionTier,
-    PyLanguageAnalyzer, RuleId, SymbolKind, WorkspacePackage, analyze_project_sources,
-    analyze_source, analyze_source_with_config, apply_patches_to_source, search_project_sources,
+    Capability, CapabilityGate, DotoreConfig, LanguageAnalyzer, LanguageId, PackageRole,
+    PrescriptionTier, PyLanguageAnalyzer, RuleId, SymbolKind, WorkspacePackage,
+    analyze_project_sources, analyze_source, analyze_source_with_config, apply_patches_to_source,
+    search_project_sources,
 };
 
 #[test]
@@ -551,5 +552,286 @@ class InvoiceGenerator:
     assert_eq!(
         search_hits[0].outline.parent_name.as_deref(),
         Some("InvoiceGenerator")
+    );
+}
+
+#[test]
+fn pyproject_toml_tool_dotore_and_python_doctor_config_and_profiles_are_loaded_and_applied() {
+    let analyzer = PyLanguageAnalyzer::new();
+
+    // 1. Profile inference: library ([build-system]), web (fastapi/flask), cli (click or [project.scripts]), script (profile override)
+    let lib_pyproject = r#"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my-sdk"
+version = "0.1.0"
+"#;
+    let lib_gate = analyzer.infer_capability_gate(
+        Path::new("packages/my-sdk"),
+        &[(PathBuf::from("packages/my-sdk/pyproject.toml"), lib_pyproject)],
+    );
+    assert_eq!(lib_gate.package_role, PackageRole::Library);
+
+    let web_pyproject = r#"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "web-app"
+dependencies = ["flask>=3.0"]
+"#;
+    let web_gate = analyzer.infer_capability_gate(
+        Path::new("apps/web"),
+        &[(PathBuf::from("apps/web/pyproject.toml"), web_pyproject)],
+    );
+    assert_eq!(web_gate.package_role, PackageRole::Application);
+
+    let cli_pyproject = r#"
+[project]
+name = "my-cli"
+dependencies = ["click>=8.1"]
+
+[project.scripts]
+my-cli = "my_cli.main:cli"
+"#;
+    let cli_gate = analyzer.infer_capability_gate(
+        Path::new("apps/cli"),
+        &[(PathBuf::from("apps/cli/pyproject.toml"), cli_pyproject)],
+    );
+    assert_eq!(cli_gate.package_role, PackageRole::Application);
+
+    // 2. [tool.python-doctor] and [tool.dotore] suppress, per-file-suppress, rules, and profile override
+    let configured_pyproject = r#"
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "configured-app"
+version = "0.1.0"
+
+[tool.python-doctor]
+profile = "script"
+suppress = ["py-require-timezone-aware-datetime"]
+
+[tool.python-doctor.per-file-suppress]
+"app/legacy/*" = ["B006"]
+"app/compat.py" = "exceptions/silent"
+
+[tool.dotore.rules]
+"py-require-context-manager-for-resource" = "off"
+"#;
+    let cfg = DotoreConfig::from_pyproject_toml_str(configured_pyproject)
+        .expect("Expected DotoreConfig from [tool.python-doctor] and [tool.dotore]");
+    assert!(cfg.effective_severity(RuleId::PyRequireTimezoneAwareDatetime).is_none());
+    assert!(cfg.effective_severity(RuleId::PyRequireContextManagerForResource).is_none());
+    assert!(cfg.is_overridden_for_file(
+        RuleId::PyNoMutableDefaultArg,
+        Path::new("app/legacy/old.py"),
+        Path::new("."),
+    ));
+    assert!(cfg.is_overridden_for_file(
+        RuleId::PyNoSilentBroadExcept,
+        Path::new("app/compat.py"),
+        Path::new("."),
+    ));
+
+    let legacy_py = r#"from datetime import datetime
+__all__ = ["old_fn"]
+
+def old_fn(items=[]):
+    now = datetime.now()
+    f = open("data.txt", "r")
+    return items, now, f
+"#;
+    let active_py = r#"__all__ = ["active_fn"]
+def active_fn(items: list = []):
+    return items
+"#;
+    let report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), configured_pyproject.to_string()),
+            (PathBuf::from("app/legacy/old.py"), legacy_py.to_string()),
+            (PathBuf::from("app/active.py"), active_py.to_string()),
+        ],
+        None,
+    );
+    assert_eq!(
+        report.diagnostics.len(),
+        1,
+        "Expected only active.py B006 to fire after pyproject.toml suppressions, got {:?}",
+        report.diagnostics
+    );
+    assert_eq!(report.diagnostics[0].file, PathBuf::from("app/active.py"));
+    assert_eq!(report.diagnostics[0].rule, RuleId::PyNoMutableDefaultArg);
+
+    // 3. CLI profile auto-suppresses bandit/B110 (py-no-silent-broad-except) when `enabled_rules` is None
+    let cli_code = r#"def run_cli():
+    try:
+        optional_cleanup()
+    except Exception:
+        pass
+"#;
+    let cli_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), cli_pyproject.to_string()),
+            (PathBuf::from("my_cli/main.py"), cli_code.to_string()),
+        ],
+        None,
+    );
+    assert!(
+        !cli_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::PyNoSilentBroadExcept),
+        "Expected CLI profile to auto-suppress bandit/B110 (py-no-silent-broad-except), got {:?}",
+        cli_report.diagnostics
+    );
+}
+
+#[test]
+fn py_structure_missing_py_typed_and_low_type_hint_coverage_evaluate_on_packages() {
+    let lib_pyproject = r#"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "typed-sdk"
+version = "0.1.0"
+"#;
+    let typed_init = r#"from typed_sdk.client import Client
+__all__ = ["Client"]
+"#;
+    let typed_client = r#"__all__ = ["Client"]
+
+class Client:
+    base_url: str
+
+    def fetch(self, path: str) -> dict[str, str]:
+        return {"url": f"{self.base_url}/{path}"}
+"#;
+
+    // 1. Typed library WITHOUT `py.typed` -> flags `py-structure-missing-py-typed`
+    let missing_marker_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), lib_pyproject.to_string()),
+            (PathBuf::from("typed_sdk/__init__.py"), typed_init.to_string()),
+            (PathBuf::from("typed_sdk/client.py"), typed_client.to_string()),
+        ],
+        None,
+    );
+    assert!(
+        missing_marker_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::PyStructureMissingPyTyped),
+        "Expected py-structure-missing-py-typed on typed library without py.typed, got {:?}",
+        missing_marker_report.diagnostics
+    );
+
+    // 2. Typed library WITH `py.typed` -> 0 `py-structure-missing-py-typed` diagnostics
+    let with_marker_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), lib_pyproject.to_string()),
+            (PathBuf::from("typed_sdk/py.typed"), String::new()),
+            (PathBuf::from("typed_sdk/__init__.py"), typed_init.to_string()),
+            (PathBuf::from("typed_sdk/client.py"), typed_client.to_string()),
+        ],
+        None,
+    );
+    assert!(
+        !with_marker_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::PyStructureMissingPyTyped),
+        "Expected 0 py-structure-missing-py-typed when py.typed is present, got {:?}",
+        with_marker_report.diagnostics
+    );
+
+    // 3. Web application WITHOUT `py.typed` -> 0 `py-structure-missing-py-typed` diagnostics
+    let web_pyproject = r#"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "web-service"
+dependencies = ["fastapi>=0.115.0"]
+"#;
+    let web_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), web_pyproject.to_string()),
+            (PathBuf::from("typed_sdk/__init__.py"), typed_init.to_string()),
+            (PathBuf::from("typed_sdk/client.py"), typed_client.to_string()),
+        ],
+        None,
+    );
+    assert!(
+        !web_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::PyStructureMissingPyTyped),
+        "Expected 0 py-structure-missing-py-typed on web application profile, got {:?}",
+        web_report.diagnostics
+    );
+
+    // 4. Low type-hint coverage (< 50% of non-test .py files have type annotations)
+    // 1 typed production file + 2 untyped production files = 33.3% (< 50%), plus 1 typed test file (ignored)
+    let untyped_a = r#"__all__ = ["compute_a"]
+def compute_a(x, y):
+    return x + y
+"#;
+    let untyped_b = r#"__all__ = ["compute_b"]
+def compute_b(items):
+    return len(items)
+"#;
+    let typed_test = r#"def test_compute(x: int) -> None:
+    assert x == 1
+"#;
+    let low_coverage_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), web_pyproject.to_string()),
+            (PathBuf::from("app/typed_mod.py"), typed_client.to_string()),
+            (PathBuf::from("app/untyped_a.py"), untyped_a.to_string()),
+            (PathBuf::from("app/untyped_b.py"), untyped_b.to_string()),
+            (PathBuf::from("tests/test_app.py"), typed_test.to_string()),
+        ],
+        None,
+    );
+    assert!(
+        low_coverage_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::PyStructureLowTypeHintCoverage),
+        "Expected py-structure-low-type-hint-coverage when only 1/3 production files have type hints, got {:?}",
+        low_coverage_report.diagnostics
+    );
+
+    // 5. Sufficient type-hint coverage (>= 50%: 2 of 3 production files have type annotations)
+    let typed_b = r#"__all__ = ["compute_b"]
+def compute_b(items: list[str]) -> int:
+    return len(items)
+"#;
+    let good_coverage_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), web_pyproject.to_string()),
+            (PathBuf::from("app/typed_mod.py"), typed_client.to_string()),
+            (PathBuf::from("app/untyped_a.py"), untyped_a.to_string()),
+            (PathBuf::from("app/typed_b.py"), typed_b.to_string()),
+        ],
+        None,
+    );
+    assert!(
+        !good_coverage_report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == RuleId::PyStructureLowTypeHintCoverage),
+        "Expected 0 py-structure-low-type-hint-coverage when 2/3 production files have type hints, got {:?}",
+        good_coverage_report.diagnostics
     );
 }

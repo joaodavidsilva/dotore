@@ -8,8 +8,9 @@ use std::{
 
 use dotore_core::{
     ByteSpan, ConcernBucket, Diagnostic, ExtractedFile, FileContext, HelperFingerprintIr,
-    ResolvedCallerSite, RuleId, RuleSeverity, SourceLoc, StructLiteralConstructionSiteIr,
-    SymbolKind, SymbolOutline, WorkspacePackage, loc_from_line_starts,
+    PackageRole, ResolvedCallerSite, RuleId, RuleSeverity, SourceLoc,
+    StructLiteralConstructionSiteIr, SymbolKind, SymbolOutline, WorkspacePackage,
+    loc_from_line_starts,
 };
 use ruff_python_ast::{Decorator, Expr, Stmt};
 use ruff_text_size::Ranged;
@@ -39,6 +40,8 @@ pub(crate) struct PyModuleGraphInfo {
     pub referenced_names: HashSet<String>,
     /// Unawaited call sites inside this file that may target an `async def` imported from another module.
     pub potential_unawaited_calls: Vec<PyUnawaitedCallCandidate>,
+    /// Whether this module contains any function parameter/return type annotations or `AnnAssign` variable annotations.
+    pub has_type_annotations: bool,
 }
 
 /// An `import ...` or `from ... import ...` statement in a Python module.
@@ -259,6 +262,7 @@ impl<'a> GraphAstWalker<'a> {
                 self.walk_expr(&assign.value);
             }
             Stmt::AnnAssign(ann) => {
+                self.info.has_type_annotations = true;
                 self.walk_expr(&ann.annotation);
                 if let Some(val) = &ann.value {
                     if self.fn_or_class_depth == 0
@@ -278,6 +282,21 @@ impl<'a> GraphAstWalker<'a> {
                 self.walk_expr(&aug.value);
             }
             Stmt::FunctionDef(func_def) => {
+                if func_def.returns.is_some()
+                    || all_function_parameters(func_def).any(|p| p.parameter.annotation.is_some())
+                    || func_def
+                        .parameters
+                        .vararg
+                        .as_ref()
+                        .is_some_and(|p| p.annotation.is_some())
+                    || func_def
+                        .parameters
+                        .kwarg
+                        .as_ref()
+                        .is_some_and(|p| p.annotation.is_some())
+                {
+                    self.info.has_type_annotations = true;
+                }
                 for dec in &func_def.decorator_list {
                     self.walk_expr(&dec.expression);
                 }
@@ -535,6 +554,7 @@ pub(crate) fn evaluate_package_graph_rules(
 ) {
     evaluate_architecture_file_rules(package, files, enabled_rules, diagnostics);
     evaluate_prefer_fluent_builder_rule(package, files, enabled_rules, diagnostics);
+    evaluate_package_structure_rules(package, files, enabled_rules, diagnostics);
 
     if files.len() < 2 {
         return;
@@ -1762,4 +1782,154 @@ fn is_file_level_rule_suppressed(
         }
         false
     })
+}
+
+fn evaluate_package_structure_rules(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let source_files: Vec<&ExtractedFile> = files
+        .iter()
+        .filter(|f| {
+            f.file_context == FileContext::Production
+                && f.path.extension().and_then(|e| e.to_str()) == Some("py")
+                && !package.config.is_file_ignored(&f.path, &package.root_dir)
+        })
+        .collect();
+    if source_files.is_empty() {
+        return;
+    }
+
+    let typed_files: Vec<&ExtractedFile> = source_files
+        .iter()
+        .copied()
+        .filter(|f| {
+            f.downcast_payload::<PyFileIr>()
+                .is_some_and(|ir| ir.module_graph.has_type_annotations)
+        })
+        .collect();
+
+    // 1. `py-structure-missing-py-typed`: library package with type annotations missing `py.typed`
+    let check_missing_py_typed = package.capability_gate.package_role == PackageRole::Library
+        || (package.capability_gate.package_role == PackageRole::Unknown
+            && enabled_rules.is_some_and(|r| r.contains(&RuleId::PyStructureMissingPyTyped)));
+    let has_py_typed = package
+        .capability_gate
+        .entrypoints
+        .iter()
+        .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("py.typed"));
+    if check_missing_py_typed && !typed_files.is_empty() && !has_py_typed {
+        let target_file = source_files
+            .iter()
+            .copied()
+            .find(|f| f.path.file_name().and_then(|n| n.to_str()) == Some("__init__.py"))
+            .or_else(|| typed_files.first().copied());
+        if let Some(file) = target_file {
+            let first_line_end = u32::try_from(
+                file.source
+                    .lines()
+                    .next()
+                    .map_or(0, str::len)
+                    .min(file.source.len()),
+            )
+            .unwrap_or(0);
+            let span = ByteSpan {
+                start: 0,
+                end: first_line_end,
+            };
+            let loc = SourceLoc { line: 1, column: 1 };
+            if !is_file_level_rule_suppressed(
+                package,
+                file,
+                RuleId::PyStructureMissingPyTyped,
+                loc,
+                span,
+            ) && let Some(effective_sev) = resolve_active_py_rule_severity(
+                package,
+                file,
+                RuleId::PyStructureMissingPyTyped,
+                enabled_rules,
+                loc.line,
+                span,
+            ) {
+                diagnostics.push(
+                    Diagnostic::for_rule(
+                        RuleId::PyStructureMissingPyTyped,
+                        file.path.clone(),
+                        loc,
+                        span,
+                        "Python library package uses inline type annotations but is missing a PEP 561 `py.typed` marker file in the package tree.",
+                    )
+                    .with_severity(effective_sev)
+                    .with_message_id("pyStructureMissingPyTyped")
+                    .with_target_name("py.typed"),
+                );
+            }
+        }
+    }
+
+    // 2. `py-structure-low-type-hint-coverage`: < 50% of production `.py` files contain type annotations
+    let check_low_coverage = source_files.len() >= 2
+        || enabled_rules.is_some_and(|r| r.contains(&RuleId::PyStructureLowTypeHintCoverage));
+    if check_low_coverage && typed_files.len() * 2 < source_files.len() {
+        let untyped_file = source_files.iter().copied().find(|f| {
+            !f.downcast_payload::<PyFileIr>()
+                .is_some_and(|ir| ir.module_graph.has_type_annotations)
+        });
+        if let Some(file) = untyped_file {
+            let first_line_end = u32::try_from(
+                file.source
+                    .lines()
+                    .next()
+                    .map_or(0, str::len)
+                    .min(file.source.len()),
+            )
+            .unwrap_or(0);
+            let span = ByteSpan {
+                start: 0,
+                end: first_line_end,
+            };
+            let loc = SourceLoc { line: 1, column: 1 };
+            if !is_file_level_rule_suppressed(
+                package,
+                file,
+                RuleId::PyStructureLowTypeHintCoverage,
+                loc,
+                span,
+            ) && let Some(effective_sev) = resolve_active_py_rule_severity(
+                package,
+                file,
+                RuleId::PyStructureLowTypeHintCoverage,
+                enabled_rules,
+                loc.line,
+                span,
+            ) {
+                let hinted = typed_files.len();
+                let total = source_files.len();
+                let pct = (hinted * 100) / total;
+                let target_name = file
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("module.py")
+                    .to_string();
+                diagnostics.push(
+                    Diagnostic::for_rule(
+                        RuleId::PyStructureLowTypeHintCoverage,
+                        file.path.clone(),
+                        loc,
+                        span,
+                        format!(
+                            "Only {hinted} of {total} production Python modules ({pct}%) contain type annotations (< 50% coverage); add parameter and return type hints across modules."
+                        ),
+                    )
+                    .with_severity(effective_sev)
+                    .with_message_id("pyStructureLowTypeHintCoverage")
+                    .with_target_name(target_name),
+                );
+            }
+        }
+    }
 }

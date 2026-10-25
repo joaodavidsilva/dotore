@@ -24,6 +24,12 @@ pub(crate) mod perf;
 pub(crate) mod rules;
 /// Single-pass detectors for the 5 core production Rust safety rules.
 pub(crate) mod safety;
+/// Lexical `use`-alias and 8-hop local `let`/`const` binding resolver (`SourceKernel`).
+pub(crate) mod source_kernel;
+/// Local `let`/`const` binding resolver and `KernelContext` for `SourceKernel`.
+pub(crate) mod source_kernel_bindings;
+/// Single-pass `SourceKernel` detectors for async runtime, HTTP, TLS, shell, secret, CORS, cookie, and JWT rules.
+pub(crate) mod source_kernel_detectors;
 /// Single-pass detectors for Tokio async concurrency hazards.
 pub(crate) mod tokio_async;
 /// Single-pass detectors for Leptos/Dioxus reactive signals and boolean parameter rules.
