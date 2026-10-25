@@ -728,6 +728,28 @@ pub fn parse_python_suppression_directive(
         }
     }
 
+    // `# nosec` or `# nosec B105, B113` or `# nosec: B105`
+    if let Some(after) = trimmed
+        .strip_prefix("nosec")
+        .or_else(|| trimmed.strip_prefix("NOSEC"))
+    {
+        if after.is_empty() {
+            return Some((SuppressionDirectiveKind::DisableLine, Vec::new()));
+        }
+        if let Some(codes) = after.strip_prefix(':') {
+            return Some((
+                SuppressionDirectiveKind::DisableLine,
+                tokenize_suppression_rules(codes),
+            ));
+        }
+        if after.starts_with(char::is_whitespace) {
+            return Some((
+                SuppressionDirectiveKind::DisableLine,
+                tokenize_suppression_rules(after),
+            ));
+        }
+    }
+
     None
 }
 

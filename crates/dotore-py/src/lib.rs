@@ -12,6 +12,7 @@ use ruff_python_ast::PySourceType;
 use ruff_python_parser::parse_unchecked_source;
 
 pub(crate) mod asyncio;
+pub(crate) mod bandit;
 pub(crate) mod fastapi_pydantic;
 pub(crate) mod graph;
 pub(crate) mod ir;

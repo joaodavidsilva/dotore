@@ -7,6 +7,8 @@ pub mod capability_gate;
 pub mod loader;
 /// In-place configuration mutator (`dotore rules`).
 pub mod mutator;
+/// `pyproject.toml` `[tool.dotore]` / `[tool.python-doctor]` configuration and profile loader.
+pub mod pyproject;
 /// Workspace package discovery and path/JSONC normalization helpers.
 pub mod workspace;
 
@@ -17,6 +19,7 @@ pub use loader::{
     ArchitectureThresholdsConfig, DotoreConfig, IgnoreConfig, IgnoreOverride, SupplyChainConfig,
     load_config_from_dir, load_local_config_in_dir,
 };
+pub use pyproject::infer_python_profile_from_pyproject_doc;
 pub use mutator::{ConfigMutation, ConfigTargetKind, MutateConfigResult, mutate_config_in_dir};
 pub use workspace::{
     WorkspacePackage, discover_workspace_packages, discover_workspace_packages_with_analyzers,

@@ -6,7 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use dotore_core::{Capability, CapabilityGate};
+use dotore_core::{
+    Capability, CapabilityGate, PackageRole, config::infer_python_profile_from_pyproject_doc,
+};
 
 /// Infers a Python [`CapabilityGate`] for `package_dir` from `pyproject.toml` and `requirements.txt` manifests.
 #[must_use]
@@ -20,13 +22,19 @@ pub(crate) fn infer_python_capability_gate(
     let mut gate = CapabilityGate::with_capabilities([Capability::Python]);
     let mut visited_req_files = HashSet::new();
 
+    let mut has_disk_manifest = false;
     for (manifest_path, content) in manifest_sources {
+        if manifest_path.is_file() {
+            has_disk_manifest = true;
+        }
         let file_name = manifest_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if file_name == "pyproject.toml" {
             infer_from_pyproject_toml(content, &mut gate);
+        } else if file_name == "py.typed" {
+            gate.entrypoints.insert(PathBuf::from("py.typed"));
         } else if file_name == "requirements.txt" || file_name.ends_with(".txt") {
             visited_req_files.insert(manifest_path.clone());
             infer_from_requirements_txt(
@@ -39,6 +47,9 @@ pub(crate) fn infer_python_capability_gate(
         }
     }
 
+    if has_disk_manifest && directory_contains_py_typed(package_dir, 0) {
+        gate.entrypoints.insert(PathBuf::from("py.typed"));
+    }
     gate
 }
 
@@ -46,6 +57,11 @@ fn infer_from_pyproject_toml(content: &str, gate: &mut CapabilityGate) {
     let Ok(doc) = toml::from_str::<toml::Value>(content) else {
         return;
     };
+    match infer_python_profile_from_pyproject_doc(&doc) {
+        Some("library") => gate.package_role = PackageRole::Library,
+        Some("web" | "cli" | "script") => gate.package_role = PackageRole::Application,
+        _ => {}
+    }
 
     // [project]
     if let Some(project) = doc.get("project").and_then(toml::Value::as_table) {
@@ -124,6 +140,31 @@ fn infer_from_pyproject_toml(content: &str, gate: &mut CapabilityGate) {
             }
         }
     }
+}
+
+fn directory_contains_py_typed(dir: &Path, depth: usize) -> bool {
+    if depth > 2 {
+        return false;
+    }
+    if dir.join("py.typed").is_file() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with('.')
+                && !matches!(name, "venv" | "node_modules" | "__pycache__" | "tests" | "test" | "docs")
+                && directory_contains_py_typed(&path, depth + 1)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn infer_from_poetry_table(
