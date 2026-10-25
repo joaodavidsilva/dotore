@@ -47,6 +47,7 @@ pub(crate) fn extract_safety_diagnostics(
         guarded_numeric_vars: vec![HashSet::new()],
         guarded_dict_keys: vec![HashSet::new()],
         assigned_var_name: None,
+        in_fallback_try_chain: false,
     };
     visitor.visit_suite(suite);
 }
@@ -63,14 +64,20 @@ struct SafetyRuleVisitor<'a> {
     guarded_numeric_vars: Vec<HashSet<String>>,
     guarded_dict_keys: Vec<HashSet<(String, String)>>,
     assigned_var_name: Option<String>,
+    in_fallback_try_chain: bool,
 }
 
 impl<'a> SafetyRuleVisitor<'a> {
     fn visit_suite(&mut self, suite: &[Stmt]) {
         self.guarded_numeric_vars.push(HashSet::new());
         self.guarded_dict_keys.push(HashSet::new());
-        for stmt in suite {
+        for (idx, stmt) in suite.iter().enumerate() {
+            let prev_fallback = self.in_fallback_try_chain;
+            self.in_fallback_try_chain = is_fallback_try_stmt(stmt)
+                && ((idx > 0 && is_fallback_try_stmt(&suite[idx - 1]))
+                    || (idx + 1 < suite.len() && is_fallback_try_stmt(&suite[idx + 1])));
             self.visit_stmt(stmt);
+            self.in_fallback_try_chain = prev_fallback;
         }
         self.guarded_dict_keys.pop();
         self.guarded_numeric_vars.pop();
@@ -184,13 +191,16 @@ impl<'a> SafetyRuleVisitor<'a> {
                 self.visit_suite(&with_stmt.body);
             }
             Stmt::Try(try_stmt) => {
+                let skip_silent_handlers = self.in_fallback_try_chain;
                 let caught = collect_caught_exceptions(&try_stmt.handlers);
                 self.caught_exception_stack.push(caught);
                 self.visit_suite(&try_stmt.body);
                 self.caught_exception_stack.pop();
                 for handler in &try_stmt.handlers {
                     let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    self.check_except_handler(h);
+                    if !skip_silent_handlers {
+                        self.check_except_handler(h);
+                    }
                     self.visit_suite(&h.body);
                 }
                 self.visit_suite(&try_stmt.orelse);
@@ -298,7 +308,7 @@ impl<'a> SafetyRuleVisitor<'a> {
     }
 
     fn check_except_handler(&mut self, handler: &ruff_python_ast::ExceptHandlerExceptHandler) {
-        if !is_silent_handler_body(&handler.body) {
+        if !is_silent_handler_body(&handler.body, self.scope.in_loop()) {
             return;
         }
         let target_name = match handler.type_.as_deref() {
@@ -724,14 +734,29 @@ fn expr_contains_broad_exception(expr: &Expr) -> bool {
     }
 }
 
+fn is_fallback_try_stmt(stmt: &Stmt) -> bool {
+    let Stmt::Try(try_stmt) = stmt else {
+        return false;
+    };
+    !try_stmt.handlers.is_empty()
+        && try_stmt.handlers.iter().all(|handler| {
+            let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
+            !h.body.is_empty()
+                && h.body
+                    .iter()
+                    .all(|s| matches!(s, Stmt::Pass(_) | Stmt::Continue(_)))
+        })
+}
+
 #[expect(
     clippy::wildcard_enum_match_arm,
-    reason = "Only pass and literal/ellipsis expression statements count as silent no-op bodies"
+    reason = "Only pass, loop continue, and literal/ellipsis expression statements count as silent no-op bodies"
 )]
-fn is_silent_handler_body(body: &[Stmt]) -> bool {
+fn is_silent_handler_body(body: &[Stmt], in_loop: bool) -> bool {
     !body.is_empty()
         && body.iter().all(|stmt| match stmt {
             Stmt::Pass(_) => true,
+            Stmt::Continue(_) => in_loop,
             Stmt::Expr(expr_stmt) => matches!(
                 expr_stmt.value.as_ref(),
                 Expr::EllipsisLiteral(_)

@@ -469,7 +469,8 @@ pub(crate) fn resolve_active_py_rule_severity(
     }
     let meta = rule.metadata();
     if enabled_rules.is_none()
-        && file.file_context != FileContext::Production
+        && (file.file_context != FileContext::Production
+            || is_python_test_or_example_path(&file.path))
         && meta.tags.contains(&RuleTag::TestNoise)
         && !meta.tags.contains(&RuleTag::MigrationHint)
         && package.config.explicit_rule_override(rule).is_none()
@@ -481,6 +482,37 @@ pub(crate) fn resolve_active_py_rule_severity(
         return None;
     }
     Some(effective_sev)
+}
+
+/// Returns `true` if `path` is inside a Python test or example directory (`tests/`, `testing/`,
+/// `examples/`, `benchmarks/`, `docs_src/`, `samples/`, `demo/`) or named `example_*.py`.
+#[must_use]
+fn is_python_test_or_example_path(path: &Path) -> bool {
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+        && (file_name.starts_with("example_")
+            || file_name.starts_with("test_")
+            || file_name.ends_with("_test.py")
+            || file_name == "conftest.py")
+    {
+        return true;
+    }
+    path.components().any(|comp| {
+        comp.as_os_str().to_str().is_some_and(|seg| {
+            matches!(
+                seg,
+                "tests"
+                    | "test"
+                    | "testing"
+                    | "examples"
+                    | "example"
+                    | "docs_src"
+                    | "samples"
+                    | "demo"
+                    | "demos"
+                    | "benchmarks"
+            )
+        })
+    })
 }
 
 /// Builds a Python [`Diagnostic`] using [`Diagnostic::for_rule`] with location computed from `line_starts`.
