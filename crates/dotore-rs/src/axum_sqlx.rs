@@ -4,19 +4,22 @@
 //! 2. `rs-sqlx-no-query-in-loop` ([`RuleId::RsSqlxNoQueryInLoop`])
 //! 3. `rs-axum-no-contended-mutex-state` ([`RuleId::RsAxumNoContendedMutexState`])
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
-    BinOp, Expr, ExprAssign, ExprCall, ExprForLoop, ExprLoop, ExprMacro, ExprMethodCall, ExprWhile,
-    File, FnArg, GenericArgument, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemStruct, Local, Macro,
-    PathArguments, Signature, TraitItemFn, Type,
+    Expr, ExprCall, ExprForLoop, ExprLoop, ExprMacro, ExprMethodCall, ExprWhile, File, FnArg,
+    GenericArgument, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemStruct, Macro, PathArguments,
+    Signature, Stmt, TraitItemFn, Type,
     spanned::Spanned,
     visit::{self, Visit},
 };
 
-use crate::matchers::{
-    RsCandidateFinding, RsScopeTracker, extract_pat_ident, is_format_macro, loc_at, span_to_bytes,
+use crate::{
+    matchers::{RsCandidateFinding, RsScopeTracker, extract_pat_ident, loc_at, span_to_bytes},
+    source_kernel::{
+        FnBodyResolver, KernelContext, RsAliasMap, bare_identifier, strip_parens, strip_wrappers,
+    },
 };
 
 /// Extracts candidate findings for Axum and SQLx rules from `ast`.
@@ -28,11 +31,13 @@ pub(crate) fn extract_axum_sqlx_findings(
     let mut struct_mutex_fields = HashMap::new();
     collect_struct_mutex_fields(ast, &mut struct_mutex_fields);
 
+    let aliases = RsAliasMap::build(ast);
     let mut extractor = AxumSqlxVisitor {
+        aliases: &aliases,
+        current_body: None,
         line_starts,
         findings: out,
         scope: RsScopeTracker::for_file(ast),
-        formatted_vars: HashSet::new(),
         reported_loop_query_spans: Vec::new(),
         struct_mutex_fields,
     };
@@ -66,10 +71,11 @@ fn collect_struct_mutex_fields(ast: &File, out: &mut HashMap<String, Vec<String>
 }
 
 struct AxumSqlxVisitor<'a> {
+    aliases: &'a RsAliasMap,
+    current_body: Option<FnBodyResolver>,
     line_starts: &'a [u32],
     findings: &'a mut Vec<RsCandidateFinding>,
     scope: RsScopeTracker,
-    formatted_vars: HashSet<String>,
     reported_loop_query_spans: Vec<ByteSpan>,
     struct_mutex_fields: HashMap<String, Vec<String>>,
 }
@@ -83,6 +89,10 @@ impl AxumSqlxVisitor<'_> {
         loc_at(self.line_starts, byte_offset)
     }
 
+    fn ctx(&self) -> KernelContext<'_> {
+        KernelContext::new(self.aliases, self.current_body.as_ref())
+    }
+
     fn is_inside_reported_loop_query(&self, span: ByteSpan) -> bool {
         self.reported_loop_query_spans
             .iter()
@@ -90,66 +100,132 @@ impl AxumSqlxVisitor<'_> {
     }
 
     fn check_sqlx_formatted_query_call(&mut self, node: &ExprCall) {
-        let Some(func_name) = extract_sqlx_query_fn_name(&node.func) else {
+        let ctx = self.ctx();
+        let Some((func_name, arg_pos, alias_req)) =
+            match_sql_query_call_function(&ctx, &node.func)
+        else {
             return;
         };
-        let Some(first_arg) = node.args.first() else {
+        let Some(sql_arg) = node.args.iter().nth(arg_pos) else {
             return;
         };
-        if self.expr_is_formatted_sql(first_arg) {
+        if is_assembled_dynamic_sql(&ctx, sql_arg) {
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
-            self.findings.push(RsCandidateFinding::new(
+            let mut finding = RsCandidateFinding::new(
                 RuleId::RsSqlxNoFormattedQueryString,
                 self.scope.subject_name(),
                 func_name.clone(),
                 "rsSqlxNoFormattedQueryString",
                 format!(
-                    "SQLx query `{func_name}(...)` is constructed with `format!(...)` string interpolation; use parameterized `$1` / `?` placeholders with `.bind(...)` instead."
+                    "SQL query `{func_name}(...)` is constructed with runtime string interpolation; use parameterized `$1` / `?` placeholders with `.bind(...)` instead."
                 ),
                 loc,
                 span,
-            ));
+            );
+            if let Some((w, c)) = alias_req {
+                finding = finding.with_required_crate_alias(w, c);
+            }
+            self.findings.push(finding);
         }
     }
 
-    fn expr_is_formatted_sql(&self, expr: &Expr) -> bool {
-        #[expect(
-            clippy::wildcard_enum_match_arm,
-            reason = "syn::Expr has dozens of variants; formatted SQL detection inspects references, macros, method calls, paths, and binary ops"
-        )]
-        match expr {
-            Expr::Reference(r) => self.expr_is_formatted_sql(&r.expr),
-            Expr::Paren(p) => self.expr_is_formatted_sql(&p.expr),
-            Expr::Group(g) => self.expr_is_formatted_sql(&g.expr),
-            Expr::Unary(u) => self.expr_is_formatted_sql(&u.expr),
-            Expr::Macro(expr_macro) => is_format_macro(&expr_macro.mac),
-            Expr::MethodCall(mc) => {
-                let m = mc.method.to_string();
-                if matches!(m.as_str(), "as_str" | "as_ref" | "into_boxed_str" | "leak") {
-                    self.expr_is_formatted_sql(&mc.receiver)
-                } else {
-                    false
+    fn check_sql_formatted_query_method(&mut self, node: &ExprMethodCall) {
+        let method = node.method.to_string();
+        let Some(first_arg) = node.args.first() else {
+            return;
+        };
+        let ctx = self.ctx();
+        if method == "push" {
+            let text = strip_transparent_sql_methods(first_arg);
+            if !ctx.is_dynamic_text(&text) && bare_identifier(&text).is_none() {
+                return;
+            }
+            let Some(Expr::Call(ctor)) = ctx.chain_root(&node.receiver) else {
+                return;
+            };
+            let Some(alias_req) =
+                ctx.matches_call_path(&ctor.func, "sqlx", &["QueryBuilder"], "new")
+            else {
+                return;
+            };
+            if is_assembled_dynamic_sql(&ctx, first_arg) {
+                let span = self.span_to_bytes(first_arg.span());
+                let loc = self.loc_at(span.start);
+                let mut finding = RsCandidateFinding::new(
+                    RuleId::RsSqlxNoFormattedQueryString,
+                    self.scope.subject_name(),
+                    "sqlx::QueryBuilder::push",
+                    "rsSqlxNoFormattedQueryString",
+                    "SQL text is assembled from a runtime value instead of bound as a parameter.",
+                    loc,
+                    span,
+                );
+                if let Some((w, c)) = alias_req {
+                    finding = finding.with_required_crate_alias(w, c);
                 }
+                self.findings.push(finding);
             }
-            Expr::Path(expr_path) => {
-                if expr_path.qself.is_none()
-                    && let Some(ident) = expr_path.path.get_ident()
-                {
-                    return self.formatted_vars.contains(&ident.to_string());
-                }
-                false
-            }
-            Expr::Binary(bin) => {
-                matches!(bin.op, BinOp::Add(_))
-                    && (self.expr_is_formatted_sql(&bin.left)
-                        || self.expr_is_formatted_sql(&bin.right)
-                        || is_string_lit_or_to_string(&bin.left))
-            }
-            _ => false,
+            return;
         }
-    }
 
+        if !matches!(
+            method.as_str(),
+            "execute" | "prepare" | "query_row" | "batch_execute" | "query"
+        ) {
+            return;
+        }
+        if !is_assembled_dynamic_sql(&ctx, first_arg) {
+            return;
+        }
+        let Some(Expr::Call(ctor)) = ctx.chain_root(&node.receiver) else {
+            return;
+        };
+        let Expr::Path(ep) = strip_parens(&ctor.func) else {
+            return;
+        };
+        let Some((resolved, maybe_renamed)) = ctx.resolve_item_path(&ep.path) else {
+            return;
+        };
+        let [krate, kind, _] = resolved.as_slice() else {
+            return;
+        };
+        let matched_crate = if is_sql_connection_method("rusqlite", kind, &method)
+            && (krate == "rusqlite" || maybe_renamed.is_some())
+        {
+            Some("rusqlite")
+        } else if is_sql_connection_method("postgres", kind, &method)
+            && (krate == "postgres" || maybe_renamed.is_some())
+        {
+            Some("postgres")
+        } else if is_sql_connection_method("tokio_postgres", kind, &method)
+            && (krate == "tokio_postgres" || maybe_renamed.is_some())
+        {
+            Some("tokio_postgres")
+        } else {
+            None
+        };
+        let Some(canonical_crate) = matched_crate else {
+            return;
+        };
+        let span = self.span_to_bytes(first_arg.span());
+        let loc = self.loc_at(span.start);
+        let mut finding = RsCandidateFinding::new(
+            RuleId::RsSqlxNoFormattedQueryString,
+            self.scope.subject_name(),
+            format!("{canonical_crate}::{kind}::{method}"),
+            "rsSqlxNoFormattedQueryString",
+            "SQL text is assembled from a runtime value instead of bound as a parameter.",
+            loc,
+            span,
+        );
+        if let Some(written) = maybe_renamed
+            && written != canonical_crate
+        {
+            finding = finding.with_required_crate_alias(written, canonical_crate);
+        }
+        self.findings.push(finding);
+    }
     fn check_axum_contended_mutex_state(&mut self, sig: &Signature, body: Option<&syn::Block>) {
         if self.scope.in_test() {
             return;
@@ -204,54 +280,67 @@ impl<'ast> Visit<'ast> for AxumSqlxVisitor<'_> {
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let snap = self.scope.enter_fn(i);
-        let prev_vars = std::mem::take(&mut self.formatted_vars);
+        let prev_body = self
+            .current_body
+            .replace(FnBodyResolver::build(&i.sig, &i.block));
 
         self.check_axum_contended_mutex_state(&i.sig, Some(&i.block));
 
-        visit::visit_item_fn(self, i);
-
-        self.formatted_vars = prev_vars;
+        for stmt in &i.block.stmts {
+            if !matches!(stmt, Stmt::Item(_)) {
+                self.visit_stmt(stmt);
+            }
+        }
+        self.current_body = prev_body;
+        for stmt in &i.block.stmts {
+            if let Stmt::Item(item) = stmt {
+                self.visit_item(item);
+            }
+        }
         self.scope.exit(snap);
     }
 
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
         let snap = self.scope.enter_method(i);
-        let prev_vars = std::mem::take(&mut self.formatted_vars);
+        let prev_body = self
+            .current_body
+            .replace(FnBodyResolver::build(&i.sig, &i.block));
 
         self.check_axum_contended_mutex_state(&i.sig, Some(&i.block));
-        visit::visit_impl_item_fn(self, i);
 
-        self.formatted_vars = prev_vars;
+        for stmt in &i.block.stmts {
+            if !matches!(stmt, Stmt::Item(_)) {
+                self.visit_stmt(stmt);
+            }
+        }
+        self.current_body = prev_body;
+        for stmt in &i.block.stmts {
+            if let Stmt::Item(item) = stmt {
+                self.visit_item(item);
+            }
+        }
         self.scope.exit(snap);
     }
 
     fn visit_trait_item_fn(&mut self, i: &'ast TraitItemFn) {
         let snap = self.scope.enter_trait_fn(i);
-        visit::visit_trait_item_fn(self, i);
-        self.scope.exit(snap);
-    }
-
-    fn visit_local(&mut self, node: &'ast Local) {
-        if let Some(ident) = extract_pat_ident(&node.pat)
-            && let Some(init) = &node.init
-        {
-            if self.expr_is_formatted_sql(&init.expr) {
-                self.formatted_vars.insert(ident);
-            } else {
-                self.formatted_vars.remove(&ident);
+        if let Some(block) = &i.default {
+            let prev_body = self
+                .current_body
+                .replace(FnBodyResolver::build(&i.sig, block));
+            for stmt in &block.stmts {
+                if !matches!(stmt, Stmt::Item(_)) {
+                    self.visit_stmt(stmt);
+                }
+            }
+            self.current_body = prev_body;
+            for stmt in &block.stmts {
+                if let Stmt::Item(item) = stmt {
+                    self.visit_item(item);
+                }
             }
         }
-        visit::visit_local(self, node);
-    }
-
-    fn visit_expr_assign(&mut self, node: &'ast ExprAssign) {
-        if let Expr::Path(p) = node.left.as_ref()
-            && let Some(ident) = p.path.get_ident()
-            && self.expr_is_formatted_sql(&node.right)
-        {
-            self.formatted_vars.insert(ident.to_string());
-        }
-        visit::visit_expr_assign(self, node);
+        self.scope.exit(snap);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast ExprForLoop) {
@@ -276,14 +365,8 @@ impl<'ast> Visit<'ast> for AxumSqlxVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if !self.scope.in_test() {
+            self.check_sql_formatted_query_method(node);
             let method = node.method.to_string();
-            if method == "push_str"
-                && let Expr::Path(p) = node.receiver.as_ref()
-                && let Some(ident) = p.path.get_ident()
-            {
-                self.formatted_vars.insert(ident.to_string());
-            }
-
             if self.scope.in_loop()
                 && is_sqlx_terminal_method(&method)
                 && receiver_chain_is_sqlx_query(&node.receiver)
@@ -443,19 +526,107 @@ fn is_sqlx_query_macro(mac: &Macro) -> bool {
     segs.len() == 1 || segs.iter().any(|s| s == "sqlx")
 }
 
-fn is_string_lit_or_to_string(expr: &Expr) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Checks only string literals and .to_string() / String::from calls"
-    )]
-    match expr {
-        Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(_),
-            ..
-        }) => true,
-        Expr::MethodCall(mc) => mc.method == "to_string" || mc.method == "to_owned",
-        _ => false,
+const QUERY_FUNCTIONS: [(&[&str], usize); 11] = [
+    (&["sqlx", "query"], 0),
+    (&["sqlx", "query_as"], 0),
+    (&["sqlx", "query_scalar"], 0),
+    (&["sqlx", "raw_sql"], 0),
+    (&["sqlx", "query_with"], 0),
+    (&["sqlx", "query_as_with"], 0),
+    (&["sqlx", "query_scalar_with"], 0),
+    (&["sqlx", "QueryBuilder", "new"], 0),
+    (&["diesel", "sql_query"], 0),
+    (&["diesel", "dsl", "sql"], 0),
+    (&["sea_orm", "Statement", "from_string"], 1),
+];
+
+const SQL_CONNECTIONS: [(&str, &str, &[&str]); 3] = [
+    ("rusqlite", "Connection", &["execute", "prepare", "query_row"]),
+    ("postgres", "Client", &["batch_execute", "execute", "query"]),
+    (
+        "tokio_postgres",
+        "Client",
+        &["batch_execute", "execute", "query"],
+    ),
+];
+
+fn is_sql_connection_method(krate: &str, kind: &str, method: &str) -> bool {
+    SQL_CONNECTIONS
+        .iter()
+        .any(|(c, k, methods)| *c == krate && *k == kind && methods.contains(&method))
+}
+
+type SqlCallMatch = (String, usize, Option<(String, String)>);
+
+fn match_sql_query_call_function(ctx: &KernelContext<'_>, callee: &Expr) -> Option<SqlCallMatch> {
+    for (path, pos) in QUERY_FUNCTIONS {
+        let Some((expected_crate, rest)) = path.split_first() else {
+            continue;
+        };
+        let Some((expected_member, expected_mid)) = rest.split_last() else {
+            continue;
+        };
+        if let Some(alias_req) =
+            ctx.matches_call_path(callee, expected_crate, expected_mid, expected_member)
+        {
+            return Some((path.join("::"), pos, alias_req));
+        }
     }
+
+    let Expr::Path(ep) = strip_parens(callee) else {
+        return None;
+    };
+    if ep.qself.is_some() {
+        return None;
+    }
+    let (resolved, maybe_renamed) = ctx.resolve_item_path(&ep.path)?;
+    if let [krate, kind, method] = resolved.as_slice() {
+        for &(listed_crate, listed_kind, methods) in &SQL_CONNECTIONS {
+            if kind == listed_kind
+                && methods.contains(&method.as_str())
+                && (krate == listed_crate || maybe_renamed.is_some())
+            {
+                let req = maybe_renamed
+                    .filter(|w| w != listed_crate)
+                    .map(|w| (w, listed_crate.to_string()));
+                return Some((format!("{listed_crate}::{kind}::{method}"), 1, req));
+            }
+        }
+    }
+
+    if let [single] = resolved.as_slice()
+        && matches!(
+            single.as_str(),
+            "query" | "query_as" | "query_scalar" | "raw_sql"
+        )
+    {
+        return Some((format!("sqlx::{single}"), 0, None));
+    }
+    None
+}
+
+fn strip_transparent_sql_methods(expr: &Expr) -> Expr {
+    let mut current = expr.clone();
+    loop {
+        current = strip_wrappers(&current).clone();
+        let Expr::MethodCall(mc) = &current else {
+            return current;
+        };
+        if matches!(
+            mc.method.to_string().as_str(),
+            "as_ref" | "as_str" | "clone" | "into_boxed_str" | "leak"
+        ) && mc.args.is_empty()
+        {
+            current = (*mc.receiver).clone();
+        } else {
+            return current;
+        }
+    }
+}
+
+fn is_assembled_dynamic_sql(ctx: &KernelContext<'_>, arg: &Expr) -> bool {
+    let text = strip_transparent_sql_methods(arg);
+    ctx.is_dynamic_text(&text) || ctx.is_pushed_or_written_dynamic(&text)
 }
 
 fn type_contains_contended_mutex(ty: &Type) -> bool {

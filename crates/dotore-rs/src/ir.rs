@@ -108,11 +108,18 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
 
     let (graph_ir, architecture_facets) = if let Ok(ast) = &parsed {
         extractor.extract_crate_file(ast);
+        let aliases = crate::source_kernel::RsAliasMap::build(ast);
         crate::safety::extract_safety_findings(ast, &lines, &line_starts, &mut findings);
         crate::axum_sqlx::extract_axum_sqlx_findings(ast, &line_starts, &mut findings);
         crate::ui_signals::extract_ui_and_arch_findings(ast, &line_starts, &mut findings);
         crate::tokio_async::extract_tokio_async_findings(ast, source, &line_starts, &mut findings);
         crate::perf::extract_perf_findings(ast, &line_starts, &mut findings);
+        crate::source_kernel_detectors::extract_source_kernel_findings(
+            ast,
+            &aliases,
+            &line_starts,
+            &mut findings,
+        );
         let g = crate::graph::extract_file_graph_ir(ast, source, &line_starts);
         let facets = extract_architecture_facets(path, ast, source, &line_starts);
         (g, facets)

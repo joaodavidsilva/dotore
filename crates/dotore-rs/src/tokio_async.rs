@@ -3,22 +3,23 @@
 //! 1. `rs-tokio-no-std-lock-across-await` ([`RuleId::RsTokioNoStdLockAcrossAwait`])
 //! 2. `rs-tokio-no-blocking-in-async` ([`RuleId::RsTokioNoBlockingInAsync`], `Autofix`)
 //! 3. `rs-tokio-prefer-bounded-channel` ([`RuleId::RsTokioPreferBoundedChannel`])
-
 use std::collections::HashSet;
 
 use dotore_core::{AutofixPatch, ByteSpan, RuleId, SourceLoc};
 use syn::{
-    Block, Expr, ExprAsync, ExprAwait, ExprCall, ExprClosure, ExprIf, File, FnArg, ImplItemFn,
-    Item, ItemFn, ItemImpl, ItemMod, Pat, Signature, Stmt, TraitItemFn, Type, UseTree,
+    Block, Expr, ExprAsync, ExprAwait, ExprCall, ExprClosure, ExprIf, ExprMethodCall, File, FnArg,
+    ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, Pat, Signature, Stmt, TraitItemFn, Type, UseTree,
     spanned::Spanned,
     visit::{self, Visit},
 };
 
-use crate::matchers::{
-    RsCandidateFinding, RsScopeTracker, extract_expr_ident, extract_pat_ident,
-    extract_receiver_label, loc_at, path_to_string, slice_source, span_to_bytes,
+use crate::{
+    matchers::{
+        RsCandidateFinding, RsScopeTracker, extract_expr_ident, extract_pat_ident,
+        extract_receiver_label, loc_at, path_to_string, slice_source, span_to_bytes,
+    },
+    source_kernel::{FnBodyResolver, KernelContext, RsAliasMap, strip_parens},
 };
-
 /// Runs single-pass Tokio async concurrency hazard detectors on the parsed [`syn::File`].
 pub(crate) fn extract_tokio_async_findings(
     file: &File,
@@ -26,10 +27,13 @@ pub(crate) fn extract_tokio_async_findings(
     line_starts: &[u32],
     findings: &mut Vec<RsCandidateFinding>,
 ) {
+    let aliases = RsAliasMap::build(file);
     let mut visitor = TokioAsyncVisitor {
         source,
         line_starts,
         findings,
+        aliases: &aliases,
+        current_body: None,
         scope: RsScopeTracker::for_file(file),
         tokio_sync_type_names: HashSet::new(),
         tokio_sync_vars: HashSet::new(),
@@ -66,6 +70,8 @@ struct TokioAsyncVisitor<'a> {
     source: &'a str,
     line_starts: &'a [u32],
     findings: &'a mut Vec<RsCandidateFinding>,
+    aliases: &'a RsAliasMap,
+    current_body: Option<FnBodyResolver>,
     scope: RsScopeTracker,
     tokio_sync_type_names: HashSet<String>,
     tokio_sync_vars: HashSet<String>,
@@ -86,6 +92,11 @@ impl TokioAsyncVisitor<'_> {
 
     fn loc_at(&self, byte_offset: u32) -> SourceLoc {
         loc_at(self.line_starts, byte_offset)
+    }
+
+
+    fn ctx(&self) -> KernelContext<'_> {
+        KernelContext::new(self.aliases, self.current_body.as_ref())
     }
 
     fn collect_use_tree(&mut self, tree: &UseTree, prefix: &str) {
@@ -250,13 +261,15 @@ impl TokioAsyncVisitor<'_> {
         if self.scope.in_test() || !self.scope.in_async() || self.spawn_blocking_depth > 0 {
             return;
         }
-        let Expr::Path(expr_path) = node.func.as_ref() else {
+        let Expr::Path(expr_path) = strip_parens(&node.func) else {
             return;
         };
         if expr_path.qself.is_some() {
             return;
         }
         let path_str = path_to_string(&expr_path.path);
+        let ctx = self.ctx();
+        let resolved_item = ctx.resolve_item_path(&expr_path.path);
 
         // 1. `std::thread::sleep(dur)` / `thread::sleep(dur)` -> Autofix to `tokio::time::sleep(dur).await`
         let is_std_sleep = matches!(
@@ -264,7 +277,13 @@ impl TokioAsyncVisitor<'_> {
             "std::thread::sleep" | "core::thread::sleep" | "thread::sleep"
         ) || (path_str == "sleep"
             && self.std_thread_sleep_imported
-            && !self.tokio_time_sleep_imported);
+            && !self.tokio_time_sleep_imported)
+            || resolved_item.as_ref().is_some_and(|(segs, _)| {
+                matches!(
+                    segs.as_slice(),
+                    [k, m, f] if matches!(k.as_str(), "std" | "core") && m == "thread" && f == "sleep"
+                )
+            });
 
         if is_std_sleep {
             let span = self.span_to_bytes(node.span());
@@ -306,7 +325,7 @@ impl TokioAsyncVisitor<'_> {
             return;
         }
 
-        // 2. Synchronous `std::fs::*` and `std::net::*` calls inside async
+        // 2. Synchronous `std::fs::*`, `std::net::*`, `std::process::Command::{output, status}`, or `reqwest::blocking::*`
         if is_blocking_std_fs_or_net_path(
             &path_str,
             StdIoImports {
@@ -314,16 +333,94 @@ impl TokioAsyncVisitor<'_> {
                 std_fs_file_imported: self.std_fs_file_imported,
                 std_net_imported: self.std_net_imported,
             },
-        ) {
+        ) || resolved_item
+            .as_ref()
+            .is_some_and(|(segs, _)| is_resolved_blocking_item(segs))
+        {
+            let target = resolved_item
+                .map(|(segs, _)| segs.join("::"))
+                .unwrap_or_else(|| path_str.clone());
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
             self.findings.push(RsCandidateFinding::new(
                 RuleId::RsTokioNoBlockingInAsync,
                 self.scope.subject_name(),
-                path_str.clone(),
+                target,
                 "rsTokioNoBlockingInAsync",
                 format!(
                     "Synchronous I/O call `{path_str}(...)` blocks the async runtime thread; use `tokio::fs` / `tokio::net` or wrap in `tokio::task::spawn_blocking(...)`."
+                ),
+                loc,
+                span,
+            ));
+            return;
+        }
+
+        // 3. Interprocedural synchronous helper call up to 4 hops deep
+        let call_site = self.span_to_bytes(node.span());
+        if let Some((helper_name, blocking_target)) =
+            crate::source_kernel::check_sync_helper_call(
+                self.aliases,
+                self.current_body.as_ref(),
+                call_site,
+                &expr_path.path,
+            )
+        {
+            let loc = self.loc_at(call_site.start);
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsTokioNoBlockingInAsync,
+                self.scope.subject_name(),
+                helper_name.clone(),
+                "rsTokioNoBlockingInAsync",
+                format!(
+                    "A blocking call runs inside async code through the synchronous helper `{helper_name}`, which reaches `{blocking_target}`, and stalls the executor thread."
+                ),
+                loc,
+                call_site,
+            ));
+        }
+    }
+
+    fn check_blocking_method_in_async(&mut self, node: &ExprMethodCall) {
+        if self.scope.in_test() || !self.scope.in_async() || self.spawn_blocking_depth > 0 {
+            return;
+        }
+        let ctx = self.ctx();
+        if let Some(waiting_target) =
+            crate::source_kernel::match_waiting_command_method(&ctx, node)
+        {
+            let span = self.span_to_bytes(node.method.span());
+            let loc = self.loc_at(span.start);
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsTokioNoBlockingInAsync,
+                self.scope.subject_name(),
+                waiting_target,
+                "rsTokioNoBlockingInAsync",
+                "A blocking call runs inside async code and stalls the executor thread.",
+                loc,
+                span,
+            ));
+            return;
+        }
+
+        let site = self.span_to_bytes(node.span());
+        if let Some((helper_name, blocking_target)) =
+            crate::source_kernel::check_sync_self_method_call(
+                self.aliases,
+                site,
+                &node.receiver,
+                &node.method.to_string(),
+            )
+        {
+            let span = self.span_to_bytes(node.method.span());
+            let loc = self.loc_at(span.start);
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsTokioNoBlockingInAsync,
+                self.scope.subject_name(),
+                helper_name.clone(),
+                "rsTokioNoBlockingInAsync",
+                format!(
+                    "A blocking call runs inside async code through the synchronous helper `{helper_name}`, which reaches `{blocking_target}`, and stalls the executor thread."
                 ),
                 loc,
                 span,
@@ -431,10 +528,13 @@ impl<'ast> Visit<'ast> for TokioAsyncVisitor<'_> {
         let snap = self.scope.enter_fn(i);
         let prev_tokio_vars = std::mem::take(&mut self.tokio_sync_vars);
         let prev_guards = std::mem::take(&mut self.active_sync_guards);
+        let prev_body = self
+            .current_body
+            .replace(FnBodyResolver::build(&i.sig, &i.block));
         self.populate_sig_vars(&i.sig);
 
         visit::visit_item_fn(self, i);
-
+        self.current_body = prev_body;
         self.active_sync_guards = prev_guards;
         self.tokio_sync_vars = prev_tokio_vars;
         self.scope.exit(snap);
@@ -450,10 +550,13 @@ impl<'ast> Visit<'ast> for TokioAsyncVisitor<'_> {
         let snap = self.scope.enter_method(i);
         let prev_tokio_vars = std::mem::take(&mut self.tokio_sync_vars);
         let prev_guards = std::mem::take(&mut self.active_sync_guards);
+        let prev_body = self
+            .current_body
+            .replace(FnBodyResolver::build(&i.sig, &i.block));
         self.populate_sig_vars(&i.sig);
 
         visit::visit_impl_item_fn(self, i);
-
+        self.current_body = prev_body;
         self.active_sync_guards = prev_guards;
         self.tokio_sync_vars = prev_tokio_vars;
         self.scope.exit(snap);
@@ -463,10 +566,16 @@ impl<'ast> Visit<'ast> for TokioAsyncVisitor<'_> {
         let snap = self.scope.enter_trait_fn(i);
         let prev_tokio_vars = std::mem::take(&mut self.tokio_sync_vars);
         let prev_guards = std::mem::take(&mut self.active_sync_guards);
+        let prev_body = i
+            .default
+            .as_ref()
+            .map(|b| FnBodyResolver::build(&i.sig, b));
+        let saved_body = std::mem::replace(&mut self.current_body, prev_body);
         self.populate_sig_vars(&i.sig);
 
         visit::visit_trait_item_fn(self, i);
 
+        self.current_body = saved_body;
         self.active_sync_guards = prev_guards;
         self.tokio_sync_vars = prev_tokio_vars;
         self.scope.exit(snap);
@@ -566,6 +675,18 @@ impl<'ast> Visit<'ast> for TokioAsyncVisitor<'_> {
             self.spawn_blocking_depth -= 1;
         }
     }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        self.check_blocking_method_in_async(node);
+        let is_spawn_blocking = is_offloading_method_call(node);
+        if is_spawn_blocking {
+            self.spawn_blocking_depth += 1;
+        }
+        visit::visit_expr_method_call(self, node);
+        if is_spawn_blocking {
+            self.spawn_blocking_depth -= 1;
+        }
+    }
 }
 
 fn is_tokio_sync_type(ty: &Type, tokio_sync_type_names: &HashSet<String>) -> bool {
@@ -619,19 +740,94 @@ fn is_tokio_sync_ctor(expr: &Expr, tokio_sync_type_names: &HashSet<String>) -> b
     false
 }
 
-fn is_spawn_blocking_call(node: &ExprCall) -> bool {
-    if let Expr::Path(ep) = node.func.as_ref() {
+
+pub(crate) fn is_spawn_blocking_call(node: &ExprCall) -> bool {
+    if let Expr::Path(ep) = strip_parens(&node.func) {
         let full = path_to_string(&ep.path);
-        return matches!(
+        if matches!(
             full.as_str(),
             "tokio::task::spawn_blocking"
                 | "task::spawn_blocking"
                 | "spawn_blocking"
                 | "tokio::runtime::Handle::spawn_blocking"
-        );
+                | "tokio::task::block_in_place"
+                | "task::block_in_place"
+                | "block_in_place"
+                | "std::thread::spawn"
+                | "thread::spawn"
+        ) {
+            return true;
+        }
+        if let Some(last) = ep.path.segments.last() {
+            let name = last.ident.to_string();
+            if matches!(name.as_str(), "spawn_blocking" | "block_in_place") {
+                return true;
+            }
+            if name == "spawn"
+                && node
+                    .args
+                    .first()
+                    .is_some_and(|arg| matches!(strip_parens(arg), Expr::Closure(c) if c.asyncness.is_none()))
+            {
+                return true;
+            }
+        }
     }
     false
 }
+
+pub(crate) fn is_offloading_method_call(node: &ExprMethodCall) -> bool {
+    let name = node.method.to_string();
+    matches!(name.as_str(), "spawn_blocking" | "block_in_place")
+        || (name == "spawn"
+            && node
+                .args
+                .first()
+                .is_some_and(|arg| matches!(strip_parens(arg), Expr::Closure(c) if c.asyncness.is_none())))
+}
+
+pub(crate) fn is_resolved_blocking_item(resolved: &[String]) -> bool {
+    let Some((krate, rest)) = resolved.split_first() else {
+        return false;
+    };
+    if krate == "std" {
+        let joined = rest.join("::");
+        matches!(
+            joined.as_str(),
+            "thread::sleep"
+                | "fs::read"
+                | "fs::read_to_string"
+                | "fs::write"
+                | "fs::copy"
+                | "fs::remove_file"
+                | "fs::remove_dir"
+                | "fs::remove_dir_all"
+                | "fs::create_dir"
+                | "fs::create_dir_all"
+                | "fs::rename"
+                | "fs::metadata"
+                | "fs::symlink_metadata"
+                | "fs::read_dir"
+                | "fs::canonicalize"
+                | "fs::hard_link"
+                | "fs::set_permissions"
+                | "fs::File::open"
+                | "fs::File::create"
+                | "fs::OpenOptions::new"
+                | "net::TcpStream::connect"
+                | "net::TcpStream::connect_timeout"
+                | "net::TcpListener::bind"
+                | "net::UdpSocket::bind"
+                | "process::Command::output"
+                | "process::Command::status"
+        )
+    } else if krate == "reqwest" {
+        rest.first().is_some_and(|m| m == "blocking")
+    } else {
+        false
+    }
+}
+
 
 #[derive(Clone, Copy)]
 struct StdIoImports {
