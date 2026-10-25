@@ -265,9 +265,13 @@ fn is_standalone_angular_source(path: &Path, source: &str) -> bool {
         || source.contains("@Component(")
         || source.contains("@Directive(")
         || source.contains("@Injectable(")
+        || source.contains("@Pipe(")
+        || source.contains("@NgModule(")
         || path_str.ends_with(".component.ts")
         || path_str.ends_with(".directive.ts")
         || path_str.ends_with(".service.ts")
+        || path_str.ends_with(".pipe.ts")
+        || path_str.ends_with(".module.ts")
         || path_str.ends_with(".component.html")
         || (matches!(
             path.extension().and_then(|e| e.to_str()),
@@ -903,29 +907,101 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
         }
 
         for (ng_dir, ng_path) in &angular_jsons {
-            if packages.iter().any(|p| &p.root_dir == ng_dir) {
+            let ng_text = manifests.get(ng_path).map_or("", String::as_str);
+            if !packages.iter().any(|p| &p.root_dir == ng_dir) {
+                let dir_manifest_sources: Vec<(PathBuf, &str)> =
+                    vec![(ng_path.clone(), ng_text)];
+                let gate = js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources);
+                let local_cfg = config_files
+                    .iter()
+                    .find(|(c_dir, _, _)| c_dir == ng_dir)
+                    .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
+                    .unwrap_or_else(|| root_config.clone());
+                let name = ng_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("root")
+                    .to_string();
+                packages.push(WorkspacePackage {
+                    name,
+                    root_dir: ng_dir.clone(),
+                    capability_gate: gate,
+                    config: local_cfg,
+                });
+            }
+
+            let ng_projects = dotore_core::parse_angular_workspace_projects(ng_text);
+            if ng_projects.is_empty() {
                 continue;
             }
-            let ng_text = manifests.get(ng_path).map_or("", String::as_str);
-            let dir_manifest_sources: Vec<(PathBuf, &str)> =
-                vec![(ng_path.clone(), ng_text)];
-            let gate = js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources);
-            let local_cfg = config_files
+            let (base_gate, base_cfg) = packages
                 .iter()
-                .find(|(c_dir, _, _)| c_dir == ng_dir)
-                .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-                .unwrap_or_else(|| root_config.clone());
-            let name = ng_dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("root")
-                .to_string();
-            packages.push(WorkspacePackage {
-                name,
-                root_dir: ng_dir.clone(),
-                capability_gate: gate,
-                config: local_cfg,
+                .find(|p| &p.root_dir == ng_dir)
+                .map_or_else(
+                    || {
+                        let dir_manifest_sources: Vec<(PathBuf, &str)> =
+                            vec![(ng_path.clone(), ng_text)];
+                        (
+                            js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources),
+                            root_config.clone(),
+                        )
+                    },
+                    |p| (p.capability_gate.clone(), p.config.clone()),
+                );
+            let has_root_project = ng_projects.iter().any(|p| p.root_rel.is_empty());
+            let sub_dirs: Vec<PathBuf> = ng_projects
+                .iter()
+                .filter(|p| !p.root_rel.is_empty())
+                .map(|p| {
+                    if ng_dir == Path::new(".") {
+                        PathBuf::from(&p.root_rel)
+                    } else {
+                        ng_dir.join(&p.root_rel)
+                    }
+                })
+                .collect();
+            let has_non_js_at_ng_dir = py_manifests.iter().any(|(d, _, _)| d == ng_dir)
+                || cargo_tomls.iter().any(|(d, _)| d == ng_dir);
+            let has_root_only_source = source_files.iter().any(|(p, _)| {
+                let in_ng_dir = ng_dir == Path::new(".") || p.starts_with(ng_dir);
+                in_ng_dir && !sub_dirs.iter().any(|sd| p.starts_with(sd))
             });
+            if !has_root_project && !has_non_js_at_ng_dir && !has_root_only_source {
+                packages.retain(|p| &p.root_dir != ng_dir);
+            }
+            for spec in ng_projects {
+                let proj_dir = if spec.root_rel.is_empty() {
+                    ng_dir.clone()
+                } else if ng_dir == Path::new(".") {
+                    PathBuf::from(&spec.root_rel)
+                } else {
+                    ng_dir.join(&spec.root_rel)
+                };
+                if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
+                    existing.name.clone_from(&spec.name);
+                    existing.capability_gate.merge(&base_gate);
+                    existing.capability_gate.package_role = spec.package_role;
+                    existing
+                        .capability_gate
+                        .entrypoints
+                        .extend(spec.entrypoints);
+                } else {
+                    let mut gate = base_gate.clone();
+                    gate.package_role = spec.package_role;
+                    gate.entrypoints.extend(spec.entrypoints);
+                    let local_cfg = config_files
+                        .iter()
+                        .find(|(c_dir, _, _)| c_dir == &proj_dir)
+                        .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
+                        .unwrap_or_else(|| base_cfg.clone());
+                    packages.push(WorkspacePackage {
+                        name: spec.name,
+                        root_dir: proj_dir,
+                        capability_gate: gate,
+                        config: local_cfg,
+                    });
+                }
+            }
         }
     }
 
