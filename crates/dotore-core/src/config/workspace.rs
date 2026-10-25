@@ -89,7 +89,8 @@ pub fn discover_workspace_packages_with_analyzers(
         dirs.push(root_dir.to_path_buf());
     }
     let root_config = load_config_from_dir(root_dir);
-    dirs.into_iter()
+    let mut packages: Vec<WorkspacePackage> = dirs
+        .into_iter()
         .map(|dir| {
             let name = dir
                 .file_name()
@@ -142,7 +143,215 @@ pub fn discover_workspace_packages_with_analyzers(
                 config,
             }
         })
-        .collect()
+        .collect();
+    expand_angular_projects_on_disk(root_dir, &mut packages);
+    packages
+}
+
+/// A parsed sub-project entry from `angular.json`'s `"projects"` map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AngularWorkspaceProject {
+    /// Project name key in `angular.json#projects`.
+    pub name: String,
+    /// Workspace-relative root directory of the project (`""` when at workspace root).
+    pub root_rel: String,
+    /// Inferred [`super::PackageRole`] (`Application` vs `Library`) from `projectType`.
+    pub package_role: super::PackageRole,
+    /// Relative entrypoint paths from `architect.build.options` / `targets.build.options`.
+    pub entrypoints: Vec<PathBuf>,
+}
+
+/// Parses the `"projects"` map of an `angular.json` manifest into [`AngularWorkspaceProject`] entries.
+#[must_use]
+pub fn parse_angular_workspace_projects(angular_json_text: &str) -> Vec<AngularWorkspaceProject> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&strip_jsonc(angular_json_text)) else {
+        return Vec::new();
+    };
+    let Some(projects_obj) = val.get("projects").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(projects_obj.len());
+    for (proj_name, proj_cfg) in projects_obj {
+        let root_rel = if let Some(s) = proj_cfg.as_str() {
+            normalize_ng_rel_dir(s)
+        } else if let Some(obj) = proj_cfg.as_object() {
+            if let Some(r) = obj.get("root").and_then(serde_json::Value::as_str) {
+                normalize_ng_rel_dir(r)
+            } else if let Some(sr) = obj.get("sourceRoot").and_then(serde_json::Value::as_str) {
+                let norm_sr = normalize_ng_rel_dir(sr);
+                if norm_sr == "src" {
+                    String::new()
+                } else if let Some(prefix) = norm_sr.strip_suffix("/src") {
+                    prefix.to_string()
+                } else {
+                    norm_sr
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let package_role = proj_cfg
+            .get("projectType")
+            .and_then(serde_json::Value::as_str)
+            .map_or(super::PackageRole::Application, |pt| {
+                if pt.eq_ignore_ascii_case("library") {
+                    super::PackageRole::Library
+                } else {
+                    super::PackageRole::Application
+                }
+            });
+
+        let entrypoints = collect_angular_project_entrypoints(proj_cfg, &root_rel, package_role);
+        out.push(AngularWorkspaceProject {
+            name: proj_name.clone(),
+            root_rel,
+            package_role,
+            entrypoints,
+        });
+    }
+    out
+}
+
+fn collect_angular_project_entrypoints(
+    proj_cfg: &serde_json::Value,
+    root_rel: &str,
+    package_role: super::PackageRole,
+) -> Vec<PathBuf> {
+    let mut entrypoints = Vec::new();
+    if let Some(arch) = proj_cfg
+        .get("architect")
+        .or_else(|| proj_cfg.get("targets"))
+        .and_then(serde_json::Value::as_object)
+    {
+        for target_name in ["build", "server"] {
+            if let Some(opts) = arch
+                .get(target_name)
+                .and_then(|t| t.get("options"))
+                .and_then(serde_json::Value::as_object)
+            {
+                collect_angular_target_option_entrypoints(opts, root_rel, &mut entrypoints);
+            }
+        }
+    }
+    if package_role == super::PackageRole::Library {
+        entrypoints.push(PathBuf::from("src/public-api.ts"));
+        entrypoints.push(PathBuf::from("public-api.ts"));
+    }
+    entrypoints
+}
+
+fn collect_angular_target_option_entrypoints(
+    opts: &serde_json::Map<String, serde_json::Value>,
+    root_rel: &str,
+    entrypoints: &mut Vec<PathBuf>,
+) {
+    for field in ["main", "browser", "server"] {
+        if let Some(ep) = opts.get(field).and_then(serde_json::Value::as_str) {
+            push_angular_entrypoint(entrypoints, ep, root_rel);
+        }
+    }
+    if let Some(ssr_entry) = opts
+        .get("ssr")
+        .and_then(|v| v.get("entry"))
+        .and_then(serde_json::Value::as_str)
+    {
+        push_angular_entrypoint(entrypoints, ssr_entry, root_rel);
+    }
+}
+
+fn normalize_ng_rel_dir(raw: &str) -> String {
+    let s = raw
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string();
+    if s == "." { String::new() } else { s }
+}
+
+fn push_angular_entrypoint(out: &mut Vec<PathBuf>, raw_ep: &str, root_rel: &str) {
+    let clean = normalize_ng_rel_dir(raw_ep);
+    if clean.is_empty() {
+        return;
+    }
+    out.push(PathBuf::from(&clean));
+    if !root_rel.is_empty()
+        && let Some(stripped) = clean
+            .strip_prefix(root_rel)
+            .and_then(|r| r.strip_prefix('/'))
+        && !stripped.is_empty()
+    {
+        out.push(PathBuf::from(stripped));
+    }
+}
+
+fn expand_angular_projects_on_disk(root_dir: &Path, packages: &mut Vec<WorkspacePackage>) {
+    let ng_containers: Vec<(PathBuf, CapabilityGate, DotoreConfig, String)> = packages
+        .iter()
+        .filter_map(|pkg| {
+            let ng_path = pkg.root_dir.join("angular.json");
+            let text = fs::read_to_string(ng_path).ok()?;
+            Some((
+                pkg.root_dir.clone(),
+                pkg.capability_gate.clone(),
+                pkg.config.clone(),
+                text,
+            ))
+        })
+        .collect();
+
+    for (ng_dir, base_gate, base_config, ng_text) in ng_containers {
+        let ng_projects = parse_angular_workspace_projects(&ng_text);
+        if ng_projects.is_empty() {
+            continue;
+        }
+        let has_root_project = ng_projects.iter().any(|p| p.root_rel.is_empty());
+        let has_other_manifest_or_root_src = ng_dir.join("Cargo.toml").is_file()
+            || ng_dir.join("pyproject.toml").is_file()
+            || ng_dir.join("requirements.txt").is_file()
+            || ng_dir.join("src").is_dir();
+        if !has_root_project && !has_other_manifest_or_root_src {
+            packages.retain(|p| p.root_dir != ng_dir);
+        }
+        for spec in ng_projects {
+            let proj_dir = if spec.root_rel.is_empty() {
+                ng_dir.clone()
+            } else {
+                ng_dir.join(&spec.root_rel)
+            };
+            if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
+                existing.name.clone_from(&spec.name);
+                existing.capability_gate.merge(&base_gate);
+                existing.capability_gate.package_role = spec.package_role;
+                existing
+                    .capability_gate
+                    .entrypoints
+                    .extend(spec.entrypoints);
+            } else {
+                let mut gate = base_gate.clone();
+                if proj_dir.join("package.json").is_file() {
+                    gate.merge(&CapabilityGate::discover(&proj_dir));
+                }
+                gate.package_role = spec.package_role;
+                gate.entrypoints.extend(spec.entrypoints);
+                let config = if proj_dir == root_dir {
+                    base_config.clone()
+                } else {
+                    load_local_config_in_dir(&proj_dir).unwrap_or_else(|| base_config.clone())
+                };
+                packages.push(WorkspacePackage {
+                    name: spec.name,
+                    root_dir: proj_dir,
+                    capability_gate: gate,
+                    config,
+                });
+            }
+        }
+    }
 }
 
 /// Resolves the most specific enclosing [`WorkspacePackage`] for `file_path` (longest directory prefix match).
