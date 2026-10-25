@@ -531,3 +531,354 @@ pub fn public_entrypoint() -> u32 {
         report.diagnostics
     );
 }
+
+#[test]
+fn rs_sqlx_no_formatted_query_string_supports_multi_crate_drivers_and_exempts_constants_and_numeric_primitives()
+ {
+    let invalid_src = r#"
+use std::fmt::Write;
+use diesel::sql_query as run_sql;
+use rusqlite::Connection as SqliteConn;
+use sqlx::QueryBuilder;
+
+type UserIdAlias = i64;
+
+pub async fn multi_driver_injections(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    aliased_id: UserIdAlias,
+) {
+    // 1. diesel::sql_query via use-alias
+    let _ = run_sql(format!("DELETE FROM users WHERE tenant = '{tenant}'"));
+    // 2. diesel::dsl::sql
+    let _ = diesel::dsl::sql::<diesel::sql_types::Bool>(&format!("tenant = '{tenant}'"));
+    // 3. sea_orm::Statement::from_string (arg 1)
+    let _ = sea_orm::Statement::from_string(
+        sea_orm::DatabaseBackend::Postgres,
+        format!("SELECT * FROM users WHERE tenant = '{tenant}'"),
+    );
+    // 4. rusqlite::Connection::execute via let-bound connection
+    let conn = SqliteConn::open_in_memory().unwrap();
+    let _ = conn.execute(&format!("DELETE FROM users WHERE name = '{tenant}'"), ());
+    // 5. sqlx::QueryBuilder::push with dynamic format!
+    let mut qb = QueryBuilder::<sqlx::Postgres>::new("SELECT * FROM users WHERE ");
+    qb.push(format!("tenant = '{tenant}'"));
+    // 6. String concatenation with +
+    let concat_sql = "SELECT * FROM users WHERE tenant = '".to_owned() + tenant + "'";
+    let _ = sqlx::query(&concat_sql).fetch_all(pool).await;
+    // 7. write! into String
+    let mut buf_sql = String::new();
+    let _ = write!(buf_sql, "SELECT * FROM users WHERE tenant = '{tenant}'");
+    let _ = sqlx::query(&buf_sql).fetch_all(pool).await;
+    // 8. Type alias of i64 is NOT trusted as a bare primitive
+    let _ = sqlx::query(&format!("SELECT * FROM users WHERE id = {aliased_id}"))
+        .fetch_all(pool)
+        .await;
+}
+"#;
+
+    let diags = analyze_source(
+        Path::new("src/multi_sql.rs"),
+        invalid_src,
+        Some(&[RuleId::RsSqlxNoFormattedQueryString]),
+    );
+    assert_eq!(
+        diags.len(),
+        8,
+        "Expected all 8 multi-crate formatted SQL queries to be flagged, got: {diags:#?}"
+    );
+
+    let valid_src = r#"
+use sqlx::QueryBuilder;
+
+const TABLE_NAME: &str = "users";
+
+struct Page {
+    limit: i64,
+}
+
+pub async fn safe_queries(
+    pool: &sqlx::PgPool,
+    limit: i64,
+    offset: usize,
+    active: bool,
+    non_zero: std::num::NonZeroU32,
+    page: Page,
+    name: &str,
+) {
+    // 1. Primitive numeric and bool parameters are exempt
+    let _ = sqlx::query(&format!(
+        "SELECT * FROM {TABLE_NAME} WHERE active = {active} LIMIT {limit} OFFSET {offset}"
+    ))
+    .fetch_all(pool)
+    .await;
+
+    // 2. NonZero* and cast to numeric primitive are exempt
+    let _ = sqlx::query(&format!(
+        "SELECT * FROM users WHERE org = {non_zero} LIMIT {}",
+        offset as i64
+    ))
+    .fetch_all(pool)
+    .await;
+
+    // 3. Field stored in a local `let` with explicit numeric type annotation is exempt
+    let page_limit: i64 = page.limit;
+    let _ = sqlx::query(&format!("SELECT * FROM users LIMIT {page_limit}"))
+        .fetch_all(pool)
+        .await;
+
+    // 4. QueryBuilder::push_bind is safe
+    let mut qb = QueryBuilder::<sqlx::Postgres>::new("SELECT * FROM users WHERE name = ");
+    qb.push_bind(name);
+}
+"#;
+    let valid_diags = analyze_source(
+        Path::new("src/multi_sql_valid.rs"),
+        valid_src,
+        Some(&[RuleId::RsSqlxNoFormattedQueryString]),
+    );
+    assert!(
+        valid_diags.is_empty(),
+        "Expected 0 diagnostics on constant and numeric-primitive SQL interpolations, got: {valid_diags:#?}"
+    );
+}
+
+#[test]
+fn source_kernel_web_http_tls_shell_and_secret_rules_resolve_aliases_and_8_hop_bindings() {
+    let invalid_src = r#"
+use reqwest::Client as HttpClient;
+use std::process::Command as ProcCmd;
+use std::env::var as read_env;
+use tower_http::cors::{Any, CorsLayer};
+use cookie::Cookie as HttpCookie;
+use jsonwebtoken::{Algorithm, Validation};
+
+const ALLOW_INSECURE_TLS: bool = true;
+
+pub async fn security_and_http_violations(user_arg: &str, url: &str) -> Result<(), reqwest::Error> {
+    // 1. rs-security-no-disabled-tls-verification through 8-hop let binding (b0..b6 -> b7 = 8 hops) and const
+    let b0 = HttpClient::builder();
+    let b1 = b0;
+    let b2 = b1;
+    let b3 = b2;
+    let b4 = b3;
+    let b5 = b4;
+    let b6 = b5;
+    let _client = b6.danger_accept_invalid_certs(ALLOW_INSECURE_TLS).build()?;
+
+    // 2. rs-security-no-dynamic-shell-command (shell -c script + dynamic program)
+    let mut sh_cmd = ProcCmd::new("/bin/bash");
+    let script = format!("echo {user_arg}");
+    let _ = sh_cmd.arg("-c").arg(script).status();
+    let _ = ProcCmd::new(format!("/opt/{user_arg}/run")).status();
+
+    // 3. rs-http-no-unchecked-response-status
+    let resp = HttpClient::new().get(url).send().await?;
+    let _body = resp.text().await?;
+
+    // 4. rs-security-no-secret-env-fallback
+    let _jwt_secret = read_env("JWT_SECRET").unwrap_or("super-secret-fallback-key".to_string());
+    let _gh_token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
+
+    // 5. rs-security-no-permissive-cors
+    let _cors1 = CorsLayer::very_permissive();
+    let _cors2 = actix_cors::Cors::permissive();
+    let base_cors = CorsLayer::new().allow_origin(Any);
+    let _cors3 = base_cors.allow_credentials(true);
+
+    // 6. rs-security-no-insecure-auth-cookie
+    let mut auth_cookie = HttpCookie::new("session_id", "xyz");
+    auth_cookie.set_http_only(false);
+
+    // 7. rs-security-no-disabled-jwt-validation
+    let mut val = Validation::new(Algorithm::HS256);
+    val.insecure_disable_signature_validation();
+    let _ = jsonwebtoken::dangerous::insecure_decode::<serde_json::Value>("tok");
+
+    Ok(())
+}
+"#;
+
+    let rules = &[
+        RuleId::RsSecurityNoDisabledTlsVerification,
+        RuleId::RsSecurityNoDynamicShellCommand,
+        RuleId::RsHttpNoUncheckedResponseStatus,
+        RuleId::RsSecurityNoSecretEnvFallback,
+        RuleId::RsSecurityNoPermissiveCors,
+        RuleId::RsSecurityNoInsecureAuthCookie,
+        RuleId::RsSecurityNoDisabledJwtValidation,
+    ];
+    let diags = analyze_source(Path::new("src/security_kernel.rs"), invalid_src, Some(rules));
+
+    let count = |r: RuleId| diags.iter().filter(|d| d.rule == r).count();
+    assert_eq!(count(RuleId::RsSecurityNoDisabledTlsVerification), 1, "{diags:#?}");
+    assert_eq!(count(RuleId::RsSecurityNoDynamicShellCommand), 2, "{diags:#?}");
+    assert_eq!(count(RuleId::RsHttpNoUncheckedResponseStatus), 1, "{diags:#?}");
+    assert_eq!(count(RuleId::RsSecurityNoSecretEnvFallback), 2, "{diags:#?}");
+    assert_eq!(count(RuleId::RsSecurityNoPermissiveCors), 3, "{diags:#?}");
+    assert_eq!(count(RuleId::RsSecurityNoInsecureAuthCookie), 1, "{diags:#?}");
+    assert_eq!(count(RuleId::RsSecurityNoDisabledJwtValidation), 2, "{diags:#?}");
+
+    let valid_src = r#"
+use reqwest::Client;
+use std::process::Command;
+use tower_http::cors::CorsLayer;
+use cookie::Cookie;
+use jsonwebtoken::{Algorithm, Validation};
+
+pub async fn safe_security_and_http(
+    user_arg: &str,
+    secs: u32,
+    url: &str,
+    flag: bool,
+    origin: http::HeaderValue,
+) -> Option<String> {
+    // 1. TLS verification enabled or reassigned binding abstains
+    let _c1 = Client::builder().danger_accept_invalid_certs(false).build().ok()?;
+    let mut dynamic_flag = true;
+    dynamic_flag &= flag;
+    let _c2 = Client::builder().danger_accept_invalid_certs(dynamic_flag).build().ok()?;
+
+    // 2. Shell command with numeric arg or non-shell binary with dynamic arg
+    let _ = Command::new("sh").arg("-c").arg(format!("sleep {secs}")).status();
+    let _ = Command::new("git").arg("log").arg(format!("--author={user_arg}")).status();
+
+    // 3. Checked HTTP status via error_for_status() and .status().is_success()
+    let _t1 = Client::new().get(url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
+    let resp = Client::new().get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let _t2 = resp.text().await.ok()?;
+
+    // 4. Non-secret env vars or placeholder fallbacks
+    let _db = std::env::var("DATABASE_URL").unwrap_or("postgres://localhost/dev".to_string());
+    let _hdr = std::env::var("API_KEY_HEADER").unwrap_or("x-api-key-header".to_string());
+    let _placeholder = std::env::var("APP_SECRET").unwrap_or("changeme-now".to_string());
+
+    // 5. Explicit origin CORS or permissive without credentials
+    let _cors1 = CorsLayer::permissive();
+    let _cors2 = CorsLayer::new().allow_origin(origin).allow_credentials(true);
+
+    // 6. CSRF cookie or http_only(true) auth cookie
+    let _csrf = Cookie::build(("csrf_session", "val")).http_only(false);
+    let _auth = Cookie::build(("session_id", "val")).http_only(true);
+
+    // 7. Standard JWT validation
+    let _val = Validation::new(Algorithm::HS256);
+
+    Some(_t2)
+}
+"#;
+    let valid_diags = analyze_source(Path::new("src/security_valid.rs"), valid_src, Some(rules));
+    assert!(
+        valid_diags.is_empty(),
+        "Expected 0 diagnostics on valid security/HTTP code, got: {valid_diags:#?}"
+    );
+}
+
+#[test]
+fn source_kernel_resolves_cargo_toml_dependency_renames() {
+    let cargo_toml = r#"
+[package]
+name = "renamed-deps-app"
+version = "0.1.0"
+
+[dependencies]
+http_client = { package = "reqwest", version = "0.12" }
+"#;
+    let lib_rs = r#"
+pub fn build_insecure_client() {
+    let _ = http_client::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build();
+}
+"#;
+
+    let report = analyze_project_sources(
+        vec![
+            (PathBuf::from("Cargo.toml"), cargo_toml.to_string()),
+            (PathBuf::from("src/lib.rs"), lib_rs.to_string()),
+        ],
+        Some(&[RuleId::RsSecurityNoDisabledTlsVerification]),
+    );
+    assert_eq!(
+        report.diagnostics.len(),
+        1,
+        "Expected http_client -> reqwest rename in Cargo.toml to be resolved: {:#?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        report.diagnostics[0].rule,
+        RuleId::RsSecurityNoDisabledTlsVerification
+    );
+}
+
+#[test]
+fn source_kernel_abstains_past_8_hops_or_on_reassigned_and_shadowed_bindings() {
+    let src = r#"
+use std::process::Command;
+use reqwest::Client;
+
+pub fn abstains_on_indeterminate_bindings(user: &str, check: bool, param_cmd: &mut Command) {
+    // 1. 9 hops (> 8-hop limit) abstains
+    let h0 = Command::new("sh");
+    let h1 = h0;
+    let h2 = h1;
+    let h3 = h2;
+    let h4 = h3;
+    let h5 = h4;
+    let h6 = h5;
+    let h7 = h6;
+    let mut h8 = h7;
+    let _ = h8.arg("-c").arg(format!("echo {user}"));
+
+    // 2. Reassigned binding abstains
+    let mut cmd = Command::new("sh");
+    if check {
+        cmd = Command::new("ls");
+    }
+    let _ = cmd.arg("-c").arg(format!("echo {user}"));
+
+    // 3. Tuple destructuring pattern abstains
+    let (mut tup_cmd, _) = (Command::new("sh"), 0);
+    let _ = tup_cmd.arg("-c").arg(format!("echo {user}"));
+
+    // 4. let-else pattern abstains
+    let Some(mut some_cmd) = Some(Command::new("sh")) else {
+        return;
+    };
+    let _ = some_cmd.arg("-c").arg(format!("echo {user}"));
+
+    // 5. Shadowed in a branch between let and use abstains
+    let mut sh_cmd = Command::new("sh");
+    if check {
+        let sh_cmd = 0;
+        let _ = sh_cmd;
+    }
+    let _ = sh_cmd.arg("-c").arg(format!("echo {user}"));
+
+    // 6. Parameter receiver abstains
+    let _ = param_cmd.arg("-c").arg(format!("echo {user}"));
+
+    // 7. Duplicate cfg consts abstain
+    #[cfg(unix)]
+    const INSECURE: bool = true;
+    #[cfg(not(unix))]
+    const INSECURE: bool = true;
+    let _ = Client::builder().danger_accept_invalid_certs(INSECURE);
+}
+"#;
+    let diags = analyze_source(
+        Path::new("src/abstentions.rs"),
+        src,
+        Some(&[
+            RuleId::RsSecurityNoDynamicShellCommand,
+            RuleId::RsSecurityNoDisabledTlsVerification,
+        ]),
+    );
+    assert!(
+        diags.is_empty(),
+        "Expected 0 diagnostics when bindings exceed 8 hops, are reassigned, or are shadowed: {diags:#?}"
+    );
+}

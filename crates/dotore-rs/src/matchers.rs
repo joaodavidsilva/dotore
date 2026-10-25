@@ -8,8 +8,8 @@ use dotore_core::{
     loc_from_line_starts,
 };
 use syn::{
-    Attribute, BinOp, Expr, ExprClosure, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemTrait, Lit,
-    Macro, Pat, TraitItemFn, Type, Visibility,
+    Attribute, BinOp, Expr, ExprClosure, ExprLit, ImplItemFn, ItemFn, ItemImpl, ItemMod, ItemTrait,
+    Lit, Pat, TraitItemFn, Type, Visibility,
 };
 
 /// A candidate diagnostic site discovered during the single-pass `syn` AST traversal.
@@ -35,6 +35,8 @@ pub struct RsCandidateFinding {
     pub caller_sites: Vec<ResolvedCallerSite>,
     /// Optional multi-step cascade or signal chain steps.
     pub cascade_steps: Vec<String>,
+    /// Optional raw crate root segment (for resolving `Cargo.toml` `package = "..."` dependency renames).
+    pub required_crate_alias: Option<(String, String)>,
 }
 
 impl RsCandidateFinding {
@@ -60,6 +62,7 @@ impl RsCandidateFinding {
             autofix: None,
             caller_sites: Vec::new(),
             cascade_steps: Vec::new(),
+            required_crate_alias: None,
         }
     }
 
@@ -90,6 +93,17 @@ impl RsCandidateFinding {
         self.cascade_steps = cascade_steps;
         self
     }
+    /// Attaches a `Cargo.toml` crate-alias requirement `(written_root, canonical_crate)` to this finding.
+    #[must_use]
+    pub fn with_required_crate_alias(
+        mut self,
+        written_root: impl Into<String>,
+        canonical_crate: impl Into<String>,
+    ) -> Self {
+        self.required_crate_alias = Some((written_root.into(), canonical_crate.into()));
+        self
+    }
+
 
     /// Converts this candidate finding into a [`Diagnostic`] using [`Diagnostic::builder`].
     #[must_use]
@@ -415,10 +429,10 @@ pub(crate) fn is_format_macro_path(path: &syn::Path) -> bool {
         || path_to_string(path) == "std::fmt::format"
         || path.segments.last().is_some_and(|s| s.ident == "format")
 }
-
 /// Returns `true` if `mac` is a `format!(...)` macro invocation.
+#[cfg(test)]
 #[must_use]
-pub(crate) fn is_format_macro(mac: &Macro) -> bool {
+fn is_format_macro(mac: &syn::Macro) -> bool {
     is_format_macro_path(&mac.path)
 }
 
@@ -536,6 +550,14 @@ fn quote_like_expr(expr: &Expr) -> String {
             )
         }
         Expr::MethodCall(mc) => {
+            if mc.method == "len"
+                && mc.args.is_empty()
+                && let Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) = mc.receiver.as_ref()
+            {
+                return s.value().len().to_string();
+            }
             format!("{}.{}()", normalize_expr_key(&mc.receiver), mc.method)
         }
         Expr::Binary(bin) => {
@@ -756,7 +778,7 @@ mod tests {
     use dotore_core::{
         ByteSpan, PrescriptionTier, RuleId, RuleSeverity, SourceLoc, compute_line_starts,
     };
-    use syn::parse_quote;
+    use syn::{Macro, parse_quote};
 
     use super::*;
 

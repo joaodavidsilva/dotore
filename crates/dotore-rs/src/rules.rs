@@ -76,6 +76,9 @@ pub fn evaluate_rs_file(
         if !is_evaluated_rust_rule(finding.rule) {
             continue;
         }
+        if !matches_required_crate_alias(finding, gate) {
+            continue;
+        }
         let Some(severity) = resolve_rs_rule_activation(
             finding.rule,
             file,
@@ -138,6 +141,9 @@ fn emit_rs_finding_if_active(
     enabled_rules: Option<&[RuleId]>,
     out: &mut Vec<Diagnostic>,
 ) {
+    if !matches_required_crate_alias(finding, gate) {
+        return;
+    }
     let Some(severity) = resolve_rs_rule_activation(
         finding.rule,
         file,
@@ -172,6 +178,22 @@ fn is_finding_suppressed(
                 .matches_line_or_block(finding.rule, finding.loc.line)
             || (finding.rule.is_architecture_soc_or_reuse_rule()
                 && file.suppressions.matches_line_or_block(finding.rule, 1)))
+}
+
+fn matches_required_crate_alias(finding: &RsCandidateFinding, gate: &CapabilityGate) -> bool {
+    let Some((written_root, canonical_crate)) = &finding.required_crate_alias else {
+        return true;
+    };
+    let normalized_written = written_root.replace('-', "_");
+    let normalized_canonical = canonical_crate.replace('-', "_");
+    if normalized_written == normalized_canonical {
+        return true;
+    }
+    gate.dependencies.iter().any(|(k, v)| {
+        k.strip_prefix("alias:")
+            .is_some_and(|alias| alias.replace('-', "_") == normalized_written)
+            && v.replace('-', "_") == normalized_canonical
+    })
 }
 
 const fn is_evaluated_rust_rule(rule: RuleId) -> bool {

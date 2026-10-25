@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    dom_and_client::{find_secret_value_in_line, find_suspicious_public_env_in_line},
+    client_and_jsx::{find_secret_value_in_line, find_suspicious_public_env_in_line},
     emit_line_diag, push_sec_diag,
 };
 

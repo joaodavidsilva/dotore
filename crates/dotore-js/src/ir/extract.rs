@@ -49,7 +49,7 @@ where
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default();
-    if matches!(ext, "css" | "scss") {
+    if matches!(ext, "css" | "scss" | "yml" | "yaml") {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, "", SourceType::default()).parse();
         let semantic_ret = SemanticBuilder::new()
@@ -57,13 +57,18 @@ where
             .build(&parsed.program);
         let line_starts = compute_line_starts(source);
         let mut semantic_sites = Vec::new();
-        crate::rules::angular::extract_angular_stylesheet_sites(
-            source,
-            0,
-            None,
-            &line_starts,
-            &mut semantic_sites,
-        );
+        let motion = if matches!(ext, "css" | "scss") {
+            crate::rules::angular::extract_angular_stylesheet_sites(
+                source,
+                0,
+                None,
+                &line_starts,
+                &mut semantic_sites,
+            );
+            extract_stylesheet_motion_ir(source)
+        } else {
+            MotionFileIr::default()
+        };
         let file_ir = FileIr {
             path: path.to_path_buf(),
             source: source.to_string(),
@@ -79,7 +84,7 @@ where
             security_sinks: Vec::new(),
             suppressions: extract_file_suppressions(source),
             semantic_sites,
-            motion: extract_stylesheet_motion_ir(source),
+            motion,
             static_dom_ids: Vec::new(),
             has_unresolved_id_spread: false,
             frame_loop_roots: Vec::new(),
