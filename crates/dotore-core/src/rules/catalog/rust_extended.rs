@@ -442,7 +442,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         &[RuleTag::TestNoise],
         CapabilityPredicate::RUST_ONLY,
         ContextualOwnerPolicy::Line,
-        PrescriptionTier::Surgical,
+        PrescriptionTier::Autofix,
         "https://doc.rust-lang.org/reference/attributes/diagnostics.html#lint-reasons",
         "Prefer `#[expect(lint, reason = \"...\")]` or append `, reason = \"...\"` to document why the lint exemption is sound.",
     ),

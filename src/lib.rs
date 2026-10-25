@@ -351,12 +351,17 @@ pub fn analyze_project_sources(
             if matches!(ext, "py" | "pyi" | "rs") {
                 return true;
             }
+            let norm_p = p.to_string_lossy().replace('\\', "/");
+            if norm_p.ends_with(".cargo/config.toml") || norm_p.ends_with(".cargo/config") {
+                return true;
+            }
             p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
                 name == "package.json"
                     || name == "angular.json"
                     || name == "pyproject.toml"
                     || name == "requirements.txt"
                     || name == "Cargo.toml"
+                    || name == "Cargo.lock"
                     || name == "tsconfig.json"
                     || name == "jsconfig.json"
                     || name == "pnpm-workspace.yaml"
@@ -734,7 +739,11 @@ fn analyze_polyglot_sources(
         }
 
         #[cfg(feature = "rs")]
-        if !rs_extracted.is_empty() {
+        if !rs_extracted.is_empty()
+            || packages
+                .iter()
+                .any(|p| p.capability_gate.has(Capability::Rust))
+        {
             let mut buckets: Vec<Vec<ExtractedFile>> =
                 (0..packages.len()).map(|_| Vec::new()).collect();
             for file in rs_extracted {
@@ -747,7 +756,12 @@ fn analyze_polyglot_sources(
                 }
             }
             for (pkg, bucket) in packages.iter().zip(buckets) {
-                if !bucket.is_empty() {
+                let has_rs_manifests = pkg
+                    .capability_gate
+                    .dependencies
+                    .keys()
+                    .any(|k| k.starts_with("__manifest:"));
+                if !bucket.is_empty() || has_rs_manifests {
                     let res = RsLanguageAnalyzer.analyze_package(pkg, &bucket, enabled_rules);
                     diagnostics.extend(res.diagnostics);
                     all_extracted.extend(bucket);
@@ -828,6 +842,17 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             py_typed_paths.push(path);
         } else if file_name == "Cargo.toml" {
             cargo_tomls.push((parent_dir, path.clone()));
+            manifests.insert(path, content);
+        } else if file_name == "Cargo.lock"
+            || path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with(".cargo/config.toml")
+            || path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with(".cargo/config")
+        {
             manifests.insert(path, content);
         } else if is_non_js_manifest_filename(file_name) {
             if is_compiler_config_name(file_name) {
@@ -1055,10 +1080,30 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     }
 
     #[cfg(feature = "rs")]
-    for (dir, cargo_path) in &cargo_tomls {
+    {
+    let rs_extra_manifests: Vec<(PathBuf, &str)> = manifests
+        .iter()
+        .filter(|(p, _)| {
+            let s = p.to_string_lossy().replace('\\', "/");
+            s.ends_with("Cargo.lock")
+                || s.ends_with(".cargo/config.toml")
+                || s.ends_with(".cargo/config")
+        })
+        .map(|(p, c)| (p.clone(), c.as_str()))
+        .collect();
+    for (idx, (dir, cargo_path)) in cargo_tomls.iter().enumerate() {
         let cargo_content = manifests.get(cargo_path).map_or("", String::as_str);
-        let rs_gate = RsLanguageAnalyzer
-            .infer_capability_gate(dir, &[(cargo_path.clone(), cargo_content)]);
+        let mut rs_sources = vec![
+            (cargo_path.clone(), cargo_content),
+            (PathBuf::from("__virtual__"), ""),
+        ];
+        rs_sources.extend(rs_extra_manifests.iter().cloned());
+        let mut rs_gate = RsLanguageAnalyzer.infer_capability_gate(dir, &rs_sources);
+        if idx > 0 {
+            rs_gate
+                .dependencies
+                .insert("__owns_workspace_manifests".to_string(), "false".to_string());
+        }
         if let Some(existing) = packages.iter_mut().find(|p| &p.root_dir == dir) {
             existing.capability_gate.merge(&rs_gate);
         } else {
@@ -1079,6 +1124,22 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
                 config: local_cfg,
             });
         }
+    }
+    if cargo_tomls.is_empty() && !rs_extra_manifests.is_empty() {
+        let mut rs_sources = vec![(PathBuf::from("__virtual__"), "")];
+        rs_sources.extend(rs_extra_manifests.iter().cloned());
+        let rs_gate = RsLanguageAnalyzer.infer_capability_gate(Path::new("."), &rs_sources);
+        if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == Path::new(".")) {
+            existing.capability_gate.merge(&rs_gate);
+        } else {
+            packages.push(WorkspacePackage {
+                name: "root".to_string(),
+                root_dir: PathBuf::from("."),
+                capability_gate: rs_gate,
+                config: root_config.clone(),
+            });
+        }
+    }
     }
 
     #[cfg(feature = "py")]
@@ -1778,15 +1839,31 @@ fn determine_workspace_root(paths: &[PathBuf]) -> PathBuf {
     let Some(first) = paths.first() else {
         return PathBuf::from(".");
     };
-    if first.is_dir() {
-        first.clone()
-    } else {
-        first
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
+    let dir_of = |p: &Path| -> PathBuf {
+        if p.is_dir() {
+            p.to_path_buf()
+        } else {
+            p.parent()
+                .filter(|par| !par.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        }
+    };
+    let mut common = dir_of(first);
+    for other in paths.iter().skip(1) {
+        let other_dir = dir_of(other);
+        while !other_dir.starts_with(&common) {
+            let Some(parent) = common.parent() else {
+                break;
+            };
+            if parent.as_os_str().is_empty() {
+                common = PathBuf::from(".");
+                break;
+            }
+            common = parent.to_path_buf();
+        }
     }
+    common
 }
 
 fn apply_cli_overrides_to_config(config: &mut DotoreConfig, overrides: &CliOverrides) {
@@ -1833,6 +1910,10 @@ pub(crate) fn load_disk_manifests(
             "android/app/build.gradle",
             "android/app/build.gradle.kts",
             ".gitignore",
+            "Cargo.toml",
+            "Cargo.lock",
+            ".cargo/config.toml",
+            ".cargo/config",
             "bun.lockb",
             "bun.lock",
             ".env.local",

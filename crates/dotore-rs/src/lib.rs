@@ -10,6 +10,12 @@ use dotore_core::{
 
 /// Single-pass detectors for Axum shared state contention and SQLx query hazards.
 pub(crate) mod axum_sqlx;
+/// Cargo manifest (`Cargo.toml`), lockfile (`Cargo.lock`), and `.cargo/config.toml` health detectors.
+pub(crate) mod cargo_health;
+/// Crate reference collector and dependency-truth evaluators (`rs-cargo-unused-dependency`, `rs-cargo-test-only-dependency`).
+pub(crate) mod cargo_health_refs;
+/// Single-pass detectors for the 7 Clippy-grade AST correctness and reliability rules.
+pub(crate) mod clippy_rules;
 /// Crate-level `ProjectGraph` analysis for `dotore-rs` (`rs-arch-no-unused-pub-crate-items`).
 pub(crate) mod graph;
 /// Single-pass `syn` AST, **Subject**, **Symbol Outline**, and suppression extraction for `.rs` files.
@@ -30,6 +36,12 @@ pub(crate) mod source_kernel;
 pub(crate) mod source_kernel_bindings;
 /// Single-pass `SourceKernel` detectors for async runtime, HTTP, TLS, shell, secret, CORS, cookie, and JWT rules.
 pub(crate) mod source_kernel_detectors;
+/// Rust structural and `#[allow]` hygiene detectors.
+pub(crate) mod structure;
+/// Canonical AST normalization and Sørensen-Dice near-duplicate function detector.
+pub(crate) mod structure_duplication;
+/// Package-level structural evaluators (`rs-structure-orphan-module-file`, `rs-structure-unreferenced-feature`).
+pub(crate) mod structure_package;
 /// Single-pass detectors for Tokio async concurrency hazards.
 pub(crate) mod tokio_async;
 /// Single-pass detectors for Leptos/Dioxus reactive signals and boolean parameter rules.

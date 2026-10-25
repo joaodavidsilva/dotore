@@ -48,6 +48,13 @@ pub fn evaluate_rs_package(
     }
 
     evaluate_rs_package_graph_rules(package, files, enabled_rules, &mut diagnostics);
+    crate::cargo_health::evaluate_cargo_health_rules(package, files, enabled_rules, &mut diagnostics);
+    crate::structure_package::evaluate_package_structure_rules(
+        package,
+        files,
+        enabled_rules,
+        &mut diagnostics,
+    );
 
     PackageAnalysisResult {
         diagnostics,
@@ -77,6 +84,12 @@ pub fn evaluate_rs_file(
             continue;
         }
         if !matches_required_crate_alias(finding, gate) {
+            continue;
+        }
+        if finding.rule == RuleId::RsNoDbgOrPrintInLibrary
+            && finding.target_name != "dbg!"
+            && !allows_print_in_library_finding(file, gate, config, enabled_rules)
+        {
             continue;
         }
         let Some(severity) = resolve_rs_rule_activation(
@@ -166,6 +179,18 @@ fn emit_rs_finding_if_active(
     out.push(finding.to_diagnostic(&file.path, severity));
 }
 
+pub(crate) fn emit_rs_finding_if_active_pub(
+    file: &ExtractedFile,
+    finding: &RsCandidateFinding,
+    package_root: &Path,
+    gate: &CapabilityGate,
+    config: &DotoreConfig,
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    emit_rs_finding_if_active(file, finding, package_root, gate, config, enabled_rules, out);
+}
+
 fn is_finding_suppressed(
     file: &ExtractedFile,
     finding: &RsCandidateFinding,
@@ -194,6 +219,26 @@ fn matches_required_crate_alias(finding: &RsCandidateFinding, gate: &CapabilityG
             .is_some_and(|alias| alias.replace('-', "_") == normalized_written)
             && v.replace('-', "_") == normalized_canonical
     })
+}
+
+fn allows_print_in_library_finding(
+    file: &ExtractedFile,
+    gate: &CapabilityGate,
+    config: &DotoreConfig,
+    enabled_rules: Option<&[RuleId]>,
+) -> bool {
+    if enabled_rules.is_some_and(|list| list.contains(&RuleId::RsNoDbgOrPrintInLibrary))
+        || config
+            .explicit_rule_override(RuleId::RsNoDbgOrPrintInLibrary)
+            .is_some()
+    {
+        return true;
+    }
+    if file.architecture_facets.is_entrypoint || file.architecture_facets.is_ui_kit_module {
+        return false;
+    }
+    gate.package_role == dotore_core::PackageRole::Library
+        || file.path.file_name().and_then(|n| n.to_str()) == Some("lib.rs")
 }
 
 const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
@@ -299,6 +344,23 @@ fn resolve_rs_rule_activation(
 
     if !has_explicit_cli_rule && !gate.allows_rule(meta) {
         return None;
+    }
+    let is_disk_workspace_allow = !gate.dependencies.contains_key("__virtual_only");
+    if (!has_explicit_cli_rule || is_disk_workspace_allow) && explicit_config_override.is_none() {
+        if rule == RuleId::RsStructureOversizedUnit
+            && gate
+                .dependencies
+                .contains_key("__allow_clippy:too_many_lines")
+        {
+            return None;
+        }
+        if rule == RuleId::RsStructureComplexFunction
+            && gate
+                .dependencies
+                .contains_key("__allow_clippy:cognitive_complexity")
+        {
+            return None;
+        }
     }
 
     if has_explicit_cli_rule {

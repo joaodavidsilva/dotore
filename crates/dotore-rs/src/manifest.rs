@@ -22,15 +22,27 @@ pub fn infer_cargo_toml_capability_gate(
             .and_then(|n| n.to_str())
             .is_some_and(|n| n == "Cargo.toml")
     });
-    if !has_cargo_manifest {
-        let disk_cargo = package_dir.join("Cargo.toml");
-        if let Ok(content) = fs::read_to_string(&disk_cargo) {
-            loaded_from_disk.push((disk_cargo, content));
-        }
+    let has_any_rust_manifest = has_cargo_manifest
+        || manifest_sources.iter().any(|(p, _)| {
+            let s = p.to_string_lossy().replace('\\', "/");
+            s.ends_with("Cargo.lock")
+                || s.ends_with(".cargo/config.toml")
+                || s.ends_with(".cargo/config")
+        });
+    let disk_cargo = package_dir.join("Cargo.toml");
+    let is_virtual_only = manifest_sources
+        .iter()
+        .any(|(p, _)| p == Path::new("__virtual__"))
+        || (has_any_rust_manifest && !package_dir.is_absolute());
+    if !has_cargo_manifest
+        && !is_virtual_only
+        && let Ok(content) = fs::read_to_string(&disk_cargo)
+    {
+        loaded_from_disk.push((disk_cargo.clone(), content));
     }
 
-    // Check ancestor directories on disk for workspace root `[workspace.dependencies]`
-    if !has_cargo_manifest || package_dir.is_absolute() {
+    let mut ancestor_cargos = Vec::new();
+    if !is_virtual_only && (!has_cargo_manifest || package_dir.is_absolute()) {
         let mut ancestor_opt = package_dir.parent();
         while let Some(anc) = ancestor_opt {
             if anc.as_os_str().is_empty() {
@@ -41,34 +53,137 @@ pub fn infer_cargo_toml_capability_gate(
                 && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
                 && let Ok(content) = fs::read_to_string(&anc_cargo)
             {
-                loaded_from_disk.push((anc_cargo, content));
+                ancestor_cargos.push((anc.to_path_buf(), anc_cargo, content));
             }
             ancestor_opt = anc.parent();
         }
     }
 
-    if !has_cargo_manifest && loaded_from_disk.is_empty() {
+    if !has_any_rust_manifest && loaded_from_disk.is_empty() && ancestor_cargos.is_empty() {
         return CapabilityGate::default_rust();
     }
 
     let mut gate = CapabilityGate::with_capabilities([Capability::Rust]);
+    if is_virtual_only {
+        gate.dependencies
+            .insert("__virtual_only".to_string(), "true".to_string());
+    }
+
     for (path, src) in manifest_sources {
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "Cargo.toml")
-        {
-            apply_cargo_toml_str(&mut gate, src);
+        let norm_p = path.to_string_lossy().replace('\\', "/");
+        if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml") {
+            apply_cargo_toml_str(&mut gate, src, false);
+            let is_pkg_manifest = path.parent().unwrap_or_else(|| Path::new(".")) == package_dir
+                || (package_dir == Path::new(".") && path == Path::new("Cargo.toml"))
+                || !gate.dependencies.contains_key("__manifest:Cargo.toml");
+            if is_pkg_manifest {
+                gate.dependencies
+                    .insert("__manifest:Cargo.toml".to_string(), (*src).to_string());
+                gate.dependencies
+                    .insert("__manifest_path:Cargo.toml".to_string(), norm_p);
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.lock") {
+            gate.dependencies
+                .insert("__manifest:Cargo.lock".to_string(), (*src).to_string());
+            gate.dependencies
+                .insert("__manifest_path:Cargo.lock".to_string(), norm_p);
+        } else if norm_p.ends_with(".cargo/config.toml") || norm_p.ends_with(".cargo/config") {
+            gate.dependencies.insert(
+                "__manifest:.cargo/config.toml".to_string(),
+                (*src).to_string(),
+            );
+            gate.dependencies
+                .insert("__manifest_path:.cargo/config.toml".to_string(), norm_p);
         }
     }
-    for (_, src) in &loaded_from_disk {
-        apply_cargo_toml_str(&mut gate, src);
+
+    for (path, src) in &loaded_from_disk {
+        apply_cargo_toml_str(&mut gate, src, false);
+        if !gate.dependencies.contains_key("__manifest:Cargo.toml") {
+            gate.dependencies
+                .insert("__manifest:Cargo.toml".to_string(), src.clone());
+            gate.dependencies.insert(
+                "__manifest_path:Cargo.toml".to_string(),
+                path.to_string_lossy().to_string(),
+            );
+        }
+    }
+
+    for (_, _, src) in &ancestor_cargos {
+        apply_cargo_toml_str(&mut gate, src, true);
+    }
+
+    populate_disk_lockfile_and_cargo_config(package_dir, &ancestor_cargos, is_virtual_only, &mut gate);
+
+    if gate.package_role == PackageRole::Unknown
+        && gate.dependencies.contains_key("__manifest:Cargo.toml")
+    {
+        if !is_virtual_only && package_dir.join("src/main.rs").is_file() {
+            gate.package_role = PackageRole::Application;
+        } else {
+            gate.package_role = PackageRole::Library;
+        }
     }
 
     gate
 }
 
-fn apply_cargo_toml_str(gate: &mut CapabilityGate, cargo_toml_str: &str) {
+fn populate_disk_lockfile_and_cargo_config(
+    package_dir: &Path,
+    ancestor_cargos: &[(PathBuf, PathBuf, String)],
+    is_virtual_only: bool,
+    gate: &mut CapabilityGate,
+) {
+    if is_virtual_only {
+        return;
+    }
+    let ws_root = ancestor_cargos
+        .last()
+        .map_or(package_dir, |(anc_dir, _, _)| anc_dir.as_path());
+    let owns_ws = ws_root == package_dir;
+    gate.dependencies.insert(
+        "__owns_workspace_manifests".to_string(),
+        if owns_ws { "true" } else { "false" }.to_string(),
+    );
+
+    if !gate.dependencies.contains_key("__manifest:Cargo.lock") {
+        for candidate in [package_dir.join("Cargo.lock"), ws_root.join("Cargo.lock")] {
+            if let Ok(lock_str) = fs::read_to_string(&candidate) {
+                gate.dependencies
+                    .insert("__manifest:Cargo.lock".to_string(), lock_str);
+                gate.dependencies.insert(
+                    "__manifest_path:Cargo.lock".to_string(),
+                    candidate.to_string_lossy().to_string(),
+                );
+                break;
+            }
+        }
+    }
+
+    if !gate
+        .dependencies
+        .contains_key("__manifest:.cargo/config.toml")
+    {
+        for candidate in [
+            package_dir.join(".cargo/config.toml"),
+            package_dir.join(".cargo/config"),
+            ws_root.join(".cargo/config.toml"),
+            ws_root.join(".cargo/config"),
+        ] {
+            if let Ok(cfg_str) = fs::read_to_string(&candidate) {
+                gate.dependencies
+                    .insert("__manifest:.cargo/config.toml".to_string(), cfg_str);
+                gate.dependencies.insert(
+                    "__manifest_path:.cargo/config.toml".to_string(),
+                    candidate.to_string_lossy().to_string(),
+                );
+                break;
+            }
+        }
+    }
+}
+
+fn apply_cargo_toml_str(gate: &mut CapabilityGate, cargo_toml_str: &str, is_ancestor_ws: bool) {
     let Ok(doc) = toml::from_str::<Value>(cargo_toml_str) else {
         return;
     };
@@ -76,11 +191,15 @@ fn apply_cargo_toml_str(gate: &mut CapabilityGate, cargo_toml_str: &str) {
         return;
     };
 
-    if root_table.contains_key("bin") {
-        gate.package_role = PackageRole::Application;
-    } else if root_table.contains_key("lib") && gate.package_role == PackageRole::Unknown {
-        gate.package_role = PackageRole::Library;
+    if !is_ancestor_ws {
+        if root_table.contains_key("bin") {
+            gate.package_role = PackageRole::Application;
+        } else if root_table.contains_key("lib") && gate.package_role == PackageRole::Unknown {
+            gate.package_role = PackageRole::Library;
+        }
     }
+
+    record_manifest_clippy_allows_and_profile(gate, root_table);
 
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
         if let Some(Value::Table(dep_table)) = root_table.get(section) {
@@ -98,6 +217,59 @@ fn apply_cargo_toml_str(gate: &mut CapabilityGate, cargo_toml_str: &str) {
         for target_cfg in targets_table.values().filter_map(Value::as_table) {
             collect_target_cfg_deps(gate, target_cfg);
         }
+    }
+}
+
+fn record_manifest_clippy_allows_and_profile(
+    gate: &mut CapabilityGate,
+    root_table: &toml::map::Map<String, Value>,
+) {
+    for clippy_table in [
+        root_table
+            .get("lints")
+            .and_then(Value::as_table)
+            .and_then(|t| t.get("clippy"))
+            .and_then(Value::as_table),
+        root_table
+            .get("workspace")
+            .and_then(Value::as_table)
+            .and_then(|w| w.get("lints"))
+            .and_then(Value::as_table)
+            .and_then(|l| l.get("clippy"))
+            .and_then(Value::as_table),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for key in ["too_many_lines", "cognitive_complexity"] {
+            let is_allow = clippy_table.get(key).is_some_and(|v| {
+                v.as_str() == Some("allow")
+                    || v.as_table()
+                        .and_then(|t| t.get("level"))
+                        .and_then(Value::as_str)
+                        == Some("allow")
+            });
+            if is_allow {
+                gate.dependencies
+                    .insert(format!("__allow_clippy:{key}"), "true".to_string());
+            }
+        }
+    }
+
+    if let Some(release_tbl) = root_table
+        .get("profile")
+        .and_then(Value::as_table)
+        .and_then(|p| p.get("release"))
+        .and_then(Value::as_table)
+        && release_tbl
+            .get("overflow-checks")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        gate.dependencies.insert(
+            "__workspace_release_overflow_checks".to_string(),
+            "true".to_string(),
+        );
     }
 }
 

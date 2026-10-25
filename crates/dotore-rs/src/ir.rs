@@ -82,6 +82,8 @@ pub struct RsFileIr {
     pub findings: Vec<RsCandidateFinding>,
     /// Per-file crate graph metadata (`pub(crate)` items and referenced identifiers).
     pub(crate) graph_ir: crate::graph::RsFileGraphIr,
+    /// Per-file structural metadata (`mod` declarations, `cfg(feature)` sites, and normalized functions).
+    pub(crate) structure_ir: crate::structure::RsStructureFileIr,
 }
 
 /// Parses a Rust source file once with `syn::parse_file` and extracts its [`ExtractedFile`] and [`RsFileIr`].
@@ -106,7 +108,7 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
     };
     let mut findings = Vec::new();
 
-    let (graph_ir, architecture_facets) = if let Ok(ast) = &parsed {
+    let (graph_ir, structure_ir, architecture_facets) = if let Ok(ast) = &parsed {
         extractor.extract_crate_file(ast);
         let aliases = crate::source_kernel::RsAliasMap::build(ast);
         crate::safety::extract_safety_findings(ast, &lines, &line_starts, &mut findings);
@@ -120,12 +122,27 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
             &line_starts,
             &mut findings,
         );
+        crate::clippy_rules::extract_clippy_ast_findings(
+            ast,
+            &aliases,
+            &line_starts,
+            &mut findings,
+        );
+        let s_ir = crate::structure::extract_structure_findings_and_ir(
+            path,
+            ast,
+            source,
+            &line_starts,
+            file_context,
+            &mut findings,
+        );
         let g = crate::graph::extract_file_graph_ir(ast, source, &line_starts);
         let facets = extract_architecture_facets(path, ast, source, &line_starts);
-        (g, facets)
+        (g, s_ir, facets)
     } else {
         (
             crate::graph::RsFileGraphIr::default(),
+            crate::structure::RsStructureFileIr::default(),
             extract_empty_architecture_facets(path),
         )
     };
@@ -150,6 +167,7 @@ pub fn extract_rs_file(path: &Path, source: &str) -> ExtractedFile {
         suppressions: suppressions.clone(),
         findings,
         graph_ir,
+        structure_ir,
     };
 
     let mut extracted =
@@ -652,8 +670,9 @@ impl<'ast> Visit<'ast> for IrAstExtractor<'_> {
 fn extract_attribute_suppressed_rules(attrs: &[Attribute]) -> Vec<String> {
     let mut rules = Vec::new();
     for attr in attrs {
-        let is_allow_or_expect = attr.path().is_ident("allow") || attr.path().is_ident("expect");
-        if !is_allow_or_expect {
+        let is_allow = attr.path().is_ident("allow");
+        let is_expect = attr.path().is_ident("expect");
+        if !is_allow && !is_expect {
             continue;
         }
         let Ok(list) = attr.meta.require_list() else {
@@ -667,6 +686,16 @@ fn extract_attribute_suppressed_rules(attrs: &[Attribute]) -> Vec<String> {
             }
             let normalized = trimmed.replace(' ', "");
             for mapped in map_rust_allow_lint_to_rules(&normalized) {
+                if is_allow
+                    && matches!(
+                        mapped.as_str(),
+                        "rs-structure-crate-level-allow"
+                            | "rs-structure-unreasoned-allow"
+                            | "rs-structure-stacked-allow"
+                    )
+                {
+                    continue;
+                }
                 if !rules.contains(&mapped) {
                     rules.push(mapped);
                 }
