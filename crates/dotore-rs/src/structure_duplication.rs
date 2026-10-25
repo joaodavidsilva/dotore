@@ -678,15 +678,15 @@ fn similarity_bps(left: &[u64], right: &[u64]) -> u16 {
     u16::try_from(score).unwrap_or(u16::MAX)
 }
 
-const fn largest_comparable(size: usize, threshold: u16) -> usize {
+fn largest_comparable(size: usize, threshold: u16) -> usize {
     if threshold == 0 {
         return usize::MAX;
     }
-    let bound = (20_000_u64.saturating_sub(threshold as u64)).saturating_mul(size as u64)
-        / (threshold as u64);
-    #[expect(clippy::cast_possible_truncation, reason = "clamped on 32-bit targets (#50)")]
-    let out = bound as usize;
-    out
+    let threshold_usize = usize::from(threshold);
+    20_000_usize
+        .saturating_sub(threshold_usize)
+        .saturating_mul(size)
+        / threshold_usize
 }
 fn append_eligible_file_functions<'a>(
     file: &'a ExtractedFile,

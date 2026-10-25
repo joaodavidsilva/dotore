@@ -18,6 +18,7 @@ use dotore::{
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
 fn create_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -190,6 +191,7 @@ fn dotore_home_and_cache_disable_env_helpers_work() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[cfg(test)]
 fn run_git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

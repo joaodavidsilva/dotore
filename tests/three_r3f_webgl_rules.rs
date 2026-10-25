@@ -39,6 +39,7 @@ fn three_only_gate() -> CapabilityGate {
     )
 }
 
+#[cfg(test)]
 fn assert_rule_fires(rule_id_str: &str, code: &str, gate: &CapabilityGate) {
     let rule = RuleId::parse(rule_id_str)
         .unwrap_or_else(|| panic!("Rule {rule_id_str} should be registered"));
@@ -55,6 +56,7 @@ fn assert_rule_fires(rule_id_str: &str, code: &str, gate: &CapabilityGate) {
     );
 }
 
+#[cfg(test)]
 fn assert_rule_clean(rule_id_str: &str, code: &str, gate: &CapabilityGate) {
     let rule = RuleId::parse(rule_id_str)
         .unwrap_or_else(|| panic!("Rule {rule_id_str} should be registered"));

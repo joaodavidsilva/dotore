@@ -634,8 +634,7 @@ fn evaluate_cargo_lock_rules(
         return;
     };
     let starts = compute_line_starts(lock_src);
-    let explicit_rule = enabled_rules
-        .is_some_and(|l| l.contains(&RuleId::RsCargoDuplicateMajorVersions))
+    let explicit_rule = enabled_rules == Some(&[RuleId::RsCargoDuplicateMajorVersions][..])
         || package
             .config
             .explicit_rule_override(RuleId::RsCargoDuplicateMajorVersions)

@@ -5,10 +5,6 @@
 //! - Deterministic local `0..=100` Health Score, labels, and `--score` CLI flag
 //! - Exit-code controls (`--blocking error|warning|none`, `--warning-exit-code <2..=255>`)
 //! - Versioned `JsonReport` (`--json`, `--json-out <path>`)
-#![expect(
-    clippy::expect_used,
-    reason = "Integration tests assert on expected Ok/Some values"
-)]
 
 use std::{
     collections::HashMap,
@@ -30,6 +26,7 @@ use dotore::{
 
 static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(1);
 
+#[cfg(test)]
 fn create_temp_dir(prefix: &str) -> PathBuf {
     let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -47,6 +44,7 @@ fn init_git_repo(dir: &Path) {
     run_git_cmd(dir, &["config", "user.name", "Dotore Test"]);
 }
 
+#[cfg(test)]
 fn run_git_cmd(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

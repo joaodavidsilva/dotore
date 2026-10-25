@@ -672,13 +672,7 @@ pub(crate) fn is_valid_shadow_map_size(val: f64) -> bool {
     if val < 1.0 || val.fract() != 0.0 || val > 16384.0 {
         return false;
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "validated integer in 1..=16384 (#50)"
-    )]
-    let n = val as u32;
-    n.is_power_of_two()
+    (0_u32..=14).any(|exp| val == f64::from(1_u32 << exp))
 }
 
 pub(crate) fn extract_root_ident_name(expr: &Expression<'_>) -> Option<String> {

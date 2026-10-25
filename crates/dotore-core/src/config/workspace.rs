@@ -147,12 +147,12 @@ fn merge_analyzer_capability_gates(
         .iter()
         .map(|(p, s)| (p.clone(), s.as_str()))
         .collect();
+    let has_local_manifests = !manifest_sources.is_empty();
     for analyzer in analyzers {
-        if analyzer
-            .manifest_filenames()
-            .iter()
-            .any(|m| dir.join(m).is_file())
-        {
+        if analyzer.manifest_filenames().iter().any(|m| {
+            dir.join(m).is_file()
+                || (!has_local_manifests && find_nearest_ancestor_file(dir, m).is_some())
+        }) {
             capability_gate.merge(&analyzer.infer_capability_gate(dir, &borrowed_refs));
         }
     }

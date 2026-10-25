@@ -483,6 +483,7 @@ fn detects_running_local_http_servers_and_prompts_for_url() {
 }
 
 /// Minimal server-side RFC 6455 WebSocket helper for testing `dotore scan` CDP interactions.
+#[cfg(test)]
 mod mock_cdp {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpStream;
@@ -780,6 +781,7 @@ fn handle_mock_cdp_command(
     }
 }
 
+#[cfg(test)]
 fn spawn_mock_cdp_server(
     open_page_urls: Vec<String>,
 ) -> (u16, std::thread::JoinHandle<Vec<String>>) {

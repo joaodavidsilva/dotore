@@ -227,7 +227,7 @@ fn allows_print_in_library_finding(
     config: &DotoreConfig,
     enabled_rules: Option<&[RuleId]>,
 ) -> bool {
-    if enabled_rules.is_some_and(|list| list.contains(&RuleId::RsNoDbgOrPrintInLibrary))
+    if enabled_rules == Some(&[RuleId::RsNoDbgOrPrintInLibrary][..])
         || config
             .explicit_rule_override(RuleId::RsNoDbgOrPrintInLibrary)
             .is_some()

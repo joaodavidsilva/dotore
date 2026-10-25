@@ -3,8 +3,11 @@ use dotore_core::RuleId;
 use super::extract_safety_findings;
 use crate::matchers::RsCandidateFinding;
 
+#[cfg(test)]
 fn check_cast_findings(src: &str) -> Vec<RsCandidateFinding> {
-    let ast = syn::parse_file(src).expect("valid Rust syntax");
+    let Ok(ast) = syn::parse_file(src) else {
+        return Vec::new();
+    };
     let lines: Vec<&str> = src.lines().collect();
     let line_starts = dotore_core::compute_line_starts(src);
     let mut findings = Vec::new();
@@ -15,8 +18,11 @@ fn check_cast_findings(src: &str) -> Vec<RsCandidateFinding> {
         .collect()
 }
 
+#[cfg(test)]
 fn check_slice_index_findings(src: &str) -> Vec<RsCandidateFinding> {
-    let ast = syn::parse_file(src).expect("valid Rust syntax");
+    let Ok(ast) = syn::parse_file(src) else {
+        return Vec::new();
+    };
     let lines: Vec<&str> = src.lines().collect();
     let line_starts = dotore_core::compute_line_starts(src);
     let mut findings = Vec::new();

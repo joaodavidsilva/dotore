@@ -1643,6 +1643,7 @@ fn all_906_reference_catalog_rules_resolve_via_parse_and_build_rule_catalog() {
     }
 }
 
+#[cfg(test)]
 fn collect_rs_sources_excluding_types(dir: &Path, out: &mut String) {
     let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir({dir:?}) failed: {e}"));
     for entry in entries {
@@ -1859,12 +1860,13 @@ fn self_hosting_workspace_scan_reports_zero_findings_and_100_health_score() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (report, _) = scan_workspace_with_overrides(
         &ScanOptions {
-            paths: vec![manifest_dir],
-            include_tests: false,
+            paths: vec![manifest_dir.clone()],
+            include_tests: true,
             ..Default::default()
         },
         &CliOverrides {
             no_cache: true,
+            no_inline_disables: true,
             ..Default::default()
         },
     )
@@ -1872,7 +1874,7 @@ fn self_hosting_workspace_scan_reports_zero_findings_and_100_health_score() {
 
     assert!(
         report.diagnostics.is_empty(),
-        "Expected 0 self-hosting diagnostics across dotore workspace, got {}:\n{:#?}",
+        "Expected 0 self-hosting diagnostics across dotore workspace (with tests & no_inline_disables), got {}:\n{:#?}",
         report.diagnostics.len(),
         report.diagnostics
     );
@@ -1895,4 +1897,34 @@ fn self_hosting_workspace_scan_reports_zero_findings_and_100_health_score() {
             proj.name, proj.health_score
         );
     }
+
+    let rs_and_arch_rules: Vec<RuleId> = rule_registry()
+        .iter()
+        .filter(|m| {
+            m.canonical_id.starts_with("rs-")
+                || m.id.is_architecture_soc_or_reuse_rule()
+                || m.canonical_id.contains("arch")
+        })
+        .map(|m| m.id)
+        .collect();
+    let (filtered_report, _) = scan_workspace_with_overrides(
+        &ScanOptions {
+            paths: vec![manifest_dir],
+            include_tests: true,
+            rules: Some(rs_and_arch_rules),
+            ..Default::default()
+        },
+        &CliOverrides {
+            no_cache: true,
+            no_inline_disables: true,
+            ..Default::default()
+        },
+    )
+    .expect("Filtered self-hosting scan must succeed");
+    assert!(
+        filtered_report.diagnostics.is_empty(),
+        "Expected 0 self-hosting diagnostics under rs-/arch filter, got {}:\n{:#?}",
+        filtered_report.diagnostics.len(),
+        filtered_report.diagnostics
+    );
 }

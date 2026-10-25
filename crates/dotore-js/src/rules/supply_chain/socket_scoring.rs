@@ -546,13 +546,9 @@ fn to_hundred(normalized: f64) -> u32 {
         return 50;
     }
     let scaled = (normalized * 100.0).round().clamp(0.0, 100.0);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "Clamped to 0.0..=100.0 before converting to u32 (#50)"
-    )]
-    let out = scaled as u32;
-    out
+    (0_u32..=100)
+        .find(|&n| f64::from(n) >= scaled)
+        .unwrap_or(100)
 }
 
 fn format_other_axis_scores(score: &SocketScore, failing_key: &str) -> String {

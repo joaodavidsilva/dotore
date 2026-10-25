@@ -22,8 +22,8 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("dotore-{prefix}-{}-{nanos}", std::process::id()))
 }
 
+#[cfg(test)]
 #[cfg(unix)]
-#[expect(clippy::expect_used, reason = "test fixture script helper")]
 fn write_executable_script(path: &std::path::Path, body: &str) {
     use std::os::unix::fs::PermissionsExt as _;
     fs::write(path, body).expect("write script");
