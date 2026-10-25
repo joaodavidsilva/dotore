@@ -94,7 +94,7 @@ impl PlannerContext for [ExtractedFile] {
             .filter(|f| {
                 !matches!(
                     f.path.extension().and_then(|e| e.to_str()),
-                    Some("css" | "scss" | "html" | "htm")
+                    Some("css" | "scss" | "html" | "htm" | "yml" | "yaml")
                 )
             })
             .map(|f| f.path.clone())

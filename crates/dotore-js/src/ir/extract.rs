@@ -49,12 +49,17 @@ where
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default();
-    if matches!(ext, "css" | "scss") {
+    if matches!(ext, "css" | "scss" | "yml" | "yaml") {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, "", SourceType::default()).parse();
         let semantic_ret = SemanticBuilder::new()
             .with_build_nodes(true)
             .build(&parsed.program);
+        let motion = if matches!(ext, "css" | "scss") {
+            extract_stylesheet_motion_ir(source)
+        } else {
+            MotionFileIr::default()
+        };
         let file_ir = FileIr {
             path: path.to_path_buf(),
             source: source.to_string(),
@@ -70,7 +75,7 @@ where
             security_sinks: Vec::new(),
             suppressions: FileSuppressions::default(),
             semantic_sites: Vec::new(),
-            motion: extract_stylesheet_motion_ir(source),
+            motion,
             static_dom_ids: Vec::new(),
             has_unresolved_id_spread: false,
             frame_loop_roots: Vec::new(),

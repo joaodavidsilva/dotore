@@ -329,6 +329,8 @@ fn is_excluded_support_file(rel_path: &str) -> bool {
         || file_name.ends_with(".htm")
         || file_name.ends_with(".css")
         || file_name.ends_with(".scss")
+        || file_name.ends_with(".yml")
+        || file_name.ends_with(".yaml")
         || file_name.contains(".config.")
         || file_name.contains(".setup.")
         || file_name.starts_with("setupTests.")
