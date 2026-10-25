@@ -16,10 +16,11 @@ crates/
         capability_gate.rs # Capability, CapabilityPredicate, CapabilityGate across JS/Angular/Python/Rust
         loader.rs         # DotoreConfig loader and static JS/TS/JSONC parser
         mutator.rs        # in-place configuration mutator (dotore rules)
+        pyproject.rs      # [tool.dotore] / [tool.python-doctor] pyproject.toml loader and profile inference
       rules.rs            # unified rule registry module root
       rules/
         types.rs          # RuleId, RuleMetadata, PrescriptionTier, Diagnostic, AutofixPatch, FixCapsule
-        catalog.rs        # 976-rule static metadata catalog assembled across domain submodules
+        catalog.rs        # 1076-rule static metadata catalog assembled across domain submodules
         catalog/
           react_core.rs   # React Effect Node, State Slot, hooks, lifecycle, and architecture rule metadata
           three_r3f_webgl.rs # Three.js, WebGL, and React Three Fiber 60fps frame-loop rule metadata
@@ -29,7 +30,11 @@ crates/
           react_native_and_expo.rs # React Native and Expo mobile rule metadata
           ecosystem.rs    # Zustand, Jotai, MobX, Valtio, Preact, Ink, TanStack, Redux, and Zod v4 rule metadata
           defensive_and_correctness.rs # Defensive JS/TS/DOM safety, React Router, Remotion, and correctness rule metadata
-          polyglot.rs     # Angular Signals/RxJS, Python, and Rust rule metadata
+          polyglot.rs     # Core Angular Signals/RxJS, Python, Rust, and architecture rule metadata
+          angular_extended.rs # Extended Angular Signals, lifecycle, decorator, template a11y, NgRx, and Material rule metadata
+          python_extended.rs # Extended Python Zen, complexity, wildcard import, Bandit security, and PEP 561 rule metadata
+          rust_extended.rs # Extended Rust SourceKernel, Cargo manifest/lockfile health, structural, and Clippy-grade rule metadata
+          trust_boundary_security.rs # Deterministic trust-boundary security rule metadata
       scanner.rs          # parallel gitignore-aware file discovery
       fixer.rs            # surgical single- and cross-file byte-range auto-fixer with syntax validation
       diff.rs             # git diff, Contextual Owner, and baseline module root
@@ -48,6 +53,7 @@ crates/
         rules.rs          # rule catalog listing and rule explanation (dotore rules)
         why.rs            # location diagnosis and suppression/gate explanation (dotore why)
         ci_install.rs     # CI workflow automation (dotore ci) and skill/hook installer (dotore install)
+        redaction.rs      # automatic credential redaction (mask_credentials) across reports, why frames, and Fix Capsules
       ui.rs               # reusable terminal UI kit (AsciiBox, GaugeBar, Badge, FlowDiagram, FilterTabBar, StatusBar, LiveSpinner)
   dotore-js/
     src/
@@ -68,7 +74,9 @@ crates/
       graph/
         resolution.rs     # module, tsconfig, workspace package, platform sibling, and barrel resolution
         callers_and_cascades.rs # cross-file Caller Site indexing and MultiEffectCascade linking
-        dead_code.rs      # entrypoint reachability, orphan files, dead exports, unused deps, circular deps
+        edges.rs          # module graph edge construction and cross-file dependency linking
+        dead_code.rs      # entrypoint reachability, orphan files, dead exports
+        cycles_and_deps.rs# unused package dependencies and circular module dependency detection
         duplicate_jsx.rs  # duplicate JSX subtree family clustering and nested-subtree suppression
       planner.rs          # PlannerContext for ProjectGraph and cross-file autofix enrichment
       rules.rs            # rules engine dispatcher gated by Capability Gate
@@ -83,7 +91,13 @@ crates/
           aria_and_roles.rs # ARIA attributes, roles, landmarks, dialogs, and semantic element rules
           keyboard_and_focus.rs # keyboard activation, focusability, tabindex, outline, and focus effect rules
           forms_media_and_content.rs # labels, form controls, alt text, anchors, media, headings, tables, and UI primitives
-        angular.rs        # Angular Signals, RxJS teardown, OnPush autofix, @for track, lifecycle, and DOM rules
+        angular.rs        # Angular Signals, lifecycle, template a11y, NgRx, and Material rules root
+        angular/
+          signals_and_lifecycle.rs # Angular Signals, lifecycle hooks, and decorator contract rules
+          metadata_and_arch.rs # @Component/@Directive/@Injectable/@Pipe metadata, DI, and architecture rules
+          rxjs_and_dom.rs # RxJS subscription teardown, OnPush autofix, and direct DOM access rules
+          template_a11y.rs# Angular HTML template @for track and WCAG/ARIA accessibility rules
+          ngrx_and_material.rs # NgRx Store/Effects and Angular Material theme/directive conflict rules
         architecture.rs   # Subject architecture rules root and cross-file ProjectGraph context/boundary dispatcher
         architecture/
           hoisting_and_compiler.rs # module-scope static/pure hoisting autofixes, nested components, and React Compiler memoization
@@ -151,8 +165,12 @@ crates/
         security.rs       # XSS, eval, SSRF, and trust-boundary security rules root
         security/
           dom_and_client.rs # dangerous HTML sinks, window.open, client secrets, web storage tokens, eval, and CSP/sandbox rules
-          injection_and_baas.rs # SQL/NoSQL/command/path injection, redirects, JWT/crypto/cookies, Supabase RLS, Firebase, and MCP/agent rules
+          client_and_jsx.rs # JSX security attributes, iframe sandbox, and client-side sink inspectors
+          injection_and_baas.rs # SQL/NoSQL/command/path injection, redirects, cookies, Supabase RLS, Firebase, and MCP/agent rules
+          auth_and_origin.rs # JWT verification, cryptographic primitives, postMessage origin validation, and CORS credential trust rules
           artifacts_and_runtime.rs # build artifact leaks, RPC/native bridges, SSR/MDX execution, and repository secret rules
+          workflows.rs    # GitHub Actions workflow injection, untrusted pull_request_target checkout, and secret-in-build-step scanner
+          trust_boundaries.rs # Electron/WebView bridges, untrusted Host headers, private-response public caching, LLM/MCP sinks, and unscoped Supabase service-role queries
         server_nextjs.rs  # Server Actions, RSC, and Next.js App Router rules
         state_and_effects.rs # state/effect loop, render setState, async/timer refs, and lazy init rules
         stores.rs         # Zustand, Jotai, MobX, and Valtio state-store rules
@@ -175,6 +193,8 @@ crates/
       fastapi_pydantic.rs # FastAPI route/auth and Pydantic default_factory rules
       orm.rs              # SQLAlchemy and Django ORM N+1 loop query rule
       security.rs         # Python SQL injection and unsafe deserialization/shell rules
+      zen.rs              # Python Zen, cyclomatic/cognitive complexity, deep nesting, function/class size, dense semicolon, and wildcard import rules
+      bandit.rs           # Native Bandit security rules (HTTP timeouts, TLS verification, weak crypto/random, XXE/archive extraction, hardcoded secrets/tmp paths)
   dotore-rs/
     src/
       lib.rs              # RsLanguageAnalyzer (LanguageAnalyzer) and dotore-rs crate root
@@ -186,8 +206,17 @@ crates/
       safety.rs           # single-pass detectors for the 5 core production Rust safety rules
       tokio_async.rs      # single-pass detectors for Tokio async concurrency hazards
       perf.rs             # single-pass detectors for Rust allocation and hot-loop performance rules
-      axum_sqlx.rs        # single-pass detectors for Axum shared state contention and SQLx query hazards
+      axum_sqlx.rs        # single-pass detectors for Axum shared state contention and multi-crate SQL query hazards
       ui_signals.rs       # single-pass detectors for Leptos/Dioxus reactive signals and boolean params
+      source_kernel.rs    # lexical use-alias and 8-hop local let/const binding resolver (SourceKernel)
+      source_kernel_bindings.rs # local let/const binding resolver and KernelContext for SourceKernel
+      source_kernel_detectors.rs # single-pass SourceKernel detectors for async runtime, HTTP, TLS, shell, secret, CORS, cookie, and JWT rules
+      cargo_health.rs     # Cargo.toml, Cargo.lock, and .cargo/config.toml manifest/lockfile health detectors
+      cargo_health_refs.rs# crate reference collector and dependency-truth evaluators (unused and test-only dependencies)
+      structure.rs        # per-file Rust structural and #[allow] hygiene AST detectors
+      structure_duplication.rs # canonical AST normalization and Sørensen-Dice near-duplicate function detector
+      structure_package.rs# package-level structural evaluators (orphan module files, unreferenced features, near-duplicate functions)
+      clippy_rules.rs     # single-pass detectors for the 7 Clippy-grade AST correctness and reliability rules
 src/
   main.rs                 # thin CLI adapter: parses args and returns process exit code
   lib.rs                  # root workspace facade: dispatches through LanguageAnalyzers and re-exports API
