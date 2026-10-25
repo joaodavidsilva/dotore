@@ -83,7 +83,7 @@ impl JsLanguageAnalyzer {
             } else if self.supports_path(&file.path)
                 || matches!(
                     file.path.extension().and_then(|e| e.to_str()),
-                    Some("css" | "scss" | "html" | "htm")
+                    Some("css" | "scss" | "html" | "htm" | "yml" | "yaml")
                 )
             {
                 file_irs.push(parse_file_ir(&file.path, &file.source));
@@ -132,7 +132,10 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
             return false;
         };
-        if !JS_SOURCE_EXTENSIONS.contains(&ext) && !matches!(ext, "html" | "htm") {
+        if !JS_SOURCE_EXTENSIONS.contains(&ext)
+            && !matches!(ext, "html" | "htm")
+            && !crate::rules::security::workflows::is_github_workflow_path(path)
+        {
             return false;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -164,7 +167,11 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
         let mut gate = if let Some(json) = pkg_json_source {
             CapabilityGate::from_package_json_str(json)
         } else if has_angular_json && !package_dir.join("package.json").is_file() {
-            CapabilityGate::default_angular()
+            CapabilityGate::with_capabilities([
+                Capability::Angular,
+                Capability::Rxjs,
+                Capability::TypeScript,
+            ])
         } else {
             CapabilityGate::discover(package_dir)
         };
@@ -212,7 +219,7 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
             } else if self.supports_path(&file.path)
                 || matches!(
                     file.path.extension().and_then(|e| e.to_str()),
-                    Some("css" | "scss" | "html" | "htm")
+                    Some("css" | "scss" | "html" | "htm" | "yml" | "yaml")
                 )
             {
                 file_irs.push(parse_file_ir(&file.path, &file.source));
@@ -245,7 +252,7 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
 pub fn source_parses_cleanly(path: &Path, source: &str) -> bool {
     if matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("html" | "htm" | "css" | "scss")
+        Some("html" | "htm" | "css" | "scss" | "yml" | "yaml")
     ) {
         return true;
     }

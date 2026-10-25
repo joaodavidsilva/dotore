@@ -10,7 +10,7 @@ use oxc_ast::{
     AstKind,
     ast::{
         BindingPattern, CallExpression, Declaration, ExportDefaultDeclarationKind, Expression,
-        ImportDeclaration, ImportDeclarationSpecifier, Program,
+        ImportDeclaration, ImportDeclarationSpecifier, ObjectProperty, Program,
     },
 };
 use oxc_semantic::{Semantic, SymbolId};
@@ -83,6 +83,9 @@ pub(super) fn extract_module_ir(
             }
             AstKind::CallExpression(call) => {
                 collect_module_call_facts(call, &mut module, &mut raw_whole_uses);
+            }
+            AstKind::ObjectProperty(prop) => {
+                collect_angular_object_property_references(prop, &mut module);
             }
             AstKind::TSImportType(ts_imp) => {
                 let raw = ts_imp.span().source_text(semantic.source_text());
@@ -609,6 +612,53 @@ fn collect_module_call_facts(
             }
         }
         _ => {}
+    }
+}
+
+fn collect_angular_object_property_references(prop: &ObjectProperty<'_>, module: &mut ModuleIr) {
+    let Some(static_name) = prop.key.static_name() else {
+        return;
+    };
+    let Some(key_name) = static_name.as_str() else {
+        return;
+    };
+    match key_name {
+        "templateUrl" | "styleUrl" => {
+            if let Some(url) = extract_static_string_expr(prop.value.without_parentheses()) {
+                module.dynamic_imports.push(normalize_angular_rel_spec(&url));
+            }
+        }
+        "styleUrls" => {
+            if let Expression::ArrayExpression(arr) = prop.value.without_parentheses() {
+                for elem in &arr.elements {
+                    if let Some(expr) = elem.as_expression()
+                        && let Some(url) = extract_static_string_expr(expr.without_parentheses())
+                    {
+                        module.dynamic_imports.push(normalize_angular_rel_spec(&url));
+                    }
+                }
+            }
+        }
+        "loadComponent" | "loadChildren" => {
+            if let Some(raw_spec) = extract_static_string_expr(prop.value.without_parentheses()) {
+                let clean_spec = raw_spec.split('#').next().unwrap_or(&raw_spec).trim();
+                if !clean_spec.is_empty() {
+                    let rel = normalize_angular_rel_spec(clean_spec);
+                    module.dynamic_imports.push(rel.clone());
+                    module.route_module_entries.push(rel);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_angular_rel_spec(spec: &str) -> String {
+    let trimmed = spec.trim();
+    if trimmed.starts_with('.') || trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("./{trimmed}")
     }
 }
 

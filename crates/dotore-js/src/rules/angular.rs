@@ -9,10 +9,10 @@
 )]
 
 pub(crate) mod metadata_and_arch;
+pub(crate) mod ngrx_and_material;
 pub(crate) mod rxjs_and_dom;
 pub(crate) mod signals_and_lifecycle;
-
-use std::collections::HashSet;
+pub(crate) mod template_a11y;
 
 use oxc_ast::{
     AstKind,
@@ -26,6 +26,11 @@ use crate::{
 };
 
 use metadata_and_arch::{check_class_metadata_and_architecture_rules, check_forward_ref_call};
+use ngrx_and_material::{
+    check_ngrx_call_rules, check_ngrx_class_rules, check_ngrx_type_reference,
+};
+pub(crate) use ngrx_and_material::extract_angular_stylesheet_sites;
+pub(crate) use template_a11y::extract_angular_html_template_sites;
 use rxjs_and_dom::{
     check_angular_class_decorators_and_constructor, check_native_element_assignment_mutation,
     check_native_element_call_mutation, check_signal_write_in_effect,
@@ -178,6 +183,7 @@ pub(crate) fn extract_angular_sites(
                 );
                 check_class_signals_and_lifecycle_rules(cls, source, line_starts, sites);
                 check_class_metadata_and_architecture_rules(cls, source, line_starts, sites);
+                check_ngrx_class_rules(cls, source, line_starts, sites);
             }
             AstKind::CallExpression(call) => {
                 if is_angular_effect_call(call) {
@@ -204,6 +210,17 @@ pub(crate) fn extract_angular_sites(
                 );
                 check_direct_lifecycle_call(semantic, node_id, call, line_starts, sites);
                 check_forward_ref_call(semantic, node_id, call, line_starts, sites);
+                check_ngrx_call_rules(semantic, node_id, call, source, line_starts, sites);
+            }
+            AstKind::TSTypeReference(type_ref) => {
+                check_ngrx_type_reference(
+                    semantic,
+                    node_id,
+                    type_ref,
+                    source,
+                    line_starts,
+                    sites,
+                );
             }
             AstKind::StaticMemberExpression(_) | AstKind::IdentifierReference(_) => {
                 check_uncalled_signal_reference(
@@ -247,139 +264,6 @@ pub(crate) fn extract_angular_sites(
     }
 }
 
-/// Scans an Angular template string (either an external `.html` file or an inline `template: \`...\``)
-/// for `@for (...; track ...)` loops that track `$index` or unstable object identity.
-pub(crate) fn extract_angular_html_template_sites(
-    template_source: &str,
-    base_byte_offset: u32,
-    subject_name: Option<&str>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    let bytes = template_source.as_bytes();
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        let Some(rel_pos) = template_source[i..].find("@for") else {
-            break;
-        };
-        let at_pos = i + rel_pos;
-        let after_for = at_pos + 4;
-        if after_for < bytes.len()
-            && (bytes[after_for].is_ascii_alphanumeric() || bytes[after_for] == b'_')
-        {
-            i = after_for;
-            continue;
-        }
-        let mut cursor = after_for;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != b'(' {
-            i = after_for;
-            continue;
-        }
-        let open_paren = cursor;
-        let Some(close_paren) = find_matching_paren(template_source, open_paren) else {
-            i = open_paren + 1;
-            continue;
-        };
-        let header = template_source
-            .get(open_paren + 1..close_paren)
-            .unwrap_or_default();
-        if let Some((track_target, reason)) = classify_for_header_track_violation(header) {
-            let start = base_byte_offset + u32::try_from(at_pos).unwrap_or(0);
-            let end = base_byte_offset + u32::try_from(close_paren).unwrap_or(0) + 1;
-            sites.push(SemanticRuleSite {
-                rule: RuleId::AngularForTrackNoIndex,
-                subject_name: subject_name.map(ToOwned::to_owned),
-                message_id: "angularForTrackNoIndex",
-                target_name: track_target,
-                message: reason,
-                loc: loc_from_line_starts(line_starts, start),
-                span: ByteSpan { start, end },
-                autofix: None,
-            });
-        }
-        i = close_paren + 1;
-    }
-}
-
-fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_quote: Option<u8> = None;
-    let bytes = text.as_bytes();
-    let mut idx = open_idx;
-    while idx < bytes.len() {
-        let b = bytes[idx];
-        if let Some(q) = in_quote {
-            if b == b'\\' {
-                idx += 2;
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-            }
-        } else if b == b'\'' || b == b'"' {
-            in_quote = Some(b);
-        } else if b == b'(' {
-            depth += 1;
-        } else if b == b')' {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some(idx);
-            }
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn classify_for_header_track_violation(header: &str) -> Option<(String, String)> {
-    let mut segments = header.split(';');
-    let first_seg = segments.next()?.trim();
-    let (item_part, _collection_part) = first_seg.split_once(" of ")?;
-    let item_var = item_part.trim();
-    if item_var.is_empty() {
-        return None;
-    }
-
-    let mut index_aliases: HashSet<&str> = HashSet::from(["$index"]);
-    let mut track_expr: Option<&str> = None;
-
-    for seg in segments {
-        let trimmed = seg.trim();
-        if let Some(rest) = trimmed.strip_prefix("let ") {
-            if let Some((alias, rhs)) = rest.split_once('=')
-                && rhs.trim() == "$index"
-            {
-                index_aliases.insert(alias.trim());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("track")
-            && rest.starts_with(char::is_whitespace)
-        {
-            track_expr = Some(rest.trim());
-        }
-    }
-
-    let track = track_expr?;
-    if index_aliases.contains(track) {
-        return Some((
-            track.to_string(),
-            format!(
-                "`@for` loop tracks `{track}` (`$index`); track a stable unique property like `track {item_var}.id` so DOM nodes are preserved when items reorder."
-            ),
-        ));
-    }
-    if track == item_var {
-        return Some((
-            track.to_string(),
-            format!(
-                "`@for` loop tracks raw object identity `track {item_var}`; track a unique key property like `track {item_var}.id` so immutable updates do not tear down DOM nodes."
-            ),
-        ));
-    }
-    None
-}
 
 pub(crate) fn angular_class_decorator_kind(cls: &Class<'_>) -> Option<&'static str> {
     for dec in &cls.decorators {

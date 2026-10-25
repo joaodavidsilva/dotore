@@ -15,6 +15,7 @@ pub const JS_SOURCE_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "mt
 /// All polyglot source extensions supported across `dotore-js`, `dotore-py`, and `dotore-rs`.
 pub const POLYGLOT_SOURCE_EXTENSIONS: &[&str] = &[
     "js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts", "html", "htm", "py", "pyi", "rs",
+    "yml", "yaml",
 ];
 
 const STYLE_EXTENSIONS: &[&str] = &["css", "scss"];
@@ -99,11 +100,34 @@ pub fn collect_source_files_with_extensions(
                 files.push(path.to_path_buf());
             }
         }
+
+        if extensions.contains(&"yml") || extensions.contains(&"yaml") {
+            collect_github_workflow_files(&root, include_tests, extensions, &mut files);
+        }
     }
 
     files.sort();
     files.dedup();
     files
+}
+
+fn collect_github_workflow_files(
+    root: &Path,
+    include_tests: bool,
+    extensions: &[&str],
+    files: &mut Vec<PathBuf>,
+) {
+    let wf_dir = root.join(".github").join("workflows");
+    let Ok(entries) = std::fs::read_dir(&wf_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let wf_path = entry.path();
+        if wf_path.is_file() && is_supported_file_with_extensions(&wf_path, include_tests, extensions) {
+            crate::ui::tick_discovery_file(&wf_path);
+            files.push(wf_path);
+        }
+    }
 }
 
 /// Collects all source files under `paths` supported by at least one registered [`LanguageAnalyzer`].
@@ -202,6 +226,12 @@ pub fn is_supported_file_with_extensions(
     };
     if !extensions.contains(&ext) {
         return false;
+    }
+    if matches!(ext, "yml" | "yaml") {
+        let norm = path.to_string_lossy().replace('\\', "/");
+        if !norm.starts_with(".github/workflows/") && !norm.contains("/.github/workflows/") {
+            return false;
+        }
     }
 
     let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {

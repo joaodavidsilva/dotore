@@ -18,8 +18,12 @@ use crate::{
 };
 
 use super::{
-    artifacts_and_runtime::evaluate_remaining_security_scan_rules, emit_line_diag,
-    find_standalone_call,
+    artifacts_and_runtime::evaluate_remaining_security_scan_rules,
+    auth_and_origin::{
+        check_cors_cookie_trust_risk, check_insecure_crypto_risk, check_jwt_insecure_verification,
+        check_postmessage_origin_risk,
+    },
+    emit_line_diag, find_standalone_call,
 };
 
 pub(super) fn evaluate_security_scan_patterns<F>(
@@ -228,82 +232,13 @@ pub(super) fn evaluate_security_scan_patterns<F>(
     }
 
     // 7. jwt-insecure-verification
-    if is_active(RuleId::JwtInsecureVerification).is_some()
-        && (src.contains("jwt") || src.contains("jsonwebtoken") || src.contains("jose"))
-    {
-        for (idx, line) in src.lines().enumerate() {
-            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-            let lower = compact.to_ascii_lowercase();
-            if lower.contains("alg:\"none\"")
-                || lower.contains("alg:'none'")
-                || lower.contains("algorithms:[\"none\"]")
-                || lower.contains("algorithms:['none']")
-                || lower.contains("algorithm:\"none\"")
-                || lower.contains("algorithm:'none'")
-            {
-                emit_line_diag(
-                    out,
-                    file,
-                    RuleId::JwtInsecureVerification,
-                    "jwtInsecureVerification",
-                    "none",
-                    "JWT is configured with the 'none' algorithm, which disables signature verification, so any forged token is accepted.",
-                    idx,
-                    line,
-                    line_starts,
-                );
-            }
-        }
+    if is_active(RuleId::JwtInsecureVerification).is_some() {
+        check_jwt_insecure_verification(file, line_starts, out);
     }
 
     // 8. insecure-crypto-risk
     if is_active(RuleId::InsecureCryptoRisk).is_some() {
-        let lower_src = src.to_ascii_lowercase();
-        let has_sec_ctx = [
-            "password",
-            "token",
-            "secret",
-            "signature",
-            "auth",
-            "credential",
-            "session",
-            "cookie",
-            "csrf",
-        ]
-        .iter()
-        .any(|w| lower_src.contains(w));
-        for (idx, line) in src.lines().enumerate() {
-            let lower_line = line.to_ascii_lowercase();
-            let is_weak_hash = (lower_line.contains("createhash(\"md5\")")
-                || lower_line.contains("createhash('md5')")
-                || lower_line.contains("createhash(\"sha1\")")
-                || lower_line.contains("createhash('sha1')")
-                || lower_line.contains("md5("))
-                && has_sec_ctx;
-            let is_weak_cipher = lower_line.contains("createcipher(")
-                || lower_line.contains("createdecipher(")
-                || lower_line.contains("createcipheriv(\"des")
-                || lower_line.contains("createcipheriv(\"rc4");
-            let is_math_random_secret = line.contains("Math.random(")
-                && [
-                    "token", "secret", "password", "nonce", "salt", "csrf", "otp",
-                ]
-                .iter()
-                .any(|w| lower_line.contains(w));
-            if is_weak_hash || is_weak_cipher || is_math_random_secret {
-                emit_line_diag(
-                    out,
-                    file,
-                    RuleId::InsecureCryptoRisk,
-                    "insecureCryptoRisk",
-                    "crypto",
-                    "Weak cryptographic primitive or non-cryptographic randomness used in a security-sensitive context.",
-                    idx,
-                    line,
-                    line_starts,
-                );
-            }
-        }
+        check_insecure_crypto_risk(file, line_starts, out);
     }
 
     // 9. insecure-session-cookie
@@ -387,51 +322,13 @@ pub(super) fn evaluate_security_scan_patterns<F>(
     }
 
     // 11. postmessage-origin-risk
-    if is_active(RuleId::PostmessageOriginRisk).is_some()
-        && (src.contains("addEventListener(\"message\"")
-            || src.contains("addEventListener('message'")
-            || src.contains("window.onmessage"))
-        && (src.contains("event.data") || src.contains("e.data") || src.contains("msg.data"))
-        && !src.contains(".origin")
-        && !src.contains("Origin")
-        && !src.contains(".source")
-    {
-        let line_idx = src.lines().position(|l| l.contains("message")).unwrap_or(0);
-        emit_line_diag(
-            out,
-            file,
-            RuleId::PostmessageOriginRisk,
-            "postmessageOriginRisk",
-            "message",
-            "`postMessage` listener reads `event.data` without validating `event.origin`.",
-            line_idx,
-            src.lines().nth(line_idx).unwrap_or(""),
-            line_starts,
-        );
+    if is_active(RuleId::PostmessageOriginRisk).is_some() {
+        check_postmessage_origin_risk(file, line_starts, out);
     }
 
     // 12. cors-cookie-trust-risk
-    if is_active(RuleId::CorsCookieTrustRisk).is_some()
-        && src.contains("Access-Control-Allow-Credentials")
-        && src.contains("true")
-        && src.contains("Access-Control-Allow-Origin")
-        && (src.contains("\"*\"") || src.contains("'*'") || src.contains("https://docs."))
-    {
-        let line_idx = src
-            .lines()
-            .position(|l| l.contains("Access-Control-Allow-"))
-            .unwrap_or(0);
-        emit_line_diag(
-            out,
-            file,
-            RuleId::CorsCookieTrustRisk,
-            "corsCookieTrustRisk",
-            "Access-Control-Allow-Origin",
-            "Credentialed CORS or broad auth-cookie scope can make a docs/custom-domain XSS become account compromise.",
-            line_idx,
-            src.lines().nth(line_idx).unwrap_or(""),
-            line_starts,
-        );
+    if is_active(RuleId::CorsCookieTrustRisk).is_some() {
+        check_cors_cookie_trust_risk(file, line_starts, out);
     }
 
     // 13. request-body-mass-assignment

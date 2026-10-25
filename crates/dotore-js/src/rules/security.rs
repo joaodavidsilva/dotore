@@ -3,8 +3,12 @@
 //! propagation (`window-open-without-noopener`).
 
 mod artifacts_and_runtime;
+mod auth_and_origin;
+mod client_and_jsx;
 mod dom_and_client;
 mod injection_and_baas;
+mod trust_boundaries;
+pub(crate) mod workflows;
 
 use crate::{
     graph::ProjectGraph,
@@ -13,18 +17,23 @@ use crate::{
     rules::types::{Diagnostic, RuleId, RuleSeverity},
 };
 
-use dom_and_client::{
-    check_auth_token_in_web_storage, check_dangerous_html_sink, check_iframe_missing_sandbox,
-    check_no_danger_with_children, check_no_eval, check_no_path_prefix_containment,
-    check_no_secrets_in_client_code, check_public_env_secret_name,
-    check_react_markdown_unsanitized_raw_html, check_react_router_csp_nonce_consistency,
-    check_unsafe_json_in_html, check_window_open_without_noopener,
+use client_and_jsx::{
+    check_auth_token_in_web_storage, check_iframe_missing_sandbox, check_no_danger_with_children,
+    check_no_eval, check_no_path_prefix_containment, check_no_secrets_in_client_code,
+    check_public_env_secret_name, check_react_markdown_unsanitized_raw_html,
+    check_react_router_csp_nonce_consistency, check_unsafe_json_in_html,
 };
+use dom_and_client::{check_dangerous_html_sink, check_window_open_without_noopener};
 use injection_and_baas::evaluate_security_scan_patterns;
+use trust_boundaries::{
+    check_electron_webview_bridge_risk, check_llm_prompt_role_and_tool_sink_risk,
+    check_private_response_public_cache, check_supabase_service_role_unscoped_query,
+    check_untrusted_host_header_origin,
+};
+use workflows::check_ci_workflow_security_risk;
 
 #[cfg(test)]
-use dom_and_client::find_suspicious_public_env_in_line;
-
+use client_and_jsx::find_suspicious_public_env_in_line;
 /// Returns `true` if `rule` is a deterministic trust-boundary security rule (`#58`).
 #[must_use]
 pub const fn is_evaluated_trust_boundary_security_rule(rule: RuleId) -> bool {
@@ -50,6 +59,13 @@ pub(crate) fn evaluate_security_rules<F>(
 {
     let line_starts = compute_line_starts(&file.source);
     let path_str = file.path.to_string_lossy().replace('\\', "/");
+
+    if path_str.ends_with(".yml") || path_str.ends_with(".yaml") {
+        if is_active(RuleId::CiWorkflowSecurityRisk).is_some() {
+            check_ci_workflow_security_risk(file, &path_str, &line_starts, out);
+        }
+        return;
+    }
 
     if is_active(RuleId::DangerousHtmlSink).is_some() {
         check_dangerous_html_sink(graph, file, &path_str, &line_starts, out);
@@ -86,6 +102,21 @@ pub(crate) fn evaluate_security_rules<F>(
     }
     if is_active(RuleId::IframeMissingSandbox).is_some() {
         check_iframe_missing_sandbox(file, out);
+    }
+    if is_active(RuleId::ElectronWebviewBridgeRisk).is_some() {
+        check_electron_webview_bridge_risk(file, &line_starts, out);
+    }
+    if is_active(RuleId::UntrustedHostHeaderOrigin).is_some() {
+        check_untrusted_host_header_origin(file, &line_starts, out);
+    }
+    if is_active(RuleId::PrivateResponsePublicCache).is_some() {
+        check_private_response_public_cache(file, &line_starts, out);
+    }
+    if is_active(RuleId::LlmPromptRoleAndToolSinkRisk).is_some() {
+        check_llm_prompt_role_and_tool_sink_risk(file, &line_starts, out);
+    }
+    if is_active(RuleId::SupabaseServiceRoleUnscopedQuery).is_some() {
+        check_supabase_service_role_unscoped_query(file, &line_starts, out);
     }
 
     evaluate_security_scan_patterns(file, &path_str, &line_starts, is_active, out);

@@ -437,7 +437,7 @@ pub(super) const NON_INTERACTIVE_ROLES: &[&str] = &[
     "tooltip",
 ];
 
-pub(super) const VALID_ARIA_PROPERTIES: &[&str] = &[
+pub(crate) const VALID_ARIA_PROPERTIES: &[&str] = &[
     "aria-activedescendant",
     "aria-atomic",
     "aria-autocomplete",

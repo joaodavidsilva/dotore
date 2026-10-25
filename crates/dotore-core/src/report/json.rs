@@ -184,15 +184,26 @@ pub fn build_report_from_planner_context<C: PlannerContext + ?Sized>(
         diag.message_id = "";
         diag.docs_url = diag.rule.metadata().docs_url;
     }
-    let files_scanned = file_subject_counts
+    let non_support_count = file_subject_counts
         .iter()
         .filter(|(path, _)| {
             !matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("css" | "scss" | "html" | "htm")
+                Some("css" | "scss" | "html" | "htm" | "yml" | "yaml")
             )
         })
         .count();
+    let files_scanned = if non_support_count == 0
+        && file_subject_counts.iter().any(|(path, _)| {
+            matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yml" | "yaml")
+            )
+        }) {
+        file_subject_counts.len()
+    } else {
+        non_support_count
+    };
     let subjects_scanned: usize = file_subject_counts.iter().map(|(_, c)| *c).sum();
 
     let mut error_count = 0;

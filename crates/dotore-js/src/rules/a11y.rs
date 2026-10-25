@@ -40,6 +40,7 @@ use self::{
     aria_and_roles::{check_jsx_attribute_a11y, check_jsx_element_a11y},
     keyboard_and_focus::{check_call_a11y, check_conditional_a11y},
 };
+pub(crate) use self::tables::VALID_ARIA_PROPERTIES;
 
 struct JsxElementA11yCtx<'a, 'b> {
     is_testlike: bool,
