@@ -48,175 +48,190 @@ pub(crate) fn check_rn_import_rules(
             continue;
         };
 
-        // 1. `rn-no-deep-imports`
-        if let Some(after) = src.strip_prefix("react-native/Libraries/") {
-            let last_seg = after.rsplit('/').next().unwrap_or(after);
-            let seg_stem = last_seg.split('.').next().unwrap_or(last_seg);
-            if src == "react-native/Libraries/NewAppScreen"
-                || PUBLIC_RN_ROOT_EXPORTS.contains(&seg_stem)
-            {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnNoDeepImports,
-                    None,
-                    "rnNoDeepImports",
-                    src,
-                    format!(
-                        "Deep import from \"{src}\" reaches into internal React Native paths; import \"{seg_stem}\" from \"react-native\" instead."
-                    ),
-                    line_starts,
-                    imp.span,
-                );
-            }
-        }
-
-        // 2. `rn-no-legacy-expo-packages`
-        for &legacy_pkg in LEGACY_EXPO_PACKAGES {
-            if src == legacy_pkg || src.starts_with(&format!("{legacy_pkg}/")) {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnNoLegacyExpoPackages,
-                    None,
-                    "rnNoLegacyExpoPackages",
-                    legacy_pkg,
-                    format!(
-                        "Your users are exposed to unfixed bugs when \"{legacy_pkg}\" is no longer maintained."
-                    ),
-                    line_starts,
-                    imp.span,
-                );
-                break;
-            }
-        }
-
-        // 3. `rn-bottom-sheet-prefer-native`
-        if JS_BOTTOM_SHEET_PACKAGES.contains(&src) {
-            push_semantic_site(
-                sites,
-                RuleId::RnBottomSheetPreferNative,
-                None,
-                "rnBottomSheetPreferNative",
-                src,
-                format!(
-                    "Users get JS-driven sheet gestures and presentation with {src}, instead of the platform-native formSheet behavior."
-                ),
-                line_starts,
-                imp.span,
-            );
-        }
-
-        // 4. `rn-no-non-native-navigator`
-        if matches!(src, "@react-navigation/stack" | "@react-navigation/drawer")
-            && let Some(specs) = &imp.specifiers
-            && specs.iter().any(|s| match s {
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
-                | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => true,
-                ImportDeclarationSpecifier::ImportSpecifier(sp) => {
-                    !sp.import_kind.is_type()
-                        && sp.imported.name().as_str().starts_with("create")
-                        && sp.imported.name().as_str().ends_with("Navigator")
-                }
-            })
-        {
-            push_semantic_site(
-                sites,
-                RuleId::RnNoNonNativeNavigator,
-                None,
-                "rnNoNonNativeNavigator",
-                src,
-                format!(
-                    "Users get JS-driven transitions and gestures from {src}, instead of platform-native navigation behavior."
-                ),
-                line_starts,
-                imp.span,
-            );
-        }
-
-        // 5. `react-native` named specifier checks (`rn-no-deprecated-modules`, `rn-no-panresponder`, `rn-prefer-pressable`, `rn-prefer-expo-image`)
+        check_rn_import_source_rules(imp, src, line_starts, sites);
         if matches!(src, "react-native" | "react-native-gesture-handler")
             && let Some(specs) = &imp.specifiers
         {
-            for spec in specs {
-                let ImportDeclarationSpecifier::ImportSpecifier(sp) = spec else {
-                    continue;
-                };
-                if sp.import_kind.is_type() {
-                    continue;
-                };
-                let imported = sp.imported.name().as_str();
-                let local = sp.local.name.as_str();
+            check_rn_core_import_specifiers(semantic, src, specs, source, line_starts, sites);
+        }
+    }
+}
 
-                if src == "react-native" && DEPRECATED_RN_CORE_MODULES.contains(&imported) {
-                    push_semantic_site(
-                        sites,
-                        RuleId::RnNoDeprecatedModules,
-                        None,
-                        "rnNoDeprecatedModules",
-                        imported,
-                        format!(
-                            "Your users hit a crash from \"{imported}\", which was removed from react-native."
-                        ),
-                        line_starts,
-                        sp.span,
-                    );
-                }
+fn check_rn_import_source_rules(
+    imp: &oxc_ast::ast::ImportDeclaration<'_>,
+    src: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Some(after) = src.strip_prefix("react-native/Libraries/") {
+        let last_seg = after.rsplit('/').next().unwrap_or(after);
+        let seg_stem = last_seg.split('.').next().unwrap_or(last_seg);
+        if src == "react-native/Libraries/NewAppScreen"
+            || PUBLIC_RN_ROOT_EXPORTS.contains(&seg_stem)
+        {
+            push_semantic_site(
+                sites,
+                RuleId::RnNoDeepImports,
+                None,
+                "rnNoDeepImports",
+                src,
+                format!(
+                    "Deep import from \"{src}\" reaches into internal React Native paths; import \"{seg_stem}\" from \"react-native\" instead."
+                ),
+                line_starts,
+                imp.span,
+            );
+        }
+    }
 
-                if src == "react-native" && imported == "PanResponder" {
-                    push_semantic_site(
-                        sites,
-                        RuleId::RnNoPanresponder,
-                        None,
-                        "rnNoPanresponder",
-                        "PanResponder",
-                        "PanResponder runs gesture handling on the JS thread, which stutters under load. Use react-native-gesture-handler (`Gesture.Pan()`) so gestures run on the native UI thread.".to_string(),
-                        line_starts,
-                        sp.span,
-                    );
-                }
+    for &legacy_pkg in LEGACY_EXPO_PACKAGES {
+        if src == legacy_pkg || src.starts_with(&format!("{legacy_pkg}/")) {
+            push_semantic_site(
+                sites,
+                RuleId::RnNoLegacyExpoPackages,
+                None,
+                "rnNoLegacyExpoPackages",
+                legacy_pkg,
+                format!(
+                    "Your users are exposed to unfixed bugs when \"{legacy_pkg}\" is no longer maintained."
+                ),
+                line_starts,
+                imp.span,
+            );
+            break;
+        }
+    }
 
-                if TOUCHABLE_COMPONENTS.contains(&imported) {
-                    push_semantic_site(
-                        sites,
-                        RuleId::RnPreferPressable,
-                        None,
-                        "rnPreferPressable",
-                        imported,
-                        format!(
-                            "Your users miss <Pressable>'s flexible press feedback when you use {imported}, which is old & frozen."
-                        ),
-                        line_starts,
-                        sp.span,
-                    );
-                }
+    if JS_BOTTOM_SHEET_PACKAGES.contains(&src) {
+        push_semantic_site(
+            sites,
+            RuleId::RnBottomSheetPreferNative,
+            None,
+            "rnBottomSheetPreferNative",
+            src,
+            format!(
+                "Users get JS-driven sheet gestures and presentation with {src}, instead of the platform-native formSheet behavior."
+            ),
+            line_starts,
+            imp.span,
+        );
+    }
 
-                if src == "react-native"
-                    && imported == "Image"
-                    && should_flag_rn_prefer_expo_image(semantic, local, source)
-                {
-                    push_semantic_site(
-                        sites,
-                        RuleId::RnPreferExpoImage,
-                        None,
-                        "rnPreferExpoImage",
-                        "Image",
-                        "React Native's <Image> lacks disk caching and placeholders; prefer <Image> from expo-image.".to_string(),
-                        line_starts,
-                        sp.span,
-                    );
-                }
-                if src == "react-native" && imported == "Animated" {
-                    push_semantic_site(
-                        sites,
-                        RuleId::RnPreferReanimated,
-                        None,
-                        "rnPreferReanimated",
-                        "Animated",
-                        "Prefer `react-native-reanimated` over React Native's legacy `Animated` API so animations run on the UI thread.".to_string(),
-                        line_starts,
-                        sp.span,
-                    );
-                }
-            }
+    if matches!(src, "@react-navigation/stack" | "@react-navigation/drawer")
+        && let Some(specs) = &imp.specifiers
+        && specs.iter().any(is_non_native_navigator_specifier)
+    {
+        push_semantic_site(
+            sites,
+            RuleId::RnNoNonNativeNavigator,
+            None,
+            "rnNoNonNativeNavigator",
+            src,
+            format!(
+                "Users get JS-driven transitions and gestures from {src}, instead of platform-native navigation behavior."
+            ),
+            line_starts,
+            imp.span,
+        );
+    }
+}
+
+fn is_non_native_navigator_specifier(spec: &ImportDeclarationSpecifier<'_>) -> bool {
+    match spec {
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+        | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => true,
+        ImportDeclarationSpecifier::ImportSpecifier(sp) => {
+            !sp.import_kind.is_type()
+                && sp.imported.name().as_str().starts_with("create")
+                && sp.imported.name().as_str().ends_with("Navigator")
+        }
+    }
+}
+
+fn check_rn_core_import_specifiers(
+    semantic: &Semantic<'_>,
+    src: &str,
+    specs: &[ImportDeclarationSpecifier<'_>],
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for spec in specs {
+        let ImportDeclarationSpecifier::ImportSpecifier(sp) = spec else {
+            continue;
+        };
+        if sp.import_kind.is_type() {
+            continue;
+        };
+        let imported = sp.imported.name().as_str();
+        let local = sp.local.name.as_str();
+
+        if TOUCHABLE_COMPONENTS.contains(&imported) {
+            push_semantic_site(
+                sites,
+                RuleId::RnPreferPressable,
+                None,
+                "rnPreferPressable",
+                imported,
+                format!(
+                    "Your users miss <Pressable>'s flexible press feedback when you use {imported}, which is old & frozen."
+                ),
+                line_starts,
+                sp.span,
+            );
+        }
+        if src != "react-native" {
+            continue;
+        }
+        if DEPRECATED_RN_CORE_MODULES.contains(&imported) {
+            push_semantic_site(
+                sites,
+                RuleId::RnNoDeprecatedModules,
+                None,
+                "rnNoDeprecatedModules",
+                imported,
+                format!(
+                    "Your users hit a crash from \"{imported}\", which was removed from react-native."
+                ),
+                line_starts,
+                sp.span,
+            );
+        }
+        if imported == "PanResponder" {
+            push_semantic_site(
+                sites,
+                RuleId::RnNoPanresponder,
+                None,
+                "rnNoPanresponder",
+                "PanResponder",
+                "PanResponder runs gesture handling on the JS thread, which stutters under load. Use react-native-gesture-handler (`Gesture.Pan()`) so gestures run on the native UI thread.".to_string(),
+                line_starts,
+                sp.span,
+            );
+        }
+        if imported == "Image" && should_flag_rn_prefer_expo_image(semantic, local, source) {
+            push_semantic_site(
+                sites,
+                RuleId::RnPreferExpoImage,
+                None,
+                "rnPreferExpoImage",
+                "Image",
+                "React Native's <Image> lacks disk caching and placeholders; prefer <Image> from expo-image.".to_string(),
+                line_starts,
+                sp.span,
+            );
+        }
+        if imported == "Animated" {
+            push_semantic_site(
+                sites,
+                RuleId::RnPreferReanimated,
+                None,
+                "rnPreferReanimated",
+                "Animated",
+                "Prefer `react-native-reanimated` over React Native's legacy `Animated` API so animations run on the UI thread.".to_string(),
+                line_starts,
+                sp.span,
+            );
         }
     }
 }

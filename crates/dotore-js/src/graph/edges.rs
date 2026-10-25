@@ -57,6 +57,39 @@ const BUILTIN_MODULES: &[&str] = &[
     "zlib",
 ];
 
+struct EdgeBuilderContext<'a> {
+    targets: &'a [IndexedTargetFile],
+    platform_siblings: &'a HashMap<usize, Vec<usize>>,
+    ts_mappings: &'a [CompiledPathMapping],
+    pkg_manifests: &'a [PackageManifestInfo],
+}
+
+impl EdgeBuilderContext<'_> {
+    fn resolve_or_record_external(
+        &self,
+        importer_path: & std::path::Path,
+        specifier: &str,
+        consumed_packages: &mut HashSet<String>,
+    ) -> Vec<usize> {
+        let resolved = resolve_specifier_to_target_indices(
+            importer_path,
+            specifier,
+            self.targets,
+            self.ts_mappings,
+            self.pkg_manifests,
+        );
+        if resolved.is_empty() {
+            if let Some(pkg) = extract_external_package_name(specifier) {
+                consumed_packages.insert(pkg);
+            }
+            Vec::new()
+        } else {
+            record_package_if_workspace_specifier(specifier, self.pkg_manifests, consumed_packages);
+            expand_with_platform_siblings(&resolved, self.platform_siblings)
+        }
+    }
+}
+
 pub(super) fn build_module_edges(
     files: &[FileIr],
     targets: &[IndexedTargetFile],
@@ -65,182 +98,26 @@ pub(super) fn build_module_edges(
     pkg_manifests: &[PackageManifestInfo],
     expo_plugin_specs: &[(PathBuf, String)],
 ) -> (Vec<ModuleEdge>, HashSet<String>) {
+    let ctx = EdgeBuilderContext {
+        targets,
+        platform_siblings,
+        ts_mappings,
+        pkg_manifests,
+    };
     let mut edges = Vec::new();
     let mut consumed_packages = HashSet::new();
 
     for (source_idx, file) in files.iter().enumerate() {
-        for imp in &file.module.imports {
-            let resolved = resolve_specifier_to_target_indices(
-                &file.path,
-                &imp.source,
-                targets,
-                ts_mappings,
-                pkg_manifests,
-            );
-            if resolved.is_empty() {
-                if let Some(pkg) = extract_external_package_name(&imp.source) {
-                    consumed_packages.insert(pkg);
-                }
-            } else {
-                record_package_if_workspace_specifier(
-                    &imp.source,
-                    pkg_manifests,
-                    &mut consumed_packages,
-                );
-                let symbols: Vec<EdgeSymbol> = imp
-                    .bindings
-                    .iter()
-                    .map(|b| EdgeSymbol {
-                        imported_name: b.imported_name.clone(),
-                        local_name: b.local_name.clone(),
-                        is_default: b.is_default,
-                        is_namespace: b.is_namespace,
-                        is_type_only: b.is_type_only,
-                    })
-                    .collect();
-                let is_side_effect = symbols.is_empty() && !imp.is_type_only;
-                for target_idx in expand_with_platform_siblings(&resolved, platform_siblings) {
-                    edges.push(ModuleEdge {
-                        source: source_idx,
-                        target: target_idx,
-                        is_dynamic: false,
-                        is_type_only: imp.is_type_only,
-                        is_re_export: false,
-                        is_side_effect,
-                        imported_symbols: symbols.clone(),
-                        re_export_mappings: Vec::new(),
-                    });
-                }
-            }
-        }
-
-        let mut re_exports_by_source: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
-        for exp in &file.module.exports {
-            let Some(from_src) = &exp.from_source else {
-                continue;
-            };
-            let orig = exp
-                .local_name
-                .as_deref()
-                .unwrap_or(exp.name.as_str())
-                .to_string();
-            re_exports_by_source
-                .entry(from_src.clone())
-                .or_default()
-                .push((orig, exp.name.clone(), exp.is_type_only));
-        }
-        for (from_src, mappings) in re_exports_by_source {
-            let resolved = resolve_specifier_to_target_indices(
-                &file.path,
-                &from_src,
-                targets,
-                ts_mappings,
-                pkg_manifests,
-            );
-            if resolved.is_empty() {
-                if let Some(pkg) = extract_external_package_name(&from_src) {
-                    consumed_packages.insert(pkg);
-                }
-            } else {
-                record_package_if_workspace_specifier(
-                    &from_src,
-                    pkg_manifests,
-                    &mut consumed_packages,
-                );
-                let all_type_only = mappings.iter().all(|(_, _, is_type)| *is_type);
-                for target_idx in expand_with_platform_siblings(&resolved, platform_siblings) {
-                    edges.push(ModuleEdge {
-                        source: source_idx,
-                        target: target_idx,
-                        is_dynamic: false,
-                        is_type_only: all_type_only,
-                        is_re_export: true,
-                        is_side_effect: false,
-                        imported_symbols: Vec::new(),
-                        re_export_mappings: mappings.clone(),
-                    });
-                }
-            }
-        }
-
-        for spec in file
-            .module
-            .dynamic_imports
-            .iter()
-            .chain(file.module.require_sources.iter())
-        {
-            let resolved = resolve_specifier_to_target_indices(
-                &file.path,
-                spec,
-                targets,
-                ts_mappings,
-                pkg_manifests,
-            );
-            if resolved.is_empty() {
-                if let Some(pkg) = extract_external_package_name(spec) {
-                    consumed_packages.insert(pkg);
-                }
-            } else {
-                record_package_if_workspace_specifier(spec, pkg_manifests, &mut consumed_packages);
-                for target_idx in expand_with_platform_siblings(&resolved, platform_siblings) {
-                    edges.push(ModuleEdge {
-                        source: source_idx,
-                        target: target_idx,
-                        is_dynamic: true,
-                        is_type_only: false,
-                        is_re_export: false,
-                        is_side_effect: false,
-                        imported_symbols: Vec::new(),
-                        re_export_mappings: Vec::new(),
-                    });
-                }
-            }
-        }
-
-        for (spec, qualifier) in &file.module.type_import_sources {
-            let resolved = resolve_specifier_to_target_indices(
-                &file.path,
-                spec,
-                targets,
-                ts_mappings,
-                pkg_manifests,
-            );
-            if resolved.is_empty() {
-                if let Some(pkg) = extract_external_package_name(spec) {
-                    consumed_packages.insert(pkg);
-                }
-            } else {
-                record_package_if_workspace_specifier(spec, pkg_manifests, &mut consumed_packages);
-                let symbols = match qualifier {
-                    Some(name) => vec![EdgeSymbol {
-                        imported_name: name.clone(),
-                        local_name: name.clone(),
-                        is_default: false,
-                        is_namespace: false,
-                        is_type_only: true,
-                    }],
-                    None => vec![EdgeSymbol {
-                        imported_name: "*".to_string(),
-                        local_name: "*".to_string(),
-                        is_default: false,
-                        is_namespace: true,
-                        is_type_only: true,
-                    }],
-                };
-                for target_idx in expand_with_platform_siblings(&resolved, platform_siblings) {
-                    edges.push(ModuleEdge {
-                        source: source_idx,
-                        target: target_idx,
-                        is_dynamic: false,
-                        is_type_only: true,
-                        is_re_export: false,
-                        is_side_effect: false,
-                        imported_symbols: symbols.clone(),
-                        re_export_mappings: Vec::new(),
-                    });
-                }
-            }
-        }
+        append_static_import_edges(source_idx, file, &ctx, &mut edges, &mut consumed_packages);
+        append_re_export_edges(source_idx, file, &ctx, &mut edges, &mut consumed_packages);
+        append_dynamic_and_require_edges(
+            source_idx,
+            file,
+            &ctx,
+            &mut edges,
+            &mut consumed_packages,
+        );
+        append_type_import_edges(source_idx, file, &ctx, &mut edges, &mut consumed_packages);
     }
 
     for (_dir, spec) in expo_plugin_specs {
@@ -250,6 +127,161 @@ pub(super) fn build_module_edges(
     }
 
     (edges, consumed_packages)
+}
+
+fn append_static_import_edges(
+    source_idx: usize,
+    file: &FileIr,
+    ctx: &EdgeBuilderContext<'_>,
+    edges: &mut Vec<ModuleEdge>,
+    consumed_packages: &mut HashSet<String>,
+) {
+    for imp in &file.module.imports {
+        let target_indices =
+            ctx.resolve_or_record_external(&file.path, &imp.source, consumed_packages);
+        if target_indices.is_empty() {
+            continue;
+        }
+        let symbols: Vec<EdgeSymbol> = imp
+            .bindings
+            .iter()
+            .map(|b| EdgeSymbol {
+                imported_name: b.imported_name.clone(),
+                local_name: b.local_name.clone(),
+                is_default: b.is_default,
+                is_namespace: b.is_namespace,
+                is_type_only: b.is_type_only,
+            })
+            .collect();
+        let is_side_effect = symbols.is_empty() && !imp.is_type_only;
+        for target_idx in target_indices {
+            edges.push(ModuleEdge {
+                source: source_idx,
+                target: target_idx,
+                is_dynamic: false,
+                is_type_only: imp.is_type_only,
+                is_re_export: false,
+                is_side_effect,
+                imported_symbols: symbols.clone(),
+                re_export_mappings: Vec::new(),
+            });
+        }
+    }
+}
+
+fn append_re_export_edges(
+    source_idx: usize,
+    file: &FileIr,
+    ctx: &EdgeBuilderContext<'_>,
+    edges: &mut Vec<ModuleEdge>,
+    consumed_packages: &mut HashSet<String>,
+) {
+    let mut re_exports_by_source: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    for exp in &file.module.exports {
+        let Some(from_src) = &exp.from_source else {
+            continue;
+        };
+        let orig = exp
+            .local_name
+            .as_deref()
+            .unwrap_or(exp.name.as_str())
+            .to_string();
+        re_exports_by_source
+            .entry(from_src.clone())
+            .or_default()
+            .push((orig, exp.name.clone(), exp.is_type_only));
+    }
+    for (from_src, mappings) in re_exports_by_source {
+        let target_indices =
+            ctx.resolve_or_record_external(&file.path, &from_src, consumed_packages);
+        if target_indices.is_empty() {
+            continue;
+        }
+        let all_type_only = mappings.iter().all(|(_, _, is_type)| *is_type);
+        for target_idx in target_indices {
+            edges.push(ModuleEdge {
+                source: source_idx,
+                target: target_idx,
+                is_dynamic: false,
+                is_type_only: all_type_only,
+                is_re_export: true,
+                is_side_effect: false,
+                imported_symbols: Vec::new(),
+                re_export_mappings: mappings.clone(),
+            });
+        }
+    }
+}
+
+fn append_dynamic_and_require_edges(
+    source_idx: usize,
+    file: &FileIr,
+    ctx: &EdgeBuilderContext<'_>,
+    edges: &mut Vec<ModuleEdge>,
+    consumed_packages: &mut HashSet<String>,
+) {
+    for spec in file
+        .module
+        .dynamic_imports
+        .iter()
+        .chain(file.module.require_sources.iter())
+    {
+        for target_idx in ctx.resolve_or_record_external(&file.path, spec, consumed_packages) {
+            edges.push(ModuleEdge {
+                source: source_idx,
+                target: target_idx,
+                is_dynamic: true,
+                is_type_only: false,
+                is_re_export: false,
+                is_side_effect: false,
+                imported_symbols: Vec::new(),
+                re_export_mappings: Vec::new(),
+            });
+        }
+    }
+}
+
+fn append_type_import_edges(
+    source_idx: usize,
+    file: &FileIr,
+    ctx: &EdgeBuilderContext<'_>,
+    edges: &mut Vec<ModuleEdge>,
+    consumed_packages: &mut HashSet<String>,
+) {
+    for (spec, qualifier) in &file.module.type_import_sources {
+        let target_indices = ctx.resolve_or_record_external(&file.path, spec, consumed_packages);
+        if target_indices.is_empty() {
+            continue;
+        }
+        let symbols = match qualifier {
+            Some(name) => vec![EdgeSymbol {
+                imported_name: name.clone(),
+                local_name: name.clone(),
+                is_default: false,
+                is_namespace: false,
+                is_type_only: true,
+            }],
+            None => vec![EdgeSymbol {
+                imported_name: "*".to_string(),
+                local_name: "*".to_string(),
+                is_default: false,
+                is_namespace: true,
+                is_type_only: true,
+            }],
+        };
+        for target_idx in target_indices {
+            edges.push(ModuleEdge {
+                source: source_idx,
+                target: target_idx,
+                is_dynamic: false,
+                is_type_only: true,
+                is_re_export: false,
+                is_side_effect: false,
+                imported_symbols: symbols.clone(),
+                re_export_mappings: Vec::new(),
+            });
+        }
+    }
 }
 
 fn expand_with_platform_siblings(

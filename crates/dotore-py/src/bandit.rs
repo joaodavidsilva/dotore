@@ -98,40 +98,16 @@ impl<'a> BanditRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses relevant Python statement variants for Bandit security rules"
+        reason = "Traverses relevant Python statement variants for Bandit security rules (#50)"
     )]
     fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Import(import_stmt) => {
-                for alias in &import_stmt.names {
-                    let orig = alias.name.to_string();
-                    let bound = alias
-                        .asname
-                        .as_ref()
-                        .map_or_else(|| orig.clone(), ToString::to_string);
-                    self.import_aliases.insert(bound, orig);
-                }
-            }
-            Stmt::ImportFrom(import_from) => {
-                let Some(mod_name) = &import_from.module else {
-                    return;
-                };
-                for alias in &import_from.names {
-                    let orig = alias.name.as_str();
-                    let bound = alias
-                        .asname
-                        .as_ref()
-                        .map_or_else(|| orig.to_string(), ToString::to_string);
-                    let qualified = format!("{mod_name}.{orig}");
-                    self.import_aliases.insert(bound, qualified);
-                }
-            }
+            Stmt::Import(import_stmt) => self.visit_import(import_stmt),
+            Stmt::ImportFrom(import_from) => self.visit_import_from(import_from),
             Stmt::ClassDef(class_def) => self.visit_class_def(class_def),
             Stmt::FunctionDef(func_def) => self.visit_function_def(func_def),
             Stmt::Assign(assign) => self.visit_assign(assign),
             Stmt::AnnAssign(ann_assign) => self.visit_ann_assign(ann_assign),
-            Stmt::AugAssign(aug) => self.visit_expr(&aug.value),
-            Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
             Stmt::Return(ret) => {
                 if let Some(val) = &ret.value {
                     let prev = self.in_sensitive_value_context;
@@ -140,21 +116,6 @@ impl<'a> BanditRuleVisitor<'a> {
                     }
                     self.visit_expr(val);
                     self.in_sensitive_value_context = prev;
-                }
-            }
-            Stmt::Raise(raise_stmt) => raise_stmt.exc.iter().for_each(|e| self.visit_expr(e)),
-            Stmt::Assert(assert_stmt) => {
-                self.visit_expr(&assert_stmt.test);
-                assert_stmt.msg.iter().for_each(|m| self.visit_expr(m));
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
-                self.visit_suite(&if_stmt.body);
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
-                    }
-                    self.visit_suite(&clause.body);
                 }
             }
             Stmt::For(for_stmt) => {
@@ -180,32 +141,46 @@ impl<'a> BanditRuleVisitor<'a> {
                 }
                 self.visit_suite(&with_stmt.body);
             }
-            Stmt::Try(try_stmt) => {
-                self.visit_suite(&try_stmt.body);
-                for handler in &try_stmt.handlers {
-                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    self.visit_suite(&h.body);
-                }
-                self.visit_suite(&try_stmt.orelse);
-                self.visit_suite(&try_stmt.finalbody);
+            _ => {
+                crate::matchers::walk_stmt_exprs(stmt, |e| self.visit_expr(e));
+                crate::matchers::walk_stmt_sub_stmts(stmt, |s| self.visit_stmt(s));
             }
-            Stmt::Match(match_stmt) => {
-                self.visit_expr(&match_stmt.subject);
-                for case in &match_stmt.cases {
-                    if let Some(guard) = &case.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_suite(&case.body);
-                }
-            }
-            _ => {}
+        }
+    }
+
+    fn visit_import(&mut self, import_stmt: &ruff_python_ast::StmtImport) {
+        for alias in &import_stmt.names {
+            let orig = alias.name.to_string();
+            let bound = alias
+                .asname
+                .as_ref()
+                .map_or_else(|| orig.clone(), ToString::to_string);
+            self.import_aliases.insert(bound, orig);
+        }
+    }
+
+    fn visit_import_from(&mut self, import_from: &ruff_python_ast::StmtImportFrom) {
+        let Some(mod_name) = &import_from.module else {
+            return;
+        };
+        for alias in &import_from.names {
+            let orig = alias.name.as_str();
+            let bound = alias
+                .asname
+                .as_ref()
+                .map_or_else(|| orig.to_string(), ToString::to_string);
+            self.import_aliases
+                .insert(bound, format!("{mod_name}.{orig}"));
         }
     }
 
     fn visit_class_def(&mut self, class_def: &StmtClassDef) {
+        let prev_sensitive = self.current_fn_is_sensitive;
+        self.current_fn_is_sensitive = false;
         self.scope.enter_class(class_def.name.as_str());
         self.visit_suite(&class_def.body);
         self.scope.exit_class();
+        self.current_fn_is_sensitive = prev_sensitive;
     }
 
     fn visit_function_def(&mut self, func_def: &StmtFunctionDef) {
@@ -297,7 +272,7 @@ impl<'a> BanditRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses Python expression variants for Bandit security rules"
+        reason = "Traverses Python expression variants for Bandit security rules (#50)"
     )]
     fn visit_expr(&mut self, expr: &Expr) {
         match expr {
@@ -308,7 +283,6 @@ impl<'a> BanditRuleVisitor<'a> {
                 self.check_disabled_tls_verify(call, &raw_callee, &resolved_callee);
                 self.check_weak_crypto_or_random_call(call, &raw_callee, &resolved_callee);
                 self.check_xxe_or_unsafe_archive(call, &raw_callee, &resolved_callee);
-
                 self.visit_expr(&call.func);
                 for arg in &call.arguments.args {
                     self.visit_expr(arg);
@@ -323,50 +297,27 @@ impl<'a> BanditRuleVisitor<'a> {
                     self.visit_expr(op_expr);
                 }
             }
-            Expr::StringLiteral(str_lit) => {
-                self.check_hardcoded_tmp_literal(str_lit);
-            }
+            Expr::StringLiteral(str_lit) => self.check_hardcoded_tmp_literal(str_lit),
             Expr::FString(fstr) => {
                 self.check_hardcoded_tmp_fstring(fstr);
-            }
-            Expr::Attribute(attr) => self.visit_expr(&attr.value),
-            Expr::Await(aw) => self.visit_expr(&aw.value),
-            Expr::Yield(y) => y.value.iter().for_each(|v| self.visit_expr(v)),
-            Expr::YieldFrom(yf) => self.visit_expr(&yf.value),
-            Expr::BinOp(bin) => {
-                self.visit_expr(&bin.left);
-                self.visit_expr(&bin.right);
-            }
-            Expr::UnaryOp(un) => self.visit_expr(&un.operand),
-            Expr::BoolOp(b) => b.values.iter().for_each(|v| self.visit_expr(v)),
-            Expr::Subscript(sub) => {
-                self.visit_expr(&sub.value);
-                self.visit_expr(&sub.slice);
-            }
-            Expr::If(if_expr) => {
-                self.visit_expr(&if_expr.test);
-                self.visit_expr(&if_expr.body);
-                self.visit_expr(&if_expr.orelse);
-            }
-            Expr::List(l) => l.elts.iter().for_each(|e| self.visit_expr(e)),
-            Expr::Tuple(t) => t.elts.iter().for_each(|e| self.visit_expr(e)),
-            Expr::Set(s) => s.elts.iter().for_each(|e| self.visit_expr(e)),
-            Expr::Dict(d) => {
-                for item in &d.items {
-                    if let Some(k) = &item.key {
-                        self.visit_expr(k);
+                for part in fstr.value.elements() {
+                    if let Some(interp) = part.as_interpolation() {
+                        self.visit_expr(&interp.expression);
                     }
-                    self.visit_expr(&item.value);
                 }
             }
             Expr::ListComp(comp) => self.visit_comprehension(&comp.elt, &comp.generators),
             Expr::SetComp(comp) => self.visit_comprehension(&comp.elt, &comp.generators),
             Expr::Generator(comp) => self.visit_comprehension(&comp.elt, &comp.generators),
-            Expr::Named(n) => self.visit_expr(&n.value),
-            _ => {}
+            Expr::DictComp(comp) => {
+                if let Some(k) = &comp.key {
+                    self.visit_expr(k);
+                }
+                self.visit_comprehension(&comp.value, &comp.generators);
+            }
+            _ => crate::matchers::walk_expr_children(expr, |child| self.visit_expr(child)),
         }
     }
-
 
     fn visit_comprehension(&mut self, elt: &Expr, generators: &[ruff_python_ast::Comprehension]) {
         self.visit_expr(elt);
@@ -426,6 +377,9 @@ impl<'a> BanditRuleVisitor<'a> {
             self.zip_vars.insert(var_name.to_string());
         }
     }
+}
+
+impl BanditRuleVisitor<'_> {
 
     /// 1. `py-security-http-request-requires-timeout` (`bandit/B113`)
     fn check_http_timeout(&mut self, call: &ExprCall, raw_callee: &str, resolved_callee: &str) {
@@ -464,19 +418,46 @@ impl<'a> BanditRuleVisitor<'a> {
             let insert_pos = call_span.end.saturating_sub(1);
             let has_args =
                 !call.arguments.args.is_empty() || !call.arguments.keywords.is_empty();
-            let replacement = if has_args {
-                ", timeout=10.0"
+            if has_args {
+                let args_start = call.arguments.range().start().to_u32().saturating_add(1);
+                let inside_args = crate::matchers::slice_source(
+                    self.source,
+                    ByteSpan {
+                        start: args_start,
+                        end: insert_pos,
+                    },
+                );
+                let trimmed = inside_args.trim_end();
+                if let Some(without_comma) = trimmed.strip_suffix(',') {
+                    let comma_pos = args_start + u32::try_from(without_comma.len()).unwrap_or(0);
+                    AutofixPatch::replace(
+                        format!("Add `timeout=10.0` to `{raw_callee}`"),
+                        ByteSpan {
+                            start: comma_pos,
+                            end: insert_pos,
+                        },
+                        ", timeout=10.0",
+                    )
+                } else {
+                    AutofixPatch::replace(
+                        format!("Add `timeout=10.0` to `{raw_callee}`"),
+                        ByteSpan {
+                            start: insert_pos,
+                            end: insert_pos,
+                        },
+                        ", timeout=10.0",
+                    )
+                }
             } else {
-                "timeout=10.0"
-            };
-            AutofixPatch::replace(
-                format!("Add `timeout=10.0` to `{raw_callee}`"),
-                ByteSpan {
-                    start: insert_pos,
-                    end: insert_pos,
-                },
-                replacement,
-            )
+                AutofixPatch::replace(
+                    format!("Add `timeout=10.0` to `{raw_callee}`"),
+                    ByteSpan {
+                        start: insert_pos,
+                        end: insert_pos,
+                    },
+                    "timeout=10.0",
+                )
+            }
         };
 
         self.out.push(build_py_diagnostic_with_patch(
@@ -694,9 +675,15 @@ impl<'a> BanditRuleVisitor<'a> {
 
         if raw_callee.ends_with(".extractall") {
             let receiver = raw_callee.rsplit_once('.').map_or("", |(r, _)| r);
+            let has_filter_kw = call
+                .arguments
+                .keywords
+                .iter()
+                .any(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "filter"));
             let is_tar = self.tar_vars.contains(receiver)
                 || receiver.contains("tar")
-                || resolved_callee.starts_with("tarfile.");
+                || resolved_callee.starts_with("tarfile.")
+                || (has_filter_kw && !self.zip_vars.contains(receiver));
             if is_tar {
                 let has_safe_filter = call.arguments.keywords.iter().any(|kw| {
                     kw.arg.as_ref().is_some_and(|a| a.as_str() == "filter")

@@ -11,8 +11,8 @@ use std::collections::HashSet;
 use oxc_ast::{
     ast::{
         Argument, ArrayExpression, ArrayExpressionElement, CallExpression, Class, ClassElement,
-        Decorator, Expression, FormalParameter, MethodDefinitionKind, ObjectProperty,
-        ObjectPropertyKind, PropertyDefinition,
+        Decorator, Expression, FormalParameter, MethodDefinitionKind, ObjectExpression,
+        ObjectProperty, ObjectPropertyKind, PropertyDefinition,
     },
 };
 use oxc_semantic::{NodeId, Semantic};
@@ -158,45 +158,8 @@ fn check_single_class_decorator(
         _ => return,
     };
 
-    // 19. `angular-use-injectable-provided-in`
     if dec_name == "Injectable" {
-        let has_provided_in = obj_opt.is_some_and(|obj| {
-            obj.properties.iter().any(|p| {
-                if let ObjectPropertyKind::ObjectProperty(prop) = p
-                    && prop_key_str(&prop.key) == Some("providedIn")
-                {
-                    !matches!(
-                        prop.value.without_parentheses(),
-                        Expression::NullLiteral(_)
-                    )
-                } else {
-                    false
-                }
-            })
-        });
-        if !has_provided_in {
-            let patch = AutofixPatch::replace(
-                "Add `providedIn: 'root'` to `@Injectable`",
-                ByteSpan {
-                    start: dec.span.start,
-                    end: dec.span.end,
-                },
-                "@Injectable({ providedIn: 'root' })",
-            );
-            push_angular_site(
-                sites,
-                RuleId::AngularUseInjectableProvidedIn,
-                class_name.map(ToOwned::to_owned),
-                "angularUseInjectableProvidedIn",
-                target.clone(),
-                format!(
-                    "`@Injectable` `{target}` should specify `providedIn: 'root'` for tree-shakable dependency injection."
-                ),
-                dec.span,
-                line_starts,
-                Some(patch),
-            );
-        }
+        check_injectable_provided_in(dec, obj_opt, class_name, &target, line_starts, sites);
     }
 
     let Some(obj) = obj_opt else {
@@ -210,129 +173,192 @@ fn check_single_class_decorator(
         let Some(key) = prop_key_str(&prop.key) else {
             continue;
         };
-
-        // 13. `angular-no-pipe-impure`
-        if dec_name == "Pipe"
-            && key == "pure"
-            && let Expression::BooleanLiteral(b) = prop.value.without_parentheses()
-            && !b.value
-        {
-            push_angular_site(
-                sites,
-                RuleId::AngularNoPipeImpure,
-                class_name.map(ToOwned::to_owned),
-                "angularNoPipeImpure",
-                target.clone(),
-                format!(
-                    "Impure `@Pipe` `{target}` (`pure: false`) executes on every change detection cycle; use a pure pipe or `computed()` signal."
-                ),
-                prop.span,
-                line_starts,
-                None,
-            );
-        }
-
-        // 17. `angular-prefer-standalone`
-        if matches!(dec_name, "Component" | "Directive" | "Pipe")
-            && key == "standalone"
-            && let Expression::BooleanLiteral(b) = prop.value.without_parentheses()
-            && !b.value
-        {
-            let val_span = prop.value.span();
-            let patch = AutofixPatch::replace(
-                "Set `standalone: true`",
-                ByteSpan {
-                    start: val_span.start,
-                    end: val_span.end,
-                },
-                "true",
-            );
-            push_angular_site(
-                sites,
-                RuleId::AngularPreferStandalone,
-                class_name.map(ToOwned::to_owned),
-                "angularPreferStandalone",
-                target.clone(),
-                format!(
-                    "`@{dec_name}` `{target}` sets `standalone: false`; prefer standalone Angular declarations."
-                ),
-                prop.span,
-                line_starts,
-                Some(patch),
-            );
-        }
-
-        // 21. `angular-no-duplicates-in-metadata-arrays`
-        if matches!(dec_name, "Component" | "Directive" | "NgModule")
-            && METADATA_ARRAY_KEYS.contains(&key)
-            && let Expression::ArrayExpression(arr) = prop.value.without_parentheses()
-        {
-            check_duplicate_metadata_array_elements(
-                arr,
-                key,
-                class_name,
-                source,
-                line_starts,
-                sites,
-            );
-        }
-
-        // 23, 24, 25: `inputs`, `outputs`, `queries` metadata properties
-        if matches!(dec_name, "Component" | "Directive") {
-            match key {
-                "inputs" => {
-                    push_angular_site(
-                        sites,
-                        RuleId::AngularNoInputsMetadataProperty,
-                        class_name.map(ToOwned::to_owned),
-                        "angularNoInputsMetadataProperty",
-                        "inputs".to_string(),
-                        format!(
-                            "Avoid `inputs: [...]` metadata in `@{dec_name}`; declare inputs with `input()` or `@Input()` on class fields."
-                        ),
-                        prop.span,
-                        line_starts,
-                        None,
-                    );
-                }
-                "outputs" => {
-                    push_angular_site(
-                        sites,
-                        RuleId::AngularNoOutputsMetadataProperty,
-                        class_name.map(ToOwned::to_owned),
-                        "angularNoOutputsMetadataProperty",
-                        "outputs".to_string(),
-                        format!(
-                            "Avoid `outputs: [...]` metadata in `@{dec_name}`; declare outputs with `output()` or `@Output()` on class fields."
-                        ),
-                        prop.span,
-                        line_starts,
-                        None,
-                    );
-                }
-                "queries" => {
-                    push_angular_site(
-                        sites,
-                        RuleId::AngularNoQueriesMetadataProperty,
-                        class_name.map(ToOwned::to_owned),
-                        "angularNoQueriesMetadataProperty",
-                        "queries".to_string(),
-                        format!(
-                            "Avoid `queries: {{ ... }}` metadata in `@{dec_name}`; use `viewChild()` / `contentChild()` or property decorators."
-                        ),
-                        prop.span,
-                        line_starts,
-                        None,
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        if dec_name == "Component" {
-            check_component_specific_metadata_prop(prop, key, class_name, source, line_starts, sites);
-        }
+        check_class_decorator_metadata_prop(
+            dec_name,
+            prop,
+            key,
+            class_name,
+            &target,
+            source,
+            line_starts,
+            sites,
+        );
     }
+}
+
+fn check_injectable_provided_in(
+    dec: &Decorator<'_>,
+    obj_opt: Option<&ObjectExpression<'_>>,
+    class_name: Option<&str>,
+    target: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let has_provided_in = obj_opt.is_some_and(|obj| {
+        obj.properties.iter().any(|p| {
+            if let ObjectPropertyKind::ObjectProperty(prop) = p
+                && prop_key_str(&prop.key) == Some("providedIn")
+            {
+                !matches!(
+                    prop.value.without_parentheses(),
+                    Expression::NullLiteral(_)
+                )
+            } else {
+                false
+            }
+        })
+    });
+    if !has_provided_in {
+        let patch = AutofixPatch::replace(
+            "Add `providedIn: 'root'` to `@Injectable`",
+            ByteSpan {
+                start: dec.span.start,
+                end: dec.span.end,
+            },
+            "@Injectable({ providedIn: 'root' })",
+        );
+        push_angular_site(
+            sites,
+            RuleId::AngularUseInjectableProvidedIn,
+            class_name.map(ToOwned::to_owned),
+            "angularUseInjectableProvidedIn",
+            target.to_string(),
+            format!(
+                "`@Injectable` `{target}` should specify `providedIn: 'root'` for tree-shakable dependency injection."
+            ),
+            dec.span,
+            line_starts,
+            Some(patch),
+        );
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Evaluates single decorator metadata property across Component, Directive, Pipe, and NgModule (#50)"
+)]
+fn check_class_decorator_metadata_prop(
+    dec_name: &str,
+    prop: &ObjectProperty<'_>,
+    key: &str,
+    class_name: Option<&str>,
+    target: &str,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if dec_name == "Pipe"
+        && key == "pure"
+        && matches!(
+            prop.value.without_parentheses(),
+            Expression::BooleanLiteral(b) if !b.value
+        )
+    {
+        push_angular_site(
+            sites,
+            RuleId::AngularNoPipeImpure,
+            class_name.map(ToOwned::to_owned),
+            "angularNoPipeImpure",
+            target.to_string(),
+            format!(
+                "Impure `@Pipe` `{target}` (`pure: false`) executes on every change detection cycle; use a pure pipe or `computed()` signal."
+            ),
+            prop.span,
+            line_starts,
+            None,
+        );
+    }
+
+    if matches!(dec_name, "Component" | "Directive" | "Pipe")
+        && key == "standalone"
+        && matches!(
+            prop.value.without_parentheses(),
+            Expression::BooleanLiteral(b) if !b.value
+        )
+    {
+        let val_span = prop.value.span();
+        let patch = AutofixPatch::replace(
+            "Set `standalone: true`",
+            ByteSpan {
+                start: val_span.start,
+                end: val_span.end,
+            },
+            "true",
+        );
+        push_angular_site(
+            sites,
+            RuleId::AngularPreferStandalone,
+            class_name.map(ToOwned::to_owned),
+            "angularPreferStandalone",
+            target.to_string(),
+            format!(
+                "`@{dec_name}` `{target}` sets `standalone: false`; prefer standalone Angular declarations."
+            ),
+            prop.span,
+            line_starts,
+            Some(patch),
+        );
+    }
+
+    if matches!(dec_name, "Component" | "Directive" | "NgModule")
+        && METADATA_ARRAY_KEYS.contains(&key)
+        && let Expression::ArrayExpression(arr) = prop.value.without_parentheses()
+    {
+        check_duplicate_metadata_array_elements(arr, key, class_name, source, line_starts, sites);
+    }
+
+    if matches!(dec_name, "Component" | "Directive") {
+        check_forbidden_io_or_query_metadata_prop(dec_name, prop, key, class_name, line_starts, sites);
+    }
+
+    if dec_name == "Component" {
+        check_component_specific_metadata_prop(prop, key, class_name, source, line_starts, sites);
+    }
+}
+
+fn check_forbidden_io_or_query_metadata_prop(
+    dec_name: &str,
+    prop: &ObjectProperty<'_>,
+    key: &str,
+    class_name: Option<&str>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let (rule, msg_id, msg) = match key {
+        "inputs" => (
+            RuleId::AngularNoInputsMetadataProperty,
+            "angularNoInputsMetadataProperty",
+            format!(
+                "Avoid `inputs: [...]` metadata in `@{dec_name}`; declare inputs with `input()` or `@Input()` on class fields."
+            ),
+        ),
+        "outputs" => (
+            RuleId::AngularNoOutputsMetadataProperty,
+            "angularNoOutputsMetadataProperty",
+            format!(
+                "Avoid `outputs: [...]` metadata in `@{dec_name}`; declare outputs with `output()` or `@Output()` on class fields."
+            ),
+        ),
+        "queries" => (
+            RuleId::AngularNoQueriesMetadataProperty,
+            "angularNoQueriesMetadataProperty",
+            format!(
+                "Avoid `queries: {{ ... }}` metadata in `@{dec_name}`; use `viewChild()` / `contentChild()` or property decorators."
+            ),
+        ),
+        _ => return,
+    };
+    push_angular_site(
+        sites,
+        rule,
+        class_name.map(ToOwned::to_owned),
+        msg_id,
+        key.to_string(),
+        msg,
+        prop.span,
+        line_starts,
+        None,
+    );
 }
 
 fn check_component_specific_metadata_prop(
@@ -344,39 +370,14 @@ fn check_component_specific_metadata_prop(
     sites: &mut Vec<SemanticRuleSite>,
 ) {
     match key {
-        // 16. `angular-relative-url-prefix`
-        "templateUrl" | "styleUrl" => {
-            if let Expression::StringLiteral(lit) = prop.value.without_parentheses()
-                && let Some(url) = lit.value.as_str()
-            {
-                check_relative_url_literal(url, lit.span, key, class_name, line_starts, sites);
-            }
+        "templateUrl" | "styleUrl" | "styleUrls" => {
+            check_component_url_metadata_prop(prop, key, class_name, line_starts, sites);
         }
-        "styleUrls" => {
-            if let Expression::ArrayExpression(arr) = prop.value.without_parentheses() {
-                for elem in &arr.elements {
-                    if let ArrayExpressionElement::StringLiteral(lit) = elem
-                        && let Some(url) = lit.value.as_str()
-                    {
-                        check_relative_url_literal(
-                            url,
-                            lit.span,
-                            "styleUrls",
-                            class_name,
-                            line_starts,
-                            sites,
-                        );
-                    }
-                }
-            }
-        }
-        // 28. `angular-use-component-view-encapsulation`
         "encapsulation" => {
-            let is_none = match prop.value.without_parentheses() {
-                Expression::StaticMemberExpression(mem) => mem.property.name == "None",
-                _ => false,
-            };
-            if is_none {
+            if matches!(
+                prop.value.without_parentheses(),
+                Expression::StaticMemberExpression(mem) if mem.property.name == "None"
+            ) {
                 let target = class_name.unwrap_or("Component").to_string();
                 push_angular_site(
                     sites,
@@ -391,39 +392,72 @@ fn check_component_specific_metadata_prop(
                 );
             }
         }
-        // 30. `angular-component-max-inline-declarations`
-        "template" => {
-            if let Some((tpl_text, _)) = extract_template_text_and_offset(&prop.value, source) {
-                let line_count = tpl_text.lines().count();
-                if line_count > 15 {
-                    push_angular_site(
-                        sites,
-                        RuleId::AngularComponentMaxInlineDeclarations,
-                        class_name.map(ToOwned::to_owned),
-                        "angularComponentMaxInlineDeclarations",
-                        "template".to_string(),
-                        format!(
-                            "Inline `template` has {line_count} lines (max 15); extract it to an external `.component.html` file."
-                        ),
-                        prop.key.span(),
-                        line_starts,
-                        None,
-                    );
-                }
+        "template" | "styles" => {
+            check_component_inline_declarations_prop(
+                prop,
+                key,
+                class_name,
+                source,
+                line_starts,
+                sites,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn check_component_url_metadata_prop(
+    prop: &ObjectProperty<'_>,
+    key: &str,
+    class_name: Option<&str>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if matches!(key, "templateUrl" | "styleUrl")
+        && let Expression::StringLiteral(lit) = prop.value.without_parentheses()
+        && let Some(url) = lit.value.as_str()
+    {
+        check_relative_url_literal(url, lit.span, key, class_name, line_starts, sites);
+    } else if key == "styleUrls"
+        && let Expression::ArrayExpression(arr) = prop.value.without_parentheses()
+    {
+        for elem in &arr.elements {
+            if let ArrayExpressionElement::StringLiteral(lit) = elem
+                && let Some(url) = lit.value.as_str()
+            {
+                check_relative_url_literal(
+                    url,
+                    lit.span,
+                    "styleUrls",
+                    class_name,
+                    line_starts,
+                    sites,
+                );
             }
         }
-        "styles" => {
-            extract_inline_styles_sites(&prop.value, class_name, source, line_starts, sites);
-            let style_lines = count_inline_styles_lines(&prop.value, source);
-            if style_lines > 15 {
+    }
+}
+
+fn check_component_inline_declarations_prop(
+    prop: &ObjectProperty<'_>,
+    key: &str,
+    class_name: Option<&str>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if key == "template" {
+        if let Some((tpl_text, _)) = extract_template_text_and_offset(&prop.value, source) {
+            let line_count = tpl_text.lines().count();
+            if line_count > 15 {
                 push_angular_site(
                     sites,
                     RuleId::AngularComponentMaxInlineDeclarations,
                     class_name.map(ToOwned::to_owned),
                     "angularComponentMaxInlineDeclarations",
-                    "styles".to_string(),
+                    "template".to_string(),
                     format!(
-                        "Inline `styles` has {style_lines} lines (max 15); extract styles to an external stylesheet."
+                        "Inline `template` has {line_count} lines (max 15); extract it to an external `.component.html` file."
                     ),
                     prop.key.span(),
                     line_starts,
@@ -431,7 +465,24 @@ fn check_component_specific_metadata_prop(
                 );
             }
         }
-        _ => {}
+    } else if key == "styles" {
+        extract_inline_styles_sites(&prop.value, class_name, source, line_starts, sites);
+        let style_lines = count_inline_styles_lines(&prop.value, source);
+        if style_lines > 15 {
+            push_angular_site(
+                sites,
+                RuleId::AngularComponentMaxInlineDeclarations,
+                class_name.map(ToOwned::to_owned),
+                "angularComponentMaxInlineDeclarations",
+                "styles".to_string(),
+                format!(
+                    "Inline `styles` has {style_lines} lines (max 15); extract styles to an external stylesheet."
+                ),
+                prop.key.span(),
+                line_starts,
+                None,
+            );
+        }
     }
 }
 

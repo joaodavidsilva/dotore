@@ -10,7 +10,7 @@ mod parsing_and_selectors;
 
 use oxc_ast::{
     AstKind,
-    ast::{Expression, IdentifierReference, LogicalOperator, UnaryOperator},
+    ast::{CallExpression, Expression, IdentifierReference, LogicalOperator, UnaryOperator},
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 use oxc_span::{GetSpan, Span};
@@ -87,250 +87,285 @@ pub(crate) fn extract_defensive_js_sites(
     for (node_id, node) in semantic.nodes().iter_enumerated() {
         let subj_name = find_enclosing_react_node(semantic, node_id)
             .and_then(|subj_id| get_subject_name(semantic, subj_id));
-
-        match node.kind() {
-            AstKind::BinaryExpression(bin) => {
-                check_no_arithmetic_on_optional_chained_operand(
-                    semantic,
-                    bin,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::LogicalExpression(log) => {
-                check_no_nullish_coalescing_arithmetic_precedence(
-                    log,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_predicate_in_logical(semantic, node_id, log, &subj_name, line_starts, sites);
-            }
-            AstKind::StaticMemberExpression(mem) => {
-                check_no_array_find_result_member_access_without_guard(
-                    semantic,
-                    node_id,
-                    mem.span,
-                    &mem.object,
-                    mem.optional,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_array_index_deref_without_bounds_or_empty_guard(
-                    semantic,
-                    node_id,
-                    mem.span,
-                    &mem.object,
-                    mem.optional,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_deprecated_keyboard_event_keycode_which(
-                    semantic,
-                    node_id,
-                    mem,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_unsafe_json_parse_member(
-                    semantic,
-                    node_id,
-                    mem.span,
-                    &mem.object,
-                    mem.optional,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::ComputedMemberExpression(comp) => {
-                check_no_array_find_result_member_access_without_guard(
-                    semantic,
-                    node_id,
-                    comp.span,
-                    &comp.object,
-                    comp.optional,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_array_index_deref_without_bounds_or_empty_guard(
-                    semantic,
-                    node_id,
-                    comp.span,
-                    &comp.object,
-                    comp.optional,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_unsafe_json_parse_member(
-                    semantic,
-                    node_id,
-                    comp.span,
-                    &comp.object,
-                    comp.optional,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::CallExpression(call) => {
-                check_no_object_keys_values_entries_on_maybe_undefined(
-                    semantic,
-                    node_id,
-                    call,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_non_literal_selector_query_without_try_catch(
-                    semantic,
-                    node_id,
-                    call,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_unguarded_numeric_input_parse(
-                    semantic,
-                    node_id,
-                    call,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_unguarded_throwing_parse_call(
-                    semantic,
-                    node_id,
-                    call,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_collapse_request_error_to_empty_state_call(
-                    semantic,
-                    call,
-                    subjects,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_loading_flag_reset_outside_finally(
-                    semantic,
-                    node_id,
-                    call,
-                    subjects,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::NewExpression(new_expr) => {
-                check_no_unescaped_dynamic_string_in_regexp(
-                    semantic,
-                    new_expr,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-                check_no_unguarded_throwing_new_url(
-                    semantic,
-                    node_id,
-                    new_expr,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::TSNonNullExpression(non_null) => {
-                check_no_non_null_assertion_on_maybe_undefined_result(
-                    semantic,
-                    non_null,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::TemplateLiteral(tpl) => {
-                check_no_object_or_array_coerced_to_string_in_template_literal(
-                    semantic,
-                    node_id,
-                    tpl,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::IfStatement(if_stmt) => {
-                check_predicate_in_condition(
-                    semantic,
-                    &if_stmt.test,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::ConditionalExpression(cond) => {
-                check_predicate_in_condition(semantic, &cond.test, &subj_name, line_starts, sites);
-            }
-            AstKind::WhileStatement(while_stmt) => {
-                check_predicate_in_condition(
-                    semantic,
-                    &while_stmt.test,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::UnaryExpression(un) if un.operator == UnaryOperator::LogicalNot => {
-                check_predicate_in_condition(
-                    semantic,
-                    &un.argument,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::FormalParameter(param) => {
-                check_no_whole_object_default_losing_per_key_defaults(
-                    semantic,
-                    node_id,
-                    param,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::JSXOpeningElement(opening) => {
-                check_jsx_event_handler_defensive_rules(
-                    semantic,
-                    opening,
-                    subjects,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            AstKind::TryStatement(try_stmt) => {
-                check_no_collapse_request_error_in_try_catch(
-                    semantic,
-                    try_stmt,
-                    subjects,
-                    &subj_name,
-                    line_starts,
-                    sites,
-                );
-            }
-            _ => {}
+        let kind = node.kind();
+        if visit_defensive_member_or_call_node(
+            semantic,
+            node_id,
+            kind,
+            subjects,
+            &subj_name,
+            line_starts,
+            sites,
+        ) {
+            continue;
         }
+        visit_defensive_expr_or_stmt_node(
+            semantic,
+            node_id,
+            kind,
+            subjects,
+            &subj_name,
+            line_starts,
+            sites,
+        );
     }
 
     check_no_passive_request_owner_ref(semantic, line_starts, sites);
+}
+
+fn visit_defensive_member_or_call_node(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    kind: AstKind<'_>,
+    subjects: &[SubjectIr],
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) -> bool {
+    match kind {
+        AstKind::StaticMemberExpression(mem) => {
+            check_member_deref_defensive_rules(
+                semantic,
+                node_id,
+                mem.span,
+                &mem.object,
+                mem.optional,
+                subj_name,
+                line_starts,
+                sites,
+            );
+            check_no_deprecated_keyboard_event_keycode_which(
+                semantic,
+                node_id,
+                mem,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::ComputedMemberExpression(comp) => {
+            check_member_deref_defensive_rules(
+                semantic,
+                node_id,
+                comp.span,
+                &comp.object,
+                comp.optional,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::CallExpression(call) => {
+            check_defensive_call_expression(
+                semantic,
+                node_id,
+                call,
+                subjects,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        _ => return false,
+    }
+    true
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Evaluates shared member-dereference defensive rules across static and computed member expressions (#50)"
+)]
+fn check_member_deref_defensive_rules(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    span: Span,
+    object: &Expression<'_>,
+    optional: bool,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    check_no_array_find_result_member_access_without_guard(
+        semantic,
+        node_id,
+        span,
+        object,
+        optional,
+        subj_name,
+        line_starts,
+        sites,
+    );
+    check_no_array_index_deref_without_bounds_or_empty_guard(
+        semantic,
+        node_id,
+        span,
+        object,
+        optional,
+        subj_name,
+        line_starts,
+        sites,
+    );
+    check_no_unsafe_json_parse_member(
+        semantic,
+        node_id,
+        span,
+        object,
+        optional,
+        subj_name,
+        line_starts,
+        sites,
+    );
+}
+
+fn check_defensive_call_expression(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    subjects: &[SubjectIr],
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    check_no_object_keys_values_entries_on_maybe_undefined(
+        semantic,
+        node_id,
+        call,
+        subj_name,
+        line_starts,
+        sites,
+    );
+    check_no_non_literal_selector_query_without_try_catch(
+        semantic,
+        node_id,
+        call,
+        subj_name,
+        line_starts,
+        sites,
+    );
+    check_no_unguarded_numeric_input_parse(semantic, node_id, call, subj_name, line_starts, sites);
+    check_no_unguarded_throwing_parse_call(semantic, node_id, call, subj_name, line_starts, sites);
+    check_no_collapse_request_error_to_empty_state_call(
+        semantic,
+        call,
+        subjects,
+        subj_name,
+        line_starts,
+        sites,
+    );
+    check_no_loading_flag_reset_outside_finally(
+        semantic,
+        node_id,
+        call,
+        subjects,
+        subj_name,
+        line_starts,
+        sites,
+    );
+}
+
+fn visit_defensive_expr_or_stmt_node(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    kind: AstKind<'_>,
+    subjects: &[SubjectIr],
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    match kind {
+        AstKind::BinaryExpression(bin) => {
+            check_no_arithmetic_on_optional_chained_operand(
+                semantic,
+                bin,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::LogicalExpression(log) => {
+            check_no_nullish_coalescing_arithmetic_precedence(log, subj_name, line_starts, sites);
+            check_predicate_in_logical(semantic, node_id, log, subj_name, line_starts, sites);
+        }
+        AstKind::NewExpression(new_expr) => {
+            check_no_unescaped_dynamic_string_in_regexp(
+                semantic,
+                new_expr,
+                subj_name,
+                line_starts,
+                sites,
+            );
+            check_no_unguarded_throwing_new_url(
+                semantic,
+                node_id,
+                new_expr,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::TSNonNullExpression(non_null) => {
+            check_no_non_null_assertion_on_maybe_undefined_result(
+                semantic,
+                non_null,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::TemplateLiteral(tpl) => {
+            check_no_object_or_array_coerced_to_string_in_template_literal(
+                semantic,
+                node_id,
+                tpl,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::IfStatement(if_stmt) => {
+            check_predicate_in_condition(semantic, &if_stmt.test, subj_name, line_starts, sites);
+        }
+        AstKind::ConditionalExpression(cond) => {
+            check_predicate_in_condition(semantic, &cond.test, subj_name, line_starts, sites);
+        }
+        AstKind::WhileStatement(while_stmt) => {
+            check_predicate_in_condition(semantic, &while_stmt.test, subj_name, line_starts, sites);
+        }
+        AstKind::UnaryExpression(un) if un.operator == UnaryOperator::LogicalNot => {
+            check_predicate_in_condition(semantic, &un.argument, subj_name, line_starts, sites);
+        }
+        AstKind::FormalParameter(param) => {
+            check_no_whole_object_default_losing_per_key_defaults(
+                semantic,
+                node_id,
+                param,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::JSXOpeningElement(opening) => {
+            check_jsx_event_handler_defensive_rules(
+                semantic,
+                opening,
+                subjects,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        AstKind::TryStatement(try_stmt) => {
+            check_no_collapse_request_error_in_try_catch(
+                semantic,
+                try_stmt,
+                subjects,
+                subj_name,
+                line_starts,
+                sites,
+            );
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------

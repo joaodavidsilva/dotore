@@ -3,7 +3,6 @@
 //! single-pass rule detectors.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     clippy::too_many_arguments,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
@@ -192,70 +191,74 @@ fn collect_file_imports(program: &Program<'_>, _semantic: &Semantic<'_>) -> File
             continue;
         };
         for spec in specs {
-            if let ImportDeclarationSpecifier::ImportSpecifier(s) = spec {
-                let imported = s.imported.name().as_str();
-                let local = s.local.name.as_str();
-                if is_motion_module(src) {
-                    match imported {
-                        "AnimatePresence" => {
-                            out.animate_presence_locals.insert(local.to_string());
-                        }
-                        "motion" | "m" => {
-                            out.motion_factory_locals.insert(local.to_string());
-                        }
-                        "animate" => {
-                            out.motion_animate_locals.insert(local.to_string());
-                        }
-                        "useTransform" => {
-                            out.use_transform_locals.insert(local.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            match spec {
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(def) => {
-                    if matches!(src, "next/image" | "next/legacy/image") {
-                        out.next_image_locals.insert(def.local.name.to_string());
-                    }
-                }
-                ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                    let imported = s.imported.name().as_str();
-                    let local = s.local.name.as_str();
-                    if matches!(src, "next/image" | "next/legacy/image") {
-                        out.next_image_locals.insert(local.to_string());
-                    } else if src == "remotion" || src.starts_with("@remotion/") {
-                        if imported == "delayRender" {
-                            out.delay_render_locals.insert(local.to_string());
-                        }
-                    } else if src == "radix-ui" || src.starts_with("@radix-ui/") {
-                        if matches!(imported, "Trigger" | "TabsTrigger") {
-                            out.radix_tabs_trigger_locals.insert(local.to_string());
-                        } else if imported == "Tabs" {
-                            out.radix_tabs_trigger_locals
-                                .insert(format!("{local}.Trigger"));
-                        }
-                    } else if src.starts_with("@base-ui") {
-                        if imported == "Tab" {
-                            out.base_ui_tab_locals.insert(local.to_string());
-                        } else if imported == "Tabs" {
-                            out.base_ui_tab_locals.insert(format!("{local}.Tab"));
-                        }
-                    }
-                }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
-                    if src == "radix-ui" || src.starts_with("@radix-ui/") {
-                        out.radix_tabs_trigger_locals
-                            .insert(format!("{}.Trigger", ns.local.name));
-                    } else if src.starts_with("@base-ui") {
-                        out.base_ui_tab_locals
-                            .insert(format!("{}.Tab", ns.local.name));
-                    }
-                }
-            }
+            record_remotion_import_specifier(src, spec, &mut out);
         }
     }
     out
+}
+
+fn record_remotion_import_specifier(
+    src: &str,
+    spec: &ImportDeclarationSpecifier<'_>,
+    out: &mut FileImports,
+) {
+    match spec {
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(def) => {
+            if matches!(src, "next/image" | "next/legacy/image") {
+                out.next_image_locals.insert(def.local.name.to_string());
+            }
+        }
+        ImportDeclarationSpecifier::ImportSpecifier(s) => {
+            record_named_remotion_import(src, s.imported.name().as_str(), s.local.name.as_str(), out);
+        }
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
+            if src == "radix-ui" || src.starts_with("@radix-ui/") {
+                out.radix_tabs_trigger_locals
+                    .insert(format!("{}.Trigger", ns.local.name));
+            } else if src.starts_with("@base-ui") {
+                out.base_ui_tab_locals
+                    .insert(format!("{}.Tab", ns.local.name));
+            }
+        }
+    }
+}
+
+fn record_named_remotion_import(src: &str, imported: &str, local: &str, out: &mut FileImports) {
+    if is_motion_module(src) {
+        match imported {
+            "AnimatePresence" => {
+                out.animate_presence_locals.insert(local.to_string());
+            }
+            "motion" | "m" => {
+                out.motion_factory_locals.insert(local.to_string());
+            }
+            "animate" => {
+                out.motion_animate_locals.insert(local.to_string());
+            }
+            "useTransform" => {
+                out.use_transform_locals.insert(local.to_string());
+            }
+            _ => {}
+        }
+    }
+    if matches!(src, "next/image" | "next/legacy/image") {
+        out.next_image_locals.insert(local.to_string());
+    } else if (src == "remotion" || src.starts_with("@remotion/")) && imported == "delayRender" {
+        out.delay_render_locals.insert(local.to_string());
+    } else if src == "radix-ui" || src.starts_with("@radix-ui/") {
+        if matches!(imported, "Trigger" | "TabsTrigger") {
+            out.radix_tabs_trigger_locals.insert(local.to_string());
+        } else if imported == "Tabs" {
+            out.radix_tabs_trigger_locals
+                .insert(format!("{local}.Trigger"));
+        }
+    } else if src.starts_with("@base-ui") {
+        if imported == "Tab" {
+            out.base_ui_tab_locals.insert(local.to_string());
+        } else if imported == "Tabs" {
+            out.base_ui_tab_locals.insert(format!("{local}.Tab"));
+        }
+    }
 }
 
 fn collect_use_animate_bindings(semantic: &Semantic<'_>) -> HashSet<String> {

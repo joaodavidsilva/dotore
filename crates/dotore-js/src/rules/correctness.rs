@@ -133,18 +133,38 @@ fn check_no_random_key(
 }
 
 fn find_unstable_key_expression(semantic: &Semantic<'_>, expr: &Expression<'_>) -> Option<String> {
-    match expr.without_parentheses() {
+    let inner = expr.without_parentheses();
+    if let Some(leaf) = find_unstable_leaf_or_call_key(semantic, inner) {
+        return Some(leaf);
+    }
+    match inner {
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => None,
-        Expression::NewExpression(new_expr) => {
-            if matches!(
-                new_expr.callee.without_parentheses(),
-                Expression::Identifier(id) if id.name == "Date"
-            ) {
-                Some("new Date()".to_string())
-            } else {
-                None
-            }
+        Expression::BinaryExpression(bin) => find_unstable_key_expression(semantic, &bin.left)
+            .or_else(|| find_unstable_key_expression(semantic, &bin.right)),
+        Expression::LogicalExpression(log) => find_unstable_key_expression(semantic, &log.left)
+            .or_else(|| find_unstable_key_expression(semantic, &log.right)),
+        Expression::ConditionalExpression(cond) => {
+            find_unstable_key_expression(semantic, &cond.consequent)
+                .or_else(|| find_unstable_key_expression(semantic, &cond.alternate))
         }
+        Expression::TemplateLiteral(tpl) => tpl
+            .expressions
+            .iter()
+            .find_map(|e| find_unstable_key_expression(semantic, e)),
+        _ => None,
+    }
+}
+
+fn find_unstable_leaf_or_call_key(
+    semantic: &Semantic<'_>,
+    expr: &Expression<'_>,
+) -> Option<String> {
+    match expr {
+        Expression::NewExpression(new_expr) => matches!(
+            new_expr.callee.without_parentheses(),
+            Expression::Identifier(id) if id.name == "Date"
+        )
+        .then(|| "new Date()".to_string()),
         Expression::UpdateExpression(upd) => {
             if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) =
                 &upd.argument
@@ -173,31 +193,12 @@ fn find_unstable_key_expression(semantic: &Semantic<'_>, expr: &Expression<'_>) 
                     .to_string(),
             )
         }
-        Expression::CallExpression(call) => {
-            if let Some(desc) = classify_always_fresh_call(semantic, call) {
-                return Some(desc);
-            }
-            for arg in &call.arguments {
-                if let Some(arg_expr) = arg.as_expression()
-                    && let Some(desc) = find_unstable_key_expression(semantic, arg_expr)
-                {
-                    return Some(desc);
-                }
-            }
-            None
-        }
-        Expression::BinaryExpression(bin) => find_unstable_key_expression(semantic, &bin.left)
-            .or_else(|| find_unstable_key_expression(semantic, &bin.right)),
-        Expression::LogicalExpression(log) => find_unstable_key_expression(semantic, &log.left)
-            .or_else(|| find_unstable_key_expression(semantic, &log.right)),
-        Expression::ConditionalExpression(cond) => {
-            find_unstable_key_expression(semantic, &cond.consequent)
-                .or_else(|| find_unstable_key_expression(semantic, &cond.alternate))
-        }
-        Expression::TemplateLiteral(tpl) => tpl
-            .expressions
-            .iter()
-            .find_map(|e| find_unstable_key_expression(semantic, e)),
+        Expression::CallExpression(call) => classify_always_fresh_call(semantic, call).or_else(|| {
+            call.arguments
+                .iter()
+                .filter_map(|arg| arg.as_expression())
+                .find_map(|arg_expr| find_unstable_key_expression(semantic, arg_expr))
+        }),
         _ => None,
     }
 }
@@ -248,13 +249,9 @@ fn is_module_scoped_identifier(
     semantic: &Semantic<'_>,
     ident: &oxc_ast::ast::IdentifierReference<'_>,
 ) -> bool {
-    let Some(ref_id) = ident.reference_id.get() else {
+    let Some(decl_id) = super::tanstack::resolve_ident_declaration_node(semantic, ident) else {
         return false;
     };
-    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
-        return false;
-    };
-    let decl_id = semantic.scoping().symbol_declaration(sym_id);
     !semantic.nodes().ancestor_ids(decl_id).any(|anc_id| {
         matches!(
             semantic.nodes().kind(anc_id),

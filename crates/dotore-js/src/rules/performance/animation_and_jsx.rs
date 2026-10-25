@@ -3,10 +3,6 @@
     clippy::wildcard_enum_match_arm,
     reason = "oxc_ast AST enums have 200+ variants; React performance rule detectors match only relevant AST node kinds"
 )]
-#![expect(
-    clippy::excessive_nesting,
-    reason = "JSX attribute and object property AST destructuring traverses opening element, attribute, container, and object property layers directly"
-)]
 
 use std::collections::HashMap;
 
@@ -46,18 +42,47 @@ pub(super) fn check_jsx_opening_performance_rules(
         find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
     let is_motion = is_motion_jsx_element(&opening.name);
     let tag_ident = extract_jsx_identifier_name(&opening.name);
-    if is_motion
-        && matches!(&opening.name, JSXElementName::MemberExpression(mem) if mem.property.name == "svg")
-        && opening.attributes.iter().any(|item| {
-            if let JSXAttributeItem::Attribute(attr) = item
-                && let JSXAttributeName::Identifier(id) = &attr.name
-            {
-                MOTION_ANIMATE_PROPS.contains(&id.name.as_str())
-            } else {
-                false
-            }
-        })
+
+    check_motion_svg_wrapper(opening, is_motion, &subject_name, line_starts, out);
+    check_jsx_css_and_motion_attributes(opening, is_motion, &subject_name, line_starts, out);
+    check_prefer_stable_empty_fallback(
+        opening,
+        tag_ident,
+        memo_registry,
+        &subject_name,
+        line_starts,
+        out,
+    );
+    if tag_ident == Some("img") {
+        check_jsx_img_attributes(opening, &subject_name, line_starts, out);
+    }
+    if tag_ident == Some("script") {
+        check_jsx_script_attributes(opening, subject_name, line_starts, out);
+    }
+}
+
+fn check_motion_svg_wrapper(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    is_motion: bool,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    if !is_motion
+        || !matches!(&opening.name, JSXElementName::MemberExpression(mem) if mem.property.name == "svg")
     {
+        return;
+    }
+    let has_animate_prop = opening.attributes.iter().any(|item| {
+        if let JSXAttributeItem::Attribute(attr) = item
+            && let JSXAttributeName::Identifier(id) = &attr.name
+        {
+            MOTION_ANIMATE_PROPS.contains(&id.name.as_str())
+        } else {
+            false
+        }
+    });
+    if has_animate_prop {
         push_semantic_site(
             out,
             RuleId::RenderingAnimateSvgWrapper,
@@ -69,8 +94,15 @@ pub(super) fn check_jsx_opening_performance_rules(
             opening.span,
         );
     }
+}
 
-    // 1. `no-transition-all` & `no-permanent-will-change`
+fn check_jsx_css_and_motion_attributes(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    is_motion: bool,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
     for attr_item in &opening.attributes {
         let JSXAttributeItem::Attribute(attr) = attr_item else {
             continue;
@@ -79,445 +111,535 @@ pub(super) fn check_jsx_opening_performance_rules(
             continue;
         };
         let name = attr_name.name.as_str();
-        if (name == "className" || name == "class")
-            && let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
-            && let Some(val) = s.value.as_str()
+        if name == "className" || name == "class" {
+            check_jsx_class_attr_transitions(opening.span, attr, subject_name, line_starts, out);
+        } else if name == "style" {
+            check_jsx_style_attr_transitions(opening.span, attr, subject_name, line_starts, out);
+        } else if MOTION_ANIMATE_PROPS.contains(&name) {
+            check_motion_animate_attr(attr, name, is_motion, subject_name, line_starts, out);
+        } else if is_motion && name == "transition" {
+            check_motion_transition_attr(attr, subject_name, line_starts, out);
+        }
+    }
+}
+
+fn check_jsx_class_attr_transitions(
+    opening_span: Span,
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value else {
+        return;
+    };
+    let Some(val) = s.value.as_str() else {
+        return;
+    };
+    if val.split_whitespace().any(|t| {
+        let u = t.rsplit(':').next().unwrap_or(t).trim_start_matches('!');
+        u == "transition-all"
+    }) {
+        push_semantic_site(
+            out,
+            RuleId::NoTransitionAll,
+            subject_name.clone(),
+            "noTransitionAll",
+            "transition-all",
+            "Your users see janky animation because `transition-all` animates every property that changes, including expensive layout ones and instant ones like focus rings. Name the properties: `transition-colors`, `transition-opacity`, or `transition-transform`.".to_string(),
+            line_starts,
+            opening_span,
+        );
+    }
+    if let Some(perm) = val.split_whitespace().find(|t| {
+        let u = t.trim_start_matches('!');
+        !u.contains(':')
+            && u.starts_with("will-change-")
+            && !matches!(
+                u,
+                "will-change-auto"
+                    | "will-change-scroll"
+                    | "will-change-[auto]"
+                    | "will-change-[scroll-position]"
+            )
+    }) {
+        push_semantic_site(
+            out,
+            RuleId::NoPermanentWillChange,
+            subject_name.clone(),
+            "noPermanentWillChange",
+            perm,
+            format!(
+                "This keeps {perm} active permanently, which can waste GPU memory. Apply the hint only immediately before the animation and remove it afterward."
+            ),
+            line_starts,
+            attr.span,
+        );
+    }
+}
+
+fn check_jsx_style_attr_transitions(
+    opening_span: Span,
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
+        return;
+    };
+    let Some(Expression::ObjectExpression(obj)) = cont.expression.as_expression().map(unwrap_expr)
+    else {
+        return;
+    };
+    for prop_kind in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let Some(key_name) = prop
+            .key
+            .static_name()
+            .and_then(|n| n.as_str().map(str::to_string))
+        else {
+            continue;
+        };
+        if (key_name == "transition" || key_name == "transitionProperty")
+            && let Expression::StringLiteral(s) = unwrap_expr(&prop.value)
+            && s.value
+                .as_str()
+                .is_some_and(|v| v.trim() == "all" || v.trim().starts_with("all "))
         {
-            if val.split_whitespace().any(|t| {
-                let u = t.rsplit(':').next().unwrap_or(t).trim_start_matches('!');
-                u == "transition-all"
-            }) {
-                push_semantic_site(
-                    out,
-                    RuleId::NoTransitionAll,
-                    subject_name.clone(),
-                    "noTransitionAll",
-                    "transition-all",
-                    "Your users see janky animation because `transition-all` animates every property that changes, including expensive layout ones and instant ones like focus rings. Name the properties: `transition-colors`, `transition-opacity`, or `transition-transform`.".to_string(),
-                    line_starts,
-                    opening.span,
-                );
-            }
-            if let Some(perm) = val.split_whitespace().find(|t| {
-                let u = t.trim_start_matches('!');
-                !u.contains(':')
-                    && u.starts_with("will-change-")
-                    && !matches!(
-                        u,
-                        "will-change-auto"
-                            | "will-change-scroll"
-                            | "will-change-[auto]"
-                            | "will-change-[scroll-position]"
-                    )
-            }) {
+            push_semantic_site(
+                out,
+                RuleId::NoTransitionAll,
+                subject_name.clone(),
+                "noTransitionAll",
+                &key_name,
+                "This can stutter because transition: \"all\" animates every property, even slow layout ones, so list only the properties you actually change".to_string(),
+                line_starts,
+                opening_span,
+            );
+        }
+        if key_name == "willChange" {
+            let val = unwrap_expr(&prop.value);
+            if !matches!(
+                val,
+                Expression::ConditionalExpression(_) | Expression::LogicalExpression(_)
+            ) && !matches!(val, Expression::StringLiteral(s) if s.value.as_str().map(str::trim) == Some("scroll-position"))
+            {
                 push_semantic_site(
                     out,
                     RuleId::NoPermanentWillChange,
                     subject_name.clone(),
                     "noPermanentWillChange",
-                    perm,
-                    format!(
-                        "This keeps {perm} active permanently, which can waste GPU memory. Apply the hint only immediately before the animation and remove it afterward."
-                    ),
+                    "willChange",
+                    "This wastes GPU memory because will-change is left on all the time, so add it right before the animation & remove it when the animation ends".to_string(),
                     line_starts,
-                    attr.span,
+                    prop.span,
                 );
             }
         }
+    }
+}
 
-        if name == "style"
-            && let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value
-            && let Some(Expression::ObjectExpression(obj)) =
-                cont.expression.as_expression().map(unwrap_expr)
+fn check_motion_animate_attr(
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    attr_name: &str,
+    is_motion: bool,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
+        return;
+    };
+    let Some(Expression::ObjectExpression(obj)) = cont.expression.as_expression().map(unwrap_expr)
+    else {
+        return;
+    };
+    for prop_kind in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let Some(prop_name) = prop
+            .key
+            .static_name()
+            .and_then(|n| n.as_str().map(str::to_string))
+        else {
+            continue;
+        };
+        check_single_motion_animate_prop(
+            prop,
+            &prop_name,
+            attr_name,
+            is_motion,
+            subject_name,
+            line_starts,
+            out,
+        );
+    }
+}
+
+fn check_single_motion_animate_prop(
+    prop: &oxc_ast::ast::ObjectProperty<'_>,
+    prop_name: &str,
+    attr_name: &str,
+    is_motion: bool,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    if is_motion && LAYOUT_PROPERTIES.contains(&prop_name) {
+        push_semantic_site(
+            out,
+            RuleId::NoLayoutPropertyAnimation,
+            subject_name.clone(),
+            "noLayoutPropertyAnimation",
+            prop_name,
+            format!(
+                "This stutters because animating \"{prop_name}\" makes the browser redo page layout every frame, so animate transform or scale instead, or use the layout prop"
+            ),
+            line_starts,
+            prop.span,
+        );
+    }
+    if matches!(
+        prop_name,
+        "filter" | "backdropFilter" | "WebkitBackdropFilter"
+    ) && let Expression::StringLiteral(s) = unwrap_expr(&prop.value)
+        && let Some(radius) = s.value.as_str().and_then(parse_blur_px)
+        && radius > 10.0
+    {
+        push_semantic_site(
+            out,
+            RuleId::NoLargeAnimatedBlur,
+            subject_name.clone(),
+            "noLargeAnimatedBlur",
+            prop_name,
+            format!(
+                "Large animated blurs can use significant GPU memory on phones because blur({radius}px) gets heavier as the blur and element grow. Use a smaller blur or a smaller element."
+            ),
+            line_starts,
+            prop.span,
+        );
+    }
+    if is_motion
+        && attr_name != "initial"
+        && INDIVIDUAL_MOTION_TRANSFORM_PROPS.contains(&prop_name)
+    {
+        push_semantic_site(
+            out,
+            RuleId::PreferMotionTransformProperty,
+            subject_name.clone(),
+            "preferMotionTransformProperty",
+            prop_name,
+            format!(
+                "Motion's individual {prop_name} transform keys can keep this animation on the main thread. Use a single transform string when compositor acceleration is important."
+            ),
+            line_starts,
+            prop.span,
+        );
+    }
+    if is_motion
+        && matches!(prop_name, "scale" | "scaleX" | "scaleY")
+        && matches!(unwrap_expr(&prop.value), Expression::NumericLiteral(n) if n.value == 0.0)
+    {
+        push_semantic_site(
+            out,
+            RuleId::NoScaleFromZero,
+            subject_name.clone(),
+            "noScaleFromZero",
+            prop_name,
+            format!(
+                "Animating `{prop_name}` from `0` makes elements pop out of nowhere; start from a subtle non-zero scale such as `0.95`."
+            ),
+            line_starts,
+            prop.span,
+        );
+    }
+}
+
+fn check_motion_transition_attr(
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
+        return;
+    };
+    let Some(Expression::ObjectExpression(obj)) = cont.expression.as_expression().map(unwrap_expr)
+    else {
+        return;
+    };
+    let mut has_physics = false;
+    let mut duration_prop_span: Option<Span> = None;
+    for prop_kind in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let Some(k) = prop
+            .key
+            .static_name()
+            .and_then(|n| n.as_str().map(str::to_string))
+        else {
+            continue;
+        };
+        if matches!(k.as_str(), "stiffness" | "damping" | "mass") {
+            has_physics = true;
+        }
+        if matches!(k.as_str(), "duration" | "bounce") && duration_prop_span.is_none() {
+            duration_prop_span = Some(prop.span);
+        }
+        if k == "staggerChildren"
+            && let Expression::NumericLiteral(n) = unwrap_expr(&prop.value)
+            && n.value > 0.08
         {
-            for prop_kind in &obj.properties {
-                let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                    continue;
-                };
-                let Some(key_name) = prop
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                if (key_name == "transition" || key_name == "transitionProperty")
-                    && let Expression::StringLiteral(s) = unwrap_expr(&prop.value)
+            push_semantic_site(
+                out,
+                RuleId::NoExcessiveMotionStagger,
+                subject_name.clone(),
+                "noExcessiveMotionStagger",
+                "staggerChildren",
+                format!(
+                    "This {}-second per-item stagger makes later children wait unnecessarily. Keep the interval at 0.08 seconds or less.",
+                    n.value
+                ),
+                line_starts,
+                prop.span,
+            );
+        }
+    }
+    if has_physics && let Some(dur_span) = duration_prop_span {
+        push_semantic_site(
+            out,
+            RuleId::NoConflictingSpringOptions,
+            subject_name.clone(),
+            "noConflictingSpringOptions",
+            "duration",
+            "This spring mixes physics controls with duration-based controls, so Motion ignores duration and bounce. Keep only one spring configuration mode.".to_string(),
+            line_starts,
+            dur_span,
+        );
+    }
+}
+
+fn check_prefer_stable_empty_fallback(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    tag_ident: Option<&str>,
+    memo_registry: &HashMap<String, MemoStatus>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(comp_name) = tag_ident else {
+        return;
+    };
+    if memo_registry.get(comp_name) != Some(&MemoStatus::Memoized) {
+        return;
+    }
+    for attr_item in &opening.attributes {
+        let JSXAttributeItem::Attribute(attr) = attr_item else {
+            continue;
+        };
+        let JSXAttributeName::Identifier(attr_name) = &attr.name else {
+            continue;
+        };
+        if attr_name.name == "key" {
+            continue;
+        }
+        let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
+            continue;
+        };
+        let Some(expr) = cont.expression.as_expression() else {
+            continue;
+        };
+        let Expression::LogicalExpression(log) = unwrap_expr(expr) else {
+            continue;
+        };
+        if !matches!(
+            log.operator,
+            LogicalOperator::Or | LogicalOperator::Coalesce
+        ) {
+            continue;
+        }
+        let right = unwrap_expr(&log.right);
+        let empty_kind = match right {
+            Expression::ArrayExpression(a) if a.elements.is_empty() => {
+                Some(("array", "[]", "const EMPTY_ITEMS: Item[] = []"))
+            }
+            Expression::ObjectExpression(o) if o.properties.is_empty() => {
+                Some(("object", "{}", "const EMPTY_CONFIG: Config = {}"))
+            }
+            _ => None,
+        };
+        if let Some((kind_str, lit, ex)) = empty_kind {
+            push_semantic_site(
+                out,
+                RuleId::PreferStableEmptyFallback,
+                subject_name.clone(),
+                "preferStableEmptyFallback",
+                attr_name.name.as_str(),
+                format!(
+                    "This redraws the memo child anyway because fallback `{lit}` builds a brand new {kind_str} each render when the left value is empty, so the child sees a different value. Hoist a constant (e.g. `{ex}`) & use that as the fallback."
+                ),
+                line_starts,
+                right.span(),
+            );
+        }
+    }
+}
+
+fn check_jsx_img_attributes(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let has_spread = jsx_has_spread_attr(&opening.attributes);
+    let mut srcset_attr: Option<(&oxc_ast::ast::JSXAttribute<'_>, &str)> = None;
+    let mut has_sizes = false;
+    let mut is_loading_lazy = false;
+    let mut is_fetch_priority_high = false;
+
+    for attr_item in &opening.attributes {
+        let JSXAttributeItem::Attribute(attr) = attr_item else {
+            continue;
+        };
+        let JSXAttributeName::Identifier(attr_name) = &attr.name else {
+            continue;
+        };
+        let name_lower = attr_name.name.to_ascii_lowercase();
+        match name_lower.as_str() {
+            "srcset" => {
+                if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
+                    && let Some(val) = s.value.as_str()
+                {
+                    srcset_attr = Some((attr, val));
+                }
+            }
+            "sizes" => has_sizes = true,
+            "loading" => {
+                if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
                     && s.value
                         .as_str()
-                        .is_some_and(|v| v.trim() == "all" || v.trim().starts_with("all "))
+                        .is_some_and(|v| v.eq_ignore_ascii_case("lazy"))
                 {
-                    push_semantic_site(
-                        out,
-                        RuleId::NoTransitionAll,
-                        subject_name.clone(),
-                        "noTransitionAll",
-                        &key_name,
-                        "This can stutter because transition: \"all\" animates every property, even slow layout ones, so list only the properties you actually change".to_string(),
-                        line_starts,
-                        opening.span,
-                    );
-                }
-                if key_name == "willChange" {
-                    let val = unwrap_expr(&prop.value);
-                    if !matches!(
-                        val,
-                        Expression::ConditionalExpression(_) | Expression::LogicalExpression(_)
-                    ) && !matches!(val, Expression::StringLiteral(s) if s.value.as_str().map(str::trim) == Some("scroll-position"))
-                    {
-                        push_semantic_site(
-                            out,
-                            RuleId::NoPermanentWillChange,
-                            subject_name.clone(),
-                            "noPermanentWillChange",
-                            "willChange",
-                            "This wastes GPU memory because will-change is left on all the time, so add it right before the animation & remove it when the animation ends".to_string(),
-                            line_starts,
-                            prop.span,
-                        );
-                    }
+                    is_loading_lazy = true;
                 }
             }
-        }
-
-        // 2. Motion animation attributes (`no-layout-property-animation`, `no-large-animated-blur`, `prefer-motion-transform-property`, `no-scale-from-zero`)
-        if MOTION_ANIMATE_PROPS.contains(&name)
-            && let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value
-            && let Some(Expression::ObjectExpression(obj)) =
-                cont.expression.as_expression().map(unwrap_expr)
-        {
-            for prop_kind in &obj.properties {
-                let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                    continue;
-                };
-                let Some(prop_name) = prop
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                if is_motion && LAYOUT_PROPERTIES.contains(&prop_name.as_str()) {
-                    push_semantic_site(
-                        out,
-                        RuleId::NoLayoutPropertyAnimation,
-                        subject_name.clone(),
-                        "noLayoutPropertyAnimation",
-                        &prop_name,
-                        format!(
-                            "This stutters because animating \"{prop_name}\" makes the browser redo page layout every frame, so animate transform or scale instead, or use the layout prop"
-                        ),
-                        line_starts,
-                        prop.span,
-                    );
-                }
-                if matches!(
-                    prop_name.as_str(),
-                    "filter" | "backdropFilter" | "WebkitBackdropFilter"
-                ) && let Expression::StringLiteral(s) = unwrap_expr(&prop.value)
-                    && let Some(radius) = s.value.as_str().and_then(parse_blur_px)
-                    && radius > 10.0
+            "fetchpriority" => {
+                if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
+                    && s.value
+                        .as_str()
+                        .is_some_and(|v| v.eq_ignore_ascii_case("high"))
                 {
-                    push_semantic_site(
-                        out,
-                        RuleId::NoLargeAnimatedBlur,
-                        subject_name.clone(),
-                        "noLargeAnimatedBlur",
-                        &prop_name,
-                        format!(
-                            "Large animated blurs can use significant GPU memory on phones because blur({radius}px) gets heavier as the blur and element grow. Use a smaller blur or a smaller element."
-                        ),
-                        line_starts,
-                        prop.span,
-                    );
-                }
-                if is_motion
-                    && name != "initial"
-                    && INDIVIDUAL_MOTION_TRANSFORM_PROPS.contains(&prop_name.as_str())
-                {
-                    push_semantic_site(
-                        out,
-                        RuleId::PreferMotionTransformProperty,
-                        subject_name.clone(),
-                        "preferMotionTransformProperty",
-                        &prop_name,
-                        format!(
-                            "Motion's individual {prop_name} transform keys can keep this animation on the main thread. Use a single transform string when compositor acceleration is important."
-                        ),
-                        line_starts,
-                        prop.span,
-                    );
-                }
-                if is_motion
-                    && matches!(prop_name.as_str(), "scale" | "scaleX" | "scaleY")
-                    && matches!(unwrap_expr(&prop.value), Expression::NumericLiteral(n) if n.value == 0.0)
-                {
-                    push_semantic_site(
-                        out,
-                        RuleId::NoScaleFromZero,
-                        subject_name.clone(),
-                        "noScaleFromZero",
-                        &prop_name,
-                        format!(
-                            "Animating `{prop_name}` from `0` makes elements pop out of nowhere; start from a subtle non-zero scale such as `0.95`."
-                        ),
-                        line_starts,
-                        prop.span,
-                    );
+                    is_fetch_priority_high = true;
                 }
             }
-        }
-
-        // 3. Motion `transition` attribute (`no-conflicting-spring-options`, `no-excessive-motion-stagger`)
-        if is_motion
-            && name == "transition"
-            && let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value
-            && let Some(Expression::ObjectExpression(obj)) =
-                cont.expression.as_expression().map(unwrap_expr)
-        {
-            let mut has_physics = false;
-            let mut duration_prop_span: Option<Span> = None;
-            for prop_kind in &obj.properties {
-                let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                    continue;
-                };
-                let Some(k) = prop
-                    .key
-                    .static_name()
-                    .and_then(|n| n.as_str().map(str::to_string))
-                else {
-                    continue;
-                };
-                if matches!(k.as_str(), "stiffness" | "damping" | "mass") {
-                    has_physics = true;
-                }
-                if matches!(k.as_str(), "duration" | "bounce") && duration_prop_span.is_none() {
-                    duration_prop_span = Some(prop.span);
-                }
-                if k == "staggerChildren"
-                    && let Expression::NumericLiteral(n) = unwrap_expr(&prop.value)
-                    && n.value > 0.08
-                {
-                    push_semantic_site(
-                        out,
-                        RuleId::NoExcessiveMotionStagger,
-                        subject_name.clone(),
-                        "noExcessiveMotionStagger",
-                        "staggerChildren",
-                        format!(
-                            "This {}-second per-item stagger makes later children wait unnecessarily. Keep the interval at 0.08 seconds or less.",
-                            n.value
-                        ),
-                        line_starts,
-                        prop.span,
-                    );
-                }
-            }
-            if has_physics && let Some(dur_span) = duration_prop_span {
-                push_semantic_site(
-                    out,
-                    RuleId::NoConflictingSpringOptions,
-                    subject_name.clone(),
-                    "noConflictingSpringOptions",
-                    "duration",
-                    "This spring mixes physics controls with duration-based controls, so Motion ignores duration and bounce. Keep only one spring configuration mode.".to_string(),
-                    line_starts,
-                    dur_span,
-                );
-            }
+            _ => {}
         }
     }
 
-    // 4. `prefer-stable-empty-fallback`
-    if let Some(comp_name) = tag_ident
-        && memo_registry.get(comp_name) == Some(&MemoStatus::Memoized)
+    if !has_spread
+        && !has_sizes
+        && let Some((attr, srcset_val)) = srcset_attr
+        && srcset_has_width_descriptor(srcset_val)
     {
-        for attr_item in &opening.attributes {
-            let JSXAttributeItem::Attribute(attr) = attr_item else {
-                continue;
-            };
-            let JSXAttributeName::Identifier(attr_name) = &attr.name else {
-                continue;
-            };
-            if attr_name.name == "key" {
-                continue;
-            }
-            let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value else {
-                continue;
-            };
-            let Some(expr) = cont.expression.as_expression() else {
-                continue;
-            };
-            if let Expression::LogicalExpression(log) = unwrap_expr(expr)
-                && matches!(
-                    log.operator,
-                    LogicalOperator::Or | LogicalOperator::Coalesce
-                )
-            {
-                let right = unwrap_expr(&log.right);
-                let empty_kind = match right {
-                    Expression::ArrayExpression(a) if a.elements.is_empty() => {
-                        Some(("array", "[]", "const EMPTY_ITEMS: Item[] = []"))
-                    }
-                    Expression::ObjectExpression(o) if o.properties.is_empty() => {
-                        Some(("object", "{}", "const EMPTY_CONFIG: Config = {}"))
-                    }
-                    _ => None,
-                };
-                if let Some((kind_str, lit, ex)) = empty_kind {
-                    push_semantic_site(
-                        out,
-                        RuleId::PreferStableEmptyFallback,
-                        subject_name.clone(),
-                        "preferStableEmptyFallback",
-                        attr_name.name.as_str(),
-                        format!(
-                            "This redraws the memo child anyway because fallback `{lit}` builds a brand new {kind_str} each render when the left value is empty, so the child sees a different value. Hoist a constant (e.g. `{ex}`) & use that as the fallback."
-                        ),
-                        line_starts,
-                        right.span(),
-                    );
+        push_semantic_site(
+            out,
+            RuleId::NoSrcsetWithoutSizes,
+            subject_name.clone(),
+            "noSrcsetWithoutSizes",
+            "srcSet",
+            "This responsive image supplies srcSet without sizes, so the browser assumes a 100vw slot and may download an unnecessarily large candidate. Describe its actual responsive width with sizes.".to_string(),
+            line_starts,
+            attr.span,
+        );
+    }
+
+    if is_loading_lazy && is_fetch_priority_high {
+        push_semantic_site(
+            out,
+            RuleId::NoImgLazyWithHighFetchpriority,
+            subject_name.clone(),
+            "noImgLazyWithHighFetchpriority",
+            "img",
+            "`<img loading=\"lazy\">` defers the request while `fetchPriority=\"high\"` asks the browser to rush it, so the two directives contradict each other. Drop one: keep `fetchPriority=\"high\"` (and eager loading) for an LCP image, or `loading=\"lazy\"` for a below-the-fold one.".to_string(),
+            line_starts,
+            opening.name.span(),
+        );
+    }
+}
+
+fn check_jsx_script_attributes(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    subject_name: Option<String>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let mut has_src = false;
+    let mut src_val: Option<&str> = None;
+    let mut has_no_module = false;
+    let mut type_val: Option<&str> = None;
+    let mut has_defer_or_async = false;
+
+    for attr_item in &opening.attributes {
+        let JSXAttributeItem::Attribute(attr) = attr_item else {
+            continue;
+        };
+        let JSXAttributeName::Identifier(attr_name) = &attr.name else {
+            continue;
+        };
+        match attr_name.name.as_str() {
+            "src" => {
+                has_src = true;
+                if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value {
+                    src_val = s.value.as_str();
                 }
             }
+            "noModule" => has_no_module = true,
+            "type" => {
+                if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value {
+                    type_val = s.value.as_str();
+                }
+            }
+            "defer" | "async" => has_defer_or_async = true,
+            _ => {}
         }
     }
 
-    // 5. `no-srcset-without-sizes`, `no-img-lazy-with-high-fetchpriority`, `rendering-script-defer-async`
-    if tag_ident == Some("img") {
-        let has_spread = jsx_has_spread_attr(&opening.attributes);
-        let mut srcset_attr: Option<(&oxc_ast::ast::JSXAttribute<'_>, &str)> = None;
-        let mut has_sizes = false;
-        let mut is_loading_lazy = false;
-        let mut is_fetch_priority_high = false;
-
-        for attr_item in &opening.attributes {
-            let JSXAttributeItem::Attribute(attr) = attr_item else {
-                continue;
-            };
-            let JSXAttributeName::Identifier(attr_name) = &attr.name else {
-                continue;
-            };
-            let name_lower = attr_name.name.to_ascii_lowercase();
-            match name_lower.as_str() {
-                "srcset" => {
-                    if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
-                        && let Some(val) = s.value.as_str()
-                    {
-                        srcset_attr = Some((attr, val));
-                    }
-                }
-                "sizes" => has_sizes = true,
-                "loading" => {
-                    if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
-                        && s.value
-                            .as_str()
-                            .is_some_and(|v| v.eq_ignore_ascii_case("lazy"))
-                    {
-                        is_loading_lazy = true;
-                    }
-                }
-                "fetchpriority" => {
-                    if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
-                        && s.value
-                            .as_str()
-                            .is_some_and(|v| v.eq_ignore_ascii_case("high"))
-                    {
-                        is_fetch_priority_high = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if !has_spread
-            && !has_sizes
-            && let Some((attr, srcset_val)) = srcset_attr
-            && srcset_has_width_descriptor(srcset_val)
-        {
-            push_semantic_site(
-                out,
-                RuleId::NoSrcsetWithoutSizes,
-                subject_name.clone(),
-                "noSrcsetWithoutSizes",
-                "srcSet",
-                "This responsive image supplies srcSet without sizes, so the browser assumes a 100vw slot and may download an unnecessarily large candidate. Describe its actual responsive width with sizes.".to_string(),
-                line_starts,
-                attr.span,
-            );
-        }
-
-        if is_loading_lazy && is_fetch_priority_high {
-            push_semantic_site(
-                out,
-                RuleId::NoImgLazyWithHighFetchpriority,
-                subject_name.clone(),
-                "noImgLazyWithHighFetchpriority",
-                "img",
-                "`<img loading=\"lazy\">` defers the request while `fetchPriority=\"high\"` asks the browser to rush it, so the two directives contradict each other. Drop one: keep `fetchPriority=\"high\"` (and eager loading) for an LCP image, or `loading=\"lazy\"` for a below-the-fold one.".to_string(),
-                line_starts,
-                opening.name.span(),
-            );
-        }
+    if has_src
+        && !has_no_module
+        && !has_defer_or_async
+        && !is_non_blocking_or_bootstrap_script(src_val, type_val)
+    {
+        push_semantic_site(
+            out,
+            RuleId::RenderingScriptDeferAsync,
+            subject_name,
+            "renderingScriptDeferAsync",
+            "script",
+            "This blocks the page from loading until the script downloads because <script src> has no defer or async, so add defer for scripts that need the page, or async for standalone ones".to_string(),
+            line_starts,
+            opening.span,
+        );
     }
+}
 
-    if tag_ident == Some("script") {
-        let mut has_src = false;
-        let mut src_val: Option<&str> = None;
-        let mut has_no_module = false;
-        let mut type_val: Option<&str> = None;
-        let mut has_defer_or_async = false;
-
-        for attr_item in &opening.attributes {
-            let JSXAttributeItem::Attribute(attr) = attr_item else {
-                continue;
-            };
-            let JSXAttributeName::Identifier(attr_name) = &attr.name else {
-                continue;
-            };
-            match attr_name.name.as_str() {
-                "src" => {
-                    has_src = true;
-                    if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value {
-                        src_val = s.value.as_str();
-                    }
-                }
-                "noModule" => has_no_module = true,
-                "type" => {
-                    if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value {
-                        type_val = s.value.as_str();
-                    }
-                }
-                "defer" | "async" => has_defer_or_async = true,
-                _ => {}
-            }
-        }
-
-        if has_src && !has_no_module && !has_defer_or_async {
-            let is_bootstrap = src_val.is_some_and(|s| {
-                let lower = s.to_ascii_lowercase();
-                lower.contains("theme-init")
-                    || lower.contains("__env")
-                    || lower.contains("env-config")
-                    || lower.contains("runtime-env")
-            });
-            let is_non_blocking_type = type_val.is_some_and(|t| {
-                t == "module"
-                    || (!t.is_empty() && t != "text/javascript" && t != "application/javascript")
-            });
-            if !is_bootstrap && !is_non_blocking_type {
-                push_semantic_site(
-                    out,
-                    RuleId::RenderingScriptDeferAsync,
-                    subject_name,
-                    "renderingScriptDeferAsync",
-                    "script",
-                    "This blocks the page from loading until the script downloads because <script src> has no defer or async, so add defer for scripts that need the page, or async for standalone ones".to_string(),
-                    line_starts,
-                    opening.span,
-                );
-            }
-        }
-    }
+fn is_non_blocking_or_bootstrap_script(src_val: Option<&str>, type_val: Option<&str>) -> bool {
+    let is_bootstrap = src_val.is_some_and(|s| {
+        let lower = s.to_ascii_lowercase();
+        lower.contains("theme-init")
+            || lower.contains("__env")
+            || lower.contains("env-config")
+            || lower.contains("runtime-env")
+    });
+    let is_non_blocking_type = type_val.is_some_and(|t| {
+        t == "module"
+            || (!t.is_empty() && t != "text/javascript" && t != "application/javascript")
+    });
+    is_bootstrap || is_non_blocking_type
 }
 
 fn is_motion_jsx_element(name: &JSXElementName<'_>) -> bool {
@@ -779,137 +901,3 @@ pub(super) fn check_no_global_css_variable_animation(
     }
 }
 
-pub(super) fn check_web_animation_keyframes(
-    node_id: NodeId,
-    call: &CallExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
-        return;
-    };
-    if mem.property.name != "animate" {
-        return;
-    }
-    let recv_text = mem.object.span().source_text(semantic.source_text());
-    if !recv_text.contains("document.")
-        && !recv_text.contains("querySelector")
-        && !recv_text.contains("getElementById")
-        && !recv_text.contains(".current")
-    {
-        return;
-    }
-    let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-
-    let mut keyframe_objs = Vec::new();
-    match unwrap_expr(first_arg) {
-        Expression::ArrayExpression(arr) => {
-            for elem in &arr.elements {
-                if let Some(Expression::ObjectExpression(obj)) =
-                    elem.as_expression().map(unwrap_expr)
-                {
-                    keyframe_objs.push(obj);
-                }
-            }
-        }
-        Expression::ObjectExpression(obj) => keyframe_objs.push(obj),
-        _ => {}
-    }
-
-    let subject_name =
-        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
-
-    for obj in keyframe_objs {
-        for prop_kind in &obj.properties {
-            let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                continue;
-            };
-            let Some(raw_name) = prop
-                .key
-                .static_name()
-                .and_then(|n| n.as_str().map(str::to_string))
-            else {
-                continue;
-            };
-            let camel = kebab_to_camel(&raw_name);
-            if LAYOUT_PROPERTIES.contains(&camel.as_str()) {
-                push_semantic_site(
-                    out,
-                    RuleId::NoLayoutPropertyAnimation,
-                    subject_name.clone(),
-                    "noLayoutPropertyAnimation",
-                    &raw_name,
-                    format!(
-                        "This Web Animation changes \"{raw_name}\" every frame, forcing layout work. Animate transform or opacity instead."
-                    ),
-                    line_starts,
-                    prop.span,
-                );
-            }
-        }
-    }
-}
-
-fn kebab_to_camel(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut upper_next = false;
-    for ch in s.chars() {
-        if ch == '-' {
-            upper_next = true;
-        } else if upper_next {
-            out.push(ch.to_ascii_uppercase());
-            upper_next = false;
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-pub(super) fn check_motion_value_constructor_in_render(
-    node_id: NodeId,
-    call: &CallExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    let Expression::Identifier(callee_id) = unwrap_expr(&call.callee) else {
-        return;
-    };
-    if callee_id.name != "motionValue" {
-        return;
-    }
-    let Some(subj_id) = find_enclosing_react_node(semantic, node_id) else {
-        return;
-    };
-    // Skip if inside useMemo / useState / useRef callback
-    let in_nested_hook_cb = semantic
-        .nodes()
-        .ancestor_ids(node_id)
-        .skip(1)
-        .take_while(|&anc_id| anc_id != subj_id)
-        .any(|anc_id| {
-            matches!(
-                semantic.nodes().kind(anc_id),
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            )
-        });
-    if in_nested_hook_cb {
-        return;
-    }
-
-    let subject_name = get_subject_name(semantic, subj_id);
-    push_semantic_site(
-        out,
-        RuleId::MotionValueConstructorInRender,
-        subject_name,
-        "motionValueConstructorInRender",
-        "motionValue",
-        "motionValue() creates a fresh reactive object during this render. Use useMotionValue() so React preserves the value across renders.".to_string(),
-        line_starts,
-        call.span,
-    );
-}

@@ -19,7 +19,7 @@ pub use loader::{
     ArchitectureThresholdsConfig, DotoreConfig, IgnoreConfig, IgnoreOverride, SupplyChainConfig,
     load_config_from_dir, load_local_config_in_dir,
 };
-pub use pyproject::infer_python_profile_from_pyproject_doc;
+pub use pyproject::{infer_python_profile_from_pyproject_doc, normalize_python_dep_name};
 pub use mutator::{ConfigMutation, ConfigTargetKind, MutateConfigResult, mutate_config_in_dir};
 pub use workspace::{
     AngularWorkspaceProject, WorkspacePackage, discover_workspace_packages,

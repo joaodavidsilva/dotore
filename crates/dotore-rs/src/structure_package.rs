@@ -64,10 +64,16 @@ pub(crate) fn evaluate_package_structure_rules(
     }
 }
 
-fn collect_orphan_module_findings(
+type PackageFileIndex<'a> = (
+    HashMap<String, (&'a ExtractedFile, &'a crate::ir::RsFileIr)>,
+    HashSet<String>,
+    HashSet<String>,
+);
+
+fn index_package_rs_files<'a>(
     package: &WorkspacePackage,
-    files: &[ExtractedFile],
-) -> Vec<(PathBuf, RsCandidateFinding)> {
+    files: &'a [ExtractedFile],
+) -> Option<PackageFileIndex<'a>> {
     let mut file_map: HashMap<String, (&ExtractedFile, &crate::ir::RsFileIr)> = HashMap::new();
     let mut scripted_names: HashSet<String> = HashSet::new();
     let mut included_rel_paths: HashSet<String> = HashSet::new();
@@ -77,11 +83,9 @@ fn collect_orphan_module_findings(
             continue;
         };
         if !rs_ir.valid_syntax || rs_ir.structure_ir.has_macro_mod_decl {
-            return Vec::new();
+            return None;
         }
-        for s in &rs_ir.structure_ir.scripted_rs_filenames {
-            scripted_names.insert(s.clone());
-        }
+        scripted_names.extend(rs_ir.structure_ir.scripted_rs_filenames.iter().cloned());
         let norm_path = normalize_rel_path(&file.path, &package.root_dir);
         for inc in &rs_ir.structure_ir.included_paths {
             if let Some(resolved_inc) = resolve_relative_file(&norm_path, inc) {
@@ -90,28 +94,23 @@ fn collect_orphan_module_findings(
         }
         file_map.insert(norm_path, (file, rs_ir));
     }
+    Some((file_map, scripted_names, included_rel_paths))
+}
 
-    let mut roots: Vec<String> = file_map
-        .keys()
-        .filter(|p| {
-            *p == "src/lib.rs"
-                || *p == "src/main.rs"
-                || *p == "lib.rs"
-                || *p == "main.rs"
-                || p.starts_with("src/bin/")
-        })
-        .cloned()
-        .collect();
-    if roots.is_empty() {
-        return Vec::new();
-    }
+fn is_crate_root_path(p: &str) -> bool {
+    matches!(p, "src/lib.rs" | "src/main.rs" | "lib.rs" | "main.rs") || p.starts_with("src/bin/")
+}
 
+fn trace_reachable_module_files(
+    file_map: &HashMap<String, (&ExtractedFile, &crate::ir::RsFileIr)>,
+) -> Option<HashSet<String>> {
     let mut reached: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
-    for r in roots.drain(..) {
-        if reached.insert(r.clone()) {
-            queue.push_back(r);
-        }
+    for key in file_map.keys().filter(|p| is_crate_root_path(p)) {
+        enqueue_if_unreached(key.clone(), &mut reached, &mut queue);
+    }
+    if reached.is_empty() {
+        return None;
     }
 
     while let Some(curr) = queue.pop_front() {
@@ -119,39 +118,54 @@ fn collect_orphan_module_findings(
             continue;
         };
         for decl in &rs_ir.structure_ir.external_mod_decls {
-            let candidates = resolve_mod_decl_candidates(&curr, decl);
             let mut matched_any = false;
-            for cand in candidates {
+            for cand in resolve_mod_decl_candidates(&curr, decl) {
                 if file_map.contains_key(&cand) {
                     matched_any = true;
                     enqueue_if_unreached(cand, &mut reached, &mut queue);
                 }
             }
             if !matched_any {
-                return Vec::new();
+                return None;
             }
         }
     }
+    Some(reached)
+}
+
+fn collect_orphan_module_findings(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+) -> Vec<(PathBuf, RsCandidateFinding)> {
+    let Some((file_map, scripted_names, included_rel_paths)) =
+        index_package_rs_files(package, files)
+    else {
+        return Vec::new();
+    };
+    let Some(reached) = trace_reachable_module_files(&file_map) else {
+        return Vec::new();
+    };
 
     let mut out = Vec::new();
     let mut sorted_keys: Vec<&String> = file_map.keys().collect();
     sorted_keys.sort();
     for norm_path in sorted_keys {
-        if !norm_path.starts_with("src/") || norm_path.starts_with("src/bin/") {
-            continue;
-        }
-        if reached.contains(norm_path) || included_rel_paths.contains(norm_path) {
+        if !norm_path.starts_with("src/")
+            || norm_path.starts_with("src/bin/")
+            || reached.contains(norm_path)
+            || included_rel_paths.contains(norm_path)
+        {
             continue;
         }
         let Some((file, _)) = file_map.get(norm_path) else {
             continue;
         };
-        if file.file_context != FileContext::Production {
-            continue;
-        }
-        if let Some(fname) = file.path.file_name().and_then(|n| n.to_str())
-            && scripted_names.contains(fname)
-        {
+        let is_scripted = file
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|fname| scripted_names.contains(fname));
+        if file.file_context != FileContext::Production || is_scripted {
             continue;
         }
         let finding = RsCandidateFinding::new(
@@ -249,13 +263,83 @@ fn resolve_mod_decl_candidates(curr_file: &str, decl: &ExternalModDeclIr) -> Vec
     ]
 }
 
+fn inspect_manifest_features_table(
+    package: &WorkspacePackage,
+    toml_str: &str,
+    root_tbl: &toml::map::Map<String, Value>,
+    read_features: &HashSet<String>,
+    declared_valid_features: &mut HashSet<String>,
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut optional_deps: HashSet<String> = HashSet::new();
+    if let Some(deps) = root_tbl.get("dependencies").and_then(Value::as_table) {
+        for (dep_key, val) in deps {
+            if val
+                .as_table()
+                .and_then(|t| t.get("optional"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                optional_deps.insert(dep_key.clone());
+                declared_valid_features.insert(dep_key.clone());
+            }
+        }
+    }
+
+    let Some(features_map) = root_tbl.get("features").and_then(Value::as_table) else {
+        return;
+    };
+    let mut listed_by_other: HashSet<String> = HashSet::new();
+    for (feat_name, activates_val) in features_map {
+        declared_valid_features.insert(feat_name.clone());
+        if let Some(arr) = activates_val.as_array() {
+            collect_plain_activated_features(arr, &mut listed_by_other);
+        }
+    }
+
+    let manifest_path = resolve_package_manifest_path(package);
+    let starts = compute_line_starts(toml_str);
+    for (feat_name, activates_val) in features_map {
+        let is_empty_activates = activates_val.as_array().is_none_or(Vec::is_empty);
+        if feat_name == "default"
+            || optional_deps.contains(feat_name)
+            || !is_empty_activates
+            || listed_by_other.contains(feat_name)
+            || read_features.contains(feat_name)
+        {
+            continue;
+        }
+        let (loc, span) = find_toml_key_span(toml_str, &starts, feat_name);
+        crate::cargo_health::emit_manifest_diagnostic_if_active(
+            package,
+            &manifest_path,
+            toml_str,
+            RuleId::RsStructureUnreferencedFeature,
+            feat_name.clone(),
+            "rsStructureUnreferencedFeature",
+            format!(
+                "Package `{}` declares feature `{feat_name}` in [features], which no `cfg(feature = ...)` reads and which activates nothing.",
+                package.name
+            ),
+            loc,
+            span,
+            enabled_rules,
+            out,
+        );
+    }
+}
+
 fn evaluate_unreferenced_feature_rules(
     package: &WorkspacePackage,
     files: &[ExtractedFile],
     enabled_rules: Option<&[RuleId]>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let cargo_toml_src = package.capability_gate.dependencies.get("__manifest:Cargo.toml");
+    let cargo_toml_src = package
+        .capability_gate
+        .dependencies
+        .get("__manifest:Cargo.toml");
     let explicit_rule = enabled_rules
         .is_some_and(|list| list.contains(&RuleId::RsStructureUnreferencedFeature))
         || package
@@ -281,58 +365,15 @@ fn evaluate_unreferenced_feature_rules(
         && let Ok(doc) = toml::from_str::<Value>(toml_str)
         && let Some(root_tbl) = doc.as_table()
     {
-        let mut optional_deps: HashSet<String> = HashSet::new();
-        if let Some(deps) = root_tbl.get("dependencies").and_then(Value::as_table) {
-            for (dep_key, val) in deps {
-                if val.as_table().and_then(|t| t.get("optional")).and_then(Value::as_bool)
-                    == Some(true)
-                {
-                    optional_deps.insert(dep_key.clone());
-                    declared_valid_features.insert(dep_key.clone());
-                }
-            }
-        }
-
-        if let Some(features_map) = root_tbl.get("features").and_then(Value::as_table) {
-            let mut listed_by_other: HashSet<String> = HashSet::new();
-            for (feat_name, activates_val) in features_map {
-                declared_valid_features.insert(feat_name.clone());
-                if let Some(arr) = activates_val.as_array() {
-                    collect_plain_activated_features(arr, &mut listed_by_other);
-                }
-            }
-
-            let manifest_path = resolve_package_manifest_path(package);
-            let starts = compute_line_starts(toml_str);
-            for (feat_name, activates_val) in features_map {
-                let is_empty_activates = activates_val.as_array().is_none_or(Vec::is_empty);
-                if feat_name == "default"
-                    || optional_deps.contains(feat_name)
-                    || !is_empty_activates
-                    || listed_by_other.contains(feat_name)
-                    || read_features.contains(feat_name)
-                {
-                    continue;
-                }
-                let (loc, span) = find_toml_key_span(toml_str, &starts, feat_name);
-                crate::cargo_health::emit_manifest_diagnostic_if_active(
-                    package,
-                    &manifest_path,
-                    toml_str,
-                    RuleId::RsStructureUnreferencedFeature,
-                    feat_name.clone(),
-                    "rsStructureUnreferencedFeature",
-                    format!(
-                        "Package `{}` declares feature `{feat_name}` in [features], which no `cfg(feature = ...)` reads and which activates nothing.",
-                        package.name
-                    ),
-                    loc,
-                    span,
-                    enabled_rules,
-                    out,
-                );
-            }
-        }
+        inspect_manifest_features_table(
+            package,
+            toml_str,
+            root_tbl,
+            &read_features,
+            &mut declared_valid_features,
+            enabled_rules,
+            out,
+        );
     }
 
     for file in files {

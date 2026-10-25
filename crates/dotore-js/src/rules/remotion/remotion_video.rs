@@ -9,8 +9,9 @@
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, BindingPattern, CallExpression, Expression, JSXAttributeItem, JSXAttributeValue,
-        ObjectPropertyKind,
+        Argument, ArrayExpressionElement, BindingPattern, CallExpression, Expression,
+        JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXElementName,
+        JSXMemberExpressionObject, ObjectExpression, ObjectPropertyKind,
     },
 };
 use oxc_semantic::{NodeId, Semantic};
@@ -19,7 +20,7 @@ use oxc_span::GetSpan;
 use super::{
     FileImports, extract_callee_name, extract_jsx_class_name_str, extract_jsx_style_string_prop,
     find_jsx_attr, get_jsx_element_name, has_object_prop, is_in_direct_render_body,
-    property_key_name, push_site,
+    is_iteration_call, property_key_name, push_site,
 };
 use crate::{
     ir::{
@@ -420,4 +421,115 @@ fn is_delay_render_call(call: &CallExpression<'_>, imports: &FileImports) -> boo
         Expression::StaticMemberExpression(mem) => mem.property.name == "delayRender",
         _ => false,
     }
+}
+
+pub(super) fn is_motion_jsx_tag(name: &JSXElementName<'_>, imports: &FileImports) -> bool {
+    match name {
+        JSXElementName::Identifier(id) => id.name.starts_with("Motion"),
+        JSXElementName::IdentifierReference(id) => id.name.starts_with("Motion"),
+        JSXElementName::MemberExpression(mem) => {
+            if let JSXMemberExpressionObject::IdentifierReference(obj) = &mem.object {
+                imports.motion_factory_locals.contains(obj.name.as_str())
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn has_motion_layout_prop(attrs: &[JSXAttributeItem<'_>]) -> bool {
+    for attr in attrs {
+        let JSXAttributeItem::Attribute(a) = attr else {
+            continue;
+        };
+        let JSXAttributeName::Identifier(id) = &a.name else {
+            continue;
+        };
+        if id.name == "layoutId" {
+            return true;
+        }
+        if id.name == "layout" {
+            if let Some(JSXAttributeValue::ExpressionContainer(cont)) = &a.value
+                && let Some(Expression::BooleanLiteral(b)) = cont
+                    .expression
+                    .as_expression()
+                    .map(Expression::without_parentheses)
+            {
+                return b.value;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn is_static_jsx_attr_value(val: &Option<JSXAttributeValue<'_>>) -> bool {
+    let Some(v) = val else {
+        return false;
+    };
+    match v {
+        JSXAttributeValue::StringLiteral(_) => true,
+        JSXAttributeValue::ExpressionContainer(cont) => {
+            let Some(expr) = cont.expression.as_expression() else {
+                return false;
+            };
+            match expr.without_parentheses() {
+                Expression::StringLiteral(_) => true,
+                Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty(),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn is_inside_iteration_without_dynamic_layout_group(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+) -> bool {
+    let mut saw_dynamic_layout_group = false;
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        match semantic.nodes().kind(anc_id) {
+            AstKind::JSXElement(el) => {
+                let tag = get_jsx_element_name(&el.opening_element.name);
+                if (tag == "LayoutGroup" || tag.ends_with(".LayoutGroup"))
+                    && let Some(id_attr) = find_jsx_attr(&el.opening_element.attributes, "id")
+                    && !is_static_jsx_attr_value(&id_attr.value)
+                {
+                    saw_dynamic_layout_group = true;
+                }
+            }
+            AstKind::CallExpression(call) if is_iteration_call(call) => {
+                return !saw_dynamic_layout_group;
+            }
+            AstKind::ForStatement(_) | AstKind::ForOfStatement(_) | AstKind::ForInStatement(_) => {
+                return !saw_dynamic_layout_group;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+pub(super) fn object_has_keyframe_array_length_mismatch(
+    kf_obj: &ObjectExpression<'_>,
+    times_len: usize,
+) -> bool {
+    for prop in &kf_obj.properties {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            continue;
+        };
+        if property_key_name(&p.key).as_deref() == Some("transition") {
+            continue;
+        }
+        if let Expression::ArrayExpression(arr) = p.value.without_parentheses()
+            && !arr.elements.iter().any(ArrayExpressionElement::is_spread)
+            && arr.elements.len() >= 2
+            && arr.elements.len() != times_len
+        {
+            return true;
+        }
+    }
+    false
 }

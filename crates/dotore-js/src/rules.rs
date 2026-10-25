@@ -193,205 +193,189 @@ pub fn evaluate_project_graph_rules(
     enabled_rules: Option<&[RuleId]>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let run_dead_code = graph.has_manifests || enabled_rules.is_some();
-
-    if run_dead_code {
-        for &file_idx in &graph.unused_file_indices {
-            let Some(file) = graph.files.get(file_idx) else {
-                continue;
-            };
-            let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
-                continue;
-            };
-            if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
-                continue;
-            }
-            let Some(sev) = resolve_rule_activation(
-                RuleId::UnusedFile,
-                file,
-                &pkg.root_dir,
-                &pkg.capability_gate,
-                &pkg.config,
-                enabled_rules,
-            ) else {
-                continue;
-            };
-            let loc = crate::ir::SourceLoc { line: 1, column: 1 };
-            let span = crate::ir::ByteSpan { start: 0, end: 0 };
-            if pkg.config.respect_inline_disables
-                && file.suppressions.is_suppressed(
-                    RuleId::UnusedFile,
-                    loc.line,
-                    span,
-                    &file.jsx_elements,
-                    &file.subjects,
-                )
-            {
-                continue;
-            }
-            out.push(
-                make_diag(
-                    RuleId::UnusedFile,
-                    file.path.clone(),
-                    loc,
-                    span,
-                    "No discovered application, package, or framework entry point reaches this file.",
-                )
-                .with_severity(sev)
-                .with_message_id("unusedFile")
-                .with_target_name(file.path.to_string_lossy().to_string()),
-            );
-        }
-
-        for unused_exp in &graph.unused_exports {
-            let Some(file) = graph.files.get(unused_exp.file_index) else {
-                continue;
-            };
-            let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
-                continue;
-            };
-            if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
-                continue;
-            }
-            let rule = if unused_exp.is_type_only {
-                RuleId::UnusedType
-            } else {
-                RuleId::UnusedExport
-            };
-            let Some(sev) = resolve_rule_activation(
-                rule,
-                file,
-                &pkg.root_dir,
-                &pkg.capability_gate,
-                &pkg.config,
-                enabled_rules,
-            ) else {
-                continue;
-            };
-            if pkg.config.respect_inline_disables
-                && file.suppressions.is_suppressed(
-                    rule,
-                    unused_exp.loc.line,
-                    unused_exp.span,
-                    &file.jsx_elements,
-                    &file.subjects,
-                )
-            {
-                continue;
-            }
-            let (message_id, kind_label) = if unused_exp.is_type_only {
-                ("unusedType", "type export")
-            } else {
-                ("unusedExport", "value export")
-            };
-            out.push(
-                make_diag_for_subject(
-                    rule,
-                    file.path.clone(),
-                    None,
-                    message_id,
-                    unused_exp.name.clone(),
-                    format!(
-                        "Unused {kind_label}: `{}` has no importer in the analyzed project graph.",
-                        unused_exp.name
-                    ),
-                    unused_exp.loc,
-                    unused_exp.span,
-                )
-                .with_severity(sev),
-            );
-        }
-
-        for dep in &graph.unused_dependencies {
-            let rule = if dep.is_dev_dependency {
-                RuleId::UnusedDevDependency
-            } else {
-                RuleId::UnusedDependency
-            };
-            if let Some(explicit_list) = enabled_rules
-                && !explicit_list.contains(&rule)
-            {
-                continue;
-            }
-            if enabled_rules.is_none() && !dep.has_package_entrypoint {
-                continue;
-            }
-            let Some(pkg) = resolve_package_for_file(&dep.manifest_path, packages) else {
-                continue;
-            };
-            if pkg
-                .config
-                .is_file_ignored(&dep.manifest_path, &pkg.root_dir)
-            {
-                continue;
-            }
-            let meta = rule.metadata();
-            let has_explicit_cli = enabled_rules.is_some_and(|l| l.contains(&rule));
-            let Some(sev) = (if has_explicit_cli {
-                Some(
-                    pkg.config
-                        .effective_severity(rule)
-                        .unwrap_or(meta.default_severity),
-                )
-            } else {
-                pkg.config.effective_severity(rule)
-            }) else {
-                continue;
-            };
-            let (message_id, dep_label) = if dep.is_dev_dependency {
-                ("unusedDevDependency", "devDependency")
-            } else {
-                ("unusedDependency", "dependency")
-            };
-            out.push(
-                make_diag_for_subject(
-                    rule,
-                    dep.manifest_path.clone(),
-                    None,
-                    message_id,
-                    dep.package_name.clone(),
-                    format!("Unused {dep_label}: `{}`", dep.package_name),
-                    dep.loc,
-                    dep.span,
-                )
-                .with_severity(sev),
-            );
-        }
+    if graph.has_manifests || enabled_rules.is_some() {
+        evaluate_unused_file_rules(graph, packages, enabled_rules, out);
+        evaluate_unused_export_rules(graph, packages, enabled_rules, out);
+        evaluate_unused_dependency_rules(graph, packages, enabled_rules, out);
     }
+    evaluate_circular_dependency_rules(graph, packages, enabled_rules, out);
+    evaluate_duplicate_jsx_subtree_rules(graph, packages, enabled_rules, out);
 
+    r3f::evaluate_cross_file_frame_loop_findings(
+        graph,
+        packages,
+        enabled_rules,
+        resolve_rule_activation,
+        out,
+    );
+    supply_chain::evaluate_project_supply_chain_rules(graph, packages, enabled_rules, out);
+    react_native::evaluate_react_native_and_expo_project_checks(
+        graph,
+        packages,
+        enabled_rules,
+        out,
+    );
+    evaluate_architecture_project_graph_rules(
+        graph,
+        packages,
+        enabled_rules,
+        &resolve_rule_activation,
+        out,
+    );
+}
+fn evaluate_unused_file_rules(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let loc = crate::ir::SourceLoc { line: 1, column: 1 };
+    let span = crate::ir::ByteSpan { start: 0, end: 0 };
+    for &file_idx in &graph.unused_file_indices {
+        let Some(file) = graph.files.get(file_idx) else {
+            continue;
+        };
+        let Some((_pkg, sev)) =
+            resolve_active_graph_rule_for_file(RuleId::UnusedFile, file, packages, enabled_rules, loc, span)
+        else {
+            continue;
+        };
+        out.push(
+            make_diag(
+                RuleId::UnusedFile,
+                file.path.clone(),
+                loc,
+                span,
+                "No discovered application, package, or framework entry point reaches this file.",
+            )
+            .with_severity(sev)
+            .with_message_id("unusedFile")
+            .with_target_name(file.path.to_string_lossy().to_string()),
+        );
+    }
+}
+
+fn evaluate_unused_export_rules(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for unused_exp in &graph.unused_exports {
+        let Some(file) = graph.files.get(unused_exp.file_index) else {
+            continue;
+        };
+        let (rule, message_id, kind_label) = if unused_exp.is_type_only {
+            (RuleId::UnusedType, "unusedType", "type export")
+        } else {
+            (RuleId::UnusedExport, "unusedExport", "value export")
+        };
+        let Some((_pkg, sev)) = resolve_active_graph_rule_for_file(
+            rule,
+            file,
+            packages,
+            enabled_rules,
+            unused_exp.loc,
+            unused_exp.span,
+        ) else {
+            continue;
+        };
+        out.push(
+            make_diag_for_subject(
+                rule,
+                file.path.clone(),
+                None,
+                message_id,
+                unused_exp.name.clone(),
+                format!(
+                    "Unused {kind_label}: `{}` has no importer in the analyzed project graph.",
+                    unused_exp.name
+                ),
+                unused_exp.loc,
+                unused_exp.span,
+            )
+            .with_severity(sev),
+        );
+    }
+}
+
+fn evaluate_unused_dependency_rules(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for dep in &graph.unused_dependencies {
+        let (rule, message_id, dep_label) = if dep.is_dev_dependency {
+            (
+                RuleId::UnusedDevDependency,
+                "unusedDevDependency",
+                "devDependency",
+            )
+        } else {
+            (RuleId::UnusedDependency, "unusedDependency", "dependency")
+        };
+        if enabled_rules.is_some_and(|list| !list.contains(&rule))
+            || (enabled_rules.is_none() && !dep.has_package_entrypoint)
+        {
+            continue;
+        }
+        let Some(pkg) = resolve_package_for_file(&dep.manifest_path, packages) else {
+            continue;
+        };
+        if pkg.config.is_file_ignored(&dep.manifest_path, &pkg.root_dir) {
+            continue;
+        }
+        let sev_opt = if enabled_rules.is_some_and(|l| l.contains(&rule)) {
+            Some(
+                pkg.config
+                    .effective_severity(rule)
+                    .unwrap_or(rule.metadata().default_severity),
+            )
+        } else {
+            pkg.config.effective_severity(rule)
+        };
+        let Some(sev) = sev_opt else {
+            continue;
+        };
+        out.push(
+            make_diag_for_subject(
+                rule,
+                dep.manifest_path.clone(),
+                None,
+                message_id,
+                dep.package_name.clone(),
+                format!("Unused {dep_label}: `{}`", dep.package_name),
+                dep.loc,
+                dep.span,
+            )
+            .with_severity(sev),
+        );
+    }
+}
+
+fn evaluate_circular_dependency_rules(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let loc = crate::ir::SourceLoc { line: 1, column: 1 };
+    let span = crate::ir::ByteSpan { start: 0, end: 0 };
     for cycle in &graph.circular_dependencies {
         let Some(file) = graph.files.get(cycle.primary_file_index) else {
             continue;
         };
-        let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
-            continue;
-        };
-        if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
-            continue;
-        }
-        let Some(sev) = resolve_rule_activation(
+        let Some((_pkg, sev)) = resolve_active_graph_rule_for_file(
             RuleId::CircularDependency,
             file,
-            &pkg.root_dir,
-            &pkg.capability_gate,
-            &pkg.config,
+            packages,
             enabled_rules,
+            loc,
+            span,
         ) else {
             continue;
         };
-        let loc = crate::ir::SourceLoc { line: 1, column: 1 };
-        let span = crate::ir::ByteSpan { start: 0, end: 0 };
-        if pkg.config.respect_inline_disables
-            && file.suppressions.is_suppressed(
-                RuleId::CircularDependency,
-                loc.line,
-                span,
-                &file.jsx_elements,
-                &file.subjects,
-            )
-        {
-            continue;
-        }
         let cycle_str = cycle
             .cycle_paths
             .iter()
@@ -414,7 +398,14 @@ pub fn evaluate_project_graph_rules(
             .with_severity(sev),
         );
     }
+}
 
+fn evaluate_duplicate_jsx_subtree_rules(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
     for family in &graph.duplicate_jsx_families {
         let Some(primary) = family.occurrences.first() else {
             continue;
@@ -422,44 +413,18 @@ pub fn evaluate_project_graph_rules(
         let Some(file) = graph.files.get(primary.file_index) else {
             continue;
         };
-        let Some(pkg) = resolve_package_for_file(&file.path, packages) else {
-            continue;
-        };
-        if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
-            continue;
-        }
-        let Some(sev) = resolve_rule_activation(
+        let Some((_pkg, sev)) = resolve_active_graph_rule_for_file(
             RuleId::DuplicateJsxSubtree,
             file,
-            &pkg.root_dir,
-            &pkg.capability_gate,
-            &pkg.config,
+            packages,
             enabled_rules,
+            primary.loc,
+            primary.span,
         ) else {
             continue;
         };
-        if pkg.config.respect_inline_disables
-            && file.suppressions.is_suppressed(
-                RuleId::DuplicateJsxSubtree,
-                primary.loc.line,
-                primary.span,
-                &file.jsx_elements,
-                &file.subjects,
-            )
-        {
-            continue;
-        }
-        let _ = RuleId::DuplicateJsxSubtree;
-        let file_label = if family.distinct_file_count == 1 {
-            "file"
-        } else {
-            "files"
-        };
-        let line_label = if family.estimated_removable_line_count == 1 {
-            "line"
-        } else {
-            "lines"
-        };
+        let file_label = if family.distinct_file_count == 1 { "file" } else { "files" };
+        let line_label = if family.estimated_removable_line_count == 1 { "line" } else { "lines" };
         let comp_path = primary.composition_path.join(" > ");
         let caller_sites = family
             .occurrences
@@ -496,28 +461,40 @@ pub fn evaluate_project_graph_rules(
             .with_caller_sites(caller_sites),
         );
     }
+}
 
-    r3f::evaluate_cross_file_frame_loop_findings(
-        graph,
-        packages,
+fn resolve_active_graph_rule_for_file<'a>(
+    rule: RuleId,
+    file: &FileIr,
+    packages: &'a [WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    loc: crate::ir::SourceLoc,
+    span: crate::ir::ByteSpan,
+) -> Option<(&'a WorkspacePackage, RuleSeverity)> {
+    let pkg = resolve_package_for_file(&file.path, packages)?;
+    if pkg.config.is_file_ignored(&file.path, &pkg.root_dir) {
+        return None;
+    }
+    let sev = resolve_rule_activation(
+        rule,
+        file,
+        &pkg.root_dir,
+        &pkg.capability_gate,
+        &pkg.config,
         enabled_rules,
-        resolve_rule_activation,
-        out,
-    );
-    supply_chain::evaluate_project_supply_chain_rules(graph, packages, enabled_rules, out);
-    react_native::evaluate_react_native_and_expo_project_checks(
-        graph,
-        packages,
-        enabled_rules,
-        out,
-    );
-    evaluate_architecture_project_graph_rules(
-        graph,
-        packages,
-        enabled_rules,
-        &resolve_rule_activation,
-        out,
-    );
+    )?;
+    if pkg.config.respect_inline_disables
+        && file.suppressions.is_suppressed(
+            rule,
+            loc.line,
+            span,
+            &file.jsx_elements,
+            &file.subjects,
+        )
+    {
+        return None;
+    }
+    Some((pkg, sev))
 }
 
 fn resolve_rule_activation(
@@ -528,67 +505,34 @@ fn resolve_rule_activation(
     config: &DotoreConfig,
     enabled_rules: Option<&[RuleId]>,
 ) -> Option<RuleSeverity> {
-    if let Some(explicit_list) = enabled_rules
-        && !explicit_list.contains(&rule)
-    {
+    if enabled_rules.is_some_and(|list| !list.contains(&rule)) {
         return None;
     }
 
     let meta = rule.metadata();
     let has_explicit_cli_rule = enabled_rules.is_some_and(|list| list.contains(&rule));
-    let explicit_config_override = config.explicit_rule_override(rule);
+    let has_explicit_override = config.explicit_rule_override(rule).is_some();
 
-    // 1. Automatic `test-noise` suppression in test and story files unless also tagged `migration-hint`
-    if file.file_context != FileContext::Production
-        && meta.tags.contains(&RuleTag::TestNoise)
-        && !meta.tags.contains(&RuleTag::MigrationHint)
-        && !has_explicit_cli_rule
-        && explicit_config_override.is_none()
-    {
-        return None;
-    }
-
-    // 2. Library packages skip application-only rules on library entrypoints unless explicitly opted in
-    if meta.capability_gate.app_only
-        && (rule == RuleId::PreferDynamicImport
-            && gate.package_role == crate::config::PackageRole::Library
-            || gate.is_library_entrypoint(&file.path, package_root)
-                && !has_explicit_cli_rule
-                && explicit_config_override.is_none())
-    {
-        return None;
-    }
-    if rule == RuleId::NoFullLodashImport
-        && gate.package_role == crate::config::PackageRole::Library
-        && file
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.contains(".page."))
-    {
+    if is_suppressed_by_context_or_role(
+        rule,
+        meta,
+        file,
+        package_root,
+        gate,
+        has_explicit_cli_rule,
+        has_explicit_override,
+    ) {
         return None;
     }
 
-    // 3. Per-path `ignore.overrides` block in config
-    if config.is_overridden_for_file(rule, &file.path, package_root) && !has_explicit_cli_rule {
-        return None;
-    }
-
-    // 4. Capability Gate check (unless explicitly forced via CLI `--rule`)
-    if !has_explicit_cli_rule && !gate.allows_rule(meta) {
-        return None;
-    }
     if !has_explicit_cli_rule
-        && rule == RuleId::NoRefCallbackCleanupBeforeReact19
-        && gate
-            .dependencies
-            .get("react")
-            .is_some_and(|ver| ver.contains("19"))
+        && (config.is_overridden_for_file(rule, &file.path, package_root)
+            || !gate.allows_rule(meta)
+            || is_react_19_ref_cleanup_allowed(rule, gate))
     {
         return None;
     }
 
-    // 5. Config severity / ignore.rules / ignore.tags / customRulesOnly / defaultEnabled
     if has_explicit_cli_rule {
         Some(
             config
@@ -600,37 +544,81 @@ fn resolve_rule_activation(
     }
 }
 
+fn is_suppressed_by_context_or_role(
+    rule: RuleId,
+    meta: &dotore_core::RuleMetadata,
+    file: &FileIr,
+    package_root: &Path,
+    gate: &CapabilityGate,
+    has_explicit_cli_rule: bool,
+    has_explicit_override: bool,
+) -> bool {
+    if file.file_context != FileContext::Production
+        && meta.tags.contains(&RuleTag::TestNoise)
+        && !meta.tags.contains(&RuleTag::MigrationHint)
+        && !has_explicit_cli_rule
+        && !has_explicit_override
+    {
+        return true;
+    }
+    if meta.capability_gate.app_only
+        && ((rule == RuleId::PreferDynamicImport
+            && gate.package_role == crate::config::PackageRole::Library)
+            || (gate.is_library_entrypoint(&file.path, package_root)
+                && !has_explicit_cli_rule
+                && !has_explicit_override))
+    {
+        return true;
+    }
+    rule == RuleId::NoFullLodashImport
+        && gate.package_role == crate::config::PackageRole::Library
+        && file
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".page."))
+}
+
+fn is_react_19_ref_cleanup_allowed(rule: RuleId, gate: &CapabilityGate) -> bool {
+    rule == RuleId::NoRefCallbackCleanupBeforeReact19
+        && gate
+            .dependencies
+            .get("react")
+            .is_some_and(|ver| ver.contains("19"))
+}
+
 fn evaluate_subject<F>(file: &FileIr, subject: &SubjectIr, is_active: &F, out: &mut Vec<Diagnostic>)
 where
     F: Fn(RuleId) -> Option<RuleSeverity>,
 {
-    if is_active(RuleId::NoDerivedState).is_some() {
-        check_no_derived_state(file, subject, out);
-    }
-    if is_active(RuleId::NoChainStateUpdates).is_some() {
-        check_no_chain_state_updates(file, subject, out);
-    }
-    if is_active(RuleId::NoEventHandler).is_some() {
-        check_no_event_handler(file, subject, out);
-    }
-    if is_active(RuleId::NoAdjustStateOnPropChange).is_some() {
-        check_no_adjust_state_on_prop_change(file, subject, out);
+    for (rule, check) in [
+        (
+            RuleId::NoDerivedState,
+            check_no_derived_state as fn(&FileIr, &SubjectIr, &mut Vec<Diagnostic>),
+        ),
+        (RuleId::NoChainStateUpdates, check_no_chain_state_updates),
+        (RuleId::NoEventHandler, check_no_event_handler),
+        (
+            RuleId::NoAdjustStateOnPropChange,
+            check_no_adjust_state_on_prop_change,
+        ),
+        (
+            RuleId::NoPassLiveStateToParent,
+            check_no_pass_live_state_to_parent,
+        ),
+        (RuleId::NoPassDataToParent, check_no_pass_data_to_parent),
+        (
+            RuleId::NoExternalStoreSubscription,
+            check_no_external_store_subscription,
+        ),
+        (RuleId::NoFetchInEffect, check_no_fetch_in_effect),
+    ] {
+        if is_active(rule).is_some() {
+            check(file, subject, out);
+        }
     }
     if is_active(RuleId::NoInitializeState).is_some() {
-        let derived_enabled = is_active(RuleId::NoDerivedState).is_some();
-        check_no_initialize_state(file, subject, derived_enabled, out);
-    }
-    if is_active(RuleId::NoPassLiveStateToParent).is_some() {
-        check_no_pass_live_state_to_parent(file, subject, out);
-    }
-    if is_active(RuleId::NoPassDataToParent).is_some() {
-        check_no_pass_data_to_parent(file, subject, out);
-    }
-    if is_active(RuleId::NoExternalStoreSubscription).is_some() {
-        check_no_external_store_subscription(file, subject, out);
-    }
-    if is_active(RuleId::NoFetchInEffect).is_some() {
-        check_no_fetch_in_effect(file, subject, out);
+        check_no_initialize_state(file, subject, is_active(RuleId::NoDerivedState).is_some(), out);
     }
 }
 
@@ -645,7 +633,6 @@ fn evaluate_file_ir_facets<F>(
 ) where
     F: Fn(RuleId) -> Option<RuleSeverity>,
 {
-    // 1. JSX element rules
     for jsx in &file.jsx_elements {
         evaluate_jsx_element_rules(
             graph,
@@ -658,7 +645,25 @@ fn evaluate_file_ir_facets<F>(
         );
     }
 
-    // 2. Module import rules (e.g. `preact-no-react-import`)
+    evaluate_preact_and_mutation_facets(file, is_active, out);
+    evaluate_security_sink_facets(file, is_active, out);
+    evaluate_semantic_site_facets(
+        file,
+        config,
+        has_explicit_rule_filter,
+        core_effect_diag_spans,
+        is_active,
+        out,
+    );
+}
+
+fn evaluate_preact_and_mutation_facets<F>(
+    file: &FileIr,
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     if is_active(RuleId::PreactNoReactImport).is_some() {
         for imp in &file.module.imports {
             if imp.source == "react" || imp.source == "react-dom" {
@@ -680,7 +685,6 @@ fn evaluate_file_ir_facets<F>(
         }
     }
 
-    // 3. Direct state mutations (`no-direct-mutation-state`)
     if is_active(RuleId::NoDirectMutationState).is_some() {
         for mutation in &file.mutations {
             if mutation.is_state_slot {
@@ -701,8 +705,15 @@ fn evaluate_file_ir_facets<F>(
             }
         }
     }
+}
 
-    // 5. Security and trust-boundary sinks (`no-danger`, `expo-no-non-inlined-env`, `server-auth-actions`)
+fn evaluate_security_sink_facets<F>(
+    file: &FileIr,
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     for sink in &file.security_sinks {
         match sink.kind {
             SecuritySinkKind::DangerouslySetInnerHtml if is_active(RuleId::NoDanger).is_some() => {
@@ -740,30 +751,25 @@ fn evaluate_file_ir_facets<F>(
             | SecuritySinkKind::UnauthenticatedServerAction => {}
         }
     }
+}
 
-    // 7. Single-pass semantic AST sites
+fn evaluate_semantic_site_facets<F>(
+    file: &FileIr,
+    config: &DotoreConfig,
+    has_explicit_rule_filter: bool,
+    core_effect_diag_spans: &[crate::ir::ByteSpan],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     for site in &file.semantic_sites {
-        // When `enabled_rules` is `None`, suppress secondary `exhaustive-deps` or `no-self-updating-effect`
-        // on an EffectNode that was already flagged by one of the 10 core effect anti-pattern rules.
-        if !has_explicit_rule_filter
-            && matches!(
-                site.rule,
-                RuleId::ExhaustiveDeps | RuleId::NoSelfUpdatingEffect
-            )
-            && core_effect_diag_spans.iter().any(|eff_span| {
-                (site.span.start <= eff_span.start && eff_span.end <= site.span.end)
-                    || (eff_span.start <= site.span.start && site.span.end <= eff_span.end)
-            })
-        {
-            continue;
-        }
-        if !has_explicit_rule_filter
-            && matches!(
-                site.rule,
-                RuleId::OnlyExportComponents | RuleId::ExhaustiveDeps
-            )
-            && config.explicit_rule_override(site.rule).is_none()
-        {
+        if is_suppressed_secondary_semantic_site(
+            site,
+            config,
+            has_explicit_rule_filter,
+            core_effect_diag_spans,
+        ) {
             continue;
         }
         if is_active(site.rule).is_some() {
@@ -793,6 +799,30 @@ fn evaluate_file_ir_facets<F>(
     }
 }
 
+fn is_suppressed_secondary_semantic_site(
+    site: &crate::ir::SemanticRuleSite,
+    config: &DotoreConfig,
+    has_explicit_rule_filter: bool,
+    core_effect_diag_spans: &[crate::ir::ByteSpan],
+) -> bool {
+    if has_explicit_rule_filter {
+        return false;
+    }
+    if matches!(
+        site.rule,
+        RuleId::ExhaustiveDeps | RuleId::NoSelfUpdatingEffect
+    ) && core_effect_diag_spans.iter().any(|eff_span| {
+        (site.span.start <= eff_span.start && eff_span.end <= site.span.end)
+            || (eff_span.start <= site.span.start && site.span.end <= eff_span.end)
+    }) {
+        return true;
+    }
+    matches!(
+        site.rule,
+        RuleId::OnlyExportComponents | RuleId::ExhaustiveDeps
+    ) && config.explicit_rule_override(site.rule).is_none()
+}
+
 fn evaluate_jsx_element_rules<F>(
     graph: &ProjectGraph,
     file: &FileIr,
@@ -804,7 +834,6 @@ fn evaluate_jsx_element_rules<F>(
 ) where
     F: Fn(RuleId) -> Option<RuleSeverity>,
 {
-    // 1. `rn-no-raw-text` (honoring `textComponents`, `rawTextWrapperComponents`, and cross-file wrappers)
     if is_active(RuleId::RnNoRawText).is_some()
         && react_native::is_rn_raw_text_violation(graph, file, jsx, config)
     {
@@ -825,7 +854,6 @@ fn evaluate_jsx_element_rules<F>(
         );
     }
 
-    // 2. `ink-no-raw-text` (including cross-file wrappers)
     if is_active(RuleId::InkNoRawText).is_some()
         && ecosystem_ui::is_ink_raw_text_violation(graph, file, jsx)
     {
@@ -845,7 +873,6 @@ fn evaluate_jsx_element_rules<F>(
         );
     }
 
-    // 3. `jsx-no-undef` (honoring `runtimeGlobals`; active on modules with imports or when explicitly enabled/configured)
     let should_check_undef = has_explicit_rule_filter
         || !config.runtime_globals.is_empty()
         || config.explicit_rule_override(RuleId::JsxNoUndef).is_some();
@@ -875,7 +902,6 @@ fn evaluate_jsx_element_rules<F>(
         );
     }
 
-    // 4. `jsx-key` and `no-array-index-as-key`
     if jsx.in_array_map {
         if !jsx.has_key && is_active(RuleId::JsxKey).is_some() {
             push_simple_diagnostic(
@@ -885,10 +911,7 @@ fn evaluate_jsx_element_rules<F>(
                 RuleId::JsxKey,
                 "missingJsxKey",
                 &jsx.name,
-                format!(
-                    "Missing `key` prop for `<{}>` in array `.map()` iterator.",
-                    jsx.name
-                ),
+                format!("Missing `key` prop for `<{}>` in array `.map()` iterator.", jsx.name),
                 jsx.loc,
                 jsx.span,
             );
@@ -910,11 +933,8 @@ fn evaluate_jsx_element_rules<F>(
         }
     }
 
-    // 6. Inline prop reference rules (`jsx-no-new-object-as-prop`, `jsx-no-new-array-as-prop`,
-    //    `jsx-no-new-function-as-prop`, `no-inline-prop-on-memo-component`) gated by ProjectGraph cold-path analysis
     evaluate_inline_prop_rules_with_graph(graph, file, jsx, is_active, out);
 
-    // 7. `no-render-prop-children` (app-only rule, skipped on library entrypoints)
     if jsx.is_component
         && jsx.has_render_prop_children
         && is_active(RuleId::NoRenderPropChildren).is_some()

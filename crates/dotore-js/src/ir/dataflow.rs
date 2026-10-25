@@ -297,7 +297,12 @@ fn get_synchronous_call_chain(
 }
 
 /// Checks if `ref_id` resolves to the state value binding (`x` in `const [x, setX] = useState()`).
-pub(crate) fn is_state(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
+fn resolve_use_state_element(
+    semantic: &Semantic<'_>,
+    ref_id: ReferenceId,
+    element_index: usize,
+    require_pair: bool,
+) -> bool {
     let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
         return false;
     };
@@ -316,42 +321,27 @@ pub(crate) fn is_state(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
     let BindingPattern::ArrayPattern(arr) = &decl.id else {
         return false;
     };
-    if arr.elements.is_empty() || arr.elements.len() > 2 {
+    if require_pair {
+        if arr.elements.len() != 2 {
+            return false;
+        }
+    } else if arr.elements.is_empty() || arr.elements.len() > 2 {
         return false;
     }
     matches!(
-        arr.elements.first().and_then(Option::as_ref),
+        arr.elements.get(element_index).and_then(Option::as_ref),
         Some(BindingPattern::BindingIdentifier(id)) if id.symbol_id.get() == Some(sym_id)
     )
 }
 
+/// Checks if `ref_id` resolves to the state value binding (`x` in `const [x, setX] = useState()`).
+pub(crate) fn is_state(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
+    resolve_use_state_element(semantic, ref_id, 0, false)
+}
+
 /// Checks if `ref_id` resolves to the state setter binding (`setX` in `const [x, setX] = useState()`).
 pub(crate) fn is_state_setter(semantic: &Semantic<'_>, ref_id: ReferenceId) -> bool {
-    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
-        return false;
-    };
-    let decl_id = semantic.scoping().symbol_declaration(sym_id);
-    let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(decl_id) else {
-        return false;
-    };
-    let Some(Expression::CallExpression(call)) =
-        decl.init.as_ref().map(Expression::without_parentheses)
-    else {
-        return false;
-    };
-    if !is_react_hook_callee(semantic, &call.callee, "useState") {
-        return false;
-    }
-    let BindingPattern::ArrayPattern(arr) = &decl.id else {
-        return false;
-    };
-    if arr.elements.len() != 2 {
-        return false;
-    }
-    matches!(
-        arr.elements.get(1).and_then(Option::as_ref),
-        Some(BindingPattern::BindingIdentifier(id)) if id.symbol_id.get() == Some(sym_id)
-    )
+    resolve_use_state_element(semantic, ref_id, 1, true)
 }
 
 /// Checks if `ref_id` resolves to a prop parameter of a functional component (excluding non-pure HOCs) or custom hook.
@@ -670,120 +660,136 @@ pub(crate) fn extract_security_sinks(
     let mut sinks = Vec::new();
 
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        match node.kind() {
-            AstKind::JSXAttribute(attr) => {
-                if let Some(ident) = attr.name.as_identifier()
-                    && ident.name == "dangerouslySetInnerHTML"
-                {
-                    let subject_name = find_enclosing_react_node(semantic, node_id)
-                        .and_then(|subj_id| get_subject_name(semantic, subj_id));
-                    sinks.push(SecuritySinkIr {
-                        kind: SecuritySinkKind::DangerouslySetInnerHtml,
-                        target_name: "dangerouslySetInnerHTML".to_string(),
-                        subject_name,
-                        span: ByteSpan {
-                            start: attr.span.start,
-                            end: attr.span.end,
-                        },
-                        loc: loc_from_line_starts(line_starts, attr.span.start),
-                    });
-                }
-            }
-            AstKind::AssignmentExpression(assign) => {
-                if let AssignmentTarget::StaticMemberExpression(mem) = &assign.left
-                    && (mem.property.name == "innerHTML" || mem.property.name == "outerHTML")
-                {
-                    let subject_name = find_enclosing_react_node(semantic, node_id)
-                        .and_then(|subj_id| get_subject_name(semantic, subj_id));
-                    sinks.push(SecuritySinkIr {
-                        kind: SecuritySinkKind::InnerHtmlAssignment,
-                        target_name: mem.property.name.to_string(),
-                        subject_name,
-                        span: ByteSpan {
-                            start: assign.span.start,
-                            end: assign.span.end,
-                        },
-                        loc: loc_from_line_starts(line_starts, assign.span.start),
-                    });
-                }
-            }
-            AstKind::CallExpression(call) => {
-                if let Expression::Identifier(ident) = call.callee.without_parentheses()
-                    && ident.name == "eval"
-                {
-                    let subject_name = find_enclosing_react_node(semantic, node_id)
-                        .and_then(|subj_id| get_subject_name(semantic, subj_id));
-                    sinks.push(SecuritySinkIr {
-                        kind: SecuritySinkKind::DynamicCodeEval,
-                        target_name: "eval".to_string(),
-                        subject_name,
-                        span: ByteSpan {
-                            start: call.span.start,
-                            end: call.span.end,
-                        },
-                        loc: loc_from_line_starts(line_starts, call.span.start),
-                    });
-                }
-            }
-            AstKind::ComputedMemberExpression(comp) => {
-                if let Expression::StaticMemberExpression(inner) = comp.object.without_parentheses()
-                    && inner.property.name == "env"
-                    && matches!(
-                        inner.object.without_parentheses(),
-                        Expression::Identifier(id) if id.name == "process"
-                    )
-                    && !matches!(
-                        comp.expression.without_parentheses(),
-                        Expression::StringLiteral(_)
-                    )
-                {
-                    let subject_name = find_enclosing_react_node(semantic, node_id)
-                        .and_then(|subj_id| get_subject_name(semantic, subj_id));
-                    sinks.push(SecuritySinkIr {
-                        kind: SecuritySinkKind::DynamicProcessEnv,
-                        target_name: "process.env".to_string(),
-                        subject_name,
-                        span: ByteSpan {
-                            start: comp.span.start,
-                            end: comp.span.end,
-                        },
-                        loc: loc_from_line_starts(line_starts, comp.span.start),
-                    });
-                }
-            }
-            _ => {}
+        if let Some(sink) = extract_node_security_sink(node_id, node.kind(), semantic, line_starts)
+        {
+            sinks.push(sink);
         }
     }
 
     if module.has_use_server {
-        for stmt in &program.body {
-            if let Statement::ExportDeclaration(exp) = stmt
-                && let Declaration::FunctionDeclaration(func) = &exp.declaration
-                && func.r#async
-                && let Some(id) = &func.id
-                && let Some(body) = &func.body
-            {
-                let body_text = body.span.source_text(semantic.source_text());
-                let has_auth_guard = AUTH_GUARD_FUNCTION_NAMES
-                    .iter()
-                    .any(|guard| body_text.contains(guard));
-                if !has_auth_guard {
-                    sinks.push(SecuritySinkIr {
-                        kind: SecuritySinkKind::UnauthenticatedServerAction,
-                        target_name: id.name.to_string(),
-                        subject_name: Some(id.name.to_string()),
-                        span: ByteSpan {
-                            start: func.span.start,
-                            end: func.span.end,
-                        },
-                        loc: loc_from_line_starts(line_starts, func.span.start),
-                    });
-                }
-            }
-        }
+        collect_unauthenticated_server_actions(program, semantic, line_starts, &mut sinks);
     }
 
     sinks
+}
+
+fn extract_node_security_sink(
+    node_id: NodeId,
+    kind: AstKind<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+) -> Option<SecuritySinkIr> {
+    let (sink_kind, target_name, span) = match kind {
+        AstKind::JSXAttribute(attr) => {
+            let ident = attr.name.as_identifier()?;
+            if ident.name != "dangerouslySetInnerHTML" {
+                return None;
+            }
+            (
+                SecuritySinkKind::DangerouslySetInnerHtml,
+                "dangerouslySetInnerHTML".to_string(),
+                attr.span,
+            )
+        }
+        AstKind::AssignmentExpression(assign) => {
+            let AssignmentTarget::StaticMemberExpression(mem) = &assign.left else {
+                return None;
+            };
+            if mem.property.name != "innerHTML" && mem.property.name != "outerHTML" {
+                return None;
+            }
+            (
+                SecuritySinkKind::InnerHtmlAssignment,
+                mem.property.name.to_string(),
+                assign.span,
+            )
+        }
+        AstKind::CallExpression(call) => {
+            let Expression::Identifier(ident) = call.callee.without_parentheses() else {
+                return None;
+            };
+            if ident.name != "eval" {
+                return None;
+            }
+            (
+                SecuritySinkKind::DynamicCodeEval,
+                "eval".to_string(),
+                call.span,
+            )
+        }
+        AstKind::ComputedMemberExpression(comp) if is_dynamic_process_env_access(comp) => (
+            SecuritySinkKind::DynamicProcessEnv,
+            "process.env".to_string(),
+            comp.span,
+        ),
+        _ => return None,
+    };
+
+    let subject_name = find_enclosing_react_node(semantic, node_id)
+        .and_then(|subj_id| get_subject_name(semantic, subj_id));
+    Some(SecuritySinkIr {
+        kind: sink_kind,
+        target_name,
+        subject_name,
+        span: ByteSpan {
+            start: span.start,
+            end: span.end,
+        },
+        loc: loc_from_line_starts(line_starts, span.start),
+    })
+}
+
+fn is_dynamic_process_env_access(comp: &oxc_ast::ast::ComputedMemberExpression<'_>) -> bool {
+    let Expression::StaticMemberExpression(inner) = comp.object.without_parentheses() else {
+        return false;
+    };
+    inner.property.name == "env"
+        && matches!(
+            inner.object.without_parentheses(),
+            Expression::Identifier(id) if id.name == "process"
+        )
+        && !matches!(
+            comp.expression.without_parentheses(),
+            Expression::StringLiteral(_)
+        )
+}
+
+fn collect_unauthenticated_server_actions(
+    program: &Program<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    sinks: &mut Vec<SecuritySinkIr>,
+) {
+    for stmt in &program.body {
+        let Statement::ExportDeclaration(exp) = stmt else {
+            continue;
+        };
+        let Declaration::FunctionDeclaration(func) = &exp.declaration else {
+            continue;
+        };
+        if !func.r#async {
+            continue;
+        }
+        let (Some(id), Some(body)) = (&func.id, &func.body) else {
+            continue;
+        };
+        let body_text = body.span.source_text(semantic.source_text());
+        let has_auth_guard = AUTH_GUARD_FUNCTION_NAMES
+            .iter()
+            .any(|guard| body_text.contains(guard));
+        if !has_auth_guard {
+            sinks.push(SecuritySinkIr {
+                kind: SecuritySinkKind::UnauthenticatedServerAction,
+                target_name: id.name.to_string(),
+                subject_name: Some(id.name.to_string()),
+                span: ByteSpan {
+                    start: func.span.start,
+                    end: func.span.end,
+                },
+                loc: loc_from_line_starts(line_starts, func.span.start),
+            });
+        }
+    }
 }
 
 /// Extracts framework-specific semantic rule sites from the single-pass AST and scope tree.

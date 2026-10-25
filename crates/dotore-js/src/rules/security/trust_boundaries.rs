@@ -21,48 +21,72 @@ pub(super) fn check_electron_webview_bridge_risk(
     line_starts: &[u32],
     out: &mut Vec<Diagnostic>,
 ) {
-    let src = &file.source;
-    let has_electron_ctx = src.contains("electron")
-        || src.contains("BrowserWindow")
-        || src.contains("BrowserView")
-        || src.contains("WebContentsView")
-        || src.contains("webPreferences")
-        || src.contains("ipcMain")
-        || src.contains("shell.openExternal");
+    check_electron_web_preferences(file, line_starts, out);
+    check_electron_ipc_main_handlers(file, line_starts, out);
+    check_electron_shell_open_external(file, line_starts, out);
+    check_react_native_webview_props(file, out);
+}
 
-    // 1. Electron BrowserWindow / webPreferences flags
-    if has_electron_ctx {
-        for (idx, line) in src.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with('*') {
-                continue;
-            }
-            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-            let has_insecure_pref = compact.contains("nodeIntegration:true")
-                || compact.contains("nodeIntegrationInWorker:true")
-                || compact.contains("nodeIntegrationInSubFrames:true")
-                || compact.contains("contextIsolation:false")
-                || compact.contains("webSecurity:false")
-                || compact.contains("sandbox:false")
-                || compact.contains("allowRunningInsecureContent:true")
-                || compact.contains("enableRemoteModule:true");
-            if has_insecure_pref {
-                emit_line_diag(
-                    out,
-                    file,
-                    RuleId::ElectronWebviewBridgeRisk,
-                    "electronWebviewBridgeRisk",
-                    "webPreferences",
-                    "Electron `webPreferences` enables `nodeIntegration` or disables `contextIsolation`/`sandbox`/`webSecurity`, exposing native OS privileges to renderer content.",
-                    idx,
-                    line,
-                    line_starts,
-                );
-            }
+fn check_electron_web_preferences(
+    file: &FileIr,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
+    let src = &file.source;
+    let has_electron_ctx = [
+        "electron",
+        "BrowserWindow",
+        "BrowserView",
+        "WebContentsView",
+        "webPreferences",
+        "ipcMain",
+        "shell.openExternal",
+    ]
+    .iter()
+    .any(|kw| src.contains(kw));
+    if !has_electron_ctx {
+        return;
+    }
+    for (idx, line) in src.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        let has_insecure_pref = [
+            "nodeIntegration:true",
+            "nodeIntegrationInWorker:true",
+            "nodeIntegrationInSubFrames:true",
+            "contextIsolation:false",
+            "webSecurity:false",
+            "sandbox:false",
+            "allowRunningInsecureContent:true",
+            "enableRemoteModule:true",
+        ]
+        .iter()
+        .any(|p| compact.contains(p));
+        if has_insecure_pref {
+            emit_line_diag(
+                out,
+                file,
+                RuleId::ElectronWebviewBridgeRisk,
+                "electronWebviewBridgeRisk",
+                "webPreferences",
+                "Electron `webPreferences` enables `nodeIntegration` or disables `contextIsolation`/`sandbox`/`webSecurity`, exposing native OS privileges to renderer content.",
+                idx,
+                line,
+                line_starts,
+            );
         }
     }
+}
 
-    // 2. ipcMain.handle / ipcMain.on invoking privileged APIs without checking event.senderFrame
+fn check_electron_ipc_main_handlers(
+    file: &FileIr,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
+    let src = &file.source;
     for ipc_pat in ["ipcMain.handle(", "ipcMain.on("] {
         let mut search_from = 0;
         while let Some(rel) = src[search_from..].find(ipc_pat) {
@@ -107,46 +131,60 @@ pub(super) fn check_electron_webview_bridge_risk(
             search_from = hit + ipc_pat.len();
         }
     }
+}
 
-    // 3. Unvalidated `shell.openExternal(url)`
-    if src.contains("shell.openExternal(") {
-        let has_protocol_validation = (src.contains("new URL(")
-            && (src.contains(".protocol")
-                || src.contains(".origin")
-                || src.contains(".hostname")))
-            || src.contains(".startsWith(\"https://\")")
-            || src.contains(".startsWith('https://')")
-            || src.contains("ALLOWED_")
-            || src.contains("allowlist");
-        if !has_protocol_validation {
-            for (idx, line) in src.lines().enumerate() {
-                let Some(pos) = line.find("shell.openExternal(") else {
-                    continue;
-                };
-                let after = &line[pos + "shell.openExternal(".len()..];
-                let Some((arg_inside, _)) = split_balanced_parens(after) else {
-                    continue;
-                };
-                let is_static_safe = unquote_js_string_literal(arg_inside)
-                    .is_some_and(|lit| lit.starts_with("https://") || lit.starts_with("mailto:"));
-                if !is_static_safe {
-                    emit_line_diag(
-                        out,
-                        file,
-                        RuleId::ElectronWebviewBridgeRisk,
-                        "electronWebviewBridgeRisk",
-                        "shell.openExternal",
-                        "`shell.openExternal()` is called without validating that the target URL uses an allowlisted `https:` protocol.",
-                        idx,
-                        line,
-                        line_starts,
-                    );
-                }
-            }
+fn check_electron_shell_open_external(
+    file: &FileIr,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
+    let src = &file.source;
+    if !src.contains("shell.openExternal(") || has_shell_open_external_validation(src) {
+        return;
+    }
+    for (idx, line) in src.lines().enumerate() {
+        let Some(pos) = line.find("shell.openExternal(") else {
+            continue;
+        };
+        let after = &line[pos + "shell.openExternal(".len()..];
+        let Some((arg_inside, _)) = split_balanced_parens(after) else {
+            continue;
+        };
+        let is_static_safe = unquote_js_string_literal(arg_inside)
+            .is_some_and(|lit| lit.starts_with("https://") || lit.starts_with("mailto:"));
+        if !is_static_safe {
+            emit_line_diag(
+                out,
+                file,
+                RuleId::ElectronWebviewBridgeRisk,
+                "electronWebviewBridgeRisk",
+                "shell.openExternal",
+                "`shell.openExternal()` is called without validating that the target URL uses an allowlisted `https:` protocol.",
+                idx,
+                line,
+                line_starts,
+            );
         }
     }
+}
 
-    // 4. React Native `<WebView>` with file/universal access from file URLs
+fn has_shell_open_external_validation(src: &str) -> bool {
+    (src.contains("new URL(")
+        && [".protocol", ".origin", ".hostname"]
+            .iter()
+            .any(|p| src.contains(p)))
+        || [
+            ".startsWith(\"https://\")",
+            ".startsWith('https://')",
+            "ALLOWED_",
+            "allowlist",
+        ]
+        .iter()
+        .any(|p| src.contains(p))
+}
+
+fn check_react_native_webview_props(file: &FileIr, out: &mut Vec<Diagnostic>) {
+    let src = &file.source;
     for jsx in &file.jsx_elements {
         if jsx.name != "WebView" && !jsx.name.ends_with(".WebView") {
             continue;
@@ -190,40 +228,9 @@ pub(super) fn check_untrusted_host_header_origin(
 ) {
     let src = &file.source;
     let lower_src = src.to_ascii_lowercase();
-    let reads_untrusted_host = lower_src.contains("req.headers.host")
-        || lower_src.contains("req.headers[\"host\"]")
-        || lower_src.contains("req.headers['host']")
-        || lower_src.contains("req.headers[\"x-forwarded-host\"]")
-        || lower_src.contains("req.headers['x-forwarded-host']")
-        || lower_src.contains(".get(\"x-forwarded-host\")")
-        || lower_src.contains(".get('x-forwarded-host')")
-        || lower_src.contains("header(\"x-forwarded-host\")")
-        || lower_src.contains("header('x-forwarded-host')")
-        || ((lower_src.contains("headers") || lower_src.contains("req"))
-            && (lower_src.contains(".get(\"host\")")
-                || lower_src.contains(".get('host')")
-                || lower_src.contains("header(\"host\")")
-                || lower_src.contains("header('host')")));
-    if !reads_untrusted_host {
+    if !reads_untrusted_host_header(&lower_src) || has_host_header_allowlist(&lower_src) {
         return;
     }
-
-    let has_host_allowlist = lower_src.contains("allowed_hosts")
-        || lower_src.contains("allowedhosts")
-        || lower_src.contains("valid_hosts")
-        || lower_src.contains("validhosts")
-        || lower_src.contains("trusted_hosts")
-        || lower_src.contains("trustedhosts")
-        || lower_src.contains("allowlist")
-        || lower_src.contains("whitelist")
-        || lower_src.contains(".has(host)")
-        || lower_src.contains(".includes(host)")
-        || lower_src.contains(".has(forwardedhost)")
-        || lower_src.contains(".includes(forwardedhost)");
-    if has_host_allowlist {
-        return;
-    }
-
     let has_sensitive_url_purpose = [
         "reset",
         "magic",
@@ -244,17 +251,7 @@ pub(super) fn check_untrusted_host_header_origin(
     }
 
     for (idx, line) in src.lines().enumerate() {
-        let lower_line = line.to_ascii_lowercase();
-        let builds_url = (lower_line.contains("http://${")
-            || lower_line.contains("https://${")
-            || lower_line.contains("new url(")
-            || lower_line.contains("redirect_uri")
-            || lower_line.contains("callbackurl")
-            || lower_line.contains("reseturl")
-            || lower_line.contains("resetlink")
-            || lower_line.contains("magiclink"))
-            && (lower_line.contains("host") || lower_line.contains("origin"));
-        if builds_url {
+        if line_builds_url_from_host(&line.to_ascii_lowercase()) {
             emit_line_diag(
                 out,
                 file,
@@ -271,6 +268,66 @@ pub(super) fn check_untrusted_host_header_origin(
     }
 }
 
+fn reads_untrusted_host_header(lower_src: &str) -> bool {
+    [
+        "req.headers.host",
+        "req.headers[\"host\"]",
+        "req.headers['host']",
+        "req.headers[\"x-forwarded-host\"]",
+        "req.headers['x-forwarded-host']",
+        ".get(\"x-forwarded-host\")",
+        ".get('x-forwarded-host')",
+        "header(\"x-forwarded-host\")",
+        "header('x-forwarded-host')",
+    ]
+    .iter()
+    .any(|p| lower_src.contains(p))
+        || ((lower_src.contains("headers") || lower_src.contains("req"))
+            && [
+                ".get(\"host\")",
+                ".get('host')",
+                "header(\"host\")",
+                "header('host')",
+            ]
+            .iter()
+            .any(|p| lower_src.contains(p)))
+}
+
+fn has_host_header_allowlist(lower_src: &str) -> bool {
+    [
+        "allowed_hosts",
+        "allowedhosts",
+        "valid_hosts",
+        "validhosts",
+        "trusted_hosts",
+        "trustedhosts",
+        "allowlist",
+        "whitelist",
+        ".has(host)",
+        ".includes(host)",
+        ".has(forwardedhost)",
+        ".includes(forwardedhost)",
+    ]
+    .iter()
+    .any(|p| lower_src.contains(p))
+}
+
+fn line_builds_url_from_host(lower_line: &str) -> bool {
+    (lower_line.contains("host") || lower_line.contains("origin"))
+        && [
+            "http://${",
+            "https://${",
+            "new url(",
+            "redirect_uri",
+            "callbackurl",
+            "reseturl",
+            "resetlink",
+            "magiclink",
+        ]
+        .iter()
+        .any(|p| lower_line.contains(p))
+}
+
 pub(super) fn check_private_response_public_cache(
     file: &FileIr,
     line_starts: &[u32],
@@ -278,28 +335,7 @@ pub(super) fn check_private_response_public_cache(
 ) {
     let src = &file.source;
     let lower_src = src.to_ascii_lowercase();
-    if !lower_src.contains("cache-control") {
-        return;
-    }
-
-    let reads_private_auth = src.contains("cookies()")
-        || src.contains("req.cookies")
-        || src.contains("request.cookies")
-        || src.contains("ctx.cookies")
-        || lower_src.contains(".get(\"authorization\")")
-        || lower_src.contains(".get('authorization')")
-        || lower_src.contains("headers.authorization")
-        || lower_src.contains("headers[\"authorization\"]")
-        || lower_src.contains("headers['authorization']")
-        || lower_src.contains(".get(\"cookie\")")
-        || lower_src.contains(".get('cookie')")
-        || lower_src.contains("headers.cookie")
-        || find_standalone_call(src, "auth(").is_some()
-        || src.contains("getServerSession(")
-        || src.contains("currentUser(")
-        || src.contains("getSession(")
-        || src.contains("supabase.auth.getUser");
-    if !reads_private_auth {
+    if !lower_src.contains("cache-control") || !reads_private_auth_context(src, &lower_src) {
         return;
     }
 
@@ -328,71 +364,125 @@ pub(super) fn check_private_response_public_cache(
     }
 }
 
+fn reads_private_auth_context(src: &str, lower_src: &str) -> bool {
+    find_standalone_call(src, "auth(").is_some()
+        || [
+            "cookies()",
+            "req.cookies",
+            "request.cookies",
+            "ctx.cookies",
+            "getServerSession(",
+            "currentUser(",
+            "getSession(",
+            "supabase.auth.getUser",
+        ]
+        .iter()
+        .any(|p| src.contains(p))
+        || [
+            ".get(\"authorization\")",
+            ".get('authorization')",
+            "headers.authorization",
+            "headers[\"authorization\"]",
+            "headers['authorization']",
+            ".get(\"cookie\")",
+            ".get('cookie')",
+            "headers.cookie",
+        ]
+        .iter()
+        .any(|p| lower_src.contains(p))
+}
+
 pub(super) fn check_llm_prompt_role_and_tool_sink_risk(
     file: &FileIr,
     line_starts: &[u32],
     out: &mut Vec<Diagnostic>,
 ) {
-    let src = &file.source;
+    if file.source.is_empty() {
+        return;
+    }
+    check_llm_unfiltered_client_messages(file, line_starts, out);
+    check_llm_tools_missing_step_bound(file, line_starts, out);
+    check_llm_tool_execute_dangerous_sinks(file, line_starts, out);
+}
 
-    // 1. Unfiltered client `messages` passed into LLM completion APIs
-    let has_llm_call = src.contains(".chat.completions.create(")
-        || src.contains(".messages.create(")
-        || src.contains("generateText(")
-        || src.contains("streamText(")
-        || src.contains("generateObject(")
-        || src.contains("streamObject(");
-    if has_llm_call {
-        let filters_roles = src.contains(".filter(")
-            && (src.contains(".role") || src.contains("role ==="))
-            || src.contains("allowedRoles")
-            || src.contains("sanitizeMessages")
-            || src.contains("z.enum([\"user\"");
-        if !filters_roles {
-            let destructures_raw_messages = (src.contains("{ messages }")
-                || src.contains("{messages}"))
-                && (src.contains("req.json(")
-                    || src.contains("request.json(")
-                    || src.contains("req.body")
-                    || src.contains("request.body"));
-            for (idx, line) in src.lines().enumerate() {
-                let passes_raw_messages = line.contains("messages: req.body.messages")
-                    || line.contains("messages: request.body.messages")
-                    || line.contains("messages: body.messages")
-                    || line.contains("messages: input.messages")
-                    || line.contains("messages: params.messages")
-                    || (destructures_raw_messages
-                        && (line.contains("messages,")
-                            || line.contains("messages: messages")
-                            || line.contains("messages }")));
-                if passes_raw_messages {
-                    emit_line_diag(
-                        out,
-                        file,
-                        RuleId::LlmPromptRoleAndToolSinkRisk,
-                        "llmPromptRoleAndToolSinkRisk",
-                        "messages",
-                        "Raw client `messages` array is passed directly to an LLM API without filtering out `system`, `developer`, or `tool` roles.",
-                        idx,
-                        line,
-                        line_starts,
-                    );
-                }
-            }
+fn check_llm_unfiltered_client_messages(
+    file: &FileIr,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
+    let src = &file.source;
+    let has_llm_call = [
+        ".chat.completions.create(",
+        ".messages.create(",
+        "generateText(",
+        "streamText(",
+        "generateObject(",
+        "streamObject(",
+    ]
+    .iter()
+    .any(|p| src.contains(p));
+    if !has_llm_call || llm_src_filters_roles(src) {
+        return;
+    }
+    let destructures_raw_messages = (src.contains("{ messages }") || src.contains("{messages}"))
+        && ["req.json(", "request.json(", "req.body", "request.body"]
+            .iter()
+            .any(|p| src.contains(p));
+    for (idx, line) in src.lines().enumerate() {
+        if line_passes_raw_llm_messages(line, destructures_raw_messages) {
+            emit_line_diag(
+                out,
+                file,
+                RuleId::LlmPromptRoleAndToolSinkRisk,
+                "llmPromptRoleAndToolSinkRisk",
+                "messages",
+                "Raw client `messages` array is passed directly to an LLM API without filtering out `system`, `developer`, or `tool` roles.",
+                idx,
+                line,
+                line_starts,
+            );
         }
     }
+}
 
-    // 2. `generateText` / `streamText` with `tools` missing `maxSteps` or `stopWhen`
+fn llm_src_filters_roles(src: &str) -> bool {
+    (src.contains(".filter(") && (src.contains(".role") || src.contains("role ===")))
+        || ["allowedRoles", "sanitizeMessages", "z.enum([\"user\""]
+            .iter()
+            .any(|p| src.contains(p))
+}
+
+fn line_passes_raw_llm_messages(line: &str, destructures_raw_messages: bool) -> bool {
+    [
+        "messages: req.body.messages",
+        "messages: request.body.messages",
+        "messages: body.messages",
+        "messages: input.messages",
+        "messages: params.messages",
+    ]
+    .iter()
+    .any(|p| line.contains(p))
+        || (destructures_raw_messages
+            && ["messages,", "messages: messages", "messages }"]
+                .iter()
+                .any(|p| line.contains(p)))
+}
+
+fn check_llm_tools_missing_step_bound(
+    file: &FileIr,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
+    let src = &file.source;
     for call_name in ["generateText(", "streamText("] {
         let mut search_from = 0;
         while let Some(rel) = src[search_from..].find(call_name) {
             let hit = search_from + rel;
             let after = &src[hit + call_name.len()..];
             if let Some((call_inside, _)) = split_balanced_parens(after) {
-                let has_tools = call_inside.contains("tools:")
-                    || call_inside.contains("tools,")
-                    || call_inside.contains("tools }")
-                    || call_inside.contains("tools\n");
+                let has_tools = ["tools:", "tools,", "tools }", "tools\n"]
+                    .iter()
+                    .any(|p| call_inside.contains(p));
                 let has_step_bound =
                     call_inside.contains("maxSteps") || call_inside.contains("stopWhen");
                 if has_tools && !has_step_bound {
@@ -416,46 +506,65 @@ pub(super) fn check_llm_prompt_role_and_tool_sink_risk(
             search_from = hit + call_name.len();
         }
     }
+}
 
-    // 3. MCP / AI SDK tool `execute` handler passing tool arguments directly to dangerous sinks
+fn check_llm_tool_execute_dangerous_sinks(
+    file: &FileIr,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
+    let src = &file.source;
     let defines_tool = find_standalone_call(src, "tool(").is_some()
-        || src.contains("createTool(")
-        || src.contains("defineTool(")
-        || src.contains("server.tool(")
-        || src.contains("registerTool(");
+        || [
+            "createTool(",
+            "defineTool(",
+            "server.tool(",
+            "registerTool(",
+        ]
+        .iter()
+        .any(|p| src.contains(p));
     let has_sink_guard = (src.contains("path.resolve(") && src.contains(".startsWith("))
         || src.contains("ALLOWED_")
         || src.contains("allowlist");
-    if defines_tool && !has_sink_guard {
-        for (idx, line) in src.lines().enumerate() {
-            let has_execute_or_tool = line.contains("execute:")
-                || line.contains("server.tool(")
-                || line.contains("registerTool(")
-                || src.contains("execute:");
-            let has_dangerous_sink = find_standalone_call(line, "exec(").is_some()
-                || find_standalone_call(line, "execSync(").is_some()
-                || find_standalone_call(line, "spawn(").is_some()
-                || line.contains("fs.readFile")
-                || line.contains("fs.writeFile")
-                || line.contains("fs.unlink")
-                || line.contains("fs.rm")
-                || line.contains("$queryRawUnsafe(")
-                || line.contains("$executeRawUnsafe(");
-            if has_execute_or_tool && has_dangerous_sink {
-                emit_line_diag(
-                    out,
-                    file,
-                    RuleId::LlmPromptRoleAndToolSinkRisk,
-                    "llmPromptRoleAndToolSinkRisk",
-                    "execute",
-                    "Agent or MCP tool `execute` handler passes model-controlled arguments directly into a shell, filesystem, or raw SQL sink without allowlist validation.",
-                    idx,
-                    line,
-                    line_starts,
-                );
-            }
+    if !defines_tool || has_sink_guard {
+        return;
+    }
+    let src_has_execute = src.contains("execute:");
+    for (idx, line) in src.lines().enumerate() {
+        let has_execute_or_tool = src_has_execute
+            || ["execute:", "server.tool(", "registerTool("]
+                .iter()
+                .any(|p| line.contains(p));
+        if has_execute_or_tool && line_has_dangerous_tool_sink(line) {
+            emit_line_diag(
+                out,
+                file,
+                RuleId::LlmPromptRoleAndToolSinkRisk,
+                "llmPromptRoleAndToolSinkRisk",
+                "execute",
+                "Agent or MCP tool `execute` handler passes model-controlled arguments directly into a shell, filesystem, or raw SQL sink without allowlist validation.",
+                idx,
+                line,
+                line_starts,
+            );
         }
     }
+}
+
+fn line_has_dangerous_tool_sink(line: &str) -> bool {
+    find_standalone_call(line, "exec(").is_some()
+        || find_standalone_call(line, "execSync(").is_some()
+        || find_standalone_call(line, "spawn(").is_some()
+        || [
+            "fs.readFile",
+            "fs.writeFile",
+            "fs.unlink",
+            "fs.rm",
+            "$queryRawUnsafe(",
+            "$executeRawUnsafe(",
+        ]
+        .iter()
+        .any(|p| line.contains(p))
 }
 
 pub(super) fn check_supabase_service_role_unscoped_query(
@@ -464,12 +573,16 @@ pub(super) fn check_supabase_service_role_unscoped_query(
     out: &mut Vec<Diagnostic>,
 ) {
     let src = &file.source;
-    let uses_service_role = src.contains("SUPABASE_SERVICE_ROLE_KEY")
-        || src.contains("SUPABASE_SERVICE_KEY")
-        || src.contains("SERVICE_ROLE_KEY")
-        || src.contains("serviceRoleKey")
-        || src.contains("supabaseAdmin")
-        || src.contains("adminSupabase");
+    let uses_service_role = [
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_KEY",
+        "SERVICE_ROLE_KEY",
+        "serviceRoleKey",
+        "supabaseAdmin",
+        "adminSupabase",
+    ]
+    .iter()
+    .any(|p| src.contains(p));
     if !uses_service_role {
         return;
     }
@@ -486,48 +599,7 @@ pub(super) fn check_supabase_service_role_unscoped_query(
             .unwrap_or(tail.len());
         let chain = tail.get(..chain_end).unwrap_or(tail);
 
-        let has_data_op = chain.contains(".select(")
-            || chain.contains(".update(")
-            || chain.contains(".delete(")
-            || chain.contains(".upsert(");
-        let uses_request_param = chain.contains("req.")
-            || chain.contains("request.")
-            || chain.contains("params.")
-            || chain.contains("query.")
-            || chain.contains("body.")
-            || chain.contains("searchParams")
-            || chain.contains(".eq(\"id\"")
-            || chain.contains(".eq('id'");
-        let has_tenant_or_owner_scope = [
-            "\"user_id\"",
-            "'user_id'",
-            "\"userId\"",
-            "'userId'",
-            "\"tenant_id\"",
-            "'tenant_id'",
-            "\"tenantId\"",
-            "'tenantId'",
-            "\"org_id\"",
-            "'org_id'",
-            "\"orgId\"",
-            "'orgId'",
-            "\"organization_id\"",
-            "'organization_id'",
-            "\"owner_id\"",
-            "'owner_id'",
-            "\"ownerId\"",
-            "'ownerId'",
-            "\"account_id\"",
-            "'account_id'",
-            "\"workspace_id\"",
-            "'workspace_id'",
-            "\"team_id\"",
-            "'team_id'",
-        ]
-        .iter()
-        .any(|col| chain.contains(col));
-
-        if has_data_op && uses_request_param && !has_tenant_or_owner_scope {
+        if is_unscoped_supabase_request_chain(chain) {
             let byte_start = u32::try_from(hit + 1).unwrap_or(0);
             let byte_end = byte_start + 4;
             push_sec_diag(
@@ -546,4 +618,52 @@ pub(super) fn check_supabase_service_role_unscoped_query(
         }
         search_from = hit + ".from(".len();
     }
+}
+
+fn is_unscoped_supabase_request_chain(chain: &str) -> bool {
+    let has_data_op = [".select(", ".update(", ".delete(", ".upsert("]
+        .iter()
+        .any(|p| chain.contains(p));
+    let uses_request_param = [
+        "req.",
+        "request.",
+        "params.",
+        "query.",
+        "body.",
+        "searchParams",
+        ".eq(\"id\"",
+        ".eq('id'",
+    ]
+    .iter()
+    .any(|p| chain.contains(p));
+    let has_tenant_or_owner_scope = [
+        "\"user_id\"",
+        "'user_id'",
+        "\"userId\"",
+        "'userId'",
+        "\"tenant_id\"",
+        "'tenant_id'",
+        "\"tenantId\"",
+        "'tenantId'",
+        "\"org_id\"",
+        "'org_id'",
+        "\"orgId\"",
+        "'orgId'",
+        "\"organization_id\"",
+        "'organization_id'",
+        "\"owner_id\"",
+        "'owner_id'",
+        "\"ownerId\"",
+        "'ownerId'",
+        "\"account_id\"",
+        "'account_id'",
+        "\"workspace_id\"",
+        "'workspace_id'",
+        "\"team_id\"",
+        "'team_id'",
+    ]
+    .iter()
+    .any(|col| chain.contains(col));
+
+    has_data_op && uses_request_param && !has_tenant_or_owner_scope
 }

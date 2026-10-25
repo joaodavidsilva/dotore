@@ -4,33 +4,31 @@
     reason = "oxc_ast AST enums have 200+ variants; collection and loop detectors match only relevant AST node kinds"
 )]
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::{collections::HashSet, path::Path};
 
 use oxc_ast::{
     AstKind,
     ast::{
         Argument, ArrowFunctionBody, CallExpression, Expression, IfStatement, LogicalOperator,
-        NewExpression, ObjectPropertyKind, Statement, UnaryOperator,
+        ObjectPropertyKind, Statement, UnaryOperator,
     },
 };
 use oxc_semantic::{NodeId, Semantic};
 use oxc_span::{GetSpan, Span};
 
-use super::{
-    CHAINABLE_ITERATION_METHODS, INTL_CLASSES, belongs_directly_to_loop,
-    collect_callee_identifier_trail,
+pub(super) use super::loop_hoisting_and_lookups::{
+    check_js_cache_property_access_in_loop, check_js_hoist_intl, check_js_hoist_regexp_call,
+    check_js_index_maps_in_loop, check_js_set_map_lookups_in_loop,
 };
+
+use super::CHAINABLE_ITERATION_METHODS;
 use crate::{
     ir::{
         react_ast::{find_enclosing_react_node, get_subject_name, is_component_name},
         types::SemanticRuleSite,
     },
     matchers::{
-        is_global_ident, push_semantic_site, push_semantic_site_with_fix, resolve_ident_symbol,
-        span_to_byte_span, unwrap_expr,
+        push_semantic_site, push_semantic_site_with_fix, span_to_byte_span, unwrap_expr,
     },
     rules::{AutofixPatch, RuleId},
 };
@@ -46,14 +44,52 @@ pub(super) fn check_no_spread_accumulator_in_reduce(
     line_starts: &[u32],
     out: &mut Vec<SemanticRuleSite>,
 ) {
-    let Expression::StaticMemberExpression(callee_mem) = unwrap_expr(&call.callee) else {
+    let Some((acc_name, body_span)) = extract_reduce_accumulator_and_body(call) else {
         return;
     };
-    let method = callee_mem.property.name.as_str();
-    if method != "reduce" && method != "reduceRight" {
-        return;
+
+    for (_, inner_node) in semantic.nodes().iter_enumerated() {
+        if !body_span.contains_inclusive(inner_node.span()) {
+            continue;
+        }
+        let spread_span = match inner_node.kind() {
+            AstKind::ObjectExpression(obj)
+                if object_spreads_and_grows_accumulator(obj, acc_name) =>
+            {
+                Some(obj.span)
+            }
+            AstKind::ArrayExpression(arr) if array_spreads_and_grows_accumulator(arr, acc_name) => {
+                Some(arr.span)
+            }
+            _ => None,
+        };
+        if let Some(target_span) = spread_span {
+            let subject_name = find_enclosing_react_node(semantic, node_id)
+                .and_then(|id| get_subject_name(semantic, id));
+            push_semantic_site(
+                out,
+                RuleId::NoSpreadAccumulatorInReduce,
+                subject_name,
+                "noSpreadAccumulatorInReduce",
+                acc_name,
+                "This is O(n²) because spreading the accumulator copies the entire growing collection every step. Mutate and return the accumulator instead (acc[key] = value; return acc).".to_string(),
+                line_starts,
+                target_span,
+            );
+            return;
+        }
     }
-    // Skip small inline literal array receiver (`[1, 2, 3].reduce(...)`)
+}
+
+fn extract_reduce_accumulator_and_body<'a>(
+    call: &'a CallExpression<'a>,
+) -> Option<(&'a str, Span)> {
+    let Expression::StaticMemberExpression(callee_mem) = unwrap_expr(&call.callee) else {
+        return None;
+    };
+    if !matches!(callee_mem.property.name.as_str(), "reduce" | "reduceRight") {
+        return None;
+    }
     if let Expression::ArrayExpression(arr) = unwrap_expr(&callee_mem.object)
         && arr.elements.len() <= 8
         && arr
@@ -61,127 +97,70 @@ pub(super) fn check_no_spread_accumulator_in_reduce(
             .iter()
             .all(|e| !matches!(e, oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)))
     {
-        return;
+        return None;
     }
-
-    let Some(seed_expr) = call.arguments.get(1).and_then(Argument::as_expression) else {
-        return;
-    };
+    let seed_expr = call.arguments.get(1)?.as_expression()?;
     if !matches!(
         unwrap_expr(seed_expr),
         Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
     ) {
-        return;
+        return None;
     }
-
-    let Some(cb_expr) = call.arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-    let (acc_name, body_span) = match unwrap_expr(cb_expr) {
-        Expression::ArrowFunctionExpression(arrow) => {
-            if arrow.r#async {
-                return;
-            }
-            let Some(first_param) = arrow.params.items.first() else {
-                return;
-            };
-            let Some(id) = first_param.pattern.get_binding_identifier() else {
-                return;
-            };
-            (id.name.as_str(), arrow.body.span())
+    let cb_expr = call.arguments.first()?.as_expression()?;
+    match unwrap_expr(cb_expr) {
+        Expression::ArrowFunctionExpression(arrow) if !arrow.r#async => {
+            let id = arrow.params.items.first()?.pattern.get_binding_identifier()?;
+            Some((id.name.as_str(), arrow.body.span()))
         }
-        Expression::FunctionExpression(func) => {
-            if func.r#async || func.generator {
-                return;
-            }
-            let Some(first_param) = func.params.items.first() else {
-                return;
-            };
-            let Some(id) = first_param.pattern.get_binding_identifier() else {
-                return;
-            };
-            let Some(body) = &func.body else {
-                return;
-            };
-            (id.name.as_str(), body.span)
+        Expression::FunctionExpression(func) if !func.r#async && !func.generator => {
+            let id = func.params.items.first()?.pattern.get_binding_identifier()?;
+            let body = func.body.as_ref()?;
+            Some((id.name.as_str(), body.span))
         }
-        _ => return,
-    };
-
-    for (_, inner_node) in semantic.nodes().iter_enumerated() {
-        if !body_span.contains_inclusive(inner_node.span()) {
-            continue;
-        }
-        match inner_node.kind() {
-            AstKind::ObjectExpression(obj) => {
-                let spreads_acc = obj.properties.iter().any(|p| {
-                    if let ObjectPropertyKind::SpreadProperty(sp) = p
-                        && let Expression::Identifier(id) = unwrap_expr(&sp.argument)
-                    {
-                        id.name == acc_name
-                    } else {
-                        false
-                    }
-                });
-                let grows_keys = obj.properties.iter().any(|p| match p {
-                    ObjectPropertyKind::ObjectProperty(prop) => prop.computed,
-                    ObjectPropertyKind::SpreadProperty(sp) => {
-                        !matches!(unwrap_expr(&sp.argument), Expression::Identifier(id) if id.name == acc_name)
-                            && !matches!(unwrap_expr(&sp.argument), Expression::ObjectExpression(_))
-                    }
-                });
-                if spreads_acc && grows_keys {
-                    let subject_name = find_enclosing_react_node(semantic, node_id)
-                        .and_then(|id| get_subject_name(semantic, id));
-                    push_semantic_site(
-                        out,
-                        RuleId::NoSpreadAccumulatorInReduce,
-                        subject_name,
-                        "noSpreadAccumulatorInReduce",
-                        acc_name,
-                        "This is O(n²) because spreading the accumulator copies the entire growing collection every step. Mutate and return the accumulator instead (acc[key] = value; return acc).".to_string(),
-                        line_starts,
-                        obj.span,
-                    );
-                    return;
-                }
-            }
-            AstKind::ArrayExpression(arr) => {
-                let spreads_acc = arr.elements.iter().any(|e| {
-                    if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(sp) = e
-                        && let Expression::Identifier(id) = unwrap_expr(&sp.argument)
-                    {
-                        id.name == acc_name
-                    } else {
-                        false
-                    }
-                });
-                let grows_elems = arr.elements.iter().any(|e| match e {
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(sp) => {
-                        !matches!(unwrap_expr(&sp.argument), Expression::Identifier(id) if id.name == acc_name)
-                    }
-                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => false,
-                    _ => true,
-                });
-                if spreads_acc && grows_elems {
-                    let subject_name = find_enclosing_react_node(semantic, node_id)
-                        .and_then(|id| get_subject_name(semantic, id));
-                    push_semantic_site(
-                        out,
-                        RuleId::NoSpreadAccumulatorInReduce,
-                        subject_name,
-                        "noSpreadAccumulatorInReduce",
-                        acc_name,
-                        "This is O(n²) because spreading the accumulator copies the entire growing collection every step. Mutate and return the accumulator instead (acc[key] = value; return acc).".to_string(),
-                        line_starts,
-                        arr.span,
-                    );
-                    return;
-                }
-            }
-            _ => {}
-        }
+        _ => None,
     }
+}
+
+fn object_spreads_and_grows_accumulator(
+    obj: &oxc_ast::ast::ObjectExpression<'_>,
+    acc_name: &str,
+) -> bool {
+    let spreads_acc = obj.properties.iter().any(|p| {
+        matches!(
+            p,
+            ObjectPropertyKind::SpreadProperty(sp)
+                if matches!(unwrap_expr(&sp.argument), Expression::Identifier(id) if id.name == acc_name)
+        )
+    });
+    let grows_keys = obj.properties.iter().any(|p| match p {
+        ObjectPropertyKind::ObjectProperty(prop) => prop.computed,
+        ObjectPropertyKind::SpreadProperty(sp) => {
+            !matches!(unwrap_expr(&sp.argument), Expression::Identifier(id) if id.name == acc_name)
+                && !matches!(unwrap_expr(&sp.argument), Expression::ObjectExpression(_))
+        }
+    });
+    spreads_acc && grows_keys
+}
+
+fn array_spreads_and_grows_accumulator(
+    arr: &oxc_ast::ast::ArrayExpression<'_>,
+    acc_name: &str,
+) -> bool {
+    let spreads_acc = arr.elements.iter().any(|e| {
+        matches!(
+            e,
+            oxc_ast::ast::ArrayExpressionElement::SpreadElement(sp)
+                if matches!(unwrap_expr(&sp.argument), Expression::Identifier(id) if id.name == acc_name)
+        )
+    });
+    let grows_elems = arr.elements.iter().any(|e| match e {
+        oxc_ast::ast::ArrayExpressionElement::SpreadElement(sp) => {
+            !matches!(unwrap_expr(&sp.argument), Expression::Identifier(id) if id.name == acc_name)
+        }
+        oxc_ast::ast::ArrayExpressionElement::Elision(_) => false,
+        _ => true,
+    });
+    spreads_acc && grows_elems
 }
 
 // ---------------------------------------------------------------------------
@@ -794,376 +773,6 @@ pub(super) fn check_js_length_check_first(
     );
 }
 
-// ---------------------------------------------------------------------------
-// 4. `js-hoist-intl` & `js-hoist-regexp`
-// ---------------------------------------------------------------------------
-
-pub(super) fn check_js_hoist_intl(
-    node_id: NodeId,
-    new_expr: &NewExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    let Expression::StaticMemberExpression(mem) = unwrap_expr(&new_expr.callee) else {
-        return;
-    };
-    let class_name = mem.property.name.as_str();
-    if !INTL_CLASSES.contains(&class_name) {
-        return;
-    }
-    let Expression::Identifier(intl_id) = unwrap_expr(&mem.object) else {
-        return;
-    };
-    if intl_id.name != "Intl" || !is_global_ident(semantic, intl_id) {
-        return;
-    }
-
-    let mut in_fn = false;
-    for anc_id in semantic.nodes().ancestor_ids(node_id).skip(1) {
-        match semantic.nodes().kind(anc_id) {
-            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
-                in_fn = true;
-                if let AstKind::CallExpression(call) = semantic.nodes().parent_kind(anc_id) {
-                    let trail = collect_callee_identifier_trail(&call.callee);
-                    if trail
-                        .first()
-                        .is_some_and(|n| matches!(n.as_str(), "useMemo" | "useCallback" | "useRef"))
-                    {
-                        return;
-                    }
-                }
-                break;
-            }
-            AstKind::TryStatement(_) => return,
-            _ => {}
-        }
-    }
-    if !in_fn {
-        return;
-    }
-
-    let subject_name =
-        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
-    push_semantic_site(
-        out,
-        RuleId::JsHoistIntl,
-        subject_name,
-        "jsHoistIntl",
-        &format!("Intl.{class_name}"),
-        format!(
-            "This is slow because new Intl.{class_name}() rebuilds on every call inside a function, so move it to the top of the file, or wrap it in useMemo"
-        ),
-        line_starts,
-        new_expr.span,
-    );
-}
-
-pub(super) fn check_js_hoist_regexp_call(
-    node_id: NodeId,
-    span: Span,
-    callee: &Expression<'_>,
-    arguments: &[Argument<'_>],
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    let Expression::Identifier(callee_id) = unwrap_expr(callee) else {
-        return;
-    };
-    if callee_id.name != "RegExp" || !is_global_ident(semantic, callee_id) {
-        return;
-    }
-    let Some(first_arg) = arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-    let is_static_pat = match unwrap_expr(first_arg) {
-        Expression::StringLiteral(_) | Expression::RegExpLiteral(_) => true,
-        Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty(),
-        _ => false,
-    };
-    if !is_static_pat {
-        return;
-    }
-    if let Some(flags_arg) = arguments.get(1).and_then(Argument::as_expression) {
-        if let Expression::StringLiteral(flags_lit) = unwrap_expr(flags_arg) {
-            let f = flags_lit.value.as_str().unwrap_or_default();
-            if f.contains('g') || f.contains('y') {
-                return;
-            }
-        } else {
-            return;
-        }
-    }
-
-    let in_loop = semantic
-        .nodes()
-        .ancestor_ids(node_id)
-        .skip(1)
-        .any(|anc_id| {
-            matches!(
-                semantic.nodes().kind(anc_id),
-                AstKind::ForStatement(_)
-                    | AstKind::ForOfStatement(_)
-                    | AstKind::ForInStatement(_)
-                    | AstKind::WhileStatement(_)
-                    | AstKind::DoWhileStatement(_)
-            )
-        });
-    if !in_loop {
-        return;
-    }
-
-    let subject_name =
-        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
-    push_semantic_site(
-        out,
-        RuleId::JsHoistRegexp,
-        subject_name,
-        "jsHoistRegexp",
-        "RegExp",
-        "`new RegExp()` rebuilds the pattern on every loop pass. Move it to a constant outside the loop.".to_string(),
-        line_starts,
-        span,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 5. `js-index-maps`, `js-set-map-lookups`, `js-cache-property-access`
-// ---------------------------------------------------------------------------
-
-pub(super) fn check_js_index_maps_in_loop(
-    loop_node_id: NodeId,
-    loop_span: Span,
-    loop_body_span: Span,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    for (node_id, node) in semantic.nodes().iter_enumerated() {
-        if !loop_body_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        if !belongs_directly_to_loop(semantic, node_id, loop_node_id) {
-            continue;
-        }
-        let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
-            continue;
-        };
-        let method = mem.property.name.as_str();
-        if method != "find" && method != "findIndex" {
-            continue;
-        }
-        let Expression::Identifier(recv_id) = unwrap_expr(&mem.object) else {
-            continue;
-        };
-        // Skip SCREAMING_SNAKE_CASE constant tables
-        if recv_id
-            .name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-        {
-            continue;
-        }
-        // Skip if receiver is declared inside the loop
-        if let Some(sym_id) = resolve_ident_symbol(semantic, recv_id) {
-            let decl_span = semantic
-                .nodes()
-                .get_node(semantic.scoping().symbol_declaration(sym_id))
-                .span();
-            if loop_span.contains_inclusive(decl_span) {
-                continue;
-            }
-        }
-        let Some(cb_arg) = call.arguments.first().and_then(Argument::as_expression) else {
-            continue;
-        };
-        let Expression::ArrowFunctionExpression(arrow) = unwrap_expr(cb_arg) else {
-            continue;
-        };
-        let body_src = arrow.body.span().source_text(semantic.source_text());
-        if !body_src.contains("===") && !body_src.contains("==") {
-            continue;
-        }
-
-        let subject_name = find_enclosing_react_node(semantic, node_id)
-            .and_then(|id| get_subject_name(semantic, id));
-        push_semantic_site(
-            out,
-            RuleId::JsIndexMaps,
-            subject_name,
-            "jsIndexMaps",
-            method,
-            format!(
-                "This gets slow as your list grows because array.{method}() runs inside a loop, so build a Map once before the loop for instant lookups"
-            ),
-            line_starts,
-            call.span,
-        );
-    }
-}
-
-pub(super) fn check_js_set_map_lookups_in_loop(
-    loop_node_id: NodeId,
-    loop_span: Span,
-    loop_body_span: Span,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    for (node_id, node) in semantic.nodes().iter_enumerated() {
-        if !loop_body_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        if !belongs_directly_to_loop(semantic, node_id, loop_node_id) {
-            continue;
-        }
-        let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
-            continue;
-        };
-        let method = mem.property.name.as_str();
-        if method != "includes" && method != "indexOf" {
-            continue;
-        }
-        if call.arguments.len() != 1 {
-            continue;
-        }
-        let Expression::Identifier(recv_id) = unwrap_expr(&mem.object) else {
-            continue;
-        };
-        if recv_id
-            .name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-        {
-            continue;
-        }
-        if let Some(sym_id) = resolve_ident_symbol(semantic, recv_id) {
-            let decl_span = semantic
-                .nodes()
-                .get_node(semantic.scoping().symbol_declaration(sym_id))
-                .span();
-            if loop_span.contains_inclusive(decl_span) {
-                continue;
-            }
-        }
-        if let Some(arg) = call.arguments.first().and_then(Argument::as_expression)
-            && matches!(unwrap_expr(arg), Expression::StringLiteral(_))
-        {
-            continue;
-        }
-
-        let subject_name = find_enclosing_react_node(semantic, node_id)
-            .and_then(|id| get_subject_name(semantic, id));
-        push_semantic_site(
-            out,
-            RuleId::JsSetMapLookups,
-            subject_name,
-            "jsSetMapLookups",
-            &format!("{}.{method}", recv_id.name),
-            format!(
-                "Calling `{}.{method}()` inside a loop scans the array on every iteration; convert `{}` to a `Set` before the loop for O(1) lookups.",
-                recv_id.name, recv_id.name
-            ),
-            line_starts,
-            call.span,
-        );
-    }
-}
-
-pub(super) fn check_js_cache_property_access_in_loop(
-    loop_node_id: NodeId,
-    loop_body_span: Span,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    let mut counts: HashMap<String, (usize, Span)> = HashMap::new();
-    let mut written: HashSet<String> = HashSet::new();
-
-    for (node_id, node) in semantic.nodes().iter_enumerated() {
-        if !loop_body_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        if !belongs_directly_to_loop(semantic, node_id, loop_node_id) {
-            continue;
-        }
-        match node.kind() {
-            AstKind::AssignmentExpression(assign) => {
-                let lhs = assign
-                    .left
-                    .span()
-                    .source_text(semantic.source_text())
-                    .trim();
-                written.insert(lhs.to_string());
-            }
-            AstKind::UpdateExpression(upd) => {
-                let arg = upd
-                    .argument
-                    .span()
-                    .source_text(semantic.source_text())
-                    .trim();
-                written.insert(arg.to_string());
-            }
-            AstKind::StaticMemberExpression(mem) => {
-                let parent_kind = semantic.nodes().parent_kind(node_id);
-                if matches!(
-                    parent_kind,
-                    AstKind::StaticMemberExpression(_) | AstKind::CallExpression(_)
-                ) {
-                    continue;
-                }
-                if let AstKind::AssignmentExpression(assign) = parent_kind
-                    && assign.left.span() == mem.span
-                {
-                    continue;
-                }
-                let raw = mem.span.source_text(semantic.source_text()).trim();
-                if raw.contains('(') || raw.contains('[') || raw.contains(' ') {
-                    continue;
-                }
-                if raw.split('.').count() < 3 || raw.ends_with(".length") {
-                    continue;
-                }
-                let entry = counts.entry(raw.to_string()).or_insert((0, mem.span));
-                entry.0 += 1;
-            }
-            _ => {}
-        }
-    }
-
-    for (key, (count, first_span)) in counts {
-        if count < 3 {
-            continue;
-        }
-        if written
-            .iter()
-            .any(|w| key == *w || key.starts_with(&format!("{w}.")))
-        {
-            continue;
-        }
-        let subject_name = find_enclosing_react_node(semantic, loop_node_id)
-            .and_then(|id| get_subject_name(semantic, id));
-        push_semantic_site(
-            out,
-            RuleId::JsCachePropertyAccess,
-            subject_name,
-            "jsCachePropertyAccess",
-            &key,
-            format!(
-                "This may slow the loop because {key} is read {count} times inside it; if the value stays unchanged between those reads, cache it immediately before the first read"
-            ),
-            line_starts,
-            first_span,
-        );
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 6. `js-tosorted-immutable` & `js-early-exit`

@@ -1,662 +1,42 @@
 //! Clap command-line argument definitions and subcommand runners (`check`, `design`, `fix`,
 //! `plan`, `score`, `report`, `search`, `scan`, `rules`, `why`, `ci`, `install`).
 
+mod args;
+
 use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use clap::{Args, Parser, Subcommand};
-
-use crate::{
-    BlockingLevel, BuildRuntimeScanReportInput, CiOptions, CiProviderKind, CliOverrides,
-    ConfigMutation, DiffScope, HandoffTarget, InstallOptions, PrCommentRepoContext,
-    PrescriptionTier, RUNTIME_SCAN_LOCAL_DEV_PORTS, RecordRuntimeTraceInput, RuleCategory, RuleId,
-    RuleSeverity, RuleSeverityOverride, RuleTag, RulesListOptions, RuntimeScanFormat, ScanOptions,
-    SearchOptions, SymbolKind, apply_autofixes, build_rule_catalog, build_runtime_scan_report,
-    ci_config, ci_install, ci_upgrade, detect_available_coding_agents, detect_local_runtime_urls,
-    execute_handoff, explain_location, explain_rule, format_design_report,
-    format_design_report_pretty, format_fix_report, format_install_report, format_plan_report,
-    format_rule_catalog_text, format_rule_explanation_text, format_runtime_scan_error_report,
-    format_runtime_scan_report, format_search_json, format_search_text, format_terminal_report,
-    format_terminal_report_pretty, format_why_report_text, generate_ci_comment, install_dotore,
-    load_config_from_dir, load_preferred_handoff_target, mutate_config_in_dir, plan_project,
-    progress::LiveSpinner,
-    prompt_runtime_scan_url_with_io, record_runtime_trace, render_github_pr_comment_from_env,
-    render_html_report, resolve_dotore_home_dir, resolve_runtime_scan_format,
-    resolve_scan_exit_code, scan_design, scan_workspace_with_overrides, search_symbols_with_cache,
-    should_highlight_stdout,
-    tui::{run_interactive_tui, should_launch_tui},
-    validate_warning_exit_code, write_and_open_html_report, write_diagnostics_bundle,
-    write_github_pr_comment, write_json_report,
+pub use self::args::{
+    CheckArgs, CiArgs, Cli, Commands, FixArgs, InstallArgs, PlanArgs, ReportArgs, RulesArgs,
+    ScanArgs, SearchArgs, WhyArgs,
 };
-
-/// Top-level `dotore` CLI parser.
-#[derive(Debug, Parser)]
-#[command(
-    name = "dotore",
-    version,
-    about = "Pure-Rust React and TypeScript static analyzer, deterministic auto-fixer, and remediation engine."
-)]
-pub struct Cli {
-    /// Optional subcommand (`check`, `fix`, `plan`, `score`, `report`, `search`, `scan`, `rules`, `why`, `design`, `ci`, `install`).
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-
-    /// Default `check` arguments when no explicit subcommand is passed.
-    #[command(flatten)]
-    pub(crate) check_args: CheckArgs,
-}
-
-/// Subcommands supported by the `dotore` binary.
-#[derive(Debug, Subcommand)]
-pub enum Commands {
-    /// Scan files or directories and report unnecessary effects and state cascades.
-    Check(CheckArgs),
-    /// Apply safe deterministic (`Autofix`-tier) rewrites directly in Rust.
-    Fix(FixArgs),
-    /// Generate deterministic `NNN-<slug>.md` execution plans and a prioritized `README.md` index.
-    Plan(PlanArgs),
-    /// Compute and print the local `0..=100` Health Score across files or directories.
-    Score(CheckArgs),
-    /// Generate a self-contained visual HTML report with Render Cascade diagrams.
-    Report(ReportArgs),
-    /// Fuzzy-search declared Symbol Outlines across files or directories.
-    Search(SearchArgs),
-    /// Profile live React interactions in Chrome via CDP and save a `.json.gz` trace.
-    Scan(ScanArgs),
-    /// Inspect and configure the compiled-in rule catalog (`list`, `explain`, `enable`, `disable`, `set`, `category`, `ignore-tag`, `unignore-tag`).
-    Rules(RulesArgs),
-    /// Explain why a diagnostic fired (or why a rule or suppression did or did not apply) at `<file:line>` and output its Fix Capsule.
-    Why(WhyArgs),
-    /// Run a focused UI design audit enabling all `design`-tagged rules while skipping unrelated passes.
-    Design(CheckArgs),
-    /// Generate, upgrade, and configure CI pull-request workflows (`install`, `upgrade`, `config`).
-    Ci(CiArgs),
-    /// Install the unified `/dotore` agent skill, `package.json` script, and git/agent hooks.
-    #[command(alias = "init")]
-    Install(InstallArgs),
-}
-
-/// Output format for `dotore check`, `dotore design`, and `dotore report`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum OutputFormat {
-    /// Human-readable terminal output.
-    Text,
-    /// Machine-readable JSON report.
-    Json,
-    /// Self-contained visual HTML report (`dotore report`).
-    Html,
-    /// Deterministic pull-request Markdown summary comment (`<!-- dotore:summary -->`).
-    #[value(
-        name = "github-pr-comment",
-        alias = "pr-comment",
-        alias = "github-pr",
-        alias = "markdown"
-    )]
-    GithubPrComment,
-}
-
-/// CLI arguments for `dotore check`, `dotore score`, and `dotore design`.
-#[derive(Debug, Clone, Args)]
-pub struct CheckArgs {
-    /// Files or directories to scan (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub(crate) paths: Vec<PathBuf>,
-
-    /// Emit machine-readable JSON output for agents and skills.
-    #[arg(long)]
-    pub(crate) json: bool,
-
-    /// Output format (`text`, `json`, `html`, or `github-pr-comment` / `pr-comment`).
-    #[arg(long = "format", value_enum, value_name = "FORMAT")]
-    format: Option<OutputFormat>,
-    /// Write the versioned machine-readable JSON report to a file on disk.
-    #[arg(long = "json-out", value_name = "FILE")]
-    pub(crate) json_out: Option<PathBuf>,
-
-    /// Print only the numeric `0..=100` Health Score to stdout.
-    #[arg(long)]
-    pub(crate) score: bool,
-
-    /// Git diff scan scope (`full`, `changed`, `contextual`, `lines`).
-    #[arg(long, default_value = "full", value_name = "SCOPE")]
-    pub(crate) scope: String,
-
-    /// Base git branch, revision, or commit range (`A..B`, `A...B`) for diff scopes.
-    #[arg(long = "base", value_name = "REF")]
-    pub(crate) base_ref: Option<String>,
-
-    /// Restrict scan to staged git index changes (`git diff --cached`).
-    #[arg(long)]
-    pub(crate) staged: bool,
-
-    /// Compare against a saved baseline JSON report or git revision as a fingerprint multiset.
-    #[arg(long, value_name = "REPORT_JSON")]
-    pub(crate) baseline: Option<PathBuf>,
-
-    /// Severity threshold that blocks CI (`error`, `warning`, `none`).
-    #[arg(long, value_name = "LEVEL")]
-    pub(crate) blocking: Option<String>,
-
-    /// Custom exit code (`2..=255`) returned when warnings are present and no blocking errors occurred.
-    #[arg(long = "warning-exit-code", value_name = "CODE")]
-    pub(crate) warning_exit_code: Option<u32>,
-
-    /// Exit with code 0 even when diagnostics are found (alias for `--blocking none`).
-    #[arg(long)]
-    pub(crate) no_fail: bool,
-
-    /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
-    #[arg(long)]
-    pub(crate) include_tests: bool,
-
-    /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
-    #[arg(long)]
-    pub(crate) no_inline_disables: bool,
-
-    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
-    #[arg(long)]
-    pub(crate) custom_rules_only: bool,
-
-    /// Ignore rules carrying the specified tag (repeatable or comma-separated, e.g. `--ignore-tag design`).
-    #[arg(long = "ignore-tag", value_name = "TAG", value_delimiter = ',')]
-    pub(crate) ignore_tags: Vec<String>,
-
-    /// Explicit path to a `dotore.config.*` file.
-    #[arg(long, value_name = "FILE")]
-    pub(crate) config: Option<PathBuf>,
-
-    /// Filter by rule ID or legacy alias (repeatable or comma-separated, e.g. `--rule no-derived-state`).
-    #[arg(long = "rule", value_name = "RULE_ID", value_delimiter = ',')]
-    pub(crate) rules: Vec<String>,
-
-    /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
-    #[arg(long = "category", value_name = "CATEGORY", value_delimiter = ',')]
-    pub(crate) categories: Vec<String>,
-
-    /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.; repeatable or comma-separated).
-    #[arg(long = "only", value_name = "FILTER", value_delimiter = ',')]
-    pub(crate) only: Vec<String>,
-
-    /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
-    #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
-    pub(crate) tiers: Vec<String>,
-
-    /// Disable the interactive TUI explorer when running in a terminal.
-    #[arg(long = "no-pager")]
-    pub(crate) no_pager: bool,
-
-    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
-    #[arg(long = "no-cache")]
-    pub(crate) no_cache: bool,
-    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
-    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub(crate) projects: Vec<String>,
-
-    /// Hand off findings to a coding agent or output (`print`, `clipboard`, `claude`, `codex`, `cursor`, `amp`, `opencode`).
-    #[arg(
-        long = "handoff",
-        value_name = "TARGET",
-        num_args = 0..=1,
-        default_missing_value = "auto"
-    )]
-    pub(crate) handoff: Option<String>,
-}
-
-/// CLI arguments for `dotore fix`.
-#[derive(Debug, Clone, Args)]
-pub struct FixArgs {
-    /// Files or directories to scan and fix (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub(crate) paths: Vec<PathBuf>,
-
-    /// Preview planned fixes without writing to disk.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
-
-    /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
-    #[arg(long)]
-    pub(crate) include_tests: bool,
-
-    /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
-    #[arg(long)]
-    pub(crate) no_inline_disables: bool,
-
-    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
-    #[arg(long)]
-    pub(crate) custom_rules_only: bool,
-
-    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
-    #[arg(long = "ignore-tag", value_name = "TAG")]
-    pub(crate) ignore_tags: Vec<String>,
-
-    /// Explicit path to a `dotore.config.*` file.
-    #[arg(long, value_name = "FILE")]
-    pub(crate) config: Option<PathBuf>,
-
-    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
-    #[arg(long = "no-cache")]
-    pub(crate) no_cache: bool,
-    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
-    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub(crate) projects: Vec<String>,
-}
-
-/// CLI arguments for `dotore plan`.
-#[derive(Debug, Clone, Args)]
-pub struct PlanArgs {
-    /// Files or directories to scan and plan (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub(crate) paths: Vec<PathBuf>,
-
-    /// Output directory for generated `NNN-<slug>.md` plans and `README.md` index.
-    #[arg(short, long = "out", default_value = "plans", value_name = "DIR")]
-    pub(crate) out: PathBuf,
-
-    /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
-    #[arg(long)]
-    pub(crate) include_tests: bool,
-
-    /// Bypass inline disable comments (`// dotore-disable-next-line`, `// eslint-disable-next-line`, `// oxlint-disable-next-line`).
-    #[arg(long)]
-    pub(crate) no_inline_disables: bool,
-
-    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
-    #[arg(long)]
-    pub(crate) custom_rules_only: bool,
-
-    /// Ignore rules carrying the specified tag (repeatable, e.g. `--ignore-tag design`).
-    #[arg(long = "ignore-tag", value_name = "TAG")]
-    pub(crate) ignore_tags: Vec<String>,
-
-    /// Explicit path to a `dotore.config.*` file.
-    #[arg(long, value_name = "FILE")]
-    pub(crate) config: Option<PathBuf>,
-
-    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
-    #[arg(long = "no-cache")]
-    pub(crate) no_cache: bool,
-    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
-    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub(crate) projects: Vec<String>,
-
-    /// Synthesize a coding-agent handoff prompt and write a diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`).
-    #[arg(long)]
-    pub(crate) handoff: bool,
-
-    /// Explicit directory for the diagnostics bundle (`diagnostics.json` + `<rule-id>.txt`, defaults to `--out`).
-    #[arg(long = "bundle-dir", value_name = "DIR")]
-    pub(crate) bundle_dir: Option<PathBuf>,
-}
-
-/// CLI arguments for `dotore report`.
-#[derive(Debug, Clone, Args)]
-pub struct ReportArgs {
-    /// Files or directories to scan (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub(crate) paths: Vec<PathBuf>,
-
-    /// Output HTML file path (defaults to a fresh temp directory).
-    #[arg(short, long, value_name = "FILE")]
-    pub(crate) output: Option<PathBuf>,
-
-    /// Output format (`html`, `json`, `text`, or `github-pr-comment` / `pr-comment`).
-    #[arg(long = "format", value_enum, value_name = "FORMAT")]
-    format: Option<OutputFormat>,
-    /// Do not open the generated HTML file in the system browser.
-    #[arg(long)]
-    pub(crate) no_open: bool,
-
-    /// Include test files (`.test.*`, `.spec.*`, `__tests__`).
-    #[arg(long)]
-    pub(crate) include_tests: bool,
-
-    /// Bypass inline disable comments.
-    #[arg(long)]
-    pub(crate) no_inline_disables: bool,
-
-    /// Disable rules originally ported from external plugins unless explicitly enabled in config.
-    #[arg(long)]
-    pub(crate) custom_rules_only: bool,
-
-    /// Ignore rules carrying the specified tag (repeatable or comma-separated, e.g. `--ignore-tag design`).
-    #[arg(long = "ignore-tag", value_name = "TAG", value_delimiter = ',')]
-    pub(crate) ignore_tags: Vec<String>,
-
-    /// Explicit path to a `dotore.config.*` file.
-    #[arg(long, value_name = "FILE")]
-    pub(crate) config: Option<PathBuf>,
-
-    /// Filter by rule ID or legacy alias (repeatable or comma-separated).
-    #[arg(long = "rule", value_name = "RULE_ID", value_delimiter = ',')]
-    pub(crate) rules: Vec<String>,
-
-    /// Filter by rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability` / `architecture`).
-    #[arg(long = "category", value_name = "CATEGORY", value_delimiter = ',')]
-    pub(crate) categories: Vec<String>,
-
-    /// Filter by rule ID, prefix, or category (`arch`, `architecture`, `py-`, `rs-`, etc.; repeatable or comma-separated).
-    #[arg(long = "only", value_name = "FILTER", value_delimiter = ',')]
-    pub(crate) only: Vec<String>,
-
-    /// Filter by Prescription Tier (`autofix`, `surgical`, `refactor`; repeatable or comma-separated).
-    #[arg(long = "tier", value_name = "TIER", value_delimiter = ',')]
-    pub(crate) tiers: Vec<String>,
-
-    /// Bypass the persistent workspace scan result cache (`~/.dotore/cache/scan-results.json`).
-    #[arg(long = "no-cache")]
-    pub(crate) no_cache: bool,
-    /// Filter to specific workspace package(s) by name or relative path (repeatable or comma-separated).
-    #[arg(long = "project", value_name = "PROJECT", value_delimiter = ',')]
-    pub(crate) projects: Vec<String>,
-}
-
-/// Output format for `dotore search`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum SearchFormat {
-    /// Human-readable terminal output.
-    Text,
-    /// Machine-readable JSON report.
-    Json,
-}
-
-/// CLI arguments for `dotore search`.
-#[derive(Debug, Clone, Args)]
-pub struct SearchArgs {
-    /// Fuzzy query string matched against symbol names.
-    #[arg(value_name = "QUERY")]
-    pub(crate) query: String,
-
-    /// Files or directories to search (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub(crate) paths: Vec<PathBuf>,
-
-    /// Comma-separated symbol kinds to include (default: class,enum,function,interface,method,property,type).
-    #[arg(short = 'k', long = "kind", value_name = "KINDS")]
-    pub(crate) kind: Option<String>,
-
-    /// Maximum number of ranked matches to return.
-    #[arg(short = 'l', long = "limit", default_value_t = 50, value_name = "N")]
-    pub(crate) limit: usize,
-
-    /// Output format (`text` or `json`).
-    #[arg(short = 'f', long = "format", value_enum, default_value_t = SearchFormat::Text, value_name = "FORMAT")]
-    format: SearchFormat,
-
-    /// Disable ANSI syntax highlighting in text output.
-    #[arg(long)]
-    pub(crate) no_color: bool,
-
-    /// Bypass reading and writing the persistent per-project Symbol Outline disk cache.
-    #[arg(long = "no-cache")]
-    pub(crate) no_cache: bool,
-}
-
-/// CLI arguments for `dotore scan`.
-#[derive(Debug, Clone, Args)]
-pub struct ScanArgs {
-    /// Target `http://` or `https://` URL to profile (optional in interactive terminals).
-    #[arg(value_name = "URL")]
-    pub(crate) url: Option<String>,
-
-    /// Connect to an existing debug-enabled Chrome instance (`ws://...` or `http://...`).
-    #[arg(long, value_name = "URL")]
-    pub(crate) cdp: Option<String>,
-
-    /// Output path for the compressed `.json.gz` DevTools trace.
-    #[arg(long = "trace-out", value_name = "FILE")]
-    pub(crate) trace_out: Option<PathBuf>,
-
-    /// Output format (`text`, `json`, or `jsonl`).
-    #[arg(long, value_name = "FORMAT")]
-    pub(crate) format: Option<String>,
-}
-
-/// CLI arguments for `dotore rules`.
-#[derive(Debug, Clone, Args)]
-pub struct RulesArgs {
-    /// Rules subcommand (`list`, `explain`, `enable`, `disable`, `set`, `category`, `ignore-tag`, `unignore-tag`).
-    #[command(subcommand)]
-    command: RulesSubcommand,
-}
-
-/// Subcommands under `dotore rules`.
-#[derive(Debug, Clone, Subcommand)]
-enum RulesSubcommand {
-    /// List all available rules with their effective severities.
-    List(RulesListArgs),
-    /// Render the rationale, examples, configuration snippet, and Prescription Tier for a rule.
-    Explain(RulesExplainArgs),
-    /// Enable a rule in `dotore.config.*` or `package.json#dotore`.
-    Enable(RulesEnableArgs),
-    /// Disable a rule (`"off"`) in `dotore.config.*` or `package.json#dotore`.
-    Disable(RulesDisableArgs),
-    /// Set a rule's severity (`off`, `warn`, `error`) in `dotore.config.*` or `package.json#dotore`.
-    Set(RulesSetArgs),
-    /// Set a category's severity (`off`, `warn`, `error`) in `dotore.config.*` or `package.json#dotore`.
-    Category(RulesCategoryArgs),
-    /// Add a rule tag to `ignore.tags` in `dotore.config.*` or `package.json#dotore`.
-    #[command(name = "ignore-tag")]
-    IgnoreTag(RulesTagArgs),
-    /// Remove a rule tag from `ignore.tags` in `dotore.config.*` or `package.json#dotore`.
-    #[command(name = "unignore-tag")]
-    UnignoreTag(RulesTagArgs),
-}
-
-/// CLI arguments for `dotore rules list`.
-#[derive(Debug, Clone, Args)]
-struct RulesListArgs {
-    /// Filter by category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability`).
-    #[arg(long, value_name = "CATEGORY")]
-    pub category: Option<String>,
-
-    /// Filter by behavioral tag (`design`, `test-noise`, `r3f`, etc.).
-    #[arg(long, value_name = "TAG")]
-    pub tag: Option<String>,
-
-    /// Filter by capability or framework (`react`, `nextjs`, `tanstack-query`, `three`, `global`, etc.).
-    #[arg(long, value_name = "FRAMEWORK")]
-    pub framework: Option<String>,
-
-    /// Only show rules with explicit configuration overrides.
-    #[arg(long)]
-    pub configured: bool,
-
-    /// Emit machine-readable JSON array.
-    #[arg(long)]
-    pub json: bool,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore rules explain`.
-#[derive(Debug, Clone, Args)]
-struct RulesExplainArgs {
-    /// Rule ID, qualified key (`dotore/<id>`), or legacy alias (`effect/<id>`, `react/<id>`).
-    #[arg(value_name = "RULE")]
-    pub rule: String,
-
-    /// Emit machine-readable JSON object.
-    #[arg(long)]
-    pub json: bool,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore rules enable`.
-#[derive(Debug, Clone, Args)]
-struct RulesEnableArgs {
-    /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
-    #[arg(value_name = "RULE")]
-    pub rule: String,
-
-    /// Severity to enable the rule at (`warn` or `error`; defaults to the rule's default severity).
-    #[arg(long, value_name = "SEVERITY")]
-    pub severity: Option<String>,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore rules disable`.
-#[derive(Debug, Clone, Args)]
-struct RulesDisableArgs {
-    /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
-    #[arg(value_name = "RULE")]
-    pub rule: String,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore rules set`.
-#[derive(Debug, Clone, Args)]
-struct RulesSetArgs {
-    /// Rule ID, qualified key (`dotore/<id>`), or legacy alias.
-    #[arg(value_name = "RULE")]
-    pub rule: String,
-
-    /// Target severity (`off`, `warn`, or `error`).
-    #[arg(value_name = "SEVERITY")]
-    pub severity: String,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore rules category`.
-#[derive(Debug, Clone, Args)]
-struct RulesCategoryArgs {
-    /// Rule category (`Bugs`, `Performance`, `Accessibility`, `Security`, `Maintainability`).
-    #[arg(value_name = "CATEGORY")]
-    pub category: String,
-
-    /// Target severity (`off`, `warn`, or `error`).
-    #[arg(value_name = "SEVERITY")]
-    pub severity: String,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore rules ignore-tag` and `dotore rules unignore-tag`.
-#[derive(Debug, Clone, Args)]
-struct RulesTagArgs {
-    /// Behavioral tag (`design`, `test-noise`, `r3f`, etc.).
-    #[arg(value_name = "TAG")]
-    pub tag: String,
-
-    /// Working directory for resolving `dotore.config.*` or `package.json#dotore`.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore why`.
-#[derive(Debug, Clone, Args)]
-pub struct WhyArgs {
-    /// Source location (`<file:line>` or `<file:line:column>`).
-    #[arg(value_name = "FILE:LINE")]
-    pub(crate) location: String,
-
-    /// Emit machine-readable JSON output.
-    #[arg(long)]
-    pub(crate) json: bool,
-
-    /// Working directory for resolving project configuration and cross-file callers.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub(crate) cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore ci`.
-#[derive(Debug, Clone, Args)]
-pub struct CiArgs {
-    /// CI workflow subcommand (`install`, `upgrade`, `config`, `comment`).
-    #[command(subcommand)]
-    command: Option<CiSubcommand>,
-
-    /// Default `install` arguments when no explicit subcommand is passed.
-    #[command(flatten)]
-    action_args: CiActionArgs,
-}
-
-/// Subcommands under `dotore ci`.
-#[derive(Debug, Clone, Subcommand)]
-enum CiSubcommand {
-    /// Generate a CI pull-request workflow (`.github/workflows/dotore.yml` or `.gitlab-ci.yml`).
-    Install(CiActionArgs),
-    /// Upgrade an existing CI workflow to the latest `dotore` v2 configuration.
-    Upgrade(CiActionArgs),
-    /// Update `blocking` or `scope` settings in an existing CI workflow.
-    Config(CiActionArgs),
-    /// Render a deterministic `<!-- dotore:summary -->` pull-request Markdown comment from a saved JSON report.
-    Comment(CiCommentArgs),
-}
-
-/// CLI arguments for `dotore ci comment`.
-#[derive(Debug, Clone, Args)]
-struct CiCommentArgs {
-    /// Path to the saved JSON report file (`report.json`).
-    #[arg(value_name = "REPORT_JSON")]
-    pub report: PathBuf,
-
-    /// Optional output Markdown file path (`-o comment.md`).
-    #[arg(short = 'o', long = "output", value_name = "FILE")]
-    pub output: Option<PathBuf>,
-}
-
-/// CLI arguments for `dotore ci install`, `dotore ci upgrade`, and `dotore ci config`.
-#[derive(Debug, Clone, Args)]
-struct CiActionArgs {
-    /// CI provider (`github-actions` or `gitlab-ci`).
-    #[arg(long, value_name = "PROVIDER")]
-    pub provider: Option<String>,
-
-    /// Gate blocking level (`none`, `warning`, or `error`).
-    #[arg(long, value_name = "LEVEL")]
-    pub blocking: Option<String>,
-
-    /// Diff scope (`changed`, `contextual`, `lines`, or `full`).
-    #[arg(long, value_name = "SCOPE")]
-    pub scope: Option<String>,
-
-    /// Non-interactive confirmation flag.
-    #[arg(short = 'y', long)]
-    pub yes: bool,
-
-    /// Target repository directory.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub cwd: PathBuf,
-}
-
-/// CLI arguments for `dotore install`.
-#[derive(Debug, Clone, Args)]
-pub struct InstallArgs {
-    /// Accept all setup steps non-interactively (skill, script, git hook, agent hooks).
-    #[arg(short = 'y', long)]
-    pub(crate) yes: bool,
-
-    /// Print planned file operations without writing to disk.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
-
-    /// Install agent stop hooks (`.claude/settings.json` and `.claude/hooks/dotore.mjs`).
-    #[arg(long)]
-    pub(crate) agent_hooks: bool,
-
-    /// Target project root directory.
-    #[arg(long, default_value = ".", value_name = "DIR")]
-    pub(crate) cwd: PathBuf,
-}
+use self::args::{
+    CiSubcommand, OutputFormat, RulesEnableArgs, RulesExplainArgs, RulesListArgs, RulesSubcommand,
+    SearchFormat, build_scan_options, resolve_check_gate_params, resolve_check_handoff_and_paths,
+};
+use crate::{
+    BuildRuntimeScanReportInput, CiOptions, CiProviderKind, CliOverrides, ConfigMutation,
+    DiffScope, HandoffTarget, InstallOptions, PrCommentRepoContext, PrescriptionTier,
+    RUNTIME_SCAN_LOCAL_DEV_PORTS, RecordRuntimeTraceInput, RuleCategory, RuleId, RuleSeverity,
+    RuleSeverityOverride, RuleTag, RulesListOptions, RuntimeScanFormat, ScanOptions, SearchOptions,
+    SymbolKind, apply_autofixes, build_rule_catalog, build_runtime_scan_report, ci_config,
+    ci_install, ci_upgrade, detect_local_runtime_urls, execute_handoff, explain_location,
+    explain_rule, format_design_report, format_design_report_pretty, format_fix_report,
+    format_install_report, format_plan_report, format_rule_catalog_text,
+    format_rule_explanation_text, format_runtime_scan_error_report, format_runtime_scan_report,
+    format_search_json, format_search_text, format_terminal_report, format_terminal_report_pretty,
+    format_why_report_text, generate_ci_comment, install_dotore, load_config_from_dir,
+    mutate_config_in_dir, plan_project, progress::LiveSpinner, prompt_runtime_scan_url_with_io,
+    record_runtime_trace, render_github_pr_comment_from_env, render_html_report,
+    resolve_dotore_home_dir, resolve_runtime_scan_format, resolve_scan_exit_code, scan_design,
+    scan_workspace_with_overrides, search_symbols_with_cache, should_highlight_stdout,
+    tui::{run_interactive_tui, should_launch_tui},
+    write_and_open_html_report, write_diagnostics_bundle, write_github_pr_comment,
+    write_json_report,
+};
 
 /// Dispatches a parsed [`Cli`] invocation to its corresponding subcommand runner and returns the process [`ExitCode`].
 #[must_use]
@@ -681,206 +61,58 @@ pub fn run_cli(cli: Cli) -> ExitCode {
     }
 }
 
-fn resolve_enabled_rules(
-    rule_strs: &[String],
-    category_strs: &[String],
-    only_strs: &[String],
-) -> Result<Option<Vec<RuleId>>, String> {
-    let mut rules: Vec<RuleId> = Vec::new();
 
-    for r in rule_strs
-        .iter()
-        .flat_map(|s| s.split(','))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let Some(parsed) = RuleId::parse(r) else {
-            return Err(format!("Unknown rule ID: {r:?}"));
-        };
-        if !rules.contains(&parsed) {
-            rules.push(parsed);
-        }
-    }
-
-    for trimmed in category_strs
-        .iter()
-        .flat_map(|s| s.split(','))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if trimmed.eq_ignore_ascii_case("arch") || trimmed.eq_ignore_ascii_case("architecture") {
-            for meta in crate::rule_registry() {
-                if (meta.category == RuleCategory::Maintainability
-                    || meta.id.is_architecture_soc_or_reuse_rule())
-                    && !rules.contains(&meta.id)
-                {
-                    rules.push(meta.id);
-                }
-            }
-        } else if let Some(parsed_cat) = RuleCategory::parse(trimmed) {
-            for meta in crate::rule_registry() {
-                if meta.category == parsed_cat && !rules.contains(&meta.id) {
-                    rules.push(meta.id);
-                }
-            }
-        } else {
-            return Err(format!(
-                "Unknown rule category: {trimmed:?} (expected Bugs, Performance, Accessibility, Security, Maintainability, or Architecture)"
-            ));
-        }
-    }
-
-    for trimmed in only_strs
-        .iter()
-        .flat_map(|s| s.split(','))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(exact) = RuleId::parse(trimmed) {
-            if !rules.contains(&exact) {
-                rules.push(exact);
-            }
-            continue;
-        }
-        if lower == "arch" || lower == "architecture" {
-            for meta in crate::rule_registry() {
-                if (meta.id.is_architecture_soc_or_reuse_rule()
-                    || meta.canonical_id.contains("arch")
-                    || meta.category == RuleCategory::Maintainability)
-                    && !rules.contains(&meta.id)
-                {
-                    rules.push(meta.id);
-                }
-            }
-            continue;
-        }
-        if let Some(parsed_cat) = RuleCategory::parse(trimmed) {
-            for meta in crate::rule_registry() {
-                if meta.category == parsed_cat && !rules.contains(&meta.id) {
-                    rules.push(meta.id);
-                }
-            }
-            continue;
-        }
-        let mut matched_prefix = false;
-        for meta in crate::rule_registry() {
-            if meta.canonical_id.starts_with(&lower) {
-                matched_prefix = true;
-                if !rules.contains(&meta.id) {
-                    rules.push(meta.id);
-                }
-            }
-        }
-        if !matched_prefix {
-            return Err(format!("Unknown --only filter: {trimmed:?}"));
-        }
-    }
-    Ok((!rules.is_empty()).then_some(rules))
-}
-
-fn build_scan_options(
-    paths: &[PathBuf],
-    include_tests: bool,
-    rule_strs: &[String],
-    category_strs: &[String],
-    only_strs: &[String],
-    tier_strs: &[String],
-) -> Result<ScanOptions, String> {
-    let rules = resolve_enabled_rules(rule_strs, category_strs, only_strs)?;
-
-    let mut tiers = Vec::with_capacity(tier_strs.len());
-    for t in tier_strs {
-        let Some(parsed) = PrescriptionTier::parse(t) else {
-            return Err(format!(
-                "Unknown prescription tier: {t:?} (expected autofix, surgical, or refactor)"
-            ));
-        };
-        tiers.push(parsed);
-    }
-
-    Ok(ScanOptions {
-        paths: paths.to_vec(),
-        include_tests,
-        rules,
-        tiers: (!tiers.is_empty()).then_some(tiers),
-    })
-}
-
-fn resolve_auto_handoff_target() -> HandoffTarget {
-    let available = detect_available_coding_agents();
-    let preferred = load_preferred_handoff_target();
-    if let Some(pref) = preferred
-        && pref.binary_name().is_some()
-        && available.contains(&pref)
-    {
-        return pref;
-    }
-    if let Some(&first_agent) = available.first() {
-        return first_agent;
-    }
-    preferred.unwrap_or(HandoffTarget::Print)
-}
-
-fn resolve_check_handoff_and_paths(
+fn emit_check_output(
     args: &CheckArgs,
-) -> Result<(Option<HandoffTarget>, Vec<PathBuf>), String> {
-    let mut effective_paths = args.paths.clone();
-    let Some(raw_target) = args.handoff.as_deref() else {
-        return Ok((None, effective_paths));
-    };
-    if raw_target.eq_ignore_ascii_case("auto") {
-        return Ok((Some(resolve_auto_handoff_target()), effective_paths));
+    report: &crate::JsonReport,
+    resolved_handoff: Option<HandoffTarget>,
+) -> Result<(), String> {
+    if let Some(out_path) = &args.json_out {
+        write_json_report(report, out_path)
+            .map_err(|err| format!("writing JSON report to {}: {err}", out_path.display()))?;
     }
-    if let Some(parsed) = HandoffTarget::parse(raw_target) {
-        return Ok((Some(parsed), effective_paths));
+
+    let is_json = args.json || args.format == Some(OutputFormat::Json);
+    if let Some(target) = resolved_handoff {
+        let bundle_dir = resolve_dotore_home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("handoff-bundle");
+        let output = execute_handoff(report, target, &bundle_dir)
+            .map_err(|err| format!("executing handoff: {err}"))?;
+        print!("{output}");
+    } else if args.score {
+        println!("{}", report.summary.health_score);
+    } else if is_json {
+        let json = serde_json::to_string_pretty(report)
+            .map_err(|err| format!("serializing JSON: {err}"))?;
+        println!("{json}");
+    } else if args.format == Some(OutputFormat::GithubPrComment) {
+        print!("{}", render_github_pr_comment_from_env(report));
+    } else if args.format == Some(OutputFormat::Html) {
+        print!("{}", render_html_report(report));
+    } else if args.format != Some(OutputFormat::Text) && should_launch_tui(args.no_pager) {
+        let color = should_highlight_stdout(false);
+        if !run_interactive_tui(report, false) {
+            print!("{}", format_terminal_report_pretty(report, color));
+        }
+    } else if io::stdout().is_terminal() {
+        let color = should_highlight_stdout(false);
+        print!("{}", format_terminal_report_pretty(report, color));
+    } else {
+        print!("{}", format_terminal_report(report));
     }
-    let candidate_path = Path::new(raw_target);
-    if candidate_path.exists() {
-        effective_paths.insert(0, candidate_path.to_path_buf());
-        return Ok((Some(resolve_auto_handoff_target()), effective_paths));
-    }
-    Err(format!(
-        "Unknown --handoff target {raw_target:?} (expected print, clipboard, claude, codex, cursor, amp, or opencode)"
-    ))
+    Ok(())
 }
 
 /// Runs `dotore check` (or `dotore score` when `args.score` is `true`).
 #[must_use]
 fn run_check(args: &CheckArgs) -> ExitCode {
-    let Some(scope) = DiffScope::parse(&args.scope) else {
-        eprintln!(
-            "error: Unknown --scope {:?} (expected full, changed, contextual, or lines)",
-            args.scope
-        );
-        return ExitCode::from(2);
-    };
-
-    let blocking = if args.no_fail {
-        BlockingLevel::None
-    } else if let Some(raw_blocking) = &args.blocking {
-        let Some(parsed) = BlockingLevel::parse(raw_blocking) else {
-            eprintln!(
-                "error: Unknown --blocking {raw_blocking:?} (expected error, warning, or none)"
-            );
+    let (scope, blocking, warning_exit_code) = match resolve_check_gate_params(args) {
+        Ok(params) => params,
+        Err(msg) => {
+            eprintln!("error: {msg}");
             return ExitCode::from(2);
-        };
-        parsed
-    } else if args.warning_exit_code.is_some() {
-        BlockingLevel::Error
-    } else {
-        BlockingLevel::Warning
-    };
-
-    let warning_exit_code = match args.warning_exit_code {
-        Some(raw) => match validate_warning_exit_code(raw) {
-            Ok(valid) => Some(valid),
-            Err(msg) => {
-                eprintln!("error: {msg}");
-                return ExitCode::from(2);
-            }
-        },
-        None => None,
+        }
     };
 
     let (resolved_handoff, effective_paths) = match resolve_check_handoff_and_paths(args) {
@@ -919,22 +151,12 @@ fn run_check(args: &CheckArgs) -> ExitCode {
         projects: args.projects.clone(),
     };
 
-    let is_json = args.json || args.format == Some(OutputFormat::Json);
-    let is_pr_comment = args.format == Some(OutputFormat::GithubPrComment);
-    let is_html = args.format == Some(OutputFormat::Html);
-    let is_explicit_text = args.format == Some(OutputFormat::Text);
     let show_live_spinner = !args.score
-        && !is_json
-        && !is_pr_comment
-        && !is_html
-        && !is_explicit_text
+        && !args.json
+        && args.format.is_none()
         && resolved_handoff.is_none()
         && should_launch_tui(args.no_pager);
-    let spinner_guard = if show_live_spinner {
-        LiveSpinner::start()
-    } else {
-        None
-    };
+    let spinner_guard = show_live_spinner.then(LiveSpinner::start).flatten();
     let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
         Ok(res) => res,
         Err(err) => {
@@ -945,49 +167,11 @@ fn run_check(args: &CheckArgs) -> ExitCode {
     };
     drop(spinner_guard);
 
-    if let Some(out_path) = &args.json_out
-        && let Err(err) = write_json_report(&report, out_path)
-    {
-        eprintln!("error writing JSON report to {}: {err}", out_path.display());
+    if let Err(err) = emit_check_output(args, &report, resolved_handoff) {
+        eprintln!("error {err}");
         return ExitCode::from(2);
     }
 
-    if let Some(target) = resolved_handoff {
-        let bundle_dir = resolve_dotore_home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("handoff-bundle");
-        match execute_handoff(&report, target, &bundle_dir) {
-            Ok(output) => print!("{output}"),
-            Err(err) => {
-                eprintln!("error executing handoff: {err}");
-                return ExitCode::from(2);
-            }
-        }
-    } else if args.score {
-        println!("{}", report.summary.health_score);
-    } else if is_json {
-        match serde_json::to_string_pretty(&report) {
-            Ok(json) => println!("{json}"),
-            Err(err) => {
-                eprintln!("error serializing JSON: {err}");
-                return ExitCode::from(2);
-            }
-        }
-    } else if is_pr_comment {
-        print!("{}", render_github_pr_comment_from_env(&report));
-    } else if is_html {
-        print!("{}", render_html_report(&report));
-    } else if !is_explicit_text && should_launch_tui(args.no_pager) {
-        let color = should_highlight_stdout(false);
-        if !run_interactive_tui(&report, false) {
-            print!("{}", format_terminal_report_pretty(&report, color));
-        }
-    } else if io::stdout().is_terminal() {
-        let color = should_highlight_stdout(false);
-        print!("{}", format_terminal_report_pretty(&report, color));
-    } else {
-        print!("{}", format_terminal_report(&report));
-    }
     let code = resolve_scan_exit_code(&report.diagnostics, blocking, warning_exit_code);
     ExitCode::from(code)
 }
@@ -1108,6 +292,43 @@ fn run_plan(args: &PlanArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn emit_pr_comment_report(output: Option<&Path>, report: &crate::JsonReport) -> ExitCode {
+    let ctx = PrCommentRepoContext::from_env();
+    if let Some(out_path) = output {
+        match write_github_pr_comment(report, out_path, &ctx) {
+            Ok(md) => {
+                print!("{md}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error writing PR comment: {err}");
+                ExitCode::from(2)
+            }
+        }
+    } else {
+        print!("{}", render_github_pr_comment_from_env(report));
+        ExitCode::SUCCESS
+    }
+}
+
+fn emit_json_report_output(output: Option<&Path>, report: &crate::JsonReport) -> ExitCode {
+    if let Some(out_path) = output {
+        if let Err(err) = write_json_report(report, out_path) {
+            eprintln!("error writing JSON report: {err}");
+            return ExitCode::from(2);
+        }
+    } else {
+        match serde_json::to_string_pretty(report) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!("error serializing JSON: {err}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// Runs `dotore report`.
 #[must_use]
 fn run_report(args: &ReportArgs) -> ExitCode {
@@ -1137,11 +358,7 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         no_cache: args.no_cache,
         projects: args.projects.clone(),
     };
-    let spinner_guard = if should_launch_tui(false) {
-        LiveSpinner::start()
-    } else {
-        None
-    };
+    let spinner_guard = should_launch_tui(false).then(LiveSpinner::start).flatten();
     let (report, _) = match scan_workspace_with_overrides(&options, &overrides) {
         Ok(res) => res,
         Err(err) => {
@@ -1151,42 +368,12 @@ fn run_report(args: &ReportArgs) -> ExitCode {
         }
     };
     drop(spinner_guard);
+
     match args.format {
         Some(OutputFormat::GithubPrComment) => {
-            let ctx = PrCommentRepoContext::from_env();
-            if let Some(out_path) = &args.output {
-                match write_github_pr_comment(&report, out_path, &ctx) {
-                    Ok(md) => {
-                        print!("{md}");
-                        ExitCode::SUCCESS
-                    }
-                    Err(err) => {
-                        eprintln!("error writing PR comment: {err}");
-                        ExitCode::from(2)
-                    }
-                }
-            } else {
-                print!("{}", render_github_pr_comment_from_env(&report));
-                ExitCode::SUCCESS
-            }
+            emit_pr_comment_report(args.output.as_deref(), &report)
         }
-        Some(OutputFormat::Json) => {
-            if let Some(out_path) = &args.output {
-                if let Err(err) = write_json_report(&report, out_path) {
-                    eprintln!("error writing JSON report: {err}");
-                    return ExitCode::from(2);
-                }
-            } else {
-                match serde_json::to_string_pretty(&report) {
-                    Ok(json) => println!("{json}"),
-                    Err(err) => {
-                        eprintln!("error serializing JSON: {err}");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            ExitCode::SUCCESS
-        }
+        Some(OutputFormat::Json) => emit_json_report_output(args.output.as_deref(), &report),
         Some(OutputFormat::Text) => {
             let text = format_terminal_report(&report);
             if let Some(out_path) = &args.output
@@ -1376,98 +563,109 @@ fn run_scan(args: &ScanArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_rules_list(list_args: &RulesListArgs) -> ExitCode {
+    let config = load_config_from_dir(&list_args.cwd);
+    let entries = build_rule_catalog(
+        &config,
+        &RulesListOptions {
+            category: list_args.category.clone(),
+            tag: list_args.tag.clone(),
+            framework: list_args.framework.clone(),
+            configured: list_args.configured,
+        },
+    );
+    if list_args.json {
+        match serde_json::to_string_pretty(&entries) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!("error serializing rules JSON: {err}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        print!("{}", format_rule_catalog_text(&entries));
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_rules_explain(explain_args: &RulesExplainArgs) -> ExitCode {
+    let config = load_config_from_dir(&explain_args.cwd);
+    let Some(entry) = explain_rule(&explain_args.rule, &config) else {
+        eprintln!(
+            "Unknown rule {:?}. Run `dotore rules list` to see every available rule.",
+            explain_args.rule
+        );
+        return ExitCode::from(1);
+    };
+    if explain_args.json {
+        match serde_json::to_string_pretty(&entry) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!("error serializing rule explanation JSON: {err}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        print!("{}", format_rule_explanation_text(&entry));
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_rules_enable(enable_args: &RulesEnableArgs) -> ExitCode {
+    let Some(rule) = parse_rule_or_print_error(&enable_args.rule) else {
+        return ExitCode::from(1);
+    };
+    let severity = if let Some(raw_sev) = &enable_args.severity {
+        let Some(parsed) = parse_severity_or_print_error(raw_sev) else {
+            return ExitCode::from(1);
+        };
+        if parsed == RuleSeverityOverride::Off {
+            eprintln!("`enable` cannot set a rule to off. Use `dotore rules disable` instead.");
+            return ExitCode::from(1);
+        }
+        parsed
+    } else {
+        match rule.metadata().default_severity {
+            RuleSeverity::Error => RuleSeverityOverride::Error,
+            RuleSeverity::Warning => RuleSeverityOverride::Warn,
+        }
+    };
+    apply_cli_config_mutation(
+        &enable_args.cwd,
+        ConfigMutation::SetRuleSeverity { rule, severity },
+        &format!(
+            "Set {} -> {}",
+            rule.metadata().qualified_key,
+            severity.as_str()
+        ),
+    )
+}
+
+fn parse_rule_or_print_error(raw_rule: &str) -> Option<RuleId> {
+    let parsed = RuleId::parse(raw_rule);
+    if parsed.is_none() {
+        eprintln!("Unknown rule {raw_rule:?}. Run `dotore rules list` to see every available rule.");
+    }
+    parsed
+}
+
+fn parse_severity_or_print_error(raw_sev: &str) -> Option<RuleSeverityOverride> {
+    let parsed = RuleSeverityOverride::parse(raw_sev);
+    if parsed.is_none() {
+        eprintln!("Invalid severity {raw_sev:?}. Expected one of: off, warn, error.");
+    }
+    parsed
+}
+
 /// Runs `dotore rules`.
 #[must_use]
 fn run_rules(args: &RulesArgs) -> ExitCode {
     match &args.command {
-        RulesSubcommand::List(list_args) => {
-            let config = load_config_from_dir(&list_args.cwd);
-            let entries = build_rule_catalog(
-                &config,
-                &RulesListOptions {
-                    category: list_args.category.clone(),
-                    tag: list_args.tag.clone(),
-                    framework: list_args.framework.clone(),
-                    configured: list_args.configured,
-                },
-            );
-            if list_args.json {
-                match serde_json::to_string_pretty(&entries) {
-                    Ok(json) => println!("{json}"),
-                    Err(err) => {
-                        eprintln!("error serializing rules JSON: {err}");
-                        return ExitCode::from(2);
-                    }
-                }
-            } else {
-                print!("{}", format_rule_catalog_text(&entries));
-            }
-            ExitCode::SUCCESS
-        }
-        RulesSubcommand::Explain(explain_args) => {
-            let config = load_config_from_dir(&explain_args.cwd);
-            let Some(entry) = explain_rule(&explain_args.rule, &config) else {
-                eprintln!(
-                    "Unknown rule {:?}. Run `dotore rules list` to see every available rule.",
-                    explain_args.rule
-                );
-                return ExitCode::from(1);
-            };
-            if explain_args.json {
-                match serde_json::to_string_pretty(&entry) {
-                    Ok(json) => println!("{json}"),
-                    Err(err) => {
-                        eprintln!("error serializing rule explanation JSON: {err}");
-                        return ExitCode::from(2);
-                    }
-                }
-            } else {
-                print!("{}", format_rule_explanation_text(&entry));
-            }
-            ExitCode::SUCCESS
-        }
-        RulesSubcommand::Enable(enable_args) => {
-            let Some(rule) = RuleId::parse(&enable_args.rule) else {
-                eprintln!(
-                    "Unknown rule {:?}. Run `dotore rules list` to see every available rule.",
-                    enable_args.rule
-                );
-                return ExitCode::from(1);
-            };
-            let severity = if let Some(raw_sev) = &enable_args.severity {
-                let Some(parsed) = RuleSeverityOverride::parse(raw_sev) else {
-                    eprintln!("Invalid severity {raw_sev:?}. Expected one of: off, warn, error.");
-                    return ExitCode::from(1);
-                };
-                if parsed == RuleSeverityOverride::Off {
-                    eprintln!(
-                        "`enable` cannot set a rule to off. Use `dotore rules disable` instead."
-                    );
-                    return ExitCode::from(1);
-                }
-                parsed
-            } else {
-                match rule.metadata().default_severity {
-                    RuleSeverity::Error => RuleSeverityOverride::Error,
-                    RuleSeverity::Warning => RuleSeverityOverride::Warn,
-                }
-            };
-            apply_cli_config_mutation(
-                &enable_args.cwd,
-                ConfigMutation::SetRuleSeverity { rule, severity },
-                &format!(
-                    "Set {} -> {}",
-                    rule.metadata().qualified_key,
-                    severity.as_str()
-                ),
-            )
-        }
+        RulesSubcommand::List(list_args) => run_rules_list(list_args),
+        RulesSubcommand::Explain(explain_args) => run_rules_explain(explain_args),
+        RulesSubcommand::Enable(enable_args) => run_rules_enable(enable_args),
         RulesSubcommand::Disable(disable_args) => {
-            let Some(rule) = RuleId::parse(&disable_args.rule) else {
-                eprintln!(
-                    "Unknown rule {:?}. Run `dotore rules list` to see every available rule.",
-                    disable_args.rule
-                );
+            let Some(rule) = parse_rule_or_print_error(&disable_args.rule) else {
                 return ExitCode::from(1);
             };
             apply_cli_config_mutation(
@@ -1480,18 +678,10 @@ fn run_rules(args: &RulesArgs) -> ExitCode {
             )
         }
         RulesSubcommand::Set(set_args) => {
-            let Some(rule) = RuleId::parse(&set_args.rule) else {
-                eprintln!(
-                    "Unknown rule {:?}. Run `dotore rules list` to see every available rule.",
-                    set_args.rule
-                );
+            let Some(rule) = parse_rule_or_print_error(&set_args.rule) else {
                 return ExitCode::from(1);
             };
-            let Some(severity) = RuleSeverityOverride::parse(&set_args.severity) else {
-                eprintln!(
-                    "Invalid severity {:?}. Expected one of: off, warn, error.",
-                    set_args.severity
-                );
+            let Some(severity) = parse_severity_or_print_error(&set_args.severity) else {
                 return ExitCode::from(1);
             };
             apply_cli_config_mutation(
@@ -1512,11 +702,7 @@ fn run_rules(args: &RulesArgs) -> ExitCode {
                 );
                 return ExitCode::from(1);
             };
-            let Some(severity) = RuleSeverityOverride::parse(&cat_args.severity) else {
-                eprintln!(
-                    "Invalid severity {:?}. Expected one of: off, warn, error.",
-                    cat_args.severity
-                );
+            let Some(severity) = parse_severity_or_print_error(&cat_args.severity) else {
                 return ExitCode::from(1);
             };
             apply_cli_config_mutation(
@@ -1625,11 +811,7 @@ fn run_design(args: &CheckArgs) -> ExitCode {
     let is_json = args.json || args.format == Some(OutputFormat::Json);
     let is_pr_comment = args.format == Some(OutputFormat::GithubPrComment);
     let show_live_spinner = !is_json && !is_pr_comment && should_launch_tui(args.no_pager);
-    let spinner_guard = if show_live_spinner {
-        LiveSpinner::start()
-    } else {
-        None
-    };
+    let spinner_guard = show_live_spinner.then(LiveSpinner::start).flatten();
     let (report, _) = match scan_design(&options, &overrides) {
         Ok(res) => res,
         Err(err) => {

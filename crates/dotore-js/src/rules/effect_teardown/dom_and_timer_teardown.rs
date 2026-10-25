@@ -97,51 +97,22 @@ pub(super) fn check_class_unmount_teardown(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
+    let has_teardown = unmount_has_teardown_call(semantic, unmount_span);
+    if has_teardown {
+        return;
+    }
     for mount_span in mount_or_ctor_spans {
-        let mount_text = mount_span.source_text(semantic.source_text());
-        if mount_text.contains("disposeOnUnmount") {
+        if mount_span
+            .source_text(semantic.source_text())
+            .contains("disposeOnUnmount")
+        {
             continue;
         }
         for (_, inner) in semantic.nodes().iter_enumerated() {
             if !mount_span.contains_inclusive(inner.span()) {
                 continue;
             }
-            let acquired_resource = match inner.kind() {
-                AstKind::CallExpression(c) => match c.callee.without_parentheses() {
-                    Expression::Identifier(id) => matches!(
-                        id.name.as_str(),
-                        "setInterval" | "setTimeout" | "requestAnimationFrame"
-                    )
-                    .then_some((id.name.as_str(), c.span)),
-                    Expression::StaticMemberExpression(mem) => {
-                        matches!(mem.property.name.as_str(), "addEventListener" | "subscribe")
-                            .then_some((mem.property.name.as_str(), c.span))
-                    }
-                    _ => None,
-                },
-                AstKind::NewExpression(n) => match n.callee.without_parentheses() {
-                    Expression::Identifier(id) if OBSERVER_CLASSES.contains(&id.name.as_str()) => {
-                        Some((id.name.as_str(), n.span))
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
-            let Some((res_name, res_span)) = acquired_resource else {
-                continue;
-            };
-            let has_teardown = unmount_span.is_some_and(|u_span| {
-                let u_text = u_span.source_text(semantic.source_text());
-                u_text.contains("removeEventListener")
-                    || u_text.contains("clearInterval")
-                    || u_text.contains("clearTimeout")
-                    || u_text.contains("cancelAnimationFrame")
-                    || u_text.contains("unsubscribe")
-                    || u_text.contains("disconnect")
-                    || u_text.contains("dispose")
-                    || u_text.contains("abort")
-            });
-            if !has_teardown {
+            if let Some((res_name, res_span)) = extract_acquired_class_resource(inner.kind()) {
                 push_site(
                     sites,
                     RuleId::ClassComponentMissingComponentWillUnmountTeardown,
@@ -157,6 +128,53 @@ pub(super) fn check_class_unmount_teardown(
                 );
             }
         }
+    }
+}
+
+fn unmount_has_teardown_call(semantic: &Semantic<'_>, unmount_span: Option<Span>) -> bool {
+    let Some(u_span) = unmount_span else {
+        return false;
+    };
+    let u_text = u_span.source_text(semantic.source_text());
+    [
+        "removeEventListener",
+        "clearInterval",
+        "clearTimeout",
+        "cancelAnimationFrame",
+        "unsubscribe",
+        "disconnect",
+        "dispose",
+        "abort",
+    ]
+    .iter()
+    .any(|kw| u_text.contains(kw))
+}
+
+fn extract_acquired_class_resource<'a>(kind: AstKind<'a>) -> Option<(&'a str, Span)> {
+    match kind {
+        AstKind::CallExpression(c) => match c.callee.without_parentheses() {
+            Expression::Identifier(id)
+                if matches!(
+                    id.name.as_str(),
+                    "setInterval" | "setTimeout" | "requestAnimationFrame"
+                ) =>
+            {
+                Some((id.name.as_str(), c.span))
+            }
+            Expression::StaticMemberExpression(mem)
+                if matches!(mem.property.name.as_str(), "addEventListener" | "subscribe") =>
+            {
+                Some((mem.property.name.as_str(), c.span))
+            }
+            _ => None,
+        },
+        AstKind::NewExpression(n) => match n.callee.without_parentheses() {
+            Expression::Identifier(id) if OBSERVER_CLASSES.contains(&id.name.as_str()) => {
+                Some((id.name.as_str(), n.span))
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -315,14 +333,13 @@ pub(super) fn check_effect_hook_call(
         return;
     };
     let cb = first_arg.without_parentheses();
-
-    // `no-async-effect-callback`
-    let is_async = match cb {
-        Expression::ArrowFunctionExpression(arr) => arr.r#async,
-        Expression::FunctionExpression(f) => f.r#async,
-        _ => false,
-    };
-    if is_async {
+    if matches!(
+        cb,
+        Expression::ArrowFunctionExpression(arr) if arr.r#async
+    ) || matches!(
+        cb,
+        Expression::FunctionExpression(f) if f.r#async
+    ) {
         push_site(
             sites,
             RuleId::NoAsyncEffectCallback,
@@ -344,172 +361,32 @@ pub(super) fn check_effect_hook_call(
     let cleanup_text = cleanup_span
         .map(|s| s.source_text(semantic.source_text()))
         .unwrap_or_default();
+    let dep_ident_names = collect_effect_dep_ident_names(call);
 
-    // Collect deps identifier names
-    let mut dep_ident_names: HashSet<String> = HashSet::new();
-    if let Some(deps_arg) = call.arguments.get(1).and_then(|a| a.as_expression())
-        && let Expression::ArrayExpression(arr) = deps_arg.without_parentheses()
-    {
-        for elem in &arr.elements {
-            if let Some(Expression::Identifier(id)) =
-                elem.as_expression().map(Expression::without_parentheses)
-            {
-                dep_ident_names.insert(id.name.to_string());
-            }
-        }
+    if is_hook && cleanup_span.is_none() && !subj_param_names.is_empty() {
+        check_effect_wrapper_discards_cleanup(
+            semantic,
+            effect_fn_id,
+            subj_param_names,
+            subj_name,
+            line_starts,
+            sites,
+        );
     }
 
-    // `no-effect-wrapper-discards-callback-cleanup-return`
-    if is_hook
-        && cleanup_span.is_none()
-        && !subj_param_names.is_empty()
-        && let AstKind::ArrowFunctionExpression(arr) = semantic.nodes().kind(effect_fn_id)
-        && let ArrowFunctionBody::FunctionBody(body) = &arr.body
-    {
-        for stmt in &body.statements {
-            if let Statement::ExpressionStatement(expr_stmt) = stmt
-                && let Expression::CallExpression(inner_call) =
-                    expr_stmt.expression.without_parentheses()
-                && let Expression::Identifier(callee_id) = inner_call.callee.without_parentheses()
-                && subj_param_names.contains(callee_id.name.as_str())
-            {
-                push_site(
-                    sites,
-                    RuleId::NoEffectWrapperDiscardsCallbackCleanupReturn,
-                    subj_name.clone(),
-                    "noEffectWrapperDiscardsCallbackCleanupReturn",
-                    callee_id.name.as_str(),
-                    format!(
-                        "Custom effect wrapper calls `{}` without returning its cleanup function; use `return {}()`.",
-                        callee_id.name, callee_id.name
-                    ),
-                    inner_call.span,
-                    line_starts,
-                    None,
-                );
-            }
-        }
-    }
-
-    let mut add_listeners: Vec<ListenerCallInfo> = Vec::new();
-    let mut remove_listeners: Vec<ListenerCallInfo> = Vec::new();
-    let mut distinct_sync_setters: HashSet<String> = HashSet::new();
-
-    for (inner_id, inner_node) in semantic.nodes().iter_enumerated() {
-        let inner_span = inner_node.span();
-        if !effect_fn_span.contains_inclusive(inner_span) {
-            continue;
-        }
-        let in_cleanup = cleanup_span.is_some_and(|cs| cs.contains_inclusive(inner_span));
-
-        match inner_node.kind() {
-            AstKind::NewExpression(new_expr) if !in_cleanup => {
-                if let Expression::Identifier(id) = new_expr.callee.without_parentheses()
-                    && OBSERVER_CLASSES.contains(&id.name.as_str())
-                {
-                    let has_disconnect = cleanup_text.contains(".disconnect(")
-                        || cleanup_text.contains(".unobserve(");
-                    if !has_disconnect {
-                        push_site(
-                            sites,
-                            RuleId::EffectObserverNeedsDisconnect,
-                            subj_name.clone(),
-                            "effectObserverNeedsDisconnect",
-                            id.name.as_str(),
-                            format!(
-                                "`new {}` in `useEffect` is never disconnected in cleanup; return `() => observer.disconnect()`.",
-                                id.name
-                            ),
-                            new_expr.span,
-                            line_starts,
-                            None,
-                        );
-                    }
-                }
-            }
-            AstKind::CallExpression(inner_call) => {
-                if in_cleanup {
-                    if let Some(rem) =
-                        parse_listener_call(semantic, inner_call, "removeEventListener")
-                    {
-                        remove_listeners.push(rem);
-                    }
-                    continue;
-                }
-
-                if let Some(add) = parse_listener_call(semantic, inner_call, "addEventListener") {
-                    // `advanced-event-handler-refs`
-                    if let Some(handler_name) = &add.handler_text
-                        && add.handler_is_ident
-                        && dep_ident_names.contains(handler_name)
-                    {
-                        push_site(
-                            sites,
-                            RuleId::AdvancedEventHandlerRefs,
-                            subj_name.clone(),
-                            "advancedEventHandlerRefs",
-                            handler_name.clone(),
-                            format!(
-                                "Effect re-subscribes `addEventListener` whenever `{handler_name}` changes; store `{handler_name}` in a ref or `useEffectEvent`."
-                            ),
-                            inner_call.span,
-                            line_starts,
-                            None,
-                        );
-                    }
-                    add_listeners.push(add);
-                }
-
-                // `effect-raf-loop-needs-cancel`
-                let is_raf = match inner_call.callee.without_parentheses() {
-                    Expression::Identifier(id) => id.name == "requestAnimationFrame",
-                    Expression::StaticMemberExpression(mem) => {
-                        mem.property.name == "requestAnimationFrame"
-                    }
-                    _ => false,
-                };
-                if is_raf && !cleanup_text.contains("cancelAnimationFrame") {
-                    push_site(
-                        sites,
-                        RuleId::EffectRafLoopNeedsCancel,
-                        subj_name.clone(),
-                        "effectRafLoopNeedsCancel",
-                        "requestAnimationFrame",
-                        "`requestAnimationFrame` inside `useEffect` has no `cancelAnimationFrame` in cleanup.".to_string(),
-                        inner_call.span,
-                        line_starts,
-                        None,
-                    );
-                }
-
-                // `no-cascading-set-state`
-                if let Expression::Identifier(callee_id) = inner_call.callee.without_parentheses()
-                    && setter_to_state.contains_key(callee_id.name.as_str())
-                    && is_synchronous(semantic, inner_id, effect_fn_id)
-                {
-                    distinct_sync_setters.insert(callee_id.name.to_string());
-                }
-
-                // `no-promise-then-side-effect-in-effect-without-catch`
-                if let Expression::StaticMemberExpression(mem) =
-                    inner_call.callee.without_parentheses()
-                    && mem.property.name == "then"
-                    && inner_call.arguments.len() == 1
-                {
-                    check_promise_then_without_catch(
-                        semantic,
-                        inner_id,
-                        inner_call,
-                        setter_to_state,
-                        subj_name,
-                        line_starts,
-                        sites,
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
+    let (add_listeners, remove_listeners, distinct_sync_setters) =
+        scan_effect_body_nodes(
+            semantic,
+            effect_fn_id,
+            effect_fn_span,
+            cleanup_span,
+            cleanup_text,
+            &dep_ident_names,
+            setter_to_state,
+            subj_name,
+            line_starts,
+            sites,
+        );
 
     if distinct_sync_setters.len() >= 2 {
         push_site(
@@ -525,7 +402,6 @@ pub(super) fn check_effect_hook_call(
         );
     }
 
-    // Match `add_listeners` vs `remove_listeners`
     check_effect_listener_mismatches(
         &add_listeners,
         &remove_listeners,
@@ -534,6 +410,211 @@ pub(super) fn check_effect_hook_call(
         line_starts,
         sites,
     );
+}
+
+fn collect_effect_dep_ident_names(call: &CallExpression<'_>) -> HashSet<String> {
+    crate::matchers::collect_effect_dep_ident_names(call)
+}
+
+fn check_effect_wrapper_discards_cleanup(
+    semantic: &Semantic<'_>,
+    effect_fn_id: NodeId,
+    subj_param_names: &HashSet<String>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let AstKind::ArrowFunctionExpression(arr) = semantic.nodes().kind(effect_fn_id) else {
+        return;
+    };
+    let ArrowFunctionBody::FunctionBody(body) = &arr.body else {
+        return;
+    };
+    for stmt in &body.statements {
+        if let Statement::ExpressionStatement(expr_stmt) = stmt
+            && let Expression::CallExpression(inner_call) =
+                expr_stmt.expression.without_parentheses()
+            && let Expression::Identifier(callee_id) = inner_call.callee.without_parentheses()
+            && subj_param_names.contains(callee_id.name.as_str())
+        {
+            push_site(
+                sites,
+                RuleId::NoEffectWrapperDiscardsCallbackCleanupReturn,
+                subj_name.clone(),
+                "noEffectWrapperDiscardsCallbackCleanupReturn",
+                callee_id.name.as_str(),
+                format!(
+                    "Custom effect wrapper calls `{}` without returning its cleanup function; use `return {}()`.",
+                    callee_id.name, callee_id.name
+                ),
+                inner_call.span,
+                line_starts,
+                None,
+            );
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Single-pass scan over effect body collecting listeners, observers, rAF loops, and sync setters (#50)"
+)]
+fn scan_effect_body_nodes(
+    semantic: &Semantic<'_>,
+    effect_fn_id: NodeId,
+    effect_fn_span: Span,
+    cleanup_span: Option<Span>,
+    cleanup_text: &str,
+    dep_ident_names: &HashSet<String>,
+    setter_to_state: &HashMap<String, String>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) -> (Vec<ListenerCallInfo>, Vec<ListenerCallInfo>, HashSet<String>) {
+    let mut add_listeners = Vec::new();
+    let mut remove_listeners = Vec::new();
+    let mut distinct_sync_setters = HashSet::new();
+
+    for (inner_id, inner_node) in semantic.nodes().iter_enumerated() {
+        let inner_span = inner_node.span();
+        if !effect_fn_span.contains_inclusive(inner_span) {
+            continue;
+        }
+        let in_cleanup = cleanup_span.is_some_and(|cs| cs.contains_inclusive(inner_span));
+
+        match inner_node.kind() {
+            AstKind::NewExpression(new_expr) if !in_cleanup => {
+                if let Expression::Identifier(id) = new_expr.callee.without_parentheses()
+                    && OBSERVER_CLASSES.contains(&id.name.as_str())
+                    && !cleanup_text.contains(".disconnect(")
+                    && !cleanup_text.contains(".unobserve(")
+                {
+                    push_site(
+                        sites,
+                        RuleId::EffectObserverNeedsDisconnect,
+                        subj_name.clone(),
+                        "effectObserverNeedsDisconnect",
+                        id.name.as_str(),
+                        format!(
+                            "`new {}` in `useEffect` is never disconnected in cleanup; return `() => observer.disconnect()`.",
+                            id.name
+                        ),
+                        new_expr.span,
+                        line_starts,
+                        None,
+                    );
+                }
+            }
+            AstKind::CallExpression(inner_call) if in_cleanup => {
+                if let Some(rem) = parse_listener_call(semantic, inner_call, "removeEventListener")
+                {
+                    remove_listeners.push(rem);
+                }
+            }
+            AstKind::CallExpression(inner_call) => {
+                visit_effect_body_call(
+                    semantic,
+                    inner_id,
+                    inner_call,
+                    effect_fn_id,
+                    cleanup_text,
+                    dep_ident_names,
+                    setter_to_state,
+                    subj_name,
+                    line_starts,
+                    &mut add_listeners,
+                    &mut distinct_sync_setters,
+                    sites,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (add_listeners, remove_listeners, distinct_sync_setters)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Inspects a non-cleanup CallExpression inside useEffect for listener, rAF, setter, and promise rules (#50)"
+)]
+fn visit_effect_body_call(
+    semantic: &Semantic<'_>,
+    inner_id: NodeId,
+    inner_call: &CallExpression<'_>,
+    effect_fn_id: NodeId,
+    cleanup_text: &str,
+    dep_ident_names: &HashSet<String>,
+    setter_to_state: &HashMap<String, String>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    add_listeners: &mut Vec<ListenerCallInfo>,
+    distinct_sync_setters: &mut HashSet<String>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Some(add) = parse_listener_call(semantic, inner_call, "addEventListener") {
+        if let Some(handler_name) = &add.handler_text
+            && add.handler_is_ident
+            && dep_ident_names.contains(handler_name)
+        {
+            push_site(
+                sites,
+                RuleId::AdvancedEventHandlerRefs,
+                subj_name.clone(),
+                "advancedEventHandlerRefs",
+                handler_name.clone(),
+                format!(
+                    "Effect re-subscribes `addEventListener` whenever `{handler_name}` changes; store `{handler_name}` in a ref or `useEffectEvent`."
+                ),
+                inner_call.span,
+                line_starts,
+                None,
+            );
+        }
+        add_listeners.push(add);
+    }
+
+    let is_raf = match inner_call.callee.without_parentheses() {
+        Expression::Identifier(id) => id.name == "requestAnimationFrame",
+        Expression::StaticMemberExpression(mem) => mem.property.name == "requestAnimationFrame",
+        _ => false,
+    };
+    if is_raf && !cleanup_text.contains("cancelAnimationFrame") {
+        push_site(
+            sites,
+            RuleId::EffectRafLoopNeedsCancel,
+            subj_name.clone(),
+            "effectRafLoopNeedsCancel",
+            "requestAnimationFrame",
+            "`requestAnimationFrame` inside `useEffect` has no `cancelAnimationFrame` in cleanup."
+                .to_string(),
+            inner_call.span,
+            line_starts,
+            None,
+        );
+    }
+
+    if let Expression::Identifier(callee_id) = inner_call.callee.without_parentheses()
+        && setter_to_state.contains_key(callee_id.name.as_str())
+        && is_synchronous(semantic, inner_id, effect_fn_id)
+    {
+        distinct_sync_setters.insert(callee_id.name.to_string());
+    }
+
+    if let Expression::StaticMemberExpression(mem) = inner_call.callee.without_parentheses()
+        && mem.property.name == "then"
+        && inner_call.arguments.len() == 1
+    {
+        check_promise_then_without_catch(
+            semantic,
+            inner_id,
+            inner_call,
+            setter_to_state,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
 }
 
 fn check_effect_listener_mismatches(
@@ -548,104 +629,126 @@ fn check_effect_listener_mismatches(
         return;
     }
     for add in add_listeners {
-        if add.has_abort_signal && cleanup_text.contains(".abort(") {
-            continue;
-        }
-        // Check if there is an exact matching remove
-        let has_exact_match = remove_listeners.iter().any(|rem| {
-            rem.target_text == add.target_text
-                && rem.event_type == add.event_type
-                && rem.handler_text == add.handler_text
-                && rem.handler_is_ident
-                && add.handler_is_ident
-                && rem.capture_flag == add.capture_flag
-        });
-        if has_exact_match {
-            continue;
-        }
+        check_single_add_listener_mismatch(
+            add,
+            add_listeners,
+            remove_listeners,
+            cleanup_text,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
+}
 
-        // Check if there is a remove with the same target & event_type, but different handler reference
-        if let Some(rem_same_event) = remove_listeners
-            .iter()
-            .find(|rem| rem.target_text == add.target_text && rem.event_type == add.event_type)
+fn check_single_add_listener_mismatch(
+    add: &ListenerCallInfo,
+    add_listeners: &[ListenerCallInfo],
+    remove_listeners: &[ListenerCallInfo],
+    cleanup_text: &str,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if add.has_abort_signal && cleanup_text.contains(".abort(") {
+        return;
+    }
+    if remove_listeners
+        .iter()
+        .any(|rem| listener_exact_match(add, rem))
+    {
+        return;
+    }
+
+    if let Some(rem_same_event) = remove_listeners
+        .iter()
+        .find(|rem| rem.target_text == add.target_text && rem.event_type == add.event_type)
+    {
+        if rem_same_event.handler_text != add.handler_text
+            || !rem_same_event.handler_is_ident
+            || !add.handler_is_ident
         {
-            if rem_same_event.handler_text != add.handler_text
-                || !rem_same_event.handler_is_ident
-                || !add.handler_is_ident
-            {
-                push_site(
-                    sites,
-                    RuleId::EffectListenerCleanupReferenceMismatch,
-                    subj_name.clone(),
-                    "effectListenerCleanupReferenceMismatch",
-                    rem_same_event
-                        .handler_text
-                        .clone()
-                        .unwrap_or_else(|| "removeEventListener".to_string()),
-                    "Effect cleanup passes a different listener reference to `removeEventListener` than was registered with `addEventListener`.".to_string(),
-                    rem_same_event.call_span,
-                    line_starts,
-                    None,
-                );
-            } else if rem_same_event.capture_flag != add.capture_flag {
-                push_site(
-                    sites,
-                    RuleId::EffectListenerCleanupMismatch,
-                    subj_name.clone(),
-                    "effectListenerCleanupMismatch",
-                    rem_same_event
-                        .event_type
-                        .clone()
-                        .unwrap_or_else(|| "removeEventListener".to_string()),
-                    "`removeEventListener` capture flag does not match `addEventListener`."
-                        .to_string(),
-                    rem_same_event.call_span,
-                    line_starts,
-                    None,
-                );
-            }
-            continue;
-        }
-
-        // Otherwise, if there is a remove with the same handler (or only 1 add & 1 remove), it's a listener cleanup mismatch (wrong event type or wrong target)
-        let candidate_rem = remove_listeners
-            .iter()
-            .find(|rem| rem.handler_text == add.handler_text)
-            .or_else(|| {
-                (add_listeners.len() == 1 && remove_listeners.len() == 1)
-                    .then(|| &remove_listeners[0])
-            });
-
-        if let Some(rem) = candidate_rem {
-            let autofix = if rem.target_text == add.target_text
-                && let (Some(add_ev), Some(rem_ev_span)) = (&add.event_type, rem.event_type_span)
-            {
-                Some(AutofixPatch::replace(
-                    format!(
-                        "Change `removeEventListener` event type to `'{add_ev}'` to match `addEventListener`"
-                    ),
-                    span_to_byte_span(rem_ev_span),
-                    format!("'{add_ev}'"),
-                ))
-            } else {
-                None
-            };
-
-            push_site_with_fix(
+            push_site(
+                sites,
+                RuleId::EffectListenerCleanupReferenceMismatch,
+                subj_name.clone(),
+                "effectListenerCleanupReferenceMismatch",
+                rem_same_event
+                    .handler_text
+                    .clone()
+                    .unwrap_or_else(|| "removeEventListener".to_string()),
+                "Effect cleanup passes a different listener reference to `removeEventListener` than was registered with `addEventListener`.".to_string(),
+                rem_same_event.call_span,
+                line_starts,
+                None,
+            );
+        } else if rem_same_event.capture_flag != add.capture_flag {
+            push_site(
                 sites,
                 RuleId::EffectListenerCleanupMismatch,
                 subj_name.clone(),
                 "effectListenerCleanupMismatch",
-                rem.event_type
+                rem_same_event
+                    .event_type
                     .clone()
                     .unwrap_or_else(|| "removeEventListener".to_string()),
-                "`removeEventListener` in effect cleanup does not match the event type or target of `addEventListener`.".to_string(),
-                rem.call_span,
+                "`removeEventListener` capture flag does not match `addEventListener`.".to_string(),
+                rem_same_event.call_span,
                 line_starts,
-                autofix,
+                None,
             );
         }
+        return;
     }
+
+    let candidate_rem = remove_listeners
+        .iter()
+        .find(|rem| rem.handler_text == add.handler_text)
+        .or_else(|| {
+            if add_listeners.len() == 1 && remove_listeners.len() == 1 {
+                remove_listeners.first()
+            } else {
+                None
+            }
+        });
+    if let Some(rem) = candidate_rem {
+        let autofix = if rem.target_text == add.target_text
+            && let (Some(add_ev), Some(rem_ev_span)) = (&add.event_type, rem.event_type_span)
+        {
+            Some(AutofixPatch::replace(
+                format!(
+                    "Change `removeEventListener` event type to `'{add_ev}'` to match `addEventListener`"
+                ),
+                span_to_byte_span(rem_ev_span),
+                format!("'{add_ev}'"),
+            ))
+        } else {
+            None
+        };
+
+        push_site_with_fix(
+            sites,
+            RuleId::EffectListenerCleanupMismatch,
+            subj_name.clone(),
+            "effectListenerCleanupMismatch",
+            rem.event_type
+                .clone()
+                .unwrap_or_else(|| "removeEventListener".to_string()),
+            "`removeEventListener` in effect cleanup does not match the event type or target of `addEventListener`.".to_string(),
+            rem.call_span,
+            line_starts,
+            autofix,
+        );
+    }
+}
+
+fn listener_exact_match(add: &ListenerCallInfo, rem: &ListenerCallInfo) -> bool {
+    rem.target_text == add.target_text
+        && rem.event_type == add.event_type
+        && rem.handler_text == add.handler_text
+        && rem.handler_is_ident
+        && add.handler_is_ident
+        && rem.capture_flag == add.capture_flag
 }
 
 fn check_promise_then_without_catch(

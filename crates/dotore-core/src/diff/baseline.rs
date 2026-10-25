@@ -92,87 +92,101 @@ pub fn normalize_ast_tokens(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut i = 0;
 
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b.is_ascii_whitespace() {
+    while let Some(&b) = bytes.get(i) {
+        if b.is_ascii_whitespace() || b == b';' {
             i += 1;
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-            i += 2;
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(bytes.len());
-            continue;
-        }
-        if b == b'\'' || b == b'"' {
-            let quote = b;
-            i += 1;
-            let mut content = String::new();
-            while i < bytes.len() && bytes[i] != quote {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                }
-                content.push(bytes[i] as char);
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1;
-            }
-            tokens.push(format!(
-                "{:?}",
-                content.split_whitespace().collect::<Vec<_>>().join(" ")
-            ));
-            continue;
-        }
-        if b.is_ascii_alphanumeric() || b == b'_' || b == b'$' {
-            let start = i;
-            i += 1;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-            {
-                i += 1;
-            }
-            if let Some(word) = input.get(start..i) {
+        } else if skip_token_comment(bytes, &mut i) {
+            // comment skipped
+        } else if b == b'\'' || b == b'"' {
+            tokens.push(consume_quoted_token(bytes, &mut i, b));
+        } else if is_ident_byte(b) {
+            if let Some(word) = consume_ident_token(input, bytes, &mut i) {
                 tokens.push(word.to_string());
             }
-            continue;
-        }
-        if b == b';' {
-            i += 1;
-            continue;
-        }
-        if let Some(op3) = input.get(i..i + 3)
-            && matches!(op3, "===" | "!==" | "...")
-        {
-            tokens.push(op3.to_string());
-            i += 3;
-            continue;
-        }
-        if let Some(op2) = input.get(i..i + 2)
-            && matches!(op2, "=>" | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "??")
-        {
-            tokens.push(op2.to_string());
-            i += 2;
-            continue;
-        }
-        if let Some(ch) = input[i..].chars().next() {
-            tokens.push(ch.to_string());
-            i += ch.len_utf8();
         } else {
-            i += 1;
+            tokens.push(consume_operator_or_char(input, &mut i));
         }
     }
 
     tokens.join(" ")
+}
+
+const fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+fn skip_token_comment(bytes: &[u8], i: &mut usize) -> bool {
+    if bytes.get(*i) == Some(&b'/') && bytes.get(*i + 1) == Some(&b'/') {
+        *i += 2;
+        while bytes.get(*i).is_some_and(|&c| c != b'\n') {
+            *i += 1;
+        }
+        return true;
+    }
+    if bytes.get(*i) == Some(&b'/') && bytes.get(*i + 1) == Some(&b'*') {
+        *i += 2;
+        while *i + 1 < bytes.len()
+            && !(bytes.get(*i) == Some(&b'*') && bytes.get(*i + 1) == Some(&b'/'))
+        {
+            *i += 1;
+        }
+        *i = (*i + 2).min(bytes.len());
+        return true;
+    }
+    false
+}
+
+fn consume_quoted_token(bytes: &[u8], i: &mut usize, quote: u8) -> String {
+    *i += 1;
+    let mut content = String::new();
+    while let Some(&cur) = bytes.get(*i) {
+        if cur == quote {
+            *i += 1;
+            break;
+        }
+        if cur == b'\\' && *i + 1 < bytes.len() {
+            *i += 1;
+        }
+        if let Some(&ch_byte) = bytes.get(*i) {
+            content.push(ch_byte as char);
+        }
+        *i += 1;
+    }
+    format!(
+        "{:?}",
+        content.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
+fn consume_ident_token<'a>(input: &'a str, bytes: &[u8], i: &mut usize) -> Option<&'a str> {
+    let start = *i;
+    *i += 1;
+    while bytes.get(*i).is_some_and(|&c| is_ident_byte(c)) {
+        *i += 1;
+    }
+    input.get(start..*i)
+}
+
+fn consume_operator_or_char(input: &str, i: &mut usize) -> String {
+    if let Some(op3) = input.get(*i..*i + 3)
+        && matches!(op3, "===" | "!==" | "...")
+    {
+        *i += 3;
+        return op3.to_string();
+    }
+    if let Some(op2) = input.get(*i..*i + 2)
+        && matches!(op2, "=>" | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "??")
+    {
+        *i += 2;
+        return op2.to_string();
+    }
+    if let Some(ch) = input.get(*i..).and_then(|s| s.chars().next()) {
+        *i += ch.len_utf8();
+        ch.to_string()
+    } else {
+        *i += 1;
+        String::new()
+    }
 }
 
 fn normalize_display_path(path: &Path, root_dir: Option<&Path>) -> String {

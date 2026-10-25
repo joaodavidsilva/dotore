@@ -900,6 +900,3 @@ export class HelperDestroyComponent implements OnInit, OnDestroy {
         Some("NonLifecycleUnsubComponent")
     );
 }
-
-mod angular_core;
-mod angular_template_ngrx_material_graph;

@@ -1,7 +1,6 @@
 //! TanStack Query (`query-*`) and TanStack Start (`tanstack-start-*`) rule detectors.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
 
@@ -430,17 +429,22 @@ fn static_member_prop_name<'a>(expr: &'a Expression<'a>) -> Option<(&'a Expressi
     None
 }
 
+pub(crate) fn resolve_ident_declaration_node(
+    semantic: &Semantic<'_>,
+    ident: &oxc_ast::ast::IdentifierReference<'_>,
+) -> Option<oxc_semantic::NodeId> {
+    let ref_id = ident.reference_id.get()?;
+    let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+    Some(semantic.scoping().symbol_declaration(sym_id))
+}
+
 pub(crate) fn is_identifier_shadowed_by_local(
     semantic: &Semantic<'_>,
     ident: &oxc_ast::ast::IdentifierReference<'_>,
 ) -> bool {
-    let Some(ref_id) = ident.reference_id.get() else {
+    let Some(decl_id) = resolve_ident_declaration_node(semantic, ident) else {
         return false;
     };
-    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
-        return false;
-    };
-    let decl_id = semantic.scoping().symbol_declaration(sym_id);
     !matches!(
         semantic.nodes().kind(decl_id),
         AstKind::ImportSpecifier(_)
@@ -515,53 +519,73 @@ pub(crate) fn resolve_tanstack_callee_name<'a>(
     let mut current = unwrap_expr(callee);
     for _ in 0..5 {
         if let Expression::Identifier(ident) = current {
-            let name = ident.name.as_str();
             if is_identifier_shadowed_by_local(semantic, ident) {
-                if let Some(init) = resolve_const_initializer(semantic, ident) {
-                    current = unwrap_expr(init);
-                    continue;
-                }
-                return None;
+                current = unwrap_expr(resolve_const_initializer(semantic, ident)?);
+                continue;
             }
-            if let Some(imp) = imports.get(name) {
-                if !imp.is_namespace
-                    && is_tanstack_query_source(&imp.source)
-                    && allowed_hooks.contains(&imp.imported_name.as_str())
-                {
-                    return Some(imp.imported_name.clone());
-                }
-                return None;
-            }
-            if allow_unimported && allowed_hooks.contains(&name) {
-                return Some(name.to_string());
-            }
-            return None;
+            return classify_tanstack_ident_callee(
+                ident.name.as_str(),
+                imports,
+                allowed_hooks,
+                allow_unimported,
+            );
         }
         if let Some((obj, prop_name)) = static_member_prop_name(current) {
-            if !allowed_hooks.contains(&prop_name) {
-                return None;
-            }
-            let mut ns_expr = unwrap_expr(obj);
-            for _ in 0..4 {
-                if let Expression::Identifier(ns_ident) = ns_expr {
-                    if is_identifier_shadowed_by_local(semantic, ns_ident) {
-                        if let Some(init) = resolve_const_initializer(semantic, ns_ident) {
-                            ns_expr = unwrap_expr(init);
-                            continue;
-                        }
-                        return None;
-                    }
-                    if let Some(imp) = imports.get(ns_ident.name.as_str())
-                        && imp.is_namespace
-                        && is_tanstack_query_source(&imp.source)
-                    {
-                        return Some(prop_name.to_string());
-                    }
-                    return None;
-                }
-                break;
-            }
-            return None;
+            return resolve_tanstack_namespace_member_callee(
+                semantic,
+                obj,
+                prop_name,
+                imports,
+                allowed_hooks,
+            );
+        }
+        return None;
+    }
+    None
+}
+
+fn classify_tanstack_ident_callee(
+    name: &str,
+    imports: &HashMap<String, ImportedBindingInfo>,
+    allowed_hooks: &[&str],
+    allow_unimported: bool,
+) -> Option<String> {
+    if let Some(imp) = imports.get(name) {
+        if !imp.is_namespace
+            && is_tanstack_query_source(&imp.source)
+            && allowed_hooks.contains(&imp.imported_name.as_str())
+        {
+            return Some(imp.imported_name.clone());
+        }
+        return None;
+    }
+    (allow_unimported && allowed_hooks.contains(&name)).then(|| name.to_string())
+}
+
+fn resolve_tanstack_namespace_member_callee<'a>(
+    semantic: &'a Semantic<'a>,
+    obj: &'a Expression<'a>,
+    prop_name: &str,
+    imports: &HashMap<String, ImportedBindingInfo>,
+    allowed_hooks: &[&str],
+) -> Option<String> {
+    if !allowed_hooks.contains(&prop_name) {
+        return None;
+    }
+    let mut ns_expr = unwrap_expr(obj);
+    for _ in 0..4 {
+        let Expression::Identifier(ns_ident) = ns_expr else {
+            break;
+        };
+        if is_identifier_shadowed_by_local(semantic, ns_ident) {
+            ns_expr = unwrap_expr(resolve_const_initializer(semantic, ns_ident)?);
+            continue;
+        }
+        if let Some(imp) = imports.get(ns_ident.name.as_str())
+            && imp.is_namespace
+            && is_tanstack_query_source(&imp.source)
+        {
+            return Some(prop_name.to_string());
         }
         return None;
     }
@@ -631,48 +655,19 @@ pub(crate) fn is_tanstack_observer_method_call(
     reject_reassigned: bool,
 ) -> bool {
     let callee = unwrap_expr(&call.callee);
-    // 1. Direct `refetch()` / `mutateAsync()` or renamed `const { refetch: reload } = useQuery(...)`
-    if let Expression::Identifier(ident) = callee {
-        let Some(ref_id) = ident.reference_id.get() else {
-            return false;
-        };
-        let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
-            return false;
-        };
-        if reject_reassigned
-            && semantic
-                .scoping()
-                .get_resolved_references(sym_id)
-                .any(|r| r.is_write())
-        {
-            return false;
-        }
-        let decl_id = semantic.scoping().symbol_declaration(sym_id);
-        let sym_name = semantic.scoping().symbol_name(sym_id);
-        for anc_id in std::iter::once(decl_id).chain(semantic.nodes().ancestor_ids(decl_id)) {
-            if let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(anc_id) {
-                if let BindingPattern::ObjectPattern(pat) = &decl.id {
-                    let is_target_prop = pat.properties.iter().any(|p| {
-                        p.key.static_name().as_ref().and_then(|n| n.as_str()) == Some(method_name)
-                            && matches!(
-                                &p.value,
-                                BindingPattern::BindingIdentifier(b) if b.name.as_str() == sym_name
-                            )
-                    });
-                    if is_target_prop
-                        && let Some(init) = &decl.init
-                        && resolve_tanstack_hook_call(semantic, init, imports, allowed_hooks, true)
-                            .is_some()
-                    {
-                        return true;
-                    }
-                }
-                break;
-            }
-        }
+    if let Expression::Identifier(ident) = callee
+        && is_destructured_tanstack_observer_method(
+            semantic,
+            ident,
+            imports,
+            method_name,
+            allowed_hooks,
+            reject_reassigned,
+        )
+    {
+        return true;
     }
 
-    // 2. Member call `query.refetch()` / `mutation.mutateAsync()` or computed string equivalent
     if let Some((obj, prop_name)) = static_member_prop_name(callee)
         && prop_name == method_name
     {
@@ -687,6 +682,52 @@ pub(crate) fn is_tanstack_observer_method_call(
         }
     }
 
+    false
+}
+
+fn is_destructured_tanstack_observer_method(
+    semantic: &Semantic<'_>,
+    ident: &oxc_ast::ast::IdentifierReference<'_>,
+    imports: &HashMap<String, ImportedBindingInfo>,
+    method_name: &str,
+    allowed_hooks: &[&str],
+    reject_reassigned: bool,
+) -> bool {
+    let Some(ref_id) = ident.reference_id.get() else {
+        return false;
+    };
+    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+        return false;
+    };
+    if reject_reassigned
+        && semantic
+            .scoping()
+            .get_resolved_references(sym_id)
+            .any(|r| r.is_write())
+    {
+        return false;
+    }
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    let sym_name = semantic.scoping().symbol_name(sym_id);
+    for anc_id in std::iter::once(decl_id).chain(semantic.nodes().ancestor_ids(decl_id)) {
+        let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(anc_id) else {
+            continue;
+        };
+        let BindingPattern::ObjectPattern(pat) = &decl.id else {
+            return false;
+        };
+        let is_target_prop = pat.properties.iter().any(|p| {
+            p.key.static_name().as_ref().and_then(|n| n.as_str()) == Some(method_name)
+                && matches!(
+                    &p.value,
+                    BindingPattern::BindingIdentifier(b) if b.name.as_str() == sym_name
+                )
+        });
+        return is_target_prop
+            && decl.init.as_ref().is_some_and(|init| {
+                resolve_tanstack_hook_call(semantic, init, imports, allowed_hooks, true).is_some()
+            });
+    }
     false
 }
 

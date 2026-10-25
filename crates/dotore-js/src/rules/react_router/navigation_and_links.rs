@@ -2,7 +2,6 @@
 //! `startTransition`, and nested/client-only component rule detectors.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
 
@@ -44,7 +43,7 @@ use crate::{
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "single-pass call dispatcher shares precomputed component sets and state maps"
+    reason = "single-pass call dispatcher shares precomputed component sets and state maps (#50)"
 )]
 pub(crate) fn check_call_expression_rules(
     node_id: NodeId,
@@ -61,77 +60,24 @@ pub(crate) fn check_call_expression_rules(
         return;
     };
 
-    // Data router creation calls: `createBrowserRouter([...], opts)` etc.
     if DATA_ROUTER_FACTORIES.contains(&callee_name) {
-        // Check `react-router-no-router-in-render`
-        if is_direct_render_phase_node(semantic, node_id)
-            && let Some(subj_id) = find_enclosing_react_node(semantic, node_id)
-        {
-            let subject_name = get_subject_name(semantic, subj_id);
-            push_site(
-                sites,
-                line_starts,
-                RuleId::ReactRouterNoRouterInRender,
-                subject_name,
-                "reactRouterNoRouterInRender",
-                callee_name,
-                "Do not create a router instance during render; hoist router creation to module scope so navigation state survives re-renders.",
-                call.span,
-                None,
-            );
-        }
-
-        // Inspect route tree array passed as first argument
-        if let Some(first_arg) = call.arguments.first()
-            && let Some(expr) = first_arg.as_expression()
-            && let Expression::ArrayExpression(arr) = expr.without_parentheses()
-        {
-            let mut seen_ids = HashSet::new();
-            for (idx, elem) in arr.elements.iter().enumerate() {
-                let ArrayExpressionElement::ObjectExpression(route_obj) = elem else {
-                    continue;
-                };
-                // Check root error boundary on top-level route(s)
-                if idx == 0 && !route_object_has_error_boundary(route_obj) {
-                    // Only flag root route if it has children or is `/` root layout
-                    let has_children = get_object_prop(route_obj, "children").is_some();
-                    let is_root_path = get_object_prop_static_str(route_obj, "path")
-                        .is_some_and(|p| p == "/" || p.is_empty());
-                    if has_children || is_root_path {
-                        push_site(
-                            sites,
-                            line_starts,
-                            RuleId::ReactRouterRequireRootErrorBoundary,
-                            None,
-                            "reactRouterRequireRootErrorBoundary",
-                            callee_name,
-                            "Root route is missing `ErrorBoundary` or `errorElement`; define a root error boundary so unhandled route errors have a fallback UI.",
-                            route_obj.span,
-                            None,
-                        );
-                    }
-                }
-                check_route_object_recursive(
-                    route_obj,
-                    None,
-                    semantic,
-                    source,
-                    line_starts,
-                    components_with_routes,
-                    components_with_outlet,
-                    &mut seen_ids,
-                    sites,
-                );
-            }
-        }
+        check_data_router_factory_call(
+            node_id,
+            call,
+            callee_name,
+            semantic,
+            source,
+            line_starts,
+            components_with_routes,
+            components_with_outlet,
+            sites,
+        );
     }
 
-    // `createCookie("name", { expires: ... })` -> `react-router-no-static-cookie-expires`
     if callee_name == "createCookie" || callee_name == "createCookieSessionStorage" {
         check_static_cookie_expires(node_id, call, callee_name, semantic, line_starts, sites);
     }
 
-    // `useBlocker(...)` -> `react-router-no-multiple-blockers`
     if (callee_name == "useBlocker" || callee_name == "unstable_useBlocker")
         && let Some(subj_id) = find_enclosing_react_node(semantic, node_id)
     {
@@ -142,12 +88,10 @@ pub(crate) fn check_call_expression_rules(
             .push((call.span, subject_name));
     }
 
-    // `useLoaderData()` inside `ErrorBoundary` -> `react-router-no-use-loader-data-in-error-ui`
     if callee_name == "useLoaderData" {
         check_use_loader_data_in_error_ui(node_id, call, semantic, line_starts, sites);
     }
 
-    // `redirect(...)` inside `try { ... } catch` -> `react-router-no-redirect-in-try-catch`
     if callee_name == "redirect" || callee_name == "redirectDocument" {
         check_redirect_in_try_catch(
             node_id,
@@ -160,7 +104,6 @@ pub(crate) fn check_call_expression_rules(
         );
     }
 
-    // `navigate(...)` during render -> `react-router-no-navigate-in-render`
     if callee_name == "navigate"
         && is_direct_render_phase_node(semantic, node_id)
         && let Some(subj_id) = find_enclosing_react_node(semantic, node_id)
@@ -179,7 +122,6 @@ pub(crate) fn check_call_expression_rules(
         );
     }
 
-    // `startTransition(() => { navigate(...); })` -> `react-router-return-navigation-promise-in-transition`
     if callee_name == "startTransition" {
         check_transition_navigation_promise(node_id, call, semantic, line_starts, sites);
     }
@@ -187,7 +129,86 @@ pub(crate) fn check_call_expression_rules(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "single-pass JSX element rule check receives precomputed sets"
+    reason = "Data router factory inspector validates render placement and route tree together (#50)"
+)]
+fn check_data_router_factory_call(
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    callee_name: &str,
+    semantic: &Semantic<'_>,
+    source: &str,
+    line_starts: &[u32],
+    components_with_routes: &HashSet<String>,
+    components_with_outlet: &HashSet<String>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if is_direct_render_phase_node(semantic, node_id)
+        && let Some(subj_id) = find_enclosing_react_node(semantic, node_id)
+    {
+        let subject_name = get_subject_name(semantic, subj_id);
+        push_site(
+            sites,
+            line_starts,
+            RuleId::ReactRouterNoRouterInRender,
+            subject_name,
+            "reactRouterNoRouterInRender",
+            callee_name,
+            "Do not create a router instance during render; hoist router creation to module scope so navigation state survives re-renders.",
+            call.span,
+            None,
+        );
+    }
+
+    let Some(first_arg) = call.arguments.first() else {
+        return;
+    };
+    let Some(expr) = first_arg.as_expression() else {
+        return;
+    };
+    let Expression::ArrayExpression(arr) = expr.without_parentheses() else {
+        return;
+    };
+
+    let mut seen_ids = HashSet::new();
+    for (idx, elem) in arr.elements.iter().enumerate() {
+        let ArrayExpressionElement::ObjectExpression(route_obj) = elem else {
+            continue;
+        };
+        if idx == 0 && !route_object_has_error_boundary(route_obj) {
+            let has_children = get_object_prop(route_obj, "children").is_some();
+            let is_root_path = get_object_prop_static_str(route_obj, "path")
+                .is_some_and(|p| p == "/" || p.is_empty());
+            if has_children || is_root_path {
+                push_site(
+                    sites,
+                    line_starts,
+                    RuleId::ReactRouterRequireRootErrorBoundary,
+                    None,
+                    "reactRouterRequireRootErrorBoundary",
+                    callee_name,
+                    "Root route is missing `ErrorBoundary` or `errorElement`; define a root error boundary so unhandled route errors have a fallback UI.",
+                    route_obj.span,
+                    None,
+                );
+            }
+        }
+        check_route_object_recursive(
+            route_obj,
+            None,
+            semantic,
+            source,
+            line_starts,
+            components_with_routes,
+            components_with_outlet,
+            &mut seen_ids,
+            sites,
+        );
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "single-pass JSX element rule check receives precomputed sets (#50)"
 )]
 pub(crate) fn check_jsx_element_rules(
     node_id: NodeId,
@@ -207,76 +228,35 @@ pub(crate) fn check_jsx_element_rules(
     let subject_name = find_enclosing_react_node(semantic, node_id)
         .and_then(|subj_id| get_subject_name(semantic, subj_id));
 
-    // 1. `<Routes>` tree inspection for JSX `<Route>` elements
     if tag == "Routes" {
-        let mut seen_ids = HashSet::new();
-        let mut root_route_checked = false;
-        for child in &jsx_el.children {
-            if let JSXChild::Element(child_el) = child {
-                if jsx_element_tag_name(&child_el.opening_element.name).as_deref() == Some("Route")
-                    && !root_route_checked
-                {
-                    root_route_checked = true;
-                    let child_opening = &child_el.opening_element;
-                    let has_err = has_jsx_attr(child_opening, "errorElement")
-                        || has_jsx_attr(child_opening, "ErrorBoundary");
-                    if !has_err && jsx_route_subtree_has_loader_or_action(child_el) {
-                        push_site(
-                            sites,
-                            line_starts,
-                            RuleId::ReactRouterRequireRootErrorBoundary,
-                            None,
-                            "reactRouterRequireRootErrorBoundary",
-                            "Route",
-                            "Root `<Route>` is missing `ErrorBoundary` or `errorElement`; define a root error boundary so unhandled loader or action errors have a fallback UI.",
-                            child_opening.span,
-                            None,
-                        );
-                    }
-                }
-                check_jsx_route_element_recursive(
-                    child_el,
-                    None,
-                    semantic,
-                    line_starts,
-                    components_with_routes,
-                    components_with_outlet,
-                    &mut seen_ids,
-                    sites,
-                );
-            }
-        }
+        check_jsx_routes_container(
+            jsx_el,
+            semantic,
+            line_starts,
+            components_with_routes,
+            components_with_outlet,
+            sites,
+        );
     }
 
-    // 2. `react-router-no-nested-router`
-    if ROUTER_JSX_COMPONENTS.contains(&tag.as_str()) {
-        let has_ancestor_router = semantic.nodes().ancestor_ids(node_id).any(|anc_id| {
-            if let AstKind::JSXElement(anc_jsx) = semantic.nodes().kind(anc_id)
-                && let Some(anc_tag) = jsx_element_tag_name(&anc_jsx.opening_element.name)
-            {
-                ROUTER_JSX_COMPONENTS.contains(&anc_tag.as_str())
-            } else {
-                false
-            }
-        });
-        if has_ancestor_router {
-            push_site(
-                sites,
-                line_starts,
-                RuleId::ReactRouterNoNestedRouter,
-                subject_name.clone(),
-                "reactRouterNoNestedRouter",
-                &tag,
-                &format!(
-                    "`<{tag}>` is nested inside another router component; keep a single router provider at the application root."
-                ),
-                opening.span,
-                None,
-            );
-        }
+    if ROUTER_JSX_COMPONENTS.contains(&tag.as_str())
+        && has_ancestor_router_jsx_component(semantic, node_id)
+    {
+        push_site(
+            sites,
+            line_starts,
+            RuleId::ReactRouterNoNestedRouter,
+            subject_name.clone(),
+            "reactRouterNoNestedRouter",
+            &tag,
+            &format!(
+                "`<{tag}>` is nested inside another router component; keep a single router provider at the application root."
+            ),
+            opening.span,
+            None,
+        );
     }
 
-    // 3. `react-router-no-client-module-in-server-render`
     if client_imported_symbols.contains(&tag) && !is_inside_client_only_boundary(semantic, node_id)
     {
         push_site(
@@ -294,7 +274,77 @@ pub(crate) fn check_jsx_element_rules(
         );
     }
 
-    // 4. `react-router-internal-route-anchor`
+    check_jsx_link_and_anchor_rules(program, opening, &tag, subject_name, line_starts, sites);
+}
+
+fn check_jsx_routes_container(
+    jsx_el: &JSXElement<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    components_with_routes: &HashSet<String>,
+    components_with_outlet: &HashSet<String>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let mut seen_ids = HashSet::new();
+    let mut root_route_checked = false;
+    for child in &jsx_el.children {
+        let JSXChild::Element(child_el) = child else {
+            continue;
+        };
+        if jsx_element_tag_name(&child_el.opening_element.name).as_deref() == Some("Route")
+            && !root_route_checked
+        {
+            root_route_checked = true;
+            let child_opening = &child_el.opening_element;
+            let has_err = has_jsx_attr(child_opening, "errorElement")
+                || has_jsx_attr(child_opening, "ErrorBoundary");
+            if !has_err && jsx_route_subtree_has_loader_or_action(child_el) {
+                push_site(
+                    sites,
+                    line_starts,
+                    RuleId::ReactRouterRequireRootErrorBoundary,
+                    None,
+                    "reactRouterRequireRootErrorBoundary",
+                    "Route",
+                    "Root `<Route>` is missing `ErrorBoundary` or `errorElement`; define a root error boundary so unhandled loader or action errors have a fallback UI.",
+                    child_opening.span,
+                    None,
+                );
+            }
+        }
+        check_jsx_route_element_recursive(
+            child_el,
+            None,
+            semantic,
+            line_starts,
+            components_with_routes,
+            components_with_outlet,
+            &mut seen_ids,
+            sites,
+        );
+    }
+}
+
+fn has_ancestor_router_jsx_component(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
+    semantic.nodes().ancestor_ids(node_id).any(|anc_id| {
+        if let AstKind::JSXElement(anc_jsx) = semantic.nodes().kind(anc_id)
+            && let Some(anc_tag) = jsx_element_tag_name(&anc_jsx.opening_element.name)
+        {
+            ROUTER_JSX_COMPONENTS.contains(&anc_tag.as_str())
+        } else {
+            false
+        }
+    })
+}
+
+fn check_jsx_link_and_anchor_rules(
+    program: &Program<'_>,
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    tag: &str,
+    subject_name: Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
     if tag == "a"
         && file_uses_react_router(program)
         && let Some((href_val, _)) = get_jsx_attr_static_str(opening, "href")
@@ -308,7 +358,7 @@ pub(crate) fn check_jsx_element_rules(
             sites,
             line_starts,
             RuleId::ReactRouterInternalRouteAnchor,
-            subject_name.clone(),
+            subject_name,
             "reactRouterInternalRouteAnchor",
             "a",
             &format!(
@@ -317,9 +367,9 @@ pub(crate) fn check_jsx_element_rules(
             opening.span,
             None,
         );
+        return;
     }
 
-    // 5. `react-router-resource-link-requires-reload`
     if (tag == "Link" || tag == "NavLink")
         && let Some((to_val, _)) = get_jsx_attr_static_str(opening, "to")
         && has_resource_extension(&to_val)
@@ -332,7 +382,7 @@ pub(crate) fn check_jsx_element_rules(
             RuleId::ReactRouterResourceLinkRequiresReload,
             subject_name,
             "reactRouterResourceLinkRequiresReload",
-            &tag,
+            tag,
             &format!(
                 "`<{tag} to=\"{to_val}\">` points to a static/resource asset without `reloadDocument`; add `reloadDocument` so the browser loads the resource directly."
             ),
@@ -411,7 +461,41 @@ pub(crate) fn check_search_params_in_statements(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    // Collect `[searchParams, setSearchParams] = useSearchParams()` bindings in this scope
+    let (search_params_vars, set_search_params_vars) = collect_search_params_bindings(statements);
+    if search_params_vars.is_empty() && set_search_params_vars.is_empty() {
+        return;
+    }
+
+    let subject_name = find_enclosing_react_node(semantic, fn_node_id)
+        .and_then(|id| get_subject_name(semantic, id));
+    let fn_span = semantic.nodes().get_node(fn_node_id).span();
+
+    if !search_params_vars.is_empty() {
+        check_unsynchronized_search_params_mutations(
+            semantic,
+            fn_span,
+            &search_params_vars,
+            &set_search_params_vars,
+            &subject_name,
+            source,
+            line_starts,
+            sites,
+        );
+    }
+
+    if !set_search_params_vars.is_empty() {
+        check_multiple_set_search_params_in_tick(
+            semantic,
+            fn_span,
+            &set_search_params_vars,
+            &subject_name,
+            line_starts,
+            sites,
+        );
+    }
+}
+
+fn collect_search_params_bindings(statements: &[Statement<'_>]) -> (Vec<String>, Vec<String>) {
     let mut search_params_vars = Vec::new();
     let mut set_search_params_vars = Vec::new();
 
@@ -443,105 +527,115 @@ pub(crate) fn check_search_params_in_statements(
             }
         }
     }
+    (search_params_vars, set_search_params_vars)
+}
 
-    if search_params_vars.is_empty() && set_search_params_vars.is_empty() {
-        return;
-    }
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Checks in-place URLSearchParams mutations against setter calls in the enclosing function (#50)"
+)]
+fn check_unsynchronized_search_params_mutations(
+    semantic: &Semantic<'_>,
+    fn_span: Span,
+    search_params_vars: &[String],
+    set_search_params_vars: &[String],
+    subject_name: &Option<String>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let sp_refs: Vec<&str> = search_params_vars.iter().map(String::as_str).collect();
+    let fn_src = fn_span.source_text(source);
 
-    let subject_name = find_enclosing_react_node(semantic, fn_node_id)
-        .and_then(|id| get_subject_name(semantic, id));
-
-    // 1. Check `searchParams.set(...)` / `append` / `delete` / `sort` without passing to `setSearchParams`
-    if !search_params_vars.is_empty() {
-        let sp_refs: Vec<&str> = search_params_vars.iter().map(String::as_str).collect();
-        let fn_span = semantic.nodes().get_node(fn_node_id).span();
-        let fn_src = fn_span.source_text(source);
-
-        // Walk all statements and nested functions inside this component
-        for (_, node) in semantic.nodes().iter_enumerated() {
-            if !fn_span.contains_inclusive(node.span()) {
-                continue;
-            }
-            if let AstKind::CallExpression(call) = node.kind()
-                && let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
-                && let Expression::Identifier(obj_id) = mem.object.without_parentheses()
-                && sp_refs.contains(&obj_id.name.as_str())
-                && matches!(
-                    mem.property.name.as_str(),
-                    "set" | "append" | "delete" | "sort"
-                )
-            {
-                // Check if `setSearchParams(searchParams)` is called in the same function
-                let passed_to_setter = set_search_params_vars
-                    .iter()
-                    .any(|setter| fn_src.contains(&format!("{setter}({})", obj_id.name)));
-                if !passed_to_setter {
-                    push_site(
-                        sites,
-                        line_starts,
-                        RuleId::ReactRouterNoUnsynchronizedSearchParamsMutation,
-                        subject_name.clone(),
-                        "reactRouterNoUnsynchronizedSearchParamsMutation",
-                        &format!("{}.{}", obj_id.name, mem.property.name),
-                        &format!(
-                            "Mutating `{}.{}(...)` in place does not trigger navigation or re-render; clone `URLSearchParams` and pass it to `setSearchParams`.",
-                            obj_id.name, mem.property.name
-                        ),
-                        call.span,
-                        None,
-                    );
-                }
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !fn_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        if let AstKind::CallExpression(call) = node.kind()
+            && let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
+            && let Expression::Identifier(obj_id) = mem.object.without_parentheses()
+            && sp_refs.contains(&obj_id.name.as_str())
+            && matches!(
+                mem.property.name.as_str(),
+                "set" | "append" | "delete" | "sort"
+            )
+        {
+            let passed_to_setter = set_search_params_vars
+                .iter()
+                .any(|setter| fn_src.contains(&format!("{setter}({})", obj_id.name)));
+            if !passed_to_setter {
+                push_site(
+                    sites,
+                    line_starts,
+                    RuleId::ReactRouterNoUnsynchronizedSearchParamsMutation,
+                    subject_name.clone(),
+                    "reactRouterNoUnsynchronizedSearchParamsMutation",
+                    &format!("{}.{}", obj_id.name, mem.property.name),
+                    &format!(
+                        "Mutating `{}.{}(...)` in place does not trigger navigation or re-render; clone `URLSearchParams` and pass it to `setSearchParams`.",
+                        obj_id.name, mem.property.name
+                    ),
+                    call.span,
+                    None,
+                );
             }
         }
     }
+}
 
-    // 2. Check multiple `setSearchParams(...)` calls in the same synchronous block/function
-    if !set_search_params_vars.is_empty() {
-        let fn_span = semantic.nodes().get_node(fn_node_id).span();
-        for (_, node) in semantic.nodes().iter_enumerated() {
-            if !fn_span.contains_inclusive(node.span()) {
-                continue;
-            }
-            let block_stmts: Option<&[Statement<'_>]> = match node.kind() {
-                AstKind::FunctionBody(body) => Some(&body.statements),
-                AstKind::BlockStatement(block) => Some(&block.body),
-                _ => None,
-            };
-            let Some(stmts) = block_stmts else {
-                continue;
-            };
-            let mut setter_calls = Vec::new();
-            for stmt in stmts {
-                if let Statement::ExpressionStatement(expr_stmt) = stmt
-                    && let Expression::CallExpression(call) =
-                        expr_stmt.expression.without_parentheses()
-                    && let Expression::Identifier(callee_id) = call.callee.without_parentheses()
-                    && set_search_params_vars
-                        .iter()
-                        .any(|s| s == callee_id.name.as_str())
-                {
-                    setter_calls.push((callee_id.name.as_str(), call.span));
-                }
-            }
-            if setter_calls.len() >= 2 {
-                for (setter_name, span) in setter_calls.into_iter().skip(1) {
-                    push_site(
-                        sites,
-                        line_starts,
-                        RuleId::ReactRouterNoMultipleSetSearchParamsInTick,
-                        subject_name.clone(),
-                        "reactRouterNoMultipleSetSearchParamsInTick",
-                        setter_name,
-                        &format!(
-                            "Calling `{setter_name}()` multiple times in the same tick overwrites earlier updates; combine search param changes into a single `{setter_name}()` call."
-                        ),
-                        span,
-                        None,
-                    );
-                }
-            }
+fn check_multiple_set_search_params_in_tick(
+    semantic: &Semantic<'_>,
+    fn_span: Span,
+    set_search_params_vars: &[String],
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !fn_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        let stmts: &[Statement<'_>] = match node.kind() {
+            AstKind::FunctionBody(body) => &body.statements,
+            AstKind::BlockStatement(block) => &block.body,
+            _ => continue,
+        };
+        let setter_calls = collect_direct_setter_calls_in_block(stmts, set_search_params_vars);
+        for (setter_name, span) in setter_calls.into_iter().skip(1) {
+            push_site(
+                sites,
+                line_starts,
+                RuleId::ReactRouterNoMultipleSetSearchParamsInTick,
+                subject_name.clone(),
+                "reactRouterNoMultipleSetSearchParamsInTick",
+                setter_name,
+                &format!(
+                    "Calling `{setter_name}()` multiple times in the same tick overwrites earlier updates; combine search param changes into a single `{setter_name}()` call."
+                ),
+                span,
+                None,
+            );
         }
     }
+}
+
+fn collect_direct_setter_calls_in_block<'a>(
+    stmts: &'a [Statement<'a>],
+    set_search_params_vars: &[String],
+) -> Vec<(&'a str, Span)> {
+    let mut setter_calls = Vec::new();
+    for stmt in stmts {
+        if let Statement::ExpressionStatement(expr_stmt) = stmt
+            && let Expression::CallExpression(call) = expr_stmt.expression.without_parentheses()
+            && let Expression::Identifier(callee_id) = call.callee.without_parentheses()
+            && set_search_params_vars
+                .iter()
+                .any(|s| s == callee_id.name.as_str())
+        {
+            setter_calls.push((callee_id.name.as_str(), call.span));
+        }
+    }
+    setter_calls
 }
 
 fn is_inside_client_only_boundary(semantic: &Semantic<'_>, node_id: NodeId) -> bool {

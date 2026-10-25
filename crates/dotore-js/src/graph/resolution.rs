@@ -290,77 +290,8 @@ pub(super) fn compile_tsconfig_mappings(
 ) -> Vec<CompiledPathMapping> {
     let mut mappings = Vec::new();
     for (path, content) in manifests {
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !(name == "tsconfig.json"
-            || name == "jsconfig.json"
-            || (name.starts_with("tsconfig.") && name.ends_with(".json")))
-        {
-            continue;
-        }
-        let tsconfig_dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let norm_tsconfig_dir = normalize_path_components(tsconfig_dir);
-        let Ok(json) = serde_json::from_str::<Value>(&strip_jsonc(content)) else {
-            continue;
-        };
-        let Some(compiler_options) = json.get("compilerOptions").and_then(Value::as_object) else {
-            continue;
-        };
-        let base_url = compiler_options
-            .get("baseUrl")
-            .and_then(Value::as_str)
-            .unwrap_or(".");
-        let base_dir_path = if norm_tsconfig_dir.is_empty() || norm_tsconfig_dir == "." {
-            PathBuf::from(base_url)
-        } else {
-            tsconfig_dir.join(base_url)
-        };
-        let base_dir = normalize_path_components(&base_dir_path);
-
-        if let Some(paths_obj) = compiler_options.get("paths").and_then(Value::as_object) {
-            for (pattern, target_arr) in paths_obj {
-                let Some(arr) = target_arr.as_array() else {
-                    continue;
-                };
-                let targets: Vec<String> = arr
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect();
-                if targets.is_empty() {
-                    continue;
-                }
-                if let Some(star_idx) = pattern.find('*') {
-                    mappings.push(CompiledPathMapping {
-                        base_dir: base_dir.clone(),
-                        prefix: pattern[..star_idx].to_string(),
-                        suffix: pattern[star_idx + 1..].to_string(),
-                        is_wildcard: true,
-                        targets,
-                    });
-                } else {
-                    mappings.push(CompiledPathMapping {
-                        base_dir: base_dir.clone(),
-                        prefix: pattern.clone(),
-                        suffix: String::new(),
-                        is_wildcard: false,
-                        targets,
-                    });
-                }
-            }
-        }
-        if compiler_options.get("baseUrl").is_some() {
-            mappings.push(CompiledPathMapping {
-                base_dir,
-                prefix: String::new(),
-                suffix: String::new(),
-                is_wildcard: true,
-                targets: vec!["*".to_string()],
-            });
+        if is_tsconfig_path(path) {
+            compile_single_tsconfig_mappings(path, content, &mut mappings);
         }
     }
 
@@ -380,83 +311,164 @@ pub(super) fn compile_tsconfig_mappings(
     mappings
 }
 
+fn is_tsconfig_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name == "tsconfig.json"
+        || name == "jsconfig.json"
+        || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+}
+
+fn compile_single_tsconfig_mappings(
+    path: &Path,
+    content: &str,
+    mappings: &mut Vec<CompiledPathMapping>,
+) {
+    let tsconfig_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let norm_tsconfig_dir = normalize_path_components(tsconfig_dir);
+    let Ok(json) = serde_json::from_str::<Value>(&strip_jsonc(content)) else {
+        return;
+    };
+    let Some(compiler_options) = json.get("compilerOptions").and_then(Value::as_object) else {
+        return;
+    };
+    let base_url = compiler_options
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    let base_dir_path = if norm_tsconfig_dir.is_empty() || norm_tsconfig_dir == "." {
+        PathBuf::from(base_url)
+    } else {
+        tsconfig_dir.join(base_url)
+    };
+    let base_dir = normalize_path_components(&base_dir_path);
+
+    if let Some(paths_obj) = compiler_options.get("paths").and_then(Value::as_object) {
+        for (pattern, target_arr) in paths_obj {
+            if let Some(mapping) = compile_path_pattern(&base_dir, pattern, target_arr) {
+                mappings.push(mapping);
+            }
+        }
+    }
+    if compiler_options.get("baseUrl").is_some() {
+        mappings.push(CompiledPathMapping {
+            base_dir,
+            prefix: String::new(),
+            suffix: String::new(),
+            is_wildcard: true,
+            targets: vec!["*".to_string()],
+        });
+    }
+}
+
+fn compile_path_pattern(
+    base_dir: &str,
+    pattern: &str,
+    target_arr: &Value,
+) -> Option<CompiledPathMapping> {
+    let targets: Vec<String> = target_arr
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    if let Some(star_idx) = pattern.find('*') {
+        Some(CompiledPathMapping {
+            base_dir: base_dir.to_string(),
+            prefix: pattern[..star_idx].to_string(),
+            suffix: pattern[star_idx + 1..].to_string(),
+            is_wildcard: true,
+            targets,
+        })
+    } else {
+        Some(CompiledPathMapping {
+            base_dir: base_dir.to_string(),
+            prefix: pattern.to_string(),
+            suffix: String::new(),
+            is_wildcard: false,
+            targets,
+        })
+    }
+}
+
 pub(super) fn parse_package_manifests(
     manifests: &HashMap<PathBuf, String>,
 ) -> Vec<PackageManifestInfo> {
-    let mut pkgs = Vec::new();
-    for (path, content) in manifests {
-        if path.file_name().and_then(|n| n.to_str()) != Some("package.json") {
-            continue;
-        }
-        let root_dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let norm_root = normalize_path_components(&root_dir);
-        let Ok(json) = serde_json::from_str::<Value>(&strip_jsonc(content)) else {
-            continue;
-        };
-        let name = json.get("name").and_then(Value::as_str).map(str::to_string);
-        let mut entry_specifiers = Vec::new();
-        for field in [
-            "main", "module", "types", "typings", "browser", "source", "style",
-        ] {
-            if let Some(val) = json.get(field) {
-                collect_string_leaves(val, &mut entry_specifiers);
-            }
-        }
-        if let Some(bin_val) = json.get("bin") {
-            collect_string_leaves(bin_val, &mut entry_specifiers);
-        }
-        if let Some(exports_val) = json.get("exports") {
-            collect_string_leaves(exports_val, &mut entry_specifiers);
-        }
-
-        let mut script_commands = Vec::new();
-        if let Some(scripts_obj) = json.get("scripts").and_then(Value::as_object) {
-            for val in scripts_obj.values() {
-                if let Some(cmd) = val.as_str() {
-                    script_commands.push(cmd.to_string());
-                }
-            }
-        }
-
-        let dependencies = json
-            .get("dependencies")
-            .and_then(Value::as_object)
-            .map(|o| o.keys().cloned().collect())
-            .unwrap_or_default();
-        let dev_dependencies = json
-            .get("devDependencies")
-            .and_then(Value::as_object)
-            .map(|o| o.keys().cloned().collect())
-            .unwrap_or_default();
-
-        let mut peer_and_optional_dependencies = HashSet::new();
-        for field in ["peerDependencies", "optionalDependencies"] {
-            if let Some(obj) = json.get(field).and_then(Value::as_object) {
-                for k in obj.keys() {
-                    peer_and_optional_dependencies.insert(k.clone());
-                }
-            }
-        }
-
-        pkgs.push(PackageManifestInfo {
-            manifest_path: path.clone(),
-            root_dir,
-            norm_root,
-            name,
-            entry_specifiers,
-            script_commands,
-            dependencies,
-            dev_dependencies,
-            peer_and_optional_dependencies,
-            raw_content: content.clone(),
-        });
-    }
+    let mut pkgs: Vec<PackageManifestInfo> = manifests
+        .iter()
+        .filter_map(|(path, content)| parse_single_package_manifest(path, content))
+        .collect();
     pkgs.sort_by(|a, b| a.manifest_path.cmp(&b.manifest_path));
     pkgs
+}
+
+fn parse_single_package_manifest(path: &Path, content: &str) -> Option<PackageManifestInfo> {
+    if path.file_name().and_then(|n| n.to_str()) != Some("package.json") {
+        return None;
+    }
+    let root_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let norm_root = normalize_path_components(&root_dir);
+    let json = serde_json::from_str::<Value>(&strip_jsonc(content)).ok()?;
+    let name = json.get("name").and_then(Value::as_str).map(str::to_string);
+
+    let mut entry_specifiers = Vec::new();
+    for field in [
+        "main", "module", "types", "typings", "browser", "source", "style", "bin", "exports",
+    ] {
+        if let Some(val) = json.get(field) {
+            collect_string_leaves(val, &mut entry_specifiers);
+        }
+    }
+
+    let script_commands = json
+        .get("scripts")
+        .and_then(Value::as_object)
+        .map(|obj| {
+            obj.values()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let dependencies = collect_json_object_keys(&json, "dependencies");
+    let dev_dependencies = collect_json_object_keys(&json, "devDependencies");
+    let mut peer_and_optional_dependencies: HashSet<String> =
+        collect_json_object_keys(&json, "peerDependencies")
+            .into_iter()
+            .collect();
+    peer_and_optional_dependencies.extend(collect_json_object_keys(&json, "optionalDependencies"));
+
+    Some(PackageManifestInfo {
+        manifest_path: path.to_path_buf(),
+        root_dir,
+        norm_root,
+        name,
+        entry_specifiers,
+        script_commands,
+        dependencies,
+        dev_dependencies,
+        peer_and_optional_dependencies,
+        raw_content: content.to_string(),
+    })
+}
+
+fn collect_json_object_keys(json: &Value, field: &str) -> Vec<String> {
+    json.get(field)
+        .and_then(Value::as_object)
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn collect_string_leaves(val: &Value, out: &mut Vec<String>) {
@@ -600,47 +612,62 @@ pub(super) fn resolve_specifier_to_target_indices(
         return Vec::new();
     }
 
-    if clean_spec.starts_with("./")
-        || clean_spec.starts_with("../")
-        || clean_spec == "."
-        || clean_spec == ".."
-    {
-        let parent = importer_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new(""));
-        let joined = parent.join(clean_spec);
-        let stem = normalize_module_stem(&joined);
-        let matched = match_stem_against_targets(&stem, targets);
+    if is_relative_specifier(clean_spec) {
+        return resolve_relative_specifier(importer_path, clean_spec, targets);
+    }
+
+    let mapped = resolve_tsconfig_mapped_specifier(clean_spec, targets, ts_mappings);
+    if !mapped.is_empty() {
+        return mapped;
+    }
+
+    if let Some(alias_rest) = clean_spec.strip_prefix("@/") {
+        let matched = resolve_at_slash_alias(alias_rest, targets);
         if !matched.is_empty() {
             return matched;
         }
-        if let Some(src_stem) = replace_output_dir_with_src(&stem) {
-            let fallback = match_stem_against_targets(&src_stem, targets);
-            if !fallback.is_empty() {
-                return fallback;
-            }
-        }
-        return Vec::new();
     }
 
-    for mapping in ts_mappings {
-        let wildcard_slice = if mapping.is_wildcard {
-            if !clean_spec.starts_with(&mapping.prefix) || !clean_spec.ends_with(&mapping.suffix) {
-                continue;
-            }
-            let end = clean_spec.len().saturating_sub(mapping.suffix.len());
-            if end < mapping.prefix.len() {
-                continue;
-            }
-            clean_spec.get(mapping.prefix.len()..end).unwrap_or_default()
-        } else {
-            if clean_spec != mapping.prefix {
-                continue;
-            }
-            ""
-        };
+    resolve_workspace_package_specifier(clean_spec, targets, pkg_manifests)
+}
 
+fn is_relative_specifier(clean_spec: &str) -> bool {
+    clean_spec.starts_with("./")
+        || clean_spec.starts_with("../")
+        || clean_spec == "."
+        || clean_spec == ".."
+}
+
+fn resolve_relative_specifier(
+    importer_path: &Path,
+    clean_spec: &str,
+    targets: &[IndexedTargetFile],
+) -> Vec<usize> {
+    let parent = importer_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(""));
+    let joined = parent.join(clean_spec);
+    let stem = normalize_module_stem(&joined);
+    let matched = match_stem_against_targets(&stem, targets);
+    if !matched.is_empty() {
+        return matched;
+    }
+    if let Some(src_stem) = replace_output_dir_with_src(&stem) {
+        return match_stem_against_targets(&src_stem, targets);
+    }
+    Vec::new()
+}
+
+fn resolve_tsconfig_mapped_specifier(
+    clean_spec: &str,
+    targets: &[IndexedTargetFile],
+    ts_mappings: &[CompiledPathMapping],
+) -> Vec<usize> {
+    for mapping in ts_mappings {
+        let Some(wildcard_slice) = match_tsconfig_mapping_pattern(clean_spec, mapping) else {
+            continue;
+        };
         for target_pat in &mapping.targets {
             let substituted = target_pat.replace('*', wildcard_slice);
             let full_path = if mapping.base_dir.is_empty() || mapping.base_dir == "." {
@@ -655,19 +682,42 @@ pub(super) fn resolve_specifier_to_target_indices(
             }
         }
     }
+    Vec::new()
+}
 
-    if let Some(alias_rest) = clean_spec.strip_prefix("@/") {
-        let clean_rest = strip_source_extension(&normalize_path_components(Path::new(alias_rest)));
-        let src_rest = format!("src/{clean_rest}");
-        let mut matched = match_stem_or_suffix_against_targets(&clean_rest, targets);
-        if matched.is_empty() {
-            matched = match_stem_or_suffix_against_targets(&src_rest, targets);
+fn match_tsconfig_mapping_pattern<'a>(
+    clean_spec: &'a str,
+    mapping: &CompiledPathMapping,
+) -> Option<&'a str> {
+    if mapping.is_wildcard {
+        if !clean_spec.starts_with(&mapping.prefix) || !clean_spec.ends_with(&mapping.suffix) {
+            return None;
         }
-        if !matched.is_empty() {
-            return matched;
+        let end = clean_spec.len().saturating_sub(mapping.suffix.len());
+        if end < mapping.prefix.len() {
+            return None;
         }
+        clean_spec.get(mapping.prefix.len()..end)
+    } else {
+        (clean_spec == mapping.prefix).then_some("")
     }
+}
 
+fn resolve_at_slash_alias(alias_rest: &str, targets: &[IndexedTargetFile]) -> Vec<usize> {
+    let clean_rest = strip_source_extension(&normalize_path_components(Path::new(alias_rest)));
+    let matched = match_stem_or_suffix_against_targets(&clean_rest, targets);
+    if !matched.is_empty() {
+        return matched;
+    }
+    let src_rest = format!("src/{clean_rest}");
+    match_stem_or_suffix_against_targets(&src_rest, targets)
+}
+
+fn resolve_workspace_package_specifier(
+    clean_spec: &str,
+    targets: &[IndexedTargetFile],
+    pkg_manifests: &[PackageManifestInfo],
+) -> Vec<usize> {
     for ws_pkg in pkg_manifests {
         let Some(pkg_name) = &ws_pkg.name else {
             continue;
@@ -678,21 +728,17 @@ pub(super) fn resolve_specifier_to_target_indices(
                 return entry_matches;
             }
         } else if let Some(subpath) = clean_spec.strip_prefix(&format!("{pkg_name}/")) {
-            let sub_joined = ws_pkg.root_dir.join(subpath);
-            let sub_stem = normalize_module_stem(&sub_joined);
-            let matched = match_stem_against_targets(&sub_stem, targets);
-            if !matched.is_empty() {
-                return matched;
-            }
-            let src_joined = ws_pkg.root_dir.join("src").join(subpath);
-            let src_stem = normalize_module_stem(&src_joined);
-            let src_matched = match_stem_against_targets(&src_stem, targets);
-            if !src_matched.is_empty() {
-                return src_matched;
+            for candidate in [
+                ws_pkg.root_dir.join(subpath),
+                ws_pkg.root_dir.join("src").join(subpath),
+            ] {
+                let matched = match_stem_against_targets(&normalize_module_stem(&candidate), targets);
+                if !matched.is_empty() {
+                    return matched;
+                }
             }
         }
     }
-
     Vec::new()
 }
 
@@ -705,35 +751,30 @@ pub(super) fn resolve_package_entry_indices(
         if spec.contains('*') {
             continue;
         }
-        let candidate_path = pkg.root_dir.join(spec);
-        let stem = normalize_module_stem(&candidate_path);
-        for idx in match_stem_against_targets(&stem, targets) {
-            if !indices.contains(&idx) {
-                indices.push(idx);
-            }
-        }
+        let stem = normalize_module_stem(&pkg.root_dir.join(spec));
+        extend_unique_indices(&mut indices, match_stem_against_targets(&stem, targets));
         if let Some(src_stem) = replace_output_dir_with_src(&stem) {
-            for idx in match_stem_against_targets(&src_stem, targets) {
-                if !indices.contains(&idx) {
-                    indices.push(idx);
-                }
-            }
+            extend_unique_indices(&mut indices, match_stem_against_targets(&src_stem, targets));
         }
     }
     if indices.is_empty() {
         for fallback in ["src/index", "src/main", "index", "main"] {
             let stem = normalize_module_stem(&pkg.root_dir.join(fallback));
-            for idx in match_stem_against_targets(&stem, targets) {
-                if !indices.contains(&idx) {
-                    indices.push(idx);
-                }
-            }
+            extend_unique_indices(&mut indices, match_stem_against_targets(&stem, targets));
             if !indices.is_empty() {
                 break;
             }
         }
     }
     indices
+}
+
+fn extend_unique_indices(out: &mut Vec<usize>, candidates: Vec<usize>) {
+    for idx in candidates {
+        if !out.contains(&idx) {
+            out.push(idx);
+        }
+    }
 }
 
 pub(super) fn match_stem_against_targets(stem: &str, targets: &[IndexedTargetFile]) -> Vec<usize> {
@@ -789,7 +830,7 @@ pub(super) fn normalize_module_stem(path: &Path) -> String {
     strip_source_extension(&normalize_path_components(path))
 }
 
-fn normalize_path_components(path: &Path) -> String {
+pub(crate) fn normalize_path_components(path: &Path) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut has_leading_root = false;
 

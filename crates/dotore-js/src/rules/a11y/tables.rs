@@ -17,217 +17,29 @@ pub(super) const RESERVED_HTML_TAGS: &[&str] = &[
 ];
 
 pub(super) const HTML_TAGS: &[&str] = &[
-    "a",
-    "abbr",
-    "acronym",
-    "address",
-    "applet",
-    "area",
-    "article",
-    "aside",
-    "audio",
-    "b",
-    "base",
-    "basefont",
-    "bdi",
-    "bdo",
-    "bgsound",
-    "big",
-    "blink",
-    "blockquote",
-    "body",
-    "br",
-    "button",
-    "canvas",
-    "caption",
-    "center",
-    "cite",
-    "code",
-    "col",
-    "colgroup",
-    "command",
-    "content",
-    "data",
-    "datalist",
-    "dd",
-    "del",
-    "details",
-    "dfn",
-    "dialog",
-    "dir",
-    "div",
-    "dl",
-    "dt",
-    "element",
-    "em",
-    "embed",
-    "fieldset",
-    "figcaption",
-    "figure",
-    "font",
-    "footer",
-    "form",
-    "frame",
-    "frameset",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "head",
-    "header",
-    "hgroup",
-    "hr",
-    "html",
-    "i",
-    "iframe",
-    "image",
-    "img",
-    "input",
-    "ins",
-    "isindex",
-    "kbd",
-    "keygen",
-    "label",
-    "legend",
-    "li",
-    "link",
-    "listing",
-    "main",
-    "map",
-    "mark",
-    "marquee",
-    "math",
-    "menu",
-    "menuitem",
-    "meta",
-    "meter",
-    "multicol",
-    "nav",
-    "nextid",
-    "nobr",
-    "noembed",
-    "noframes",
-    "noscript",
-    "object",
-    "ol",
-    "optgroup",
-    "option",
-    "output",
-    "p",
-    "param",
-    "picture",
-    "plaintext",
-    "pre",
-    "progress",
-    "q",
-    "rb",
-    "rbc",
-    "rp",
-    "rt",
-    "rtc",
-    "ruby",
-    "s",
-    "samp",
-    "script",
-    "search",
-    "section",
-    "select",
-    "shadow",
-    "slot",
-    "small",
-    "source",
-    "spacer",
-    "span",
-    "strike",
-    "strong",
-    "style",
-    "sub",
-    "summary",
-    "sup",
-    "svg",
-    "table",
-    "tbody",
-    "td",
-    "template",
-    "textarea",
-    "tfoot",
-    "th",
-    "thead",
-    "time",
-    "title",
-    "tr",
-    "track",
-    "tt",
-    "u",
-    "ul",
-    "var",
-    "video",
-    "wbr",
-    "xmp",
+    "a", "abbr", "acronym", "address", "applet", "area", "article", "aside", "audio", "b", "base",
+    "basefont", "bdi", "bdo", "bgsound", "big", "blink", "blockquote", "body", "br", "button",
+    "canvas", "caption", "center", "cite", "code", "col", "colgroup", "command", "content", "data",
+    "datalist", "dd", "del", "details", "dfn", "dialog", "dir", "div", "dl", "dt", "element", "em",
+    "embed", "fieldset", "figcaption", "figure", "font", "footer", "form", "frame", "frameset",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe",
+    "image", "img", "input", "ins", "isindex", "kbd", "keygen", "label", "legend", "li", "link",
+    "listing", "main", "map", "mark", "marquee", "math", "menu", "menuitem", "meta", "meter",
+    "multicol", "nav", "nextid", "nobr", "noembed", "noframes", "noscript", "object", "ol",
+    "optgroup", "option", "output", "p", "param", "picture", "plaintext", "pre", "progress", "q",
+    "rb", "rbc", "rp", "rt", "rtc", "ruby", "s", "samp", "script", "search", "section", "select",
+    "shadow", "slot", "small", "source", "spacer", "span", "strike", "strong", "style", "sub",
+    "summary", "sup", "svg", "table", "tbody", "td", "template", "textarea", "tfoot", "th",
+    "thead", "time", "title", "tr", "track", "tt", "u", "ul", "var", "video", "wbr", "xmp",
 ];
 
 pub(super) const NON_INTERACTIVE_ELEMENTS: &[&str] = &[
-    "abbr",
-    "address",
-    "article",
-    "aside",
-    "blockquote",
-    "br",
-    "caption",
-    "code",
-    "dd",
-    "del",
-    "details",
-    "dfn",
-    "dialog",
-    "dir",
-    "dl",
-    "dt",
-    "em",
-    "fieldset",
-    "figcaption",
-    "figure",
-    "footer",
-    "form",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "hr",
-    "html",
-    "iframe",
-    "img",
-    "ins",
-    "label",
-    "legend",
-    "li",
-    "main",
-    "mark",
-    "marquee",
-    "menu",
-    "meter",
-    "nav",
-    "ol",
-    "optgroup",
-    "output",
-    "p",
-    "pre",
-    "progress",
-    "ruby",
-    "section",
-    "strong",
-    "sub",
-    "sup",
-    "table",
-    "tbody",
-    "tfoot",
-    "thead",
-    "time",
-    "ul",
+    "abbr", "address", "article", "aside", "blockquote", "br", "caption", "code", "dd", "del",
+    "details", "dfn", "dialog", "dir", "dl", "dt", "em", "fieldset", "figcaption", "figure",
+    "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "html", "iframe", "img", "ins",
+    "label", "legend", "li", "main", "mark", "marquee", "menu", "meter", "nav", "ol", "optgroup",
+    "output", "p", "pre", "progress", "ruby", "section", "strong", "sub", "sup", "table", "tbody",
+    "tfoot", "thead", "time", "ul",
 ];
 
 pub(super) const VALID_ARIA_ROLES: &[&str] = &[
@@ -599,98 +411,114 @@ const COMMON_LANG_TAGS: &[&str] = &[
     "art", "cel", "sgn", "i",
 ];
 
+const STATIC_IMPLICIT_ROLES: &[(&str, &str)] = &[
+    ("article", "article"),
+    ("aside", "complementary"),
+    ("button", "button"),
+    ("datalist", "listbox"),
+    ("details", "group"),
+    ("dialog", "dialog"),
+    ("fieldset", "group"),
+    ("figure", "figure"),
+    ("footer", "contentinfo"),
+    ("form", "form"),
+    ("h1", "heading"),
+    ("h2", "heading"),
+    ("h3", "heading"),
+    ("h4", "heading"),
+    ("h5", "heading"),
+    ("h6", "heading"),
+    ("header", "banner"),
+    ("hr", "separator"),
+    ("img", "img"),
+    ("li", "listitem"),
+    ("main", "main"),
+    ("math", "math"),
+    ("menu", "list"),
+    ("meter", "meter"),
+    ("nav", "navigation"),
+    ("ol", "list"),
+    ("option", "option"),
+    ("output", "status"),
+    ("p", "paragraph"),
+    ("progress", "progressbar"),
+    ("search", "search"),
+    ("section", "region"),
+    ("select", "combobox"),
+    ("svg", "graphics-document"),
+    ("table", "table"),
+    ("tbody", "rowgroup"),
+    ("td", "cell"),
+    ("textarea", "textbox"),
+    ("tfoot", "rowgroup"),
+    ("th", "columnheader"),
+    ("thead", "rowgroup"),
+    ("tr", "row"),
+    ("ul", "list"),
+];
+
+const PREFERRED_HTML_TAG_BY_ROLE: &[(&str, &str)] = &[
+    ("navigation", "nav"),
+    ("main", "main"),
+    ("banner", "header"),
+    ("contentinfo", "footer"),
+    ("complementary", "aside"),
+    ("article", "article"),
+    ("form", "form"),
+    ("search", "search"),
+    ("blockquote", "blockquote"),
+    ("paragraph", "p"),
+    ("code", "code"),
+    ("figure", "figure"),
+    ("caption", "caption"),
+    ("list", "ul"),
+    ("listitem", "li"),
+    ("Deletion", "del"),
+    ("deletion", "del"),
+    ("insertion", "ins"),
+    ("strong", "strong"),
+    ("emphasis", "em"),
+    ("subscript", "sub"),
+    ("superscript", "sup"),
+    ("term", "dfn"),
+    ("time", "time"),
+    ("meter", "meter"),
+];
+
 pub(super) fn get_implicit_role(
     tag: &str,
     opening: &JSXOpeningElement<'_>,
     semantic: &Semantic<'_>,
     const_strings: &HashMap<SymbolId, String>,
 ) -> Option<&'static str> {
-    match tag {
-        "a" | "area" | "link" => {
-            find_jsx_attr_ignore_case(&opening.attributes, "href").map(|_| "link")
-        }
-        "article" => Some("article"),
-        "aside" => Some("complementary"),
-        "button" => Some("button"),
-        "datalist" => Some("listbox"),
-        "details" => Some("group"),
-        "dialog" => Some("dialog"),
-        "fieldset" => Some("group"),
-        "figure" => Some("figure"),
-        "footer" => Some("contentinfo"),
-        "form" => Some("form"),
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some("heading"),
-        "header" => Some("banner"),
-        "hr" => Some("separator"),
-        "img" => Some("img"),
-        "input" => {
-            let input_type = find_jsx_attr_ignore_case(&opening.attributes, "type")
-                .and_then(|a| get_attr_static_str(semantic, a, const_strings))
-                .unwrap_or_else(|| "text".to_string())
-                .to_ascii_lowercase();
-            match input_type.as_str() {
-                "button" | "image" | "reset" | "submit" => Some("button"),
-                "checkbox" => Some("checkbox"),
-                "number" => Some("spinbutton"),
-                "radio" => Some("radio"),
-                "range" => Some("slider"),
-                "search" => Some("searchbox"),
-                "hidden" => None,
-                _ => Some("textbox"),
-            }
-        }
-        "li" => Some("listitem"),
-        "main" => Some("main"),
-        "math" => Some("math"),
-        "menu" | "ol" | "ul" => Some("list"),
-        "meter" => Some("meter"),
-        "nav" => Some("navigation"),
-        "option" => Some("option"),
-        "output" => Some("status"),
-        "p" => Some("paragraph"),
-        "progress" => Some("progressbar"),
-        "search" => Some("search"),
-        "section" => Some("region"),
-        "select" => Some("combobox"),
-        "svg" => Some("graphics-document"),
-        "table" => Some("table"),
-        "tbody" | "tfoot" | "thead" => Some("rowgroup"),
-        "td" => Some("cell"),
-        "textarea" => Some("textbox"),
-        "th" => Some("columnheader"),
-        "tr" => Some("row"),
-        _ => None,
+    if matches!(tag, "a" | "area" | "link") {
+        return find_jsx_attr_ignore_case(&opening.attributes, "href").map(|_| "link");
     }
+    if tag == "input" {
+        let input_type = find_jsx_attr_ignore_case(&opening.attributes, "type")
+            .and_then(|a| get_attr_static_str(semantic, a, const_strings))
+            .unwrap_or_else(|| "text".to_string())
+            .to_ascii_lowercase();
+        return match input_type.as_str() {
+            "button" | "image" | "reset" | "submit" => Some("button"),
+            "checkbox" => Some("checkbox"),
+            "number" => Some("spinbutton"),
+            "radio" => Some("radio"),
+            "range" => Some("slider"),
+            "search" => Some("searchbox"),
+            "hidden" => None,
+            _ => Some("textbox"),
+        };
+    }
+    STATIC_IMPLICIT_ROLES
+        .iter()
+        .find_map(|&(t, role)| (t == tag).then_some(role))
 }
 
 pub(super) fn preferred_html_tag_for_role(role: &str) -> Option<&'static str> {
-    match role {
-        "navigation" => Some("nav"),
-        "main" => Some("main"),
-        "banner" => Some("header"),
-        "contentinfo" => Some("footer"),
-        "complementary" => Some("aside"),
-        "article" => Some("article"),
-        "form" => Some("form"),
-        "search" => Some("search"),
-        "blockquote" => Some("blockquote"),
-        "paragraph" => Some("p"),
-        "code" => Some("code"),
-        "figure" => Some("figure"),
-        "caption" => Some("caption"),
-        "list" => Some("ul"),
-        "listitem" => Some("li"),
-        "Deletion" | "deletion" => Some("del"),
-        "insertion" => Some("ins"),
-        "strong" => Some("strong"),
-        "emphasis" => Some("em"),
-        "subscript" => Some("sub"),
-        "superscript" => Some("sup"),
-        "term" => Some("dfn"),
-        "time" => Some("time"),
-        "meter" => Some("meter"),
-        _ => None,
-    }
+    PREFERRED_HTML_TAG_BY_ROLE
+        .iter()
+        .find_map(|&(r, tag)| (r == role).then_some(tag))
 }
 
 pub(super) fn is_allowed_interactive_role_on_noninteractive(tag: &str, role: &str) -> bool {
@@ -841,34 +669,68 @@ pub(super) fn is_valid_aria_prop_value(
     val: &JSXAttributeValue<'_>,
     _semantic: &Semantic<'_>,
 ) -> bool {
-    let lit_str = match val {
+    let Some(s) = extract_aria_literal_string(val) else {
+        return true;
+    };
+    validate_aria_prop_string(prop, s.trim())
+}
+
+fn extract_aria_literal_string(val: &JSXAttributeValue<'_>) -> Option<String> {
+    match val {
         JSXAttributeValue::StringLiteral(s) => s.value.as_str().map(str::to_ascii_lowercase),
         JSXAttributeValue::ExpressionContainer(c) => match c.expression.as_expression() {
             Some(Expression::StringLiteral(s)) => s.value.as_str().map(str::to_ascii_lowercase),
             Some(Expression::BooleanLiteral(b)) => Some(b.value.to_string()),
             Some(Expression::NumericLiteral(n)) => Some(n.value.to_string()),
-            _ => return true,
+            _ => None,
         },
-        _ => return true,
-    };
-    let Some(s) = lit_str else {
-        return true;
-    };
-    let trimmed = s.trim();
+        _ => None,
+    }
+}
+
+fn validate_aria_prop_string(prop: &str, trimmed: &str) -> bool {
+    const BOOLEAN_ARIA_PROPS: &[&str] = &[
+        "aria-atomic",
+        "aria-busy",
+        "aria-disabled",
+        "aria-modal",
+        "aria-multiline",
+        "aria-multiselectable",
+        "aria-readonly",
+        "aria-required",
+    ];
+    const OPT_BOOLEAN_ARIA_PROPS: &[&str] = &[
+        "aria-expanded",
+        "aria-grabbed",
+        "aria-hidden",
+        "aria-selected",
+    ];
+    const INTEGER_ARIA_PROPS: &[&str] = &[
+        "aria-colcount",
+        "aria-colindex",
+        "aria-colspan",
+        "aria-level",
+        "aria-posinset",
+        "aria-rowcount",
+        "aria-rowindex",
+        "aria-rowspan",
+        "aria-setsize",
+    ];
+    const FLOAT_ARIA_PROPS: &[&str] = &["aria-valuemax", "aria-valuemin", "aria-valuenow"];
+
+    if BOOLEAN_ARIA_PROPS.contains(&prop) {
+        return matches!(trimmed, "true" | "false");
+    }
+    if OPT_BOOLEAN_ARIA_PROPS.contains(&prop) {
+        return matches!(trimmed, "true" | "false" | "undefined");
+    }
+    if INTEGER_ARIA_PROPS.contains(&prop) {
+        return trimmed.parse::<i64>().is_ok();
+    }
+    if FLOAT_ARIA_PROPS.contains(&prop) {
+        return trimmed.parse::<f64>().is_ok();
+    }
     match prop {
-        "aria-atomic"
-        | "aria-busy"
-        | "aria-disabled"
-        | "aria-modal"
-        | "aria-multiline"
-        | "aria-multiselectable"
-        | "aria-readonly"
-        | "aria-required" => {
-            matches!(trimmed, "true" | "false")
-        }
-        "aria-expanded" | "aria-grabbed" | "aria-hidden" | "aria-selected" => {
-            matches!(trimmed, "true" | "false" | "undefined")
-        }
         "aria-checked" | "aria-pressed" => {
             matches!(trimmed, "true" | "false" | "mixed" | "undefined")
         }
@@ -885,11 +747,6 @@ pub(super) fn is_valid_aria_prop_value(
         "aria-live" => matches!(trimmed, "assertive" | "off" | "polite"),
         "aria-orientation" => matches!(trimmed, "horizontal" | "undefined" | "vertical"),
         "aria-sort" => matches!(trimmed, "ascending" | "descending" | "none" | "other"),
-        "aria-colcount" | "aria-colindex" | "aria-colspan" | "aria-level" | "aria-posinset"
-        | "aria-rowcount" | "aria-rowindex" | "aria-rowspan" | "aria-setsize" => {
-            trimmed.parse::<i64>().is_ok()
-        }
-        "aria-valuemax" | "aria-valuemin" | "aria-valuenow" => trimmed.parse::<f64>().is_ok(),
         _ => !trimmed.is_empty(),
     }
 }

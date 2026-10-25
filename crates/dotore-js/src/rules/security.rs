@@ -67,35 +67,50 @@ pub(crate) fn evaluate_security_rules<F>(
         return;
     }
 
+    evaluate_dom_and_client_security_rules(graph, file, &path_str, &line_starts, is_active, out);
+    evaluate_trust_boundary_security_rules(file, &line_starts, is_active, out);
+    evaluate_security_scan_patterns(file, &path_str, &line_starts, is_active, out);
+}
+
+fn evaluate_dom_and_client_security_rules<F>(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    path_str: &str,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     if is_active(RuleId::DangerousHtmlSink).is_some() {
-        check_dangerous_html_sink(graph, file, &path_str, &line_starts, out);
+        check_dangerous_html_sink(graph, file, path_str, line_starts, out);
     }
     if is_active(RuleId::WindowOpenWithoutNoopener).is_some() {
-        check_window_open_without_noopener(graph, file, &line_starts, out);
+        check_window_open_without_noopener(graph, file, line_starts, out);
     }
     if is_active(RuleId::UnsafeJsonInHtml).is_some() {
-        check_unsafe_json_in_html(file, &line_starts, out);
+        check_unsafe_json_in_html(file, line_starts, out);
     }
     if is_active(RuleId::NoSecretsInClientCode).is_some() {
-        check_no_secrets_in_client_code(file, &path_str, &line_starts, out);
+        check_no_secrets_in_client_code(file, path_str, line_starts, out);
     }
     if is_active(RuleId::PublicEnvSecretName).is_some() {
-        check_public_env_secret_name(file, &path_str, &line_starts, out);
+        check_public_env_secret_name(file, path_str, line_starts, out);
     }
     if is_active(RuleId::AuthTokenInWebStorage).is_some() {
-        check_auth_token_in_web_storage(file, &line_starts, out);
+        check_auth_token_in_web_storage(file, line_starts, out);
     }
     if is_active(RuleId::NoEval).is_some() {
-        check_no_eval(file, &path_str, &line_starts, out);
+        check_no_eval(file, path_str, line_starts, out);
     }
     if is_active(RuleId::NoPathPrefixContainment).is_some() {
-        check_no_path_prefix_containment(file, &line_starts, out);
+        check_no_path_prefix_containment(file, line_starts, out);
     }
     if is_active(RuleId::ReactMarkdownUnsanitizedRawHtml).is_some() {
-        check_react_markdown_unsanitized_raw_html(file, &line_starts, out);
+        check_react_markdown_unsanitized_raw_html(file, line_starts, out);
     }
     if is_active(RuleId::ReactRouterCspNonceConsistency).is_some() {
-        check_react_router_csp_nonce_consistency(file, &line_starts, out);
+        check_react_router_csp_nonce_consistency(file, line_starts, out);
     }
     if is_active(RuleId::NoDangerWithChildren).is_some() {
         check_no_danger_with_children(file, out);
@@ -103,23 +118,31 @@ pub(crate) fn evaluate_security_rules<F>(
     if is_active(RuleId::IframeMissingSandbox).is_some() {
         check_iframe_missing_sandbox(file, out);
     }
+}
+
+fn evaluate_trust_boundary_security_rules<F>(
+    file: &FileIr,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     if is_active(RuleId::ElectronWebviewBridgeRisk).is_some() {
-        check_electron_webview_bridge_risk(file, &line_starts, out);
+        check_electron_webview_bridge_risk(file, line_starts, out);
     }
     if is_active(RuleId::UntrustedHostHeaderOrigin).is_some() {
-        check_untrusted_host_header_origin(file, &line_starts, out);
+        check_untrusted_host_header_origin(file, line_starts, out);
     }
     if is_active(RuleId::PrivateResponsePublicCache).is_some() {
-        check_private_response_public_cache(file, &line_starts, out);
+        check_private_response_public_cache(file, line_starts, out);
     }
     if is_active(RuleId::LlmPromptRoleAndToolSinkRisk).is_some() {
-        check_llm_prompt_role_and_tool_sink_risk(file, &line_starts, out);
+        check_llm_prompt_role_and_tool_sink_risk(file, line_starts, out);
     }
     if is_active(RuleId::SupabaseServiceRoleUnscopedQuery).is_some() {
-        check_supabase_service_role_unscoped_query(file, &line_starts, out);
+        check_supabase_service_role_unscoped_query(file, line_starts, out);
     }
-
-    evaluate_security_scan_patterns(file, &path_str, &line_starts, is_active, out);
 }
 
 #[expect(
@@ -290,83 +313,106 @@ fn find_function_declaration_end(tail: &str) -> Option<usize> {
     let mut after_arrow = false;
 
     while i < bytes.len() {
+        if let Some(next_i) = skip_js_comment_or_string_literal(bytes, i) {
+            i = next_i;
+            continue;
+        }
         let b = bytes[i];
-        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-            i += 2;
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(bytes.len());
-            continue;
-        }
-        if b == b'\'' || b == b'"' || b == b'`' {
-            let quote = b;
-            i += 1;
-            while i < bytes.len() && bytes[i] != quote {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i = (i + 1).min(bytes.len());
-            continue;
-        }
-
         if !started_body_block {
-            match b {
-                b'(' => paren_depth += 1,
-                b')' => paren_depth = paren_depth.saturating_sub(1),
-                b'=' if paren_depth == 0 && bytes.get(i + 1) == Some(&b'>') => {
-                    after_arrow = true;
-                    i += 2;
-                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                        i += 1;
-                    }
-                    if bytes.get(i) == Some(&b'{') {
-                        started_body_block = true;
-                        brace_depth = 1;
-                        i += 1;
-                    }
-                    continue;
-                }
-                b'{' if paren_depth == 0 => {
-                    started_body_block = true;
-                    brace_depth = 1;
-                }
-                b';' if after_arrow && paren_depth == 0 => {
-                    return Some(i + 1);
-                }
-                b'\n' if after_arrow && paren_depth == 0 => {
-                    return Some(i);
-                }
-                _ => {}
+            if let Some(done_idx) = step_fn_header_byte(
+                bytes,
+                &mut i,
+                b,
+                &mut paren_depth,
+                &mut brace_depth,
+                &mut started_body_block,
+                &mut after_arrow,
+            ) {
+                return Some(done_idx);
             }
-        } else {
-            match b {
-                b'{' => brace_depth += 1,
-                b'}' => {
-                    brace_depth = brace_depth.saturating_sub(1);
-                    if brace_depth == 0 {
-                        return Some(i + 1);
-                    }
-                }
-                _ => {}
-            }
+        } else if step_fn_body_brace(b, &mut brace_depth) {
+            return Some(i + 1);
         }
         i += 1;
     }
 
-    if after_arrow && !started_body_block {
-        Some(tail.len())
+    (after_arrow && !started_body_block).then_some(tail.len())
+}
+
+fn skip_js_comment_or_string_literal(bytes: &[u8], i: usize) -> Option<usize> {
+    let b = *bytes.get(i)?;
+    if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+        let mut j = i + 2;
+        while j < bytes.len() && bytes[j] != b'\n' {
+            j += 1;
+        }
+        return Some(j);
+    }
+    if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+        let mut j = i + 2;
+        while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
+            j += 1;
+        }
+        return Some((j + 2).min(bytes.len()));
+    }
+    if b == b'\'' || b == b'"' || b == b'`' {
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j] != b {
+            if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                j += 1;
+            }
+            j += 1;
+        }
+        return Some((j + 1).min(bytes.len()));
+    }
+    None
+}
+
+fn step_fn_header_byte(
+    bytes: &[u8],
+    i: &mut usize,
+    b: u8,
+    paren_depth: &mut usize,
+    brace_depth: &mut usize,
+    started_body_block: &mut bool,
+    after_arrow: &mut bool,
+) -> Option<usize> {
+    match b {
+        b'(' => *paren_depth += 1,
+        b')' => *paren_depth = paren_depth.saturating_sub(1),
+        b'=' if *paren_depth == 0 && bytes.get(*i + 1) == Some(&b'>') => {
+            *after_arrow = true;
+            *i += 2;
+            while bytes.get(*i).is_some_and(u8::is_ascii_whitespace) {
+                *i += 1;
+            }
+            if bytes.get(*i) == Some(&b'{') {
+                *started_body_block = true;
+                *brace_depth = 1;
+            } else {
+                *i = i.saturating_sub(1);
+            }
+        }
+        b'{' if *paren_depth == 0 => {
+            *started_body_block = true;
+            *brace_depth = 1;
+        }
+        b';' if *after_arrow && *paren_depth == 0 => return Some(*i + 1),
+        b'\n' if *after_arrow && *paren_depth == 0 => return Some(*i),
+        _ => {}
+    }
+    None
+}
+
+fn step_fn_body_brace(b: u8, brace_depth: &mut usize) -> bool {
+    if b == b'{' {
+        *brace_depth += 1;
+        false
+    } else if b == b'}' {
+        *brace_depth = brace_depth.saturating_sub(1);
+        *brace_depth == 0
     } else {
-        None
+        false
     }
 }
 
@@ -374,51 +420,59 @@ fn slice_until_sink_terminator(s: &str) -> String {
     let mut paren = 0_i32;
     let mut brace = 0_i32;
     let mut bracket = 0_i32;
-    let mut in_quote: Option<u8> = None;
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if let Some(q) = in_quote {
-            if b == b'\\' {
-                i += 2;
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-            }
-            i += 1;
+        if matches!(b, b'"' | b'\'' | b'`')
+            && let Some(next_i) = skip_js_comment_or_string_literal(bytes, i)
+        {
+            i = next_i;
             continue;
         }
-        match b {
-            b'"' | b'\'' | b'`' => in_quote = Some(b),
-            b'(' => paren += 1,
-            b')' => {
-                if paren == 0 {
-                    return s[..i].trim().to_string();
-                }
-                paren -= 1;
-            }
-            b'{' => brace += 1,
-            b'}' => {
-                if brace == 0 {
-                    return s[..i].trim().to_string();
-                }
-                brace -= 1;
-            }
-            b'[' => bracket += 1,
-            b']' => bracket = (bracket - 1).max(0),
-            b';' if paren == 0 && brace == 0 && bracket == 0 => {
-                return s[..i].trim().to_string();
-            }
-            b'\n' if paren == 0 && brace == 0 && bracket == 0 => {
-                return s[..i].trim().to_string();
-            }
-            _ => {}
+        if is_sink_terminator_at(b, &mut paren, &mut brace, &mut bracket) {
+            return s[..i].trim().to_string();
         }
         i += 1;
     }
     s.trim().to_string()
+}
+
+fn is_sink_terminator_at(b: u8, paren: &mut i32, brace: &mut i32, bracket: &mut i32) -> bool {
+    match b {
+        b'(' => {
+            *paren += 1;
+            false
+        }
+        b')' => {
+            if *paren == 0 {
+                return true;
+            }
+            *paren -= 1;
+            false
+        }
+        b'{' => {
+            *brace += 1;
+            false
+        }
+        b'}' => {
+            if *brace == 0 {
+                return true;
+            }
+            *brace -= 1;
+            false
+        }
+        b'[' => {
+            *bracket += 1;
+            false
+        }
+        b']' => {
+            *bracket = (*bracket - 1).max(0);
+            false
+        }
+        b';' | b'\n' => *paren == 0 && *brace == 0 && *bracket == 0,
+        _ => false,
+    }
 }
 
 fn resolve_static_string_in_file(source: &str, expr: &str) -> Option<String> {

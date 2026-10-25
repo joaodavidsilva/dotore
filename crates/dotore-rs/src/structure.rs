@@ -20,19 +20,20 @@ use syn::{
 
 use crate::{
     matchers::{RsCandidateFinding, RsScopeTracker, loc_at, span_to_bytes},
+    source_kernel::strip_parens,
     structure_duplication::{NormalizedFnIr, extract_normalized_functions},
 };
 
 /// File line threshold for `rs-structure-oversized-unit`.
-pub const FILE_LINES_THRESHOLD: usize = 1_000;
+const FILE_LINES_THRESHOLD: usize = 1_000;
 /// `impl` and inline `mod` block line threshold for `rs-structure-oversized-unit`.
-pub const BLOCK_LINES_THRESHOLD: usize = 500;
+const BLOCK_LINES_THRESHOLD: usize = 500;
 /// Function and method line threshold for `rs-structure-oversized-unit`.
-pub const FUNCTION_LINES_THRESHOLD: usize = 150;
+const FUNCTION_LINES_THRESHOLD: usize = 150;
 /// Cyclomatic complexity threshold for `rs-structure-complex-function`.
-pub const CYCLOMATIC_THRESHOLD: u32 = 20;
+const CYCLOMATIC_THRESHOLD: u32 = 20;
 /// SonarSource cognitive complexity threshold for `rs-structure-complex-function`.
-pub const COGNITIVE_THRESHOLD: u32 = 25;
+const COGNITIVE_THRESHOLD: u32 = 25;
 
 /// An external `mod <name>;` declaration extracted from a `.rs` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +263,22 @@ impl StructureAstVisitor<'_> {
     }
 
     fn inspect_attrs_on_node(&mut self, attrs: &[Attribute], inline_mod_name: Option<&str>) {
+        self.collect_node_cfg_feature_refs(attrs);
+        if self.scope.in_test() {
+            return;
+        }
+
+        let mut outer_stats = OuterAllowStats::default();
+        for attr in attrs {
+            if let Some(reading) = parse_allow_attribute(attr) {
+                let span = self.span_to_bytes(attr.span());
+                self.record_allow_attribute(reading, span, inline_mod_name, &mut outer_stats);
+            }
+        }
+        self.emit_stacked_allow_finding(outer_stats);
+    }
+
+    fn collect_node_cfg_feature_refs(&mut self, attrs: &[Attribute]) {
         for attr in attrs {
             if (attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
                 && let Ok(list) = attr.meta.require_list()
@@ -280,94 +297,89 @@ impl StructureAstVisitor<'_> {
                 }
             }
         }
+    }
 
-        if self.scope.in_test() {
-            return;
+    fn record_allow_attribute(
+        &mut self,
+        reading: AllowReading,
+        span: ByteSpan,
+        inline_mod_name: Option<&str>,
+        outer_stats: &mut OuterAllowStats,
+    ) {
+        let loc = self.loc_at(span.start);
+        let lints_joined = reading.lints.join(", ");
+
+        if reading.is_inner
+            && let Some(mod_name) = inline_mod_name
+        {
+            self.findings.push(RsCandidateFinding::new(
+                RuleId::RsStructureCrateLevelAllow,
+                Some(mod_name.to_string()),
+                format!("#![allow({lints_joined})]"),
+                "rsStructureCrateLevelAllow",
+                format!(
+                    "`#![allow({lints_joined})]` covers the entire inline module `{mod_name}`; use item-scoped `#[expect(..., reason = \"...\")]` instead."
+                ),
+                loc,
+                span,
+            ));
         }
 
-        let mut outer_allow_count = 0_usize;
-        let mut widest_outer_lints = 0_usize;
-        let mut all_outer_lints = Vec::new();
-        let mut first_outer_span: Option<ByteSpan> = None;
-
-        for attr in attrs {
-            let Some(reading) = parse_allow_attribute(attr) else {
-                continue;
-            };
-            let span = self.span_to_bytes(attr.span());
-            let loc = self.loc_at(span.start);
-            let lints_joined = reading.lints.join(", ");
-
-            if reading.is_inner
-                && let Some(mod_name) = inline_mod_name
-            {
-                self.findings.push(RsCandidateFinding::new(
-                    RuleId::RsStructureCrateLevelAllow,
-                    Some(mod_name.to_string()),
-                    format!("#![allow({lints_joined})]"),
-                    "rsStructureCrateLevelAllow",
+        if !reading.has_reason && self.seen_unreasoned_spans.insert((span.start, span.end)) {
+            let bang = if reading.is_inner { "!" } else { "" };
+            let written = format!("#{bang}[allow({lints_joined})]");
+            let replacement =
+                format!("#{bang}[expect({lints_joined}, reason = \"explain lint suppression\")]");
+            let patch = AutofixPatch::replace(
+                format!("Replace `{written}` with `{replacement}`"),
+                span,
+                replacement,
+            );
+            self.findings.push(
+                RsCandidateFinding::new(
+                    RuleId::RsStructureUnreasonedAllow,
+                    self.scope.subject_name(),
+                    written.clone(),
+                    "rsStructureUnreasonedAllow",
                     format!(
-                        "`#![allow({lints_joined})]` covers the entire inline module `{mod_name}`; use item-scoped `#[expect(..., reason = \"...\")]` instead."
+                        "`{written}` suppresses a lint without a `reason = \"...\"` justification."
                     ),
                     loc,
                     span,
-                ));
-            }
-
-            if !reading.has_reason && self.seen_unreasoned_spans.insert((span.start, span.end)) {
-                let bang = if reading.is_inner { "!" } else { "" };
-                let written = format!("#{bang}[allow({lints_joined})]");
-                let replacement = format!(
-                    "#{bang}[expect({lints_joined}, reason = \"explain lint suppression\")]"
-                );
-                let patch = AutofixPatch::replace(
-                    format!("Replace `{written}` with `{replacement}`"),
-                    span,
-                    replacement,
-                );
-                self.findings.push(
-                    RsCandidateFinding::new(
-                        RuleId::RsStructureUnreasonedAllow,
-                        self.scope.subject_name(),
-                        written.clone(),
-                        "rsStructureUnreasonedAllow",
-                        format!(
-                            "`{written}` suppresses a lint without a `reason = \"...\"` justification."
-                        ),
-                        loc,
-                        span,
-                    )
-                    .with_patch(patch),
-                );
-            }
-
-            if !reading.is_inner {
-                outer_allow_count += 1;
-                widest_outer_lints = widest_outer_lints.max(reading.lints.len());
-                all_outer_lints.extend(reading.lints);
-                if first_outer_span.is_none() {
-                    first_outer_span = Some(span);
-                }
-            }
+                )
+                .with_patch(patch),
+            );
         }
 
-        if (outer_allow_count >= 2 || widest_outer_lints >= 4)
-            && let Some(span) = first_outer_span
+        if !reading.is_inner {
+            outer_stats.count += 1;
+            outer_stats.widest = outer_stats.widest.max(reading.lints.len());
+            outer_stats.all_lints.extend(reading.lints);
+            if outer_stats.first_span.is_none() {
+                outer_stats.first_span = Some(span);
+            }
+        }
+    }
+
+    fn emit_stacked_allow_finding(&mut self, mut outer_stats: OuterAllowStats) {
+        if (outer_stats.count >= 2 || outer_stats.widest >= 4)
+            && let Some(span) = outer_stats.first_span
             && self.seen_stacked_spans.insert((span.start, span.end))
         {
-            all_outer_lints.sort_unstable();
-            all_outer_lints.dedup();
+            outer_stats.all_lints.sort_unstable();
+            outer_stats.all_lints.dedup();
             let loc = self.loc_at(span.start);
-            let lints_joined = all_outer_lints.join(", ");
-            let message = if outer_allow_count >= 2 {
+            let lints_joined = outer_stats.all_lints.join(", ");
+            let message = if outer_stats.count >= 2 {
                 format!(
-                    "{outer_allow_count} `#[allow]` attributes stack {} lint suppressions on a single item.",
-                    all_outer_lints.len()
+                    "{} `#[allow]` attributes stack {} lint suppressions on a single item.",
+                    outer_stats.count,
+                    outer_stats.all_lints.len()
                 )
             } else {
                 format!(
                     "`#[allow({lints_joined})]` stacks {} lint suppressions on a single item.",
-                    all_outer_lints.len()
+                    outer_stats.all_lints.len()
                 )
             };
             self.findings.push(RsCandidateFinding::new(
@@ -669,149 +681,156 @@ fn trait_item_attrs(item: &TraitItem) -> &[Attribute] {
     }
 }
 
-fn compute_function_complexity(block: &Block) -> (u32, u32) {
-    struct ComplexityWalker {
-        cyclomatic: u32,
-        cognitive: u32,
-        nesting: u32,
+#[derive(Default)]
+struct OuterAllowStats {
+    count: usize,
+    widest: usize,
+    all_lints: Vec<String>,
+    first_span: Option<ByteSpan>,
+}
+
+struct ComplexityWalker {
+    cyclomatic: u32,
+    cognitive: u32,
+    nesting: u32,
+}
+
+impl ComplexityWalker {
+    fn visit_if_chain(&mut self, expr_if: &ExprIf, is_chained_else_if: bool) {
+        self.cyclomatic += 1;
+        self.cognitive += if is_chained_else_if {
+            1
+        } else {
+            1 + self.nesting
+        };
+        self.visit_expr(&expr_if.cond);
+
+        self.nesting += 1;
+        self.visit_block(&expr_if.then_branch);
+        self.nesting -= 1;
+
+        if let Some((_, else_expr)) = &expr_if.else_branch {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "else branch is either If or Block (#50)"
+            )]
+            match else_expr.as_ref() {
+                Expr::If(chained_if) => self.visit_if_chain(chained_if, true),
+                Expr::Block(else_block) => {
+                    self.cognitive += 1;
+                    self.nesting += 1;
+                    self.visit_block(&else_block.block);
+                    self.nesting -= 1;
+                }
+                other => {
+                    self.nesting += 1;
+                    self.visit_expr(other);
+                    self.nesting -= 1;
+                }
+            }
+        }
     }
 
-    impl ComplexityWalker {
-        fn visit_if_chain(&mut self, expr_if: &ExprIf, is_chained_else_if: bool) {
+    fn visit_logical_bin(&mut self, bin: &syn::ExprBinary, parent_op: Option<bool>) {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "only And and Or are logical boolean operators (#50)"
+        )]
+        let is_and_or = match bin.op {
+            BinOp::And(_) => Some(true),
+            BinOp::Or(_) => Some(false),
+            _ => None,
+        };
+        if let Some(cur_op) = is_and_or {
             self.cyclomatic += 1;
-            self.cognitive += if is_chained_else_if { 1 } else { 1 + self.nesting };
-            self.visit_expr(&expr_if.cond);
-
-            self.nesting += 1;
-            self.visit_block(&expr_if.then_branch);
-            self.nesting -= 1;
-
-            if let Some((_, else_expr)) = &expr_if.else_branch {
-                #[expect(clippy::wildcard_enum_match_arm, reason = "else branch is either If or Block")]
-                match else_expr.as_ref() {
-                    Expr::If(chained_if) => self.visit_if_chain(chained_if, true),
-                    Expr::Block(else_block) => {
-                        self.cognitive += 1;
-                        self.nesting += 1;
-                        self.visit_block(&else_block.block);
-                        self.nesting -= 1;
-                    }
-                    other => {
-                        self.nesting += 1;
-                        self.visit_expr(other);
-                        self.nesting -= 1;
-                    }
-                }
+            if parent_op != Some(cur_op) {
+                self.cognitive += 1;
             }
-        }
-
-        fn visit_logical_bin(&mut self, bin: &syn::ExprBinary, parent_op: Option<bool>) {
-            #[expect(clippy::wildcard_enum_match_arm, reason = "only And and Or are logical boolean operators")]
-            let is_and_or = match bin.op {
-                BinOp::And(_) => Some(true),
-                BinOp::Or(_) => Some(false),
-                _ => None,
-            };
-            if let Some(cur_op) = is_and_or {
-                self.cyclomatic += 1;
-                if parent_op != Some(cur_op) {
-                    self.cognitive += 1;
-                }
-                if let Expr::Binary(left_bin) = strip_parens(&bin.left) {
-                    self.visit_logical_bin(left_bin, Some(cur_op));
-                } else {
-                    self.visit_expr(&bin.left);
-                }
-                if let Expr::Binary(right_bin) = strip_parens(&bin.right) {
-                    self.visit_logical_bin(right_bin, Some(cur_op));
-                } else {
-                    self.visit_expr(&bin.right);
-                }
+            if let Expr::Binary(left_bin) = strip_parens(&bin.left) {
+                self.visit_logical_bin(left_bin, Some(cur_op));
             } else {
                 self.visit_expr(&bin.left);
+            }
+            if let Expr::Binary(right_bin) = strip_parens(&bin.right) {
+                self.visit_logical_bin(right_bin, Some(cur_op));
+            } else {
                 self.visit_expr(&bin.right);
             }
+        } else {
+            self.visit_expr(&bin.left);
+            self.visit_expr(&bin.right);
         }
+    }
 
-        fn visit_match_arm_for_complexity(&mut self, arm: &Arm) {
+    fn visit_match_expr(&mut self, expr_match: &syn::ExprMatch) {
+        self.cognitive += 1 + self.nesting;
+        self.visit_expr(&expr_match.expr);
+        self.nesting += 1;
+        for arm in &expr_match.arms {
             self.cyclomatic += 1;
             if let Some((_, guard)) = &arm.guard {
                 self.visit_expr(guard);
             }
             self.visit_expr(&arm.body);
         }
+        self.nesting -= 1;
     }
 
-    impl<'ast> Visit<'ast> for ComplexityWalker {
-        fn visit_item_fn(&mut self, _i: &'ast ItemFn) {}
+    fn visit_nested_loop_body(&mut self, header_expr: Option<&Expr>, body: &Block) {
+        self.cyclomatic += 1;
+        self.cognitive += 1 + self.nesting;
+        if let Some(expr) = header_expr {
+            self.visit_expr(expr);
+        }
+        self.nesting += 1;
+        self.visit_block(body);
+        self.nesting -= 1;
+    }
+}
 
-        fn visit_expr(&mut self, i: &'ast Expr) {
-            #[expect(
-                clippy::wildcard_enum_match_arm,
-                reason = "Complexity walker handles branches, loops, closures, ?, and jumps"
-            )]
-            match i {
-                Expr::If(expr_if) => self.visit_if_chain(expr_if, false),
-                Expr::Match(expr_match) => {
-                    self.cognitive += 1 + self.nesting;
-                    self.visit_expr(&expr_match.expr);
-                    self.nesting += 1;
-                    for arm in &expr_match.arms {
-                        self.visit_match_arm_for_complexity(arm);
-                    }
-                    self.nesting -= 1;
-                }
-                Expr::ForLoop(fl) => {
-                    self.cyclomatic += 1;
-                    self.cognitive += 1 + self.nesting;
-                    self.visit_expr(&fl.expr);
-                    self.nesting += 1;
-                    self.visit_block(&fl.body);
-                    self.nesting -= 1;
-                }
-                Expr::While(w) => {
-                    self.cyclomatic += 1;
-                    self.cognitive += 1 + self.nesting;
-                    self.visit_expr(&w.cond);
-                    self.nesting += 1;
-                    self.visit_block(&w.body);
-                    self.nesting -= 1;
-                }
-                Expr::Loop(l) => {
-                    self.cyclomatic += 1;
-                    self.cognitive += 1 + self.nesting;
-                    self.nesting += 1;
-                    self.visit_block(&l.body);
-                    self.nesting -= 1;
-                }
-                Expr::Closure(c) => {
-                    self.nesting += 1;
-                    self.visit_expr(&c.body);
-                    self.nesting -= 1;
-                }
-                Expr::Binary(bin) => self.visit_logical_bin(bin, None),
-                Expr::Try(t) => {
-                    self.cyclomatic += 1;
-                    self.visit_expr(&t.expr);
-                }
-                Expr::Break(ExprBreak { label, expr, .. }) => {
-                    if label.is_some() {
-                        self.cognitive += 1;
-                    }
-                    if let Some(e) = expr {
-                        self.visit_expr(e);
-                    }
-                }
-                Expr::Continue(ExprContinue { label, .. }) => {
-                    if label.is_some() {
-                        self.cognitive += 1;
-                    }
-                }
-                _ => visit::visit_expr(self, i),
+impl<'ast> Visit<'ast> for ComplexityWalker {
+    fn visit_item_fn(&mut self, _i: &'ast ItemFn) {}
+
+    fn visit_expr(&mut self, i: &'ast Expr) {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "Complexity walker handles branches, loops, closures, ?, and jumps (#50)"
+        )]
+        match i {
+            Expr::If(expr_if) => self.visit_if_chain(expr_if, false),
+            Expr::Match(expr_match) => self.visit_match_expr(expr_match),
+            Expr::ForLoop(fl) => self.visit_nested_loop_body(Some(&fl.expr), &fl.body),
+            Expr::While(w) => self.visit_nested_loop_body(Some(&w.cond), &w.body),
+            Expr::Loop(l) => self.visit_nested_loop_body(None, &l.body),
+            Expr::Closure(c) => {
+                self.nesting += 1;
+                self.visit_expr(&c.body);
+                self.nesting -= 1;
             }
+            Expr::Binary(bin) => self.visit_logical_bin(bin, None),
+            Expr::Try(t) => {
+                self.cyclomatic += 1;
+                self.visit_expr(&t.expr);
+            }
+            Expr::Break(ExprBreak { label, expr, .. }) => {
+                if label.is_some() {
+                    self.cognitive += 1;
+                }
+                if let Some(e) = expr {
+                    self.visit_expr(e);
+                }
+            }
+            Expr::Continue(ExprContinue { label, .. }) => {
+                if label.is_some() {
+                    self.cognitive += 1;
+                }
+            }
+            _ => visit::visit_expr(self, i),
         }
     }
+}
 
+fn compute_function_complexity(block: &Block) -> (u32, u32) {
     let mut walker = ComplexityWalker {
         cyclomatic: 1,
         cognitive: 0,
@@ -821,12 +840,6 @@ fn compute_function_complexity(block: &Block) -> (u32, u32) {
     (walker.cyclomatic, walker.cognitive)
 }
 
-fn strip_parens(mut expr: &Expr) -> &Expr {
-    while let Expr::Paren(p) = expr {
-        expr = &p.expr;
-    }
-    expr
-}
 
 fn collect_cfg_features_from_tokens(tokens: TokenStream, out: &mut Vec<String>) {
     let flat: Vec<TokenTree> = tokens.into_iter().collect();

@@ -157,68 +157,78 @@ fn classify_impure_constructor_call(
     source: &str,
 ) -> Option<(String, String)> {
     match call.callee.without_parentheses() {
-        Expression::Identifier(id) => {
-            if matches!(id.name.as_str(), "fetch" | "setInterval" | "setTimeout") {
-                return Some((
-                    id.name.to_string(),
-                    format!(
-                        "Avoid calling `{}(...)` inside `constructor()`; move side effects and network requests to `ngOnInit()`.",
-                        id.name
-                    ),
-                ));
-            }
+        Expression::Identifier(id)
+            if matches!(id.name.as_str(), "fetch" | "setInterval" | "setTimeout") =>
+        {
+            Some((
+                id.name.to_string(),
+                format!(
+                    "Avoid calling `{}(...)` inside `constructor()`; move side effects and network requests to `ngOnInit()`.",
+                    id.name
+                ),
+            ))
         }
         Expression::StaticMemberExpression(mem) => {
-            let prop = mem.property.name.as_str();
-            let obj_text = source
-                .get(mem.object.span().start as usize..mem.object.span().end as usize)
-                .unwrap_or_default()
-                .trim();
-
-            if prop == "subscribe" {
-                let is_http_or_fetch = obj_text.contains("http.")
-                    || obj_text.contains("Http")
-                    || obj_text.contains(".get(")
-                    || obj_text.contains(".post(")
-                    || obj_text.contains(".put(")
-                    || obj_text.contains(".delete(")
-                    || obj_text.contains(".fetch");
-                let has_take_until_destroyed = obj_text.contains("takeUntilDestroyed");
-                if is_http_or_fetch || !has_take_until_destroyed {
-                    let target = extract_stream_target_name(&mem.object, source);
-                    return Some((
-                        target,
-                        "Avoid starting subscriptions or HTTP requests inside `constructor()`; move stream subscriptions to `ngOnInit()` or use `toSignal()`.".to_string(),
-                    ));
-                }
-            }
-
-            if (obj_text == "this.http" || obj_text.ends_with(".http") || obj_text == "http")
-                && matches!(
-                    prop,
-                    "get" | "post" | "put" | "delete" | "patch" | "request" | "head"
-                )
-            {
-                return Some((
-                    format!("http.{prop}"),
-                    format!(
-                        "Avoid triggering `http.{prop}(...)` inside `constructor()`; move HTTP calls to `ngOnInit()` or a declarative data stream."
-                    ),
-                ));
-            }
-
-            if matches!(obj_text, "localStorage" | "sessionStorage" | "document")
-                || (obj_text == "window" && prop == "addEventListener")
-            {
-                return Some((
-                    format!("{obj_text}.{prop}"),
-                    format!(
-                        "Avoid `{obj_text}.{prop}(...)` inside `constructor()`; browser globals break SSR and belong in `ngOnInit()` or `afterNextRender()`."
-                    ),
-                ));
-            }
+            classify_impure_member_constructor_call(mem, source)
         }
-        _ => {}
+        _ => None,
+    }
+}
+
+fn classify_impure_member_constructor_call(
+    mem: &oxc_ast::ast::StaticMemberExpression<'_>,
+    source: &str,
+) -> Option<(String, String)> {
+    let prop = mem.property.name.as_str();
+    let obj_text = source
+        .get(mem.object.span().start as usize..mem.object.span().end as usize)
+        .unwrap_or_default()
+        .trim();
+
+    if prop == "subscribe" {
+        let is_http_or_fetch = [
+            "http.",
+            "Http",
+            ".get(",
+            ".post(",
+            ".put(",
+            ".delete(",
+            ".fetch",
+        ]
+        .iter()
+        .any(|needle| obj_text.contains(needle));
+        if is_http_or_fetch || !obj_text.contains("takeUntilDestroyed") {
+            let target = extract_stream_target_name(&mem.object, source);
+            return Some((
+                target,
+                "Avoid starting subscriptions or HTTP requests inside `constructor()`; move stream subscriptions to `ngOnInit()` or use `toSignal()`.".to_string(),
+            ));
+        }
+    }
+
+    if (obj_text == "this.http" || obj_text.ends_with(".http") || obj_text == "http")
+        && matches!(
+            prop,
+            "get" | "post" | "put" | "delete" | "patch" | "request" | "head"
+        )
+    {
+        return Some((
+            format!("http.{prop}"),
+            format!(
+                "Avoid triggering `http.{prop}(...)` inside `constructor()`; move HTTP calls to `ngOnInit()` or a declarative data stream."
+            ),
+        ));
+    }
+
+    if matches!(obj_text, "localStorage" | "sessionStorage" | "document")
+        || (obj_text == "window" && prop == "addEventListener")
+    {
+        return Some((
+            format!("{obj_text}.{prop}"),
+            format!(
+                "Avoid `{obj_text}.{prop}(...)` inside `constructor()`; browser globals break SSR and belong in `ngOnInit()` or `afterNextRender()`."
+            ),
+        ));
     }
     None
 }
@@ -392,64 +402,80 @@ pub(super) fn collect_class_teardown_identifiers(
     let source = semantic.source_text();
 
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        let AstKind::Class(cls) = node.kind() else {
-            continue;
-        };
-        let mut method_spans: HashMap<String, Span> = HashMap::new();
-        for elem in &cls.body.body {
-            if let ClassElement::MethodDefinition(method_def) = elem
-                && let Some(name) = prop_key_str(&method_def.key)
-            {
-                method_spans.insert(name.to_string(), method_def.span);
-            }
+        if let AstKind::Class(cls) = node.kind() {
+            map.insert(
+                node_id,
+                collect_single_class_teardown_identifiers(semantic, cls, source),
+            );
         }
-        let Some(&ng_on_destroy_span) = method_spans.get("ngOnDestroy") else {
-            map.insert(node_id, HashSet::new());
-            continue;
-        };
-
-        let mut teardown_method_spans = vec![ng_on_destroy_span];
-        for (_inner_id, inner_node) in semantic.nodes().iter_enumerated() {
-            let AstKind::CallExpression(call) = inner_node.kind() else {
-                continue;
-            };
-            if call.span.start < ng_on_destroy_span.start || call.span.end > ng_on_destroy_span.end
-            {
-                continue;
-            }
-            if let Some(helper_name) = extract_this_method_call_name(&call.callee)
-                && let Some(&helper_span) = method_spans.get(helper_name)
-            {
-                teardown_method_spans.push(helper_span);
-            }
-        }
-
-        let mut torn_down = HashSet::new();
-        for (_inner_id, inner_node) in semantic.nodes().iter_enumerated() {
-            let AstKind::CallExpression(call) = inner_node.kind() else {
-                continue;
-            };
-            let in_teardown_method = teardown_method_spans
-                .iter()
-                .any(|sp| call.span.start >= sp.start && call.span.end <= sp.end);
-            if !in_teardown_method {
-                continue;
-            }
-            let Some(unsub_obj) = extract_unsubscribe_receiver(&call.callee) else {
-                continue;
-            };
-            if let Some(name) = extract_signal_receiver_name(unsub_obj) {
-                torn_down.insert(name);
-            }
-            let recv_text = source
-                .get(unsub_obj.span().start as usize..unsub_obj.span().end as usize)
-                .unwrap_or_default()
-                .trim();
-            torn_down.insert(recv_text.to_string());
-        }
-        map.insert(node_id, torn_down);
     }
     map
+}
+
+fn collect_single_class_teardown_identifiers(
+    semantic: &Semantic<'_>,
+    cls: &oxc_ast::ast::Class<'_>,
+    source: &str,
+) -> HashSet<String> {
+    let mut method_spans: HashMap<String, Span> = HashMap::new();
+    for elem in &cls.body.body {
+        if let ClassElement::MethodDefinition(method_def) = elem
+            && let Some(name) = prop_key_str(&method_def.key)
+        {
+            method_spans.insert(name.to_string(), method_def.span);
+        }
+    }
+    let Some(&ng_on_destroy_span) = method_spans.get("ngOnDestroy") else {
+        return HashSet::new();
+    };
+
+    let teardown_method_spans =
+        collect_teardown_method_spans(semantic, ng_on_destroy_span, &method_spans);
+    let mut torn_down = HashSet::new();
+    for (_inner_id, inner_node) in semantic.nodes().iter_enumerated() {
+        let AstKind::CallExpression(call) = inner_node.kind() else {
+            continue;
+        };
+        if !teardown_method_spans
+            .iter()
+            .any(|sp| call.span.start >= sp.start && call.span.end <= sp.end)
+        {
+            continue;
+        }
+        let Some(unsub_obj) = extract_unsubscribe_receiver(&call.callee) else {
+            continue;
+        };
+        if let Some(name) = extract_signal_receiver_name(unsub_obj) {
+            torn_down.insert(name);
+        }
+        let recv_text = source
+            .get(unsub_obj.span().start as usize..unsub_obj.span().end as usize)
+            .unwrap_or_default()
+            .trim();
+        torn_down.insert(recv_text.to_string());
+    }
+    torn_down
+}
+
+fn collect_teardown_method_spans(
+    semantic: &Semantic<'_>,
+    ng_on_destroy_span: Span,
+    method_spans: &HashMap<String, Span>,
+) -> Vec<Span> {
+    let mut teardown_method_spans = vec![ng_on_destroy_span];
+    for (_inner_id, inner_node) in semantic.nodes().iter_enumerated() {
+        let AstKind::CallExpression(call) = inner_node.kind() else {
+            continue;
+        };
+        if call.span.start >= ng_on_destroy_span.start
+            && call.span.end <= ng_on_destroy_span.end
+            && let Some(helper_name) = extract_this_method_call_name(&call.callee)
+            && let Some(&helper_span) = method_spans.get(helper_name)
+        {
+            teardown_method_spans.push(helper_span);
+        }
+    }
+    teardown_method_spans
 }
 
 fn extract_this_method_call_name<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
@@ -578,63 +604,60 @@ fn is_subscription_stored_and_torn_down(
     call_node_id: NodeId,
     class_teardowns: &HashMap<NodeId, HashSet<String>>,
 ) -> bool {
-    let enclosing_class_id = semantic
+    let Some(cls_id) = semantic
         .nodes()
         .ancestor_ids(call_node_id)
-        .find(|&anc_id| matches!(semantic.nodes().kind(anc_id), AstKind::Class(_)));
-    let Some(cls_id) = enclosing_class_id else {
+        .find(|&anc_id| matches!(semantic.nodes().kind(anc_id), AstKind::Class(_)))
+    else {
         return false;
     };
-    let Some(torn_down_names) = class_teardowns.get(&cls_id) else {
+    let Some(torn_down_names) = class_teardowns.get(&cls_id).filter(|s| !s.is_empty()) else {
         return false;
     };
-    if torn_down_names.is_empty() {
-        return false;
-    }
 
     for anc_id in semantic.nodes().ancestor_ids(call_node_id) {
-        match semantic.nodes().kind(anc_id) {
-            AstKind::AssignmentExpression(assign) => {
-                if let AssignmentTarget::StaticMemberExpression(mem) = &assign.left
-                    && torn_down_names.contains(mem.property.name.as_str())
-                {
-                    return true;
-                }
-                if let AssignmentTarget::AssignmentTargetIdentifier(id) = &assign.left
-                    && torn_down_names.contains(id.name.as_str())
-                {
-                    return true;
-                }
-            }
-            AstKind::PropertyDefinition(prop) => {
-                if let Some(name) = prop_key_str(&prop.key)
-                    && torn_down_names.contains(name)
-                {
-                    return true;
-                }
-            }
-            AstKind::VariableDeclarator(decl) => {
-                if let Some(id) = decl.id.get_binding_identifier()
-                    && torn_down_names.contains(id.name.as_str())
-                {
-                    return true;
-                }
-            }
-            AstKind::CallExpression(parent_call) => {
-                if let Expression::StaticMemberExpression(mem) =
-                    parent_call.callee.without_parentheses()
-                    && matches!(mem.property.name.as_str(), "add" | "push")
-                    && let Some(holder_name) = extract_signal_receiver_name(&mem.object)
-                    && torn_down_names.contains(holder_name.as_str())
-                {
-                    return true;
-                }
-            }
-            AstKind::MethodDefinition(_) | AstKind::Class(_) => break,
-            _ => {}
+        let kind = semantic.nodes().kind(anc_id);
+        if matches!(kind, AstKind::MethodDefinition(_) | AstKind::Class(_)) {
+            break;
+        }
+        if ancestor_stores_torn_down_subscription(kind, torn_down_names) {
+            return true;
         }
     }
     false
+}
+
+fn ancestor_stores_torn_down_subscription(
+    kind: AstKind<'_>,
+    torn_down_names: &HashSet<String>,
+) -> bool {
+    match kind {
+        AstKind::AssignmentExpression(assign) => match &assign.left {
+            AssignmentTarget::StaticMemberExpression(mem) => {
+                torn_down_names.contains(mem.property.name.as_str())
+            }
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                torn_down_names.contains(id.name.as_str())
+            }
+            _ => false,
+        },
+        AstKind::PropertyDefinition(prop) => prop_key_str(&prop.key)
+            .is_some_and(|name| torn_down_names.contains(name)),
+        AstKind::VariableDeclarator(decl) => decl
+            .id
+            .get_binding_identifier()
+            .is_some_and(|id| torn_down_names.contains(id.name.as_str())),
+        AstKind::CallExpression(parent_call) => {
+            let Expression::StaticMemberExpression(mem) = parent_call.callee.without_parentheses()
+            else {
+                return false;
+            };
+            matches!(mem.property.name.as_str(), "add" | "push")
+                && extract_signal_receiver_name(&mem.object)
+                    .is_some_and(|holder_name| torn_down_names.contains(holder_name.as_str()))
+        }
+        _ => false,
+    }
 }
 
 fn extract_stream_target_name(expr: &Expression<'_>, source: &str) -> String {

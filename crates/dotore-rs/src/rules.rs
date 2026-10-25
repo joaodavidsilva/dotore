@@ -345,23 +345,6 @@ fn resolve_rs_rule_activation(
     if !has_explicit_cli_rule && !gate.allows_rule(meta) {
         return None;
     }
-    let is_disk_workspace_allow = !gate.dependencies.contains_key("__virtual_only");
-    if (!has_explicit_cli_rule || is_disk_workspace_allow) && explicit_config_override.is_none() {
-        if rule == RuleId::RsStructureOversizedUnit
-            && gate
-                .dependencies
-                .contains_key("__allow_clippy:too_many_lines")
-        {
-            return None;
-        }
-        if rule == RuleId::RsStructureComplexFunction
-            && gate
-                .dependencies
-                .contains_key("__allow_clippy:cognitive_complexity")
-        {
-            return None;
-        }
-    }
 
     if has_explicit_cli_rule {
         Some(
@@ -374,166 +357,169 @@ fn resolve_rs_rule_activation(
     }
 }
 
-fn evaluate_rs_file_soc_rules(
-    file: &ExtractedFile,
-    rs_ir: &RsFileIr,
-    package_root: &Path,
-    gate: &CapabilityGate,
-    config: &DotoreConfig,
-    enabled_rules: Option<&[RuleId]>,
-    out: &mut Vec<Diagnostic>,
-) {
-    let facets = &file.architecture_facets;
-    let arch_cfg = &config.architecture;
-    let file_len = u32::try_from(file.source.len()).unwrap_or(0);
+struct FileRuleEvalCtx<'a> {
+    file: &'a ExtractedFile,
+    rs_ir: &'a RsFileIr,
+    package_root: &'a Path,
+    gate: &'a CapabilityGate,
+    config: &'a DotoreConfig,
+    enabled_rules: Option<&'a [RuleId]>,
+}
 
-    // 1. `arch-thin-entrypoint`
-    if facets.is_entrypoint {
-        let has_io = facets.has_bucket(ConcernBucket::DataOrNetworkIo);
-        let has_ui = facets.has_bucket(ConcernBucket::TerminalOrUiPresentation);
-        let has_domain_types_and_helpers = facets.public_type_count >= 1
-            && facets.has_bucket(ConcernBucket::AstOrValidationHelper);
-        let exceeds_stmts = facets.entrypoint_statement_count > arch_cfg.max_entrypoint_statements;
-
-        if has_io || has_ui || has_domain_types_and_helpers || exceeds_stmts {
-            let (loc, span, subj_name) = rs_ir
-                .subjects
-                .iter()
-                .find(|s| s.name == "main" && !s.is_test)
-                .map_or(
-                    (
-                        SourceLoc { line: 1, column: 1 },
-                        ByteSpan {
-                            start: 0,
-                            end: file_len,
-                        },
-                        Some("main".to_string()),
-                    ),
-                    |s| (s.loc, s.span, Some(s.name.clone())),
-                );
-
-            let mut steps = Vec::new();
-            if exceeds_stmts {
-                steps.push(format!(
-                    "entrypoint statements: {} > max {}",
-                    facets.entrypoint_statement_count, arch_cfg.max_entrypoint_statements
-                ));
-            }
-            if has_domain_types_and_helpers {
-                steps.push(format!(
-                    "domain types ({}) + helper functions in entrypoint",
-                    facets.public_type_count
-                ));
-            }
-            for sig in &facets.concern_signals {
-                if matches!(
-                    sig.bucket,
-                    ConcernBucket::DataOrNetworkIo | ConcernBucket::TerminalOrUiPresentation
-                ) {
-                    steps.push(format!(
-                        "{}: `{}` (line {})",
-                        sig.bucket.as_str(),
-                        sig.detail,
-                        sig.loc.line
-                    ));
-                }
-            }
-
-            let finding = RsCandidateFinding::new(
-                RuleId::ArchThinEntrypoint,
-                subj_name,
-                "main",
-                "archThinEntrypoint",
-                format!(
-                    "Binary entrypoint `{}` embeds domain logic or direct I/O ({} statements, {} public types); keep `main.rs` as a thin adapter delegating to a library runner.",
-                    file.path.display(),
-                    facets.entrypoint_statement_count,
-                    facets.public_type_count
-                ),
-                loc,
-                span,
-            )
-            .with_cascade_steps(steps);
-
-            emit_rs_finding_if_active(
-                file,
-                &finding,
-                package_root,
-                gate,
-                config,
-                enabled_rules,
-                out,
-            );
-        }
-    }
-
-    // 2. `arch-no-mixed-io-and-presentation`
-    let io_signals = facets.signals_for_bucket(ConcernBucket::DataOrNetworkIo);
-    let ui_signals = facets.signals_for_bucket(ConcernBucket::TerminalOrUiPresentation);
-    let is_exempt_report_adapter = is_report_or_cli_adapter_path(&file.path)
-        && facets.inline_terminal_ui_sites.is_empty()
-        && !io_signals.iter().any(|s| {
-            s.detail.starts_with("sqlx")
-                || s.detail.starts_with("reqwest")
-                || s.detail.contains("Tcp")
-                || s.detail.contains("Pool")
-        });
-
-    if !io_signals.is_empty() && !ui_signals.is_empty() && !is_exempt_report_adapter {
-        let first_io = io_signals[0];
-        let first_ui = ui_signals[0];
-        let primary_loc = if first_io.loc.line <= first_ui.loc.line {
-            first_io.loc
-        } else {
-            first_ui.loc
-        };
-        let primary_span = ByteSpan {
-            start: first_io.span.start.min(first_ui.span.start),
-            end: first_io.span.end.max(first_ui.span.end),
-        };
-        let subj_name = find_enclosing_subject_name(rs_ir, primary_span);
-        let target = subj_name.clone().unwrap_or_else(|| {
-            file.path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("module")
-                .to_string()
-        });
-
-        let finding = RsCandidateFinding::new(
-            RuleId::ArchNoMixedIoAndPresentation,
-            subj_name,
-            target,
-            "archNoMixedIoAndPresentation",
-            format!(
-                "Module `{}` mixes data/filesystem/network I/O (`{}`) with terminal/UI presentation (`{}`); split I/O and rendering into separate modules.",
-                file.path.display(),
-                first_io.detail,
-                first_ui.detail
-            ),
-            primary_loc,
-            primary_span,
-        )
-        .with_cascade_steps(vec![
-            format!("data-or-network-io: `{}` (line {})", first_io.detail, first_io.loc.line),
-            format!(
-                "terminal-or-ui-presentation: `{}` (line {})",
-                first_ui.detail, first_ui.loc.line
-            ),
-        ]);
-
+impl FileRuleEvalCtx<'_> {
+    fn emit(&self, finding: &RsCandidateFinding, out: &mut Vec<Diagnostic>) {
         emit_rs_finding_if_active(
-            file,
-            &finding,
-            package_root,
-            gate,
-            config,
-            enabled_rules,
+            self.file,
+            finding,
+            self.package_root,
+            self.gate,
+            self.config,
+            self.enabled_rules,
             out,
         );
     }
+}
 
-    // 3. `arch-separate-static-catalog-from-types`
+fn check_rs_thin_entrypoint(ctx: &FileRuleEvalCtx<'_>, out: &mut Vec<Diagnostic>) {
+    let facets = &ctx.file.architecture_facets;
+    if !facets.is_entrypoint {
+        return;
+    }
+    let arch_cfg = &ctx.config.architecture;
+    let has_io = facets.has_bucket(ConcernBucket::DataOrNetworkIo);
+    let has_ui = facets.has_bucket(ConcernBucket::TerminalOrUiPresentation);
+    let has_domain_types_and_helpers = facets.public_type_count >= 1
+        && facets.has_bucket(ConcernBucket::AstOrValidationHelper);
+    let exceeds_stmts = facets.entrypoint_statement_count > arch_cfg.max_entrypoint_statements;
+    if !(has_io || has_ui || has_domain_types_and_helpers || exceeds_stmts) {
+        return;
+    }
+
+    let file_len = u32::try_from(ctx.file.source.len()).unwrap_or(0);
+    let (loc, span, subj_name) = ctx
+        .rs_ir
+        .subjects
+        .iter()
+        .find(|s| s.name == "main" && !s.is_test)
+        .map_or(
+            (
+                SourceLoc { line: 1, column: 1 },
+                ByteSpan {
+                    start: 0,
+                    end: file_len,
+                },
+                Some("main".to_string()),
+            ),
+            |s| (s.loc, s.span, Some(s.name.clone())),
+        );
+
+    let mut steps = Vec::new();
+    if exceeds_stmts {
+        steps.push(format!(
+            "entrypoint statements: {} > max {}",
+            facets.entrypoint_statement_count, arch_cfg.max_entrypoint_statements
+        ));
+    }
+    if has_domain_types_and_helpers {
+        steps.push(format!(
+            "domain types ({}) + helper functions in entrypoint",
+            facets.public_type_count
+        ));
+    }
+    for sig in &facets.concern_signals {
+        if matches!(
+            sig.bucket,
+            ConcernBucket::DataOrNetworkIo | ConcernBucket::TerminalOrUiPresentation
+        ) {
+            steps.push(format!(
+                "{}: `{}` (line {})",
+                sig.bucket.as_str(),
+                sig.detail,
+                sig.loc.line
+            ));
+        }
+    }
+
+    let finding = RsCandidateFinding::new(
+        RuleId::ArchThinEntrypoint,
+        subj_name,
+        "main",
+        "archThinEntrypoint",
+        format!(
+            "Binary entrypoint `{}` embeds domain logic or direct I/O ({} statements, {} public types); keep `main.rs` as a thin adapter delegating to a library runner.",
+            ctx.file.path.display(),
+            facets.entrypoint_statement_count,
+            facets.public_type_count
+        ),
+        loc,
+        span,
+    )
+    .with_cascade_steps(steps);
+    ctx.emit(&finding, out);
+}
+
+fn check_rs_mixed_io_and_presentation(
+    ctx: &FileRuleEvalCtx<'_>,
+    io_signals: &[&dotore_core::ConcernSignalSite],
+    ui_signals: &[&dotore_core::ConcernSignalSite],
+    is_exempt_report_adapter: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    if is_exempt_report_adapter {
+        return;
+    }
+    let (Some(first_io), Some(first_ui)) = (io_signals.first(), ui_signals.first()) else {
+        return;
+    };
+    let primary_loc = if first_io.loc.line <= first_ui.loc.line {
+        first_io.loc
+    } else {
+        first_ui.loc
+    };
+    let primary_span = ByteSpan {
+        start: first_io.span.start.min(first_ui.span.start),
+        end: first_io.span.end.max(first_ui.span.end),
+    };
+    let subj_name = find_enclosing_subject_name(ctx.rs_ir, primary_span);
+    let target = subj_name.clone().unwrap_or_else(|| {
+        ctx.file
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("module")
+            .to_string()
+    });
+
+    let finding = RsCandidateFinding::new(
+        RuleId::ArchNoMixedIoAndPresentation,
+        subj_name,
+        target,
+        "archNoMixedIoAndPresentation",
+        format!(
+            "Module `{}` mixes data/filesystem/network I/O (`{}`) with terminal/UI presentation (`{}`); split I/O and rendering into separate modules.",
+            ctx.file.path.display(),
+            first_io.detail,
+            first_ui.detail
+        ),
+        primary_loc,
+        primary_span,
+    )
+    .with_cascade_steps(vec![
+        format!(
+            "data-or-network-io: `{}` (line {})",
+            first_io.detail, first_io.loc.line
+        ),
+        format!(
+            "terminal-or-ui-presentation: `{}` (line {})",
+            first_ui.detail, first_ui.loc.line
+        ),
+    ]);
+    ctx.emit(&finding, out);
+}
+
+fn check_rs_static_catalog_and_ui_primitives(ctx: &FileRuleEvalCtx<'_>, out: &mut Vec<Diagnostic>) {
+    let facets = &ctx.file.architecture_facets;
+    let arch_cfg = &ctx.config.architecture;
     if facets.public_type_count >= arch_cfg.min_types_with_catalog {
         for cat in &facets.static_catalog_sites {
             if cat.entry_count >= arch_cfg.min_static_catalog_entries {
@@ -544,7 +530,7 @@ fn evaluate_rs_file_soc_rules(
                     "archSeparateStaticCatalogFromTypes",
                     format!(
                         "Module `{}` declares {} public domain types alongside static catalog `{}` ({} entries); extract the static catalog into a dedicated `catalog` or `data` submodule.",
-                        file.path.display(),
+                        ctx.file.path.display(),
                         facets.public_type_count,
                         cat.name,
                         cat.entry_count
@@ -554,26 +540,19 @@ fn evaluate_rs_file_soc_rules(
                 )
                 .with_cascade_steps(vec![
                     format!("public domain types: {}", facets.public_type_count),
-                    format!("static catalog `{}`: {} entries ({}B)", cat.name, cat.entry_count, cat.byte_len),
+                    format!(
+                        "static catalog `{}`: {} entries ({}B)",
+                        cat.name, cat.entry_count, cat.byte_len
+                    ),
                 ]);
-
-                emit_rs_finding_if_active(
-                    file,
-                    &finding,
-                    package_root,
-                    gate,
-                    config,
-                    enabled_rules,
-                    out,
-                );
+                ctx.emit(&finding, out);
             }
         }
     }
 
-    // 4. `arch-no-inline-terminal-ui-primitives`
     if !facets.is_ui_kit_module {
         for site in &facets.inline_terminal_ui_sites {
-            let subj_name = find_enclosing_subject_name(rs_ir, site.span);
+            let subj_name = find_enclosing_subject_name(ctx.rs_ir, site.span);
             let finding = RsCandidateFinding::new(
                 RuleId::ArchNoInlineTerminalUiPrimitives,
                 subj_name,
@@ -590,100 +569,145 @@ fn evaluate_rs_file_soc_rules(
                 "inline {}: `{}` at {}:{}",
                 site.kind,
                 site.snippet,
-                file.path.display(),
+                ctx.file.path.display(),
                 site.loc.line
             )]);
-
-            emit_rs_finding_if_active(
-                file,
-                &finding,
-                package_root,
-                gate,
-                config,
-                enabled_rules,
-                out,
-            );
+            ctx.emit(&finding, out);
         }
     }
+}
 
-    // 5. `arch-no-mixed-domain-monolith`
+fn check_rs_mixed_domain_monolith(
+    ctx: &FileRuleEvalCtx<'_>,
+    io_signals: &[&dotore_core::ConcernSignalSite],
+    ui_signals: &[&dotore_core::ConcernSignalSite],
+    is_exempt_report_adapter: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    let has_io = !io_signals.is_empty();
+    let has_ui = !ui_signals.is_empty();
+    if is_exempt_report_adapter || !(has_io || has_ui) {
+        return;
+    }
+    let facets = &ctx.file.architecture_facets;
+    if facets.static_catalog_sites.is_empty() && !(has_io && has_ui) {
+        return;
+    }
+    let arch_cfg = &ctx.config.architecture;
     let distinct_buckets = facets.distinct_concern_buckets();
     let cluster_count = distinct_buckets.len().max(facets.domain_clusters.len());
-    let symbol_count = file.symbol_outlines.len().max(file.subjects_count);
-    let distinct_symbol_kinds = file
+    let symbol_count = ctx.file.symbol_outlines.len().max(ctx.file.subjects_count);
+    let distinct_symbol_kinds = ctx
+        .file
         .symbol_outlines
         .iter()
         .map(|s| s.kind)
         .collect::<HashSet<SymbolKind>>()
         .len();
-    if !is_exempt_report_adapter
-        && cluster_count >= arch_cfg.min_monolith_domain_clusters
-        && symbol_count >= arch_cfg.min_monolith_symbols
-        && distinct_symbol_kinds >= 3
-        && (!io_signals.is_empty() || !ui_signals.is_empty())
-        && (!facets.static_catalog_sites.is_empty()
-            || (!io_signals.is_empty() && !ui_signals.is_empty()))
+    if cluster_count < arch_cfg.min_monolith_domain_clusters
+        || symbol_count < arch_cfg.min_monolith_symbols
+        || distinct_symbol_kinds < 3
     {
-        let mod_name = file
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("monolith")
-            .to_string();
-        let bucket_names: Vec<&str> = distinct_buckets.iter().map(|b| b.as_str()).collect();
-        let (primary_loc, primary_span) = file.symbol_outlines.first().map_or(
-            (
-                SourceLoc { line: 1, column: 1 },
-                ByteSpan {
-                    start: 0,
-                    end: file_len,
-                },
-            ),
-            |sym| (sym.loc, sym.span),
-        );
-        let finding = RsCandidateFinding::new(
-            RuleId::ArchNoMixedDomainMonolith,
-            Some(mod_name.clone()),
-            mod_name,
-            "archNoMixedDomainMonolith",
-            format!(
-                "Monolithic module `{}` combines {} incompatible concern clusters ([{}]) across {} symbols; decompose into focused domain submodules.",
-                file.path.display(),
-                cluster_count,
-                bucket_names.join(", "),
-                symbol_count
-            ),
-            primary_loc,
-            primary_span,
-        )
-        .with_cascade_steps(
-            bucket_names
-                .into_iter()
-                .map(|b| format!("concern cluster: {b}"))
-                .collect(),
-        );
-
-        emit_rs_finding_if_active(
-            file,
-            &finding,
-            package_root,
-            gate,
-            config,
-            enabled_rules,
-            out,
-        );
+        return;
     }
+
+    let file_len = u32::try_from(ctx.file.source.len()).unwrap_or(0);
+    let mod_name = ctx
+        .file
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("monolith")
+        .to_string();
+    let bucket_names: Vec<&str> = distinct_buckets.iter().map(|b| b.as_str()).collect();
+    let (primary_loc, primary_span) = ctx.file.symbol_outlines.first().map_or(
+        (
+            SourceLoc { line: 1, column: 1 },
+            ByteSpan {
+                start: 0,
+                end: file_len,
+            },
+        ),
+        |sym| (sym.loc, sym.span),
+    );
+    let finding = RsCandidateFinding::new(
+        RuleId::ArchNoMixedDomainMonolith,
+        Some(mod_name.clone()),
+        mod_name,
+        "archNoMixedDomainMonolith",
+        format!(
+            "Monolithic module `{}` combines {} incompatible concern clusters ([{}]) across {} symbols; decompose into focused domain submodules.",
+            ctx.file.path.display(),
+            cluster_count,
+            bucket_names.join(", "),
+            symbol_count
+        ),
+        primary_loc,
+        primary_span,
+    )
+    .with_cascade_steps(
+        bucket_names
+            .into_iter()
+            .map(|b| format!("concern cluster: {b}"))
+            .collect(),
+    );
+    ctx.emit(&finding, out);
 }
 
-fn evaluate_rs_package_reuse_rules(
+fn evaluate_rs_file_soc_rules(
+    file: &ExtractedFile,
+    rs_ir: &RsFileIr,
+    package_root: &Path,
+    gate: &CapabilityGate,
+    config: &DotoreConfig,
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let ctx = FileRuleEvalCtx {
+        file,
+        rs_ir,
+        package_root,
+        gate,
+        config,
+        enabled_rules,
+    };
+    let facets = &file.architecture_facets;
+    let io_signals = facets.signals_for_bucket(ConcernBucket::DataOrNetworkIo);
+    let ui_signals = facets.signals_for_bucket(ConcernBucket::TerminalOrUiPresentation);
+    let is_exempt_report_adapter = is_report_or_cli_adapter_path(&file.path)
+        && facets.inline_terminal_ui_sites.is_empty()
+        && !io_signals.iter().any(|s| {
+            s.detail.starts_with("sqlx")
+                || s.detail.starts_with("reqwest")
+                || s.detail.contains("Tcp")
+                || s.detail.contains("Pool")
+        });
+
+    check_rs_thin_entrypoint(&ctx, out);
+    check_rs_mixed_io_and_presentation(
+        &ctx,
+        &io_signals,
+        &ui_signals,
+        is_exempt_report_adapter,
+        out,
+    );
+    check_rs_static_catalog_and_ui_primitives(&ctx, out);
+    check_rs_mixed_domain_monolith(
+        &ctx,
+        &io_signals,
+        &ui_signals,
+        is_exempt_report_adapter,
+        out,
+    );
+}
+
+fn evaluate_rs_duplicated_helper_logic(
     package: &WorkspacePackage,
     files: &[ExtractedFile],
     enabled_rules: Option<&[RuleId]>,
     out: &mut Vec<Diagnostic>,
 ) {
     let arch_cfg = &package.config.architecture;
-
-    // 1. `arch-no-duplicated-helper-logic`
     let mut helpers_by_key: BTreeMap<(u64, usize), Vec<(&ExtractedFile, &HelperFingerprintIr)>> =
         BTreeMap::new();
     for file in files {
@@ -769,14 +793,17 @@ fn evaluate_rs_package_reuse_rules(
             );
         }
     }
+}
 
-    // 2. `arch-prefer-fluent-builder`
-    let mut crate_builder_types: HashSet<&str> = HashSet::new();
-    for file in files {
-        for t in &file.architecture_facets.defined_builder_types {
-            crate_builder_types.insert(t.as_str());
-        }
-    }
+fn collect_builder_candidate_sites<'a>(
+    package: &WorkspacePackage,
+    files: &'a [ExtractedFile],
+) -> BTreeMap<String, Vec<(&'a ExtractedFile, &'a StructLiteralConstructionSiteIr)>> {
+    let arch_cfg = &package.config.architecture;
+    let crate_builder_types: HashSet<&str> = files
+        .iter()
+        .flat_map(|f| f.architecture_facets.defined_builder_types.iter().map(String::as_str))
+        .collect();
 
     let mut sites_by_type: BTreeMap<
         String,
@@ -802,29 +829,40 @@ fn evaluate_rs_package_reuse_rules(
             }
         }
     }
+    sites_by_type
+}
 
+fn compute_shared_default_fields<'a>(
+    sites: &[(&ExtractedFile, &'a StructLiteralConstructionSiteIr)],
+) -> Vec<&'a str> {
+    let mut default_field_counts: BTreeMap<&'a str, usize> = BTreeMap::new();
+    for (_, site) in sites {
+        for f in &site.default_or_literal_fields {
+            *default_field_counts.entry(f.as_str()).or_insert(0) += 1;
+        }
+    }
+    default_field_counts
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn evaluate_rs_prefer_fluent_builder(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let arch_cfg = &package.config.architecture;
     let min_distinct_files = arch_cfg.min_builder_sites.clamp(1, 2);
-    for (type_name, sites) in sites_by_type {
-        if sites.len() < arch_cfg.min_builder_sites {
-            continue;
-        }
+    for (type_name, sites) in collect_builder_candidate_sites(package, files) {
         let distinct_files: BTreeSet<&Path> = sites.iter().map(|(f, _)| f.path.as_path()).collect();
-        if distinct_files.len() < min_distinct_files {
-            continue;
-        }
-
-        let mut default_field_counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for (_, site) in &sites {
-            for f in &site.default_or_literal_fields {
-                *default_field_counts.entry(f.as_str()).or_insert(0) += 1;
-            }
-        }
-        let shared_defaults: Vec<&str> = default_field_counts
-            .into_iter()
-            .filter(|(_, count)| *count >= 2)
-            .map(|(name, _)| name)
-            .collect();
-        if shared_defaults.len() < 3 {
+        let shared_defaults = compute_shared_default_fields(&sites);
+        if sites.len() < arch_cfg.min_builder_sites
+            || distinct_files.len() < min_distinct_files
+            || shared_defaults.len() < 3
+        {
             continue;
         }
 
@@ -892,6 +930,16 @@ fn evaluate_rs_package_reuse_rules(
             );
         }
     }
+}
+
+fn evaluate_rs_package_reuse_rules(
+    package: &WorkspacePackage,
+    files: &[ExtractedFile],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<Diagnostic>,
+) {
+    evaluate_rs_duplicated_helper_logic(package, files, enabled_rules, out);
+    evaluate_rs_prefer_fluent_builder(package, files, enabled_rules, out);
 }
 
 fn find_enclosing_subject_name(rs_ir: &RsFileIr, span: ByteSpan) -> Option<String> {

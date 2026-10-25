@@ -9,87 +9,174 @@ use std::{
 use dotore_core::{Capability, CapabilityGate, PackageRole};
 use toml::Value;
 
-/// Infers a Rust [`CapabilityGate`] from `Cargo.toml` manifest sources.
-#[must_use]
-pub fn infer_cargo_toml_capability_gate(
-    package_dir: &Path,
-    manifest_sources: &[(PathBuf, &str)],
-) -> CapabilityGate {
-    let mut loaded_from_disk = Vec::new();
+fn is_cargo_toml_path(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
+}
 
-    let has_cargo_manifest = manifest_sources.iter().any(|(p, _)| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "Cargo.toml")
-    });
-    let has_any_rust_manifest = has_cargo_manifest
+fn has_rust_manifest_entry(manifest_sources: &[(PathBuf, &str)]) -> (bool, bool) {
+    let has_cargo = manifest_sources.iter().any(|(p, _)| is_cargo_toml_path(p));
+    let has_any = has_cargo
         || manifest_sources.iter().any(|(p, _)| {
             let s = p.to_string_lossy().replace('\\', "/");
             s.ends_with("Cargo.lock")
                 || s.ends_with(".cargo/config.toml")
                 || s.ends_with(".cargo/config")
         });
+    (has_cargo, has_any)
+}
+
+fn discover_ancestor_cargo_manifests(
+    package_dir: &Path,
+    manifest_sources: &[(PathBuf, &str)],
+) -> Vec<(PathBuf, PathBuf, String)> {
+    let mut ancestor_cargos = Vec::new();
+    let mut ancestor_opt = package_dir.parent();
+    let mut visited_dot = false;
+    while let Some(raw_anc) = ancestor_opt {
+        let anc = if raw_anc.as_os_str().is_empty() {
+            if visited_dot {
+                break;
+            }
+            visited_dot = true;
+            Path::new(".")
+        } else {
+            if raw_anc == Path::new(".") {
+                visited_dot = true;
+            }
+            raw_anc
+        };
+        let anc_cargo = anc.join("Cargo.toml");
+        if anc_cargo.is_file()
+            && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
+            && let Ok(content) = fs::read_to_string(&anc_cargo)
+        {
+            let found_ws = content.contains("[workspace]");
+            ancestor_cargos.push((anc.to_path_buf(), anc_cargo, content));
+            if found_ws {
+                break;
+            }
+        }
+        ancestor_opt = if visited_dot && raw_anc.as_os_str().is_empty() {
+            None
+        } else {
+            raw_anc.parent()
+        };
+    }
+    ancestor_cargos
+}
+
+fn record_manifest_source_entry(package_dir: &Path, path: &Path, src: &str, gate: &mut CapabilityGate) {
+    let norm_p = path.to_string_lossy().replace('\\', "/");
+    if is_cargo_toml_path(path) {
+        apply_cargo_toml_str(gate, src, false);
+        let is_pkg_manifest = path.parent().unwrap_or_else(|| Path::new(".")) == package_dir
+            || (package_dir == Path::new(".") && path == Path::new("Cargo.toml"))
+            || !gate.dependencies.contains_key("__manifest:Cargo.toml");
+        if is_pkg_manifest {
+            gate.dependencies
+                .insert("__manifest:Cargo.toml".to_string(), src.to_string());
+            gate.dependencies
+                .insert("__manifest_path:Cargo.toml".to_string(), norm_p);
+        }
+    } else if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.lock") {
+        gate.dependencies
+            .insert("__manifest:Cargo.lock".to_string(), src.to_string());
+        gate.dependencies
+            .insert("__manifest_path:Cargo.lock".to_string(), norm_p);
+    } else if norm_p.ends_with(".cargo/config.toml") || norm_p.ends_with(".cargo/config") {
+        gate.dependencies.insert(
+            "__manifest:.cargo/config.toml".to_string(),
+            src.to_string(),
+        );
+        gate.dependencies
+            .insert("__manifest_path:.cargo/config.toml".to_string(), norm_p);
+    }
+}
+
+fn apply_all_manifest_sources(
+    package_dir: &Path,
+    manifest_sources: &[(PathBuf, &str)],
+    loaded_from_disk: &[(PathBuf, String)],
+    ancestor_cargos: &[(PathBuf, PathBuf, String)],
+    gate: &mut CapabilityGate,
+) {
+    for (path, src) in manifest_sources {
+        record_manifest_source_entry(package_dir, path, src, gate);
+    }
+    for (path, src) in loaded_from_disk {
+        apply_cargo_toml_str(gate, src, false);
+        if !gate.dependencies.contains_key("__manifest:Cargo.toml") {
+            gate.dependencies
+                .insert("__manifest:Cargo.toml".to_string(), src.clone());
+            gate.dependencies.insert(
+                "__manifest_path:Cargo.toml".to_string(),
+                path.to_string_lossy().to_string(),
+            );
+        }
+    }
+    for (_, _, src) in ancestor_cargos {
+        apply_cargo_toml_str(gate, src, true);
+    }
+}
+
+fn has_workspace_section(
+    manifest_sources: &[(PathBuf, &str)],
+    loaded_from_disk: &[(PathBuf, String)],
+) -> bool {
+    manifest_sources
+        .iter()
+        .any(|(p, src)| is_cargo_toml_path(p) && src.contains("[workspace]"))
+        || loaded_from_disk
+            .iter()
+            .any(|(_, src)| src.contains("[workspace]"))
+}
+
+fn detect_virtual_and_disk_cargo(
+    package_dir: &Path,
+    manifest_sources: &[(PathBuf, &str)],
+    has_cargo_manifest: bool,
+    has_any_rust_manifest: bool,
+) -> (bool, bool, Vec<(PathBuf, String)>) {
     let disk_cargo = package_dir.join("Cargo.toml");
     let matches_disk_cargo = manifest_sources.iter().any(|(p, src)| {
-        p.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
-            && fs::read_to_string(&disk_cargo).ok().as_deref() == Some(*src)
+        is_cargo_toml_path(p) && fs::read_to_string(&disk_cargo).ok().as_deref() == Some(*src)
     });
     let is_virtual_only = manifest_sources
         .iter()
         .any(|(p, _)| p == Path::new("__virtual__"))
         || (has_any_rust_manifest && !package_dir.is_absolute() && !matches_disk_cargo);
+    let mut loaded_from_disk = Vec::new();
     if !has_cargo_manifest
         && !is_virtual_only
         && let Ok(content) = fs::read_to_string(&disk_cargo)
     {
-        loaded_from_disk.push((disk_cargo.clone(), content));
+        loaded_from_disk.push((disk_cargo, content));
     }
+    (matches_disk_cargo, is_virtual_only, loaded_from_disk)
+}
 
-    let own_has_workspace = manifest_sources.iter().any(|(p, src)| {
-        p.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
-            && src.contains("[workspace]")
-    }) || loaded_from_disk
-        .iter()
-        .any(|(_, src)| src.contains("[workspace]"));
+/// Infers a Rust [`CapabilityGate`] from `Cargo.toml` manifest sources.
+#[must_use]
+pub fn infer_cargo_toml_capability_gate(
+    package_dir: &Path,
+    manifest_sources: &[(PathBuf, &str)],
+) -> CapabilityGate {
+    let (has_cargo_manifest, has_any_rust_manifest) = has_rust_manifest_entry(manifest_sources);
+    let (matches_disk_cargo, is_virtual_only, loaded_from_disk) = detect_virtual_and_disk_cargo(
+        package_dir,
+        manifest_sources,
+        has_cargo_manifest,
+        has_any_rust_manifest,
+    );
 
-    let mut ancestor_cargos = Vec::new();
-    if !is_virtual_only
-        && !own_has_workspace
-        && (!has_cargo_manifest || package_dir.is_absolute() || matches_disk_cargo)
-    {
-        let mut ancestor_opt = package_dir.parent();
-        let mut visited_dot = false;
-        while let Some(raw_anc) = ancestor_opt {
-            let anc = if raw_anc.as_os_str().is_empty() {
-                if visited_dot {
-                    break;
-                }
-                visited_dot = true;
-                Path::new(".")
-            } else {
-                if raw_anc == Path::new(".") {
-                    visited_dot = true;
-                }
-                raw_anc
-            };
-            let anc_cargo = anc.join("Cargo.toml");
-            if anc_cargo.is_file()
-                && !manifest_sources.iter().any(|(p, _)| p == &anc_cargo)
-                && let Ok(content) = fs::read_to_string(&anc_cargo)
-            {
-                let found_ws = content.contains("[workspace]");
-                ancestor_cargos.push((anc.to_path_buf(), anc_cargo, content));
-                if found_ws {
-                    break;
-                }
-            }
-            ancestor_opt = if visited_dot && raw_anc.as_os_str().is_empty() {
-                None
-            } else {
-                raw_anc.parent()
-            };
-        }
-    }
+    let should_walk_ancestors = !is_virtual_only
+        && !has_workspace_section(manifest_sources, &loaded_from_disk)
+        && (!has_cargo_manifest || package_dir.is_absolute() || matches_disk_cargo);
+    let ancestor_cargos = if should_walk_ancestors {
+        discover_ancestor_cargo_manifests(package_dir, manifest_sources)
+    } else {
+        Vec::new()
+    };
 
     if !has_any_rust_manifest && loaded_from_disk.is_empty() && ancestor_cargos.is_empty() {
         return CapabilityGate::default_rust();
@@ -101,60 +188,28 @@ pub fn infer_cargo_toml_capability_gate(
             .insert("__virtual_only".to_string(), "true".to_string());
     }
 
-    for (path, src) in manifest_sources {
-        let norm_p = path.to_string_lossy().replace('\\', "/");
-        if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml") {
-            apply_cargo_toml_str(&mut gate, src, false);
-            let is_pkg_manifest = path.parent().unwrap_or_else(|| Path::new(".")) == package_dir
-                || (package_dir == Path::new(".") && path == Path::new("Cargo.toml"))
-                || !gate.dependencies.contains_key("__manifest:Cargo.toml");
-            if is_pkg_manifest {
-                gate.dependencies
-                    .insert("__manifest:Cargo.toml".to_string(), (*src).to_string());
-                gate.dependencies
-                    .insert("__manifest_path:Cargo.toml".to_string(), norm_p);
-            }
-        } else if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.lock") {
-            gate.dependencies
-                .insert("__manifest:Cargo.lock".to_string(), (*src).to_string());
-            gate.dependencies
-                .insert("__manifest_path:Cargo.lock".to_string(), norm_p);
-        } else if norm_p.ends_with(".cargo/config.toml") || norm_p.ends_with(".cargo/config") {
-            gate.dependencies.insert(
-                "__manifest:.cargo/config.toml".to_string(),
-                (*src).to_string(),
-            );
-            gate.dependencies
-                .insert("__manifest_path:.cargo/config.toml".to_string(), norm_p);
-        }
-    }
-
-    for (path, src) in &loaded_from_disk {
-        apply_cargo_toml_str(&mut gate, src, false);
-        if !gate.dependencies.contains_key("__manifest:Cargo.toml") {
-            gate.dependencies
-                .insert("__manifest:Cargo.toml".to_string(), src.clone());
-            gate.dependencies.insert(
-                "__manifest_path:Cargo.toml".to_string(),
-                path.to_string_lossy().to_string(),
-            );
-        }
-    }
-
-    for (_, _, src) in &ancestor_cargos {
-        apply_cargo_toml_str(&mut gate, src, true);
-    }
-
-    populate_disk_lockfile_and_cargo_config(package_dir, &ancestor_cargos, is_virtual_only, &mut gate);
+    apply_all_manifest_sources(
+        package_dir,
+        manifest_sources,
+        &loaded_from_disk,
+        &ancestor_cargos,
+        &mut gate,
+    );
+    populate_disk_lockfile_and_cargo_config(
+        package_dir,
+        &ancestor_cargos,
+        is_virtual_only,
+        &mut gate,
+    );
 
     if gate.package_role == PackageRole::Unknown
         && gate.dependencies.contains_key("__manifest:Cargo.toml")
     {
-        if !is_virtual_only && package_dir.join("src/main.rs").is_file() {
-            gate.package_role = PackageRole::Application;
+        gate.package_role = if !is_virtual_only && package_dir.join("src/main.rs").is_file() {
+            PackageRole::Application
         } else {
-            gate.package_role = PackageRole::Library;
-        }
+            PackageRole::Library
+        };
     }
 
     gate
@@ -352,6 +407,44 @@ fn collect_cargo_dep_table(gate: &mut CapabilityGate, dep_table: &toml::map::Map
     }
 }
 
+const RUST_DEP_CAPABILITY_RULES: &[(&[&str], Capability)] = &[
+    (&["tokio", "tokio-util", "tokio-stream"], Capability::Tokio),
+    (&["axum", "axum-extra", "axum-core"], Capability::Axum),
+    (
+        &["sqlx", "sqlx-core", "sqlx-postgres", "sqlx-mysql", "sqlx-sqlite"],
+        Capability::Sqlx,
+    ),
+    (&["serde", "serde-json", "serde-derive"], Capability::Serde),
+    (
+        &["tracing", "tracing-subscriber", "tracing-futures", "tracing-appender"],
+        Capability::Tracing,
+    ),
+    (
+        &["leptos", "leptos-reactive", "leptos-router", "leptos-meta"],
+        Capability::Leptos,
+    ),
+    (
+        &["dioxus", "dioxus-hooks", "dioxus-web", "dioxus-desktop", "dioxus-fullstack"],
+        Capability::Dioxus,
+    ),
+    (&["reqwest"], Capability::Reqwest),
+    (&["diesel", "diesel-async"], Capability::Diesel),
+    (&["sea-orm", "sea-query"], Capability::SeaOrm),
+    (&["rusqlite"], Capability::Rusqlite),
+    (
+        &["postgres", "tokio-postgres", "deadpool-postgres"],
+        Capability::Postgres,
+    ),
+    (
+        &["futures", "futures-util", "futures-executor", "futures-core"],
+        Capability::Futures,
+    ),
+    (&["tower-http"], Capability::TowerHttp),
+    (&["actix-cors"], Capability::ActixCors),
+    (&["cookie", "tower-cookies"], Capability::Cookie),
+    (&["jsonwebtoken"], Capability::Jsonwebtoken),
+];
+
 fn record_rust_dep_and_capabilities(gate: &mut CapabilityGate, raw_name: &str, version: &str) {
     let normalized = raw_name.trim().to_ascii_lowercase().replace('_', "-");
     if !gate.dependencies.contains_key(raw_name) || version != "*" {
@@ -359,34 +452,9 @@ fn record_rust_dep_and_capabilities(gate: &mut CapabilityGate, raw_name: &str, v
             .insert(raw_name.to_string(), version.to_string());
     }
 
-    let caps: &[Capability] = match normalized.as_str() {
-        "tokio" | "tokio-util" | "tokio-stream" => &[Capability::Tokio],
-        "axum" | "axum-extra" | "axum-core" => &[Capability::Axum],
-        "sqlx" | "sqlx-core" | "sqlx-postgres" | "sqlx-mysql" | "sqlx-sqlite" => {
-            &[Capability::Sqlx]
+    for &(names, cap) in RUST_DEP_CAPABILITY_RULES {
+        if names.contains(&normalized.as_str()) {
+            gate.capabilities.insert(cap);
         }
-        "serde" | "serde-json" | "serde-derive" => &[Capability::Serde],
-        "tracing" | "tracing-subscriber" | "tracing-futures" | "tracing-appender" => {
-            &[Capability::Tracing]
-        }
-        "leptos" | "leptos-reactive" | "leptos-router" | "leptos-meta" => &[Capability::Leptos],
-        "dioxus" | "dioxus-hooks" | "dioxus-web" | "dioxus-desktop" | "dioxus-fullstack" => {
-            &[Capability::Dioxus]
-        }
-        "reqwest" => &[Capability::Reqwest],
-        "diesel" | "diesel-async" => &[Capability::Diesel],
-        "sea-orm" | "sea-query" => &[Capability::SeaOrm],
-        "rusqlite" => &[Capability::Rusqlite],
-        "postgres" | "tokio-postgres" | "deadpool-postgres" => &[Capability::Postgres],
-        "futures" | "futures-util" | "futures-executor" | "futures-core" => &[Capability::Futures],
-        "tower-http" => &[Capability::TowerHttp],
-        "actix-cors" => &[Capability::ActixCors],
-        "cookie" | "tower-cookies" => &[Capability::Cookie],
-        "jsonwebtoken" => &[Capability::Jsonwebtoken],
-        _ => &[],
-    };
-
-    for &cap in caps {
-        gate.capabilities.insert(cap);
     }
 }

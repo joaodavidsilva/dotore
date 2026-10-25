@@ -15,8 +15,6 @@ dbg_macro = "deny"
 todo = "warn"
 
 # Pragmatic size gates (favor readable, idiomatic Rust over artificial splitting)
-too_many_lines = "allow"
-cognitive_complexity = "allow"
 excessive_nesting = "warn"
 too_many_arguments = "warn"
 

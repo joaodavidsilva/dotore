@@ -26,6 +26,15 @@ use super::{
     },
 };
 
+#[derive(Default)]
+struct ModuleIrCollector {
+    module: ModuleIr,
+    namespace_locals: HashSet<String>,
+    local_refs_set: HashSet<String>,
+    raw_member_accesses: Vec<(String, String)>,
+    raw_whole_uses: HashSet<String>,
+}
+
 /// Extracts [`ModuleIr`] (imports, exports, directives, dynamic imports, namespace uses, and barrel status) from `program`.
 pub(super) fn extract_module_ir(
     program: &Program<'_>,
@@ -33,64 +42,64 @@ pub(super) fn extract_module_ir(
     jsx_elements: &[JsxElementIr],
     line_starts: &[u32],
 ) -> ModuleIr {
-    let mut module = ModuleIr::default();
-    let mut namespace_locals: HashSet<String> = HashSet::new();
-    let mut local_refs_set: HashSet<String> = HashSet::new();
-    let mut raw_member_accesses: Vec<(String, String)> = Vec::new();
-    let mut raw_whole_uses: HashSet<String> = HashSet::new();
+    let mut collector = ModuleIrCollector::default();
 
     for dir in &program.directives {
-        match dir.directive.as_str() {
-            "use client" => module.has_use_client = true,
-            "use server" => module.has_use_server = true,
-            _ => {}
-        }
+        record_directive(dir.directive.as_str(), &mut collector.module);
     }
 
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        match node.kind() {
-            AstKind::Directive(dir) => match dir.directive.as_str() {
-                "use client" => module.has_use_client = true,
-                "use server" => module.has_use_server = true,
-                _ => {}
-            },
+        collector.visit_node(node_id, node.kind(), semantic, jsx_elements, line_starts);
+    }
+
+    collector.finish(program, semantic)
+}
+
+fn record_directive(directive: &str, module: &mut ModuleIr) {
+    match directive {
+        "use client" => module.has_use_client = true,
+        "use server" => module.has_use_server = true,
+        _ => {}
+    }
+}
+
+impl ModuleIrCollector {
+    fn visit_node(
+        &mut self,
+        node_id: oxc_semantic::NodeId,
+        kind: AstKind<'_>,
+        semantic: &Semantic<'_>,
+        jsx_elements: &[JsxElementIr],
+        line_starts: &[u32],
+    ) {
+        if self.visit_import_or_export_node(kind, semantic, jsx_elements, line_starts) {
+            return;
+        }
+        self.visit_reference_or_call_node(node_id, kind, semantic);
+    }
+
+    fn visit_import_or_export_node(
+        &mut self,
+        kind: AstKind<'_>,
+        semantic: &Semantic<'_>,
+        jsx_elements: &[JsxElementIr],
+        line_starts: &[u32],
+    ) -> bool {
+        match kind {
+            AstKind::Directive(dir) => record_directive(dir.directive.as_str(), &mut self.module),
             AstKind::ImportDeclaration(imp) => {
-                let is_type_only = imp.import_kind.is_type();
-                let (specifiers, bindings) =
-                    extract_import_bindings(imp, is_type_only, semantic, jsx_elements);
-                for b in &bindings {
-                    if b.is_namespace {
-                        namespace_locals.insert(b.local_name.clone());
-                    }
-                }
-                module.imports.push(ImportDeclIr {
-                    source: imp.source.value.as_str().unwrap_or_default().to_string(),
-                    specifiers,
-                    bindings,
-                    is_type_only,
-                    span: ByteSpan {
-                        start: imp.span.start,
-                        end: imp.span.end,
-                    },
-                    loc: loc_from_line_starts(line_starts, imp.span.start),
-                });
+                self.record_import_declaration(imp, semantic, jsx_elements, line_starts);
             }
             AstKind::ImportExpression(dyn_imp) => {
                 if let Some(val) = extract_static_string_expr(dyn_imp.source.without_parentheses())
                 {
-                    module.dynamic_imports.push(val);
+                    self.module.dynamic_imports.push(val);
                 }
-            }
-            AstKind::CallExpression(call) => {
-                collect_module_call_facts(call, &mut module, &mut raw_whole_uses);
-            }
-            AstKind::ObjectProperty(prop) => {
-                collect_angular_object_property_references(prop, &mut module);
             }
             AstKind::TSImportType(ts_imp) => {
                 let raw = ts_imp.span().source_text(semantic.source_text());
-                if let Some((specifier, qualifier)) = parse_ts_import_type_text(raw) {
-                    module.type_import_sources.push((specifier, qualifier));
+                if let Some(pair) = parse_ts_import_type_text(raw) {
+                    self.module.type_import_sources.push(pair);
                 }
             }
             AstKind::ExportDeclaration(exp) => {
@@ -104,128 +113,77 @@ pub(super) fn extract_module_ir(
                     exp.export_kind().is_type(),
                     span,
                     loc,
-                    &mut module.exports,
+                    &mut self.module.exports,
                 );
             }
             AstKind::ExportNamedDeclaration(exp) => {
-                let is_type_only = exp.export_kind.is_type();
-                let loc = loc_from_line_starts(line_starts, exp.span.start);
-                let span = ByteSpan {
-                    start: exp.span.start,
-                    end: exp.span.end,
-                };
-                for spec in &exp.specifiers {
-                    let name = spec.exported.name().as_str().to_string();
-                    let local_name = Some(spec.local.name().as_str().to_string());
-                    let spec_loc = loc_from_line_starts(line_starts, spec.span.start);
-                    let spec_span = ByteSpan {
-                        start: spec.span.start,
-                        end: spec.span.end,
-                    };
-                    module.exports.push(ExportDeclIr {
-                        is_component: is_component_name(&name),
-                        name,
-                        local_name,
-                        from_source: None,
-                        is_namespace_re_export: false,
-                        is_type_only: is_type_only || spec.export_kind.is_type(),
-                        span: if spec.span.start > 0 { spec_span } else { span },
-                        loc: if spec.span.start > 0 { spec_loc } else { loc },
-                    });
-                }
+                record_export_named_declaration(exp, line_starts, &mut self.module.exports);
             }
             AstKind::ExportFromDeclaration(exp) => {
-                let from_source = exp.source.value.as_str().map(str::to_string);
-                let is_type_only = exp.export_kind.is_type();
-                let loc = loc_from_line_starts(line_starts, exp.span.start);
-                let span = ByteSpan {
-                    start: exp.span.start,
-                    end: exp.span.end,
-                };
-                for spec in &exp.specifiers {
-                    let name = spec.exported.name().as_str().to_string();
-                    let local_name = Some(spec.local.name().as_str().to_string());
-                    module.exports.push(ExportDeclIr {
-                        is_component: is_component_name(&name),
-                        name,
-                        local_name,
-                        from_source: from_source.clone(),
-                        is_namespace_re_export: false,
-                        is_type_only: is_type_only || spec.export_kind.is_type(),
-                        span,
-                        loc,
-                    });
-                }
+                record_export_from_declaration(exp, line_starts, &mut self.module.exports);
             }
             AstKind::ExportDefaultDeclaration(exp) => {
-                let (is_comp, local_name) = match &exp.declaration {
-                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => (
-                        f.id.as_ref().is_none_or(|id| is_component_name(&id.name)),
-                        f.id.as_ref().map(|id| id.name.to_string()),
-                    ),
-                    ExportDefaultDeclarationKind::ClassDeclaration(c) => {
-                        (true, c.id.as_ref().map(|id| id.name.to_string()))
-                    }
-                    ExportDefaultDeclarationKind::Identifier(id) => {
-                        (is_component_name(&id.name), Some(id.name.to_string()))
-                    }
-                    _ => (true, None),
-                };
-                module.exports.push(ExportDeclIr {
-                    name: "default".to_string(),
-                    local_name,
-                    from_source: None,
-                    is_namespace_re_export: false,
-                    is_type_only: false,
-                    is_component: is_comp,
-                    span: ByteSpan {
-                        start: exp.span.start,
-                        end: exp.span.end,
-                    },
-                    loc: loc_from_line_starts(line_starts, exp.span.start),
-                });
+                record_export_default_declaration(exp, line_starts, &mut self.module.exports);
             }
             AstKind::ExportAllDeclaration(exp) => {
-                let exported_name = exp
-                    .exported
-                    .as_ref()
-                    .map_or_else(|| "*".to_string(), |e| e.name().as_str().to_string());
-                module.exports.push(ExportDeclIr {
-                    name: exported_name,
-                    local_name: Some("*".to_string()),
-                    from_source: exp.source.value.as_str().map(str::to_string),
-                    is_namespace_re_export: true,
-                    is_type_only: exp.export_kind.is_type(),
-                    is_component: false,
-                    span: ByteSpan {
-                        start: exp.span.start,
-                        end: exp.span.end,
-                    },
-                    loc: loc_from_line_starts(line_starts, exp.span.start),
-                });
+                record_export_all_declaration(exp, line_starts, &mut self.module.exports);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn record_import_declaration(
+        &mut self,
+        imp: &ImportDeclaration<'_>,
+        semantic: &Semantic<'_>,
+        jsx_elements: &[JsxElementIr],
+        line_starts: &[u32],
+    ) {
+        let is_type_only = imp.import_kind.is_type();
+        let (specifiers, bindings) =
+            extract_import_bindings(imp, is_type_only, semantic, jsx_elements);
+        for b in &bindings {
+            if b.is_namespace {
+                self.namespace_locals.insert(b.local_name.clone());
+            }
+        }
+        self.module.imports.push(ImportDeclIr {
+            source: imp.source.value.as_str().unwrap_or_default().to_string(),
+            specifiers,
+            bindings,
+            is_type_only,
+            span: ByteSpan {
+                start: imp.span.start,
+                end: imp.span.end,
+            },
+            loc: loc_from_line_starts(line_starts, imp.span.start),
+        });
+    }
+
+    fn visit_reference_or_call_node(
+        &mut self,
+        node_id: oxc_semantic::NodeId,
+        kind: AstKind<'_>,
+        semantic: &Semantic<'_>,
+    ) {
+        match kind {
+            AstKind::CallExpression(call) => {
+                collect_module_call_facts(call, &mut self.module, &mut self.raw_whole_uses);
+            }
+            AstKind::ObjectProperty(prop) => {
+                collect_angular_object_property_references(prop, &mut self.module);
             }
             AstKind::IdentifierReference(ident) => {
-                let parent_kind = semantic.nodes().parent_kind(node_id);
                 if !matches!(
-                    parent_kind,
+                    semantic.nodes().parent_kind(node_id),
                     AstKind::ExportSpecifier(_) | AstKind::ExportDefaultDeclaration(_)
                 ) {
-                    local_refs_set.insert(ident.name.to_string());
+                    self.local_refs_set.insert(ident.name.to_string());
                 }
             }
             AstKind::TSTypeReference(type_ref) => {
-                let raw = type_ref
-                    .type_name
-                    .span()
-                    .source_text(semantic.source_text())
-                    .trim();
-                let mut parts = raw.split('.');
-                if let Some(first) = parts.next().filter(|s| !s.is_empty()) {
-                    local_refs_set.insert(first.to_string());
-                    if let Some(second) = parts.next().filter(|s| !s.is_empty()) {
-                        raw_member_accesses.push((first.to_string(), second.to_string()));
-                    }
-                }
+                self.record_ts_type_reference(type_ref, semantic.source_text());
             }
             AstKind::TSInterfaceHeritage(heritage) => {
                 let raw = heritage
@@ -235,78 +193,234 @@ pub(super) fn extract_module_ir(
                     .trim();
                 let root = raw.split(['.', '<']).next().unwrap_or(raw).trim();
                 if !root.is_empty() {
-                    local_refs_set.insert(root.to_string());
+                    self.local_refs_set.insert(root.to_string());
                 }
             }
             AstKind::StaticMemberExpression(mem) => {
                 if let Expression::Identifier(obj) = mem.object.without_parentheses() {
-                    raw_member_accesses.push((obj.name.to_string(), mem.property.name.to_string()));
+                    self.raw_member_accesses
+                        .push((obj.name.to_string(), mem.property.name.to_string()));
                 }
             }
             AstKind::ComputedMemberExpression(comp) => {
-                if let Expression::Identifier(obj) = comp.object.without_parentheses() {
-                    if let Some(prop_name) =
-                        extract_static_string_expr(comp.expression.without_parentheses())
-                    {
-                        raw_member_accesses.push((obj.name.to_string(), prop_name));
-                    } else {
-                        raw_whole_uses.insert(obj.name.to_string());
-                    }
-                }
+                self.record_computed_member_access(comp);
             }
             AstKind::JSXMemberExpression(jsx_mem) => {
-                let full = jsx_mem
-                    .span()
-                    .source_text(semantic.source_text())
-                    .trim()
-                    .to_string();
-                let mut parts = full.split('.');
-                if let (Some(obj), Some(prop)) = (parts.next(), parts.next()) {
-                    local_refs_set.insert(obj.to_string());
-                    raw_member_accesses.push((obj.to_string(), prop.to_string()));
-                }
+                self.record_jsx_member_expression(jsx_mem, semantic.source_text());
             }
             AstKind::VariableDeclarator(decl) => {
                 collect_declarator_namespace_uses(
                     decl,
-                    &mut raw_member_accesses,
-                    &mut raw_whole_uses,
+                    &mut self.raw_member_accesses,
+                    &mut self.raw_whole_uses,
                 );
             }
             AstKind::SpreadElement(spread) => {
                 if let Expression::Identifier(id) = spread.argument.without_parentheses() {
-                    raw_whole_uses.insert(id.name.to_string());
+                    self.raw_whole_uses.insert(id.name.to_string());
                 }
             }
             _ => {}
         }
     }
 
-    let mut local_references: Vec<String> = local_refs_set.into_iter().collect();
-    local_references.sort();
-    module.local_references = local_references;
-
-    if !namespace_locals.is_empty() {
-        for (obj, member) in raw_member_accesses {
-            if namespace_locals.contains(&obj)
-                && !module
-                    .namespace_member_accesses
-                    .iter()
-                    .any(|(o, m)| o == &obj && m == &member)
-            {
-                module.namespace_member_accesses.push((obj, member));
+    fn record_ts_type_reference(
+        &mut self,
+        type_ref: &oxc_ast::ast::TSTypeReference<'_>,
+        source_text: &str,
+    ) {
+        let raw = type_ref.type_name.span().source_text(source_text).trim();
+        let mut parts = raw.split('.');
+        if let Some(first) = parts.next().filter(|s| !s.is_empty()) {
+            self.local_refs_set.insert(first.to_string());
+            if let Some(second) = parts.next().filter(|s| !s.is_empty()) {
+                self.raw_member_accesses
+                    .push((first.to_string(), second.to_string()));
             }
         }
-        let mut whole_uses: Vec<String> = raw_whole_uses
-            .into_iter()
-            .filter(|name| namespace_locals.contains(name))
-            .collect();
-        whole_uses.sort();
-        module.whole_namespace_uses = whole_uses;
     }
-    module.is_aggregation_barrel = is_aggregation_barrel_program(program, &module);
-    module.component_children_targets = extract_component_children_targets(semantic);
-    module
+
+    fn record_computed_member_access(
+        &mut self,
+        comp: &oxc_ast::ast::ComputedMemberExpression<'_>,
+    ) {
+        let Expression::Identifier(obj) = comp.object.without_parentheses() else {
+            return;
+        };
+        if let Some(prop_name) = extract_static_string_expr(comp.expression.without_parentheses()) {
+            self.raw_member_accesses
+                .push((obj.name.to_string(), prop_name));
+        } else {
+            self.raw_whole_uses.insert(obj.name.to_string());
+        }
+    }
+
+    fn record_jsx_member_expression(
+        &mut self,
+        jsx_mem: &oxc_ast::ast::JSXMemberExpression<'_>,
+        source_text: &str,
+    ) {
+        let full = jsx_mem.span().source_text(source_text).trim();
+        let mut parts = full.split('.');
+        if let (Some(obj), Some(prop)) = (parts.next(), parts.next()) {
+            self.local_refs_set.insert(obj.to_string());
+            self.raw_member_accesses
+                .push((obj.to_string(), prop.to_string()));
+        }
+    }
+
+    fn finish(mut self, program: &Program<'_>, semantic: &Semantic<'_>) -> ModuleIr {
+        let mut local_references: Vec<String> = self.local_refs_set.into_iter().collect();
+        local_references.sort();
+        self.module.local_references = local_references;
+
+        if !self.namespace_locals.is_empty() {
+            for (obj, member) in self.raw_member_accesses {
+                if self.namespace_locals.contains(&obj)
+                    && !self
+                        .module
+                        .namespace_member_accesses
+                        .iter()
+                        .any(|(o, m)| o == &obj && m == &member)
+                {
+                    self.module.namespace_member_accesses.push((obj, member));
+                }
+            }
+            let mut whole_uses: Vec<String> = self
+                .raw_whole_uses
+                .into_iter()
+                .filter(|name| self.namespace_locals.contains(name))
+                .collect();
+            whole_uses.sort();
+            self.module.whole_namespace_uses = whole_uses;
+        }
+        self.module.is_aggregation_barrel = is_aggregation_barrel_program(program, &self.module);
+        self.module.component_children_targets = extract_component_children_targets(semantic);
+        self.module
+    }
+}
+
+fn record_export_named_declaration(
+    exp: &oxc_ast::ast::ExportNamedDeclaration<'_>,
+    line_starts: &[u32],
+    exports: &mut Vec<ExportDeclIr>,
+) {
+    let is_type_only = exp.export_kind.is_type();
+    let loc = loc_from_line_starts(line_starts, exp.span.start);
+    let span = ByteSpan {
+        start: exp.span.start,
+        end: exp.span.end,
+    };
+    for spec in &exp.specifiers {
+        let name = spec.exported.name().as_str().to_string();
+        let local_name = Some(spec.local.name().as_str().to_string());
+        let (spec_span, spec_loc) = if spec.span.start > 0 {
+            (
+                ByteSpan {
+                    start: spec.span.start,
+                    end: spec.span.end,
+                },
+                loc_from_line_starts(line_starts, spec.span.start),
+            )
+        } else {
+            (span, loc)
+        };
+        exports.push(ExportDeclIr {
+            is_component: is_component_name(&name),
+            name,
+            local_name,
+            from_source: None,
+            is_namespace_re_export: false,
+            is_type_only: is_type_only || spec.export_kind.is_type(),
+            span: spec_span,
+            loc: spec_loc,
+        });
+    }
+}
+
+fn record_export_from_declaration(
+    exp: &oxc_ast::ast::ExportFromDeclaration<'_>,
+    line_starts: &[u32],
+    exports: &mut Vec<ExportDeclIr>,
+) {
+    let from_source = exp.source.value.as_str().map(str::to_string);
+    let is_type_only = exp.export_kind.is_type();
+    let loc = loc_from_line_starts(line_starts, exp.span.start);
+    let span = ByteSpan {
+        start: exp.span.start,
+        end: exp.span.end,
+    };
+    for spec in &exp.specifiers {
+        let name = spec.exported.name().as_str().to_string();
+        let local_name = Some(spec.local.name().as_str().to_string());
+        exports.push(ExportDeclIr {
+            is_component: is_component_name(&name),
+            name,
+            local_name,
+            from_source: from_source.clone(),
+            is_namespace_re_export: false,
+            is_type_only: is_type_only || spec.export_kind.is_type(),
+            span,
+            loc,
+        });
+    }
+}
+
+fn record_export_default_declaration(
+    exp: &oxc_ast::ast::ExportDefaultDeclaration<'_>,
+    line_starts: &[u32],
+    exports: &mut Vec<ExportDeclIr>,
+) {
+    let (is_comp, local_name) = match &exp.declaration {
+        ExportDefaultDeclarationKind::FunctionDeclaration(f) => (
+            f.id.as_ref().is_none_or(|id| is_component_name(&id.name)),
+            f.id.as_ref().map(|id| id.name.to_string()),
+        ),
+        ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+            (true, c.id.as_ref().map(|id| id.name.to_string()))
+        }
+        ExportDefaultDeclarationKind::Identifier(id) => {
+            (is_component_name(&id.name), Some(id.name.to_string()))
+        }
+        _ => (true, None),
+    };
+    exports.push(ExportDeclIr {
+        name: "default".to_string(),
+        local_name,
+        from_source: None,
+        is_namespace_re_export: false,
+        is_type_only: false,
+        is_component: is_comp,
+        span: ByteSpan {
+            start: exp.span.start,
+            end: exp.span.end,
+        },
+        loc: loc_from_line_starts(line_starts, exp.span.start),
+    });
+}
+
+fn record_export_all_declaration(
+    exp: &oxc_ast::ast::ExportAllDeclaration<'_>,
+    line_starts: &[u32],
+    exports: &mut Vec<ExportDeclIr>,
+) {
+    let exported_name = exp
+        .exported
+        .as_ref()
+        .map_or_else(|| "*".to_string(), |e| e.name().as_str().to_string());
+    exports.push(ExportDeclIr {
+        name: exported_name,
+        local_name: Some("*".to_string()),
+        from_source: exp.source.value.as_str().map(str::to_string),
+        is_namespace_re_export: true,
+        is_type_only: exp.export_kind.is_type(),
+        is_component: false,
+        span: ByteSpan {
+            start: exp.span.start,
+            end: exp.span.end,
+        },
+        loc: loc_from_line_starts(line_starts, exp.span.start),
+    });
 }
 
 fn extract_component_children_targets(semantic: &Semantic<'_>) -> Vec<(String, String)> {

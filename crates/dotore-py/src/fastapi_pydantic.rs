@@ -61,7 +61,7 @@ impl<'a> FastapiPydanticVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses relevant Python statement variants for FastAPI and Pydantic rules"
+        reason = "Traverses relevant Python statement variants for FastAPI and Pydantic rules (#50)"
     )]
     fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
@@ -77,37 +77,8 @@ impl<'a> FastapiPydanticVisitor<'a> {
             }
             Stmt::Assign(assign) => {
                 self.record_router_auth_from_assign(assign);
-                let handled_pydantic = self.check_class_assign_pydantic(assign);
-                if !handled_pydantic {
+                if !self.check_class_assign_pydantic(assign) {
                     self.visit_expr(&assign.value);
-                }
-            }
-            Stmt::AugAssign(aug) => self.visit_expr(&aug.value),
-            Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
-            Stmt::Return(ret) => {
-                if let Some(val) = &ret.value {
-                    self.visit_expr(val);
-                }
-            }
-            Stmt::Raise(raise_stmt) => {
-                if let Some(exc) = &raise_stmt.exc {
-                    self.visit_expr(exc);
-                }
-            }
-            Stmt::Assert(assert_stmt) => {
-                self.visit_expr(&assert_stmt.test);
-                if let Some(msg) = &assert_stmt.msg {
-                    self.visit_expr(msg);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
-                self.visit_suite(&if_stmt.body);
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
-                    }
-                    self.visit_suite(&clause.body);
                 }
             }
             Stmt::For(for_stmt) => {
@@ -124,31 +95,10 @@ impl<'a> FastapiPydanticVisitor<'a> {
                 self.visit_suite(&while_stmt.orelse);
                 self.scope.exit_loop();
             }
-            Stmt::With(with_stmt) => {
-                for item in &with_stmt.items {
-                    self.visit_expr(&item.context_expr);
-                }
-                self.visit_suite(&with_stmt.body);
+            _ => {
+                crate::matchers::walk_stmt_exprs(stmt, |e| self.visit_expr(e));
+                crate::matchers::walk_stmt_sub_stmts(stmt, |s| self.visit_stmt(s));
             }
-            Stmt::Try(try_stmt) => {
-                self.visit_suite(&try_stmt.body);
-                for handler in &try_stmt.handlers {
-                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    self.visit_suite(&h.body);
-                }
-                self.visit_suite(&try_stmt.orelse);
-                self.visit_suite(&try_stmt.finalbody);
-            }
-            Stmt::Match(match_stmt) => {
-                self.visit_expr(&match_stmt.subject);
-                for case in &match_stmt.cases {
-                    if let Some(guard) = &case.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_suite(&case.body);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -181,83 +131,14 @@ impl<'a> FastapiPydanticVisitor<'a> {
         self.pydantic_class_stack = saved_pydantic;
     }
 
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Traverses Python expression nodes for Pydantic Field(...) inspection"
-    )]
     fn visit_expr(&mut self, expr: &Expr) {
-        match expr {
-            Expr::Call(call) => {
-                let callee = callee_qualified_name(&call.func);
-                if is_pydantic_field_callee(&callee) {
-                    self.check_pydantic_field_call(call, None);
-                }
-                self.visit_expr(&call.func);
-                for arg in &call.arguments.args {
-                    self.visit_expr(arg);
-                }
-                for kw in &call.arguments.keywords {
-                    self.visit_expr(&kw.value);
-                }
+        if let Expr::Call(call) = expr {
+            let callee = callee_qualified_name(&call.func);
+            if is_pydantic_field_callee(&callee) {
+                self.check_pydantic_field_call(call, None);
             }
-            Expr::Attribute(attr) => self.visit_expr(&attr.value),
-            Expr::Await(aw) => self.visit_expr(&aw.value),
-            Expr::Yield(y) => {
-                if let Some(v) = &y.value {
-                    self.visit_expr(v);
-                }
-            }
-            Expr::YieldFrom(yf) => self.visit_expr(&yf.value),
-            Expr::BinOp(bin) => {
-                self.visit_expr(&bin.left);
-                self.visit_expr(&bin.right);
-            }
-            Expr::UnaryOp(un) => self.visit_expr(&un.operand),
-            Expr::BoolOp(b) => {
-                for v in &b.values {
-                    self.visit_expr(v);
-                }
-            }
-            Expr::Compare(cmp) => {
-                for op_expr in &cmp.operands {
-                    self.visit_expr(op_expr);
-                }
-            }
-            Expr::Subscript(sub) => {
-                self.visit_expr(&sub.value);
-                self.visit_expr(&sub.slice);
-            }
-            Expr::If(if_expr) => {
-                self.visit_expr(&if_expr.test);
-                self.visit_expr(&if_expr.body);
-                self.visit_expr(&if_expr.orelse);
-            }
-            Expr::List(l) => {
-                for e in &l.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Tuple(t) => {
-                for e in &t.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Set(s) => {
-                for e in &s.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Dict(d) => {
-                for item in &d.items {
-                    if let Some(k) = &item.key {
-                        self.visit_expr(k);
-                    }
-                    self.visit_expr(&item.value);
-                }
-            }
-            Expr::Named(n) => self.visit_expr(&n.value),
-            _ => {}
         }
+        crate::matchers::walk_expr_children(expr, |child| self.visit_expr(child));
     }
 
     fn check_class_ann_assign_pydantic(&mut self, ann_assign: &StmtAnnAssign) -> bool {
@@ -969,9 +850,27 @@ fn parameter_satisfies_fastapi_auth(param: &ParameterWithDefault) -> bool {
     is_auth_param_name && param.default.is_none() && param.parameter.annotation.is_some()
 }
 
+const AUTH_DEP_KEYWORDS: &[&str] = &[
+    "user",
+    "auth",
+    "token",
+    "admin",
+    "verify",
+    "require",
+    "permission",
+    "role",
+    "scope",
+    "key",
+    "credential",
+    "oauth",
+    "bearer",
+    "jwt",
+    "guard",
+];
+
 #[expect(
     clippy::wildcard_enum_match_arm,
-    reason = "Inspects Call, Subscript, and Tuple AST nodes for Depends/Security auth dependencies"
+    reason = "Inspects Call, Subscript, and Tuple AST nodes for Depends/Security auth dependencies (#50)"
 )]
 fn expr_contains_security_or_auth_depends(expr: &Expr, is_auth_param_name: bool) -> bool {
     match expr {
@@ -981,31 +880,10 @@ fn expr_contains_security_or_auth_depends(expr: &Expr, is_auth_param_name: bool)
             if tail == "Security" {
                 return true;
             }
-            if tail == "Depends" {
-                if is_auth_param_name {
-                    return true;
-                }
-                if let Some(dep_arg) = call.arguments.args.first() {
-                    let dep_name = callee_qualified_name(dep_arg).to_ascii_lowercase();
-                    if dep_name.contains("user")
-                        || dep_name.contains("auth")
-                        || dep_name.contains("token")
-                        || dep_name.contains("admin")
-                        || dep_name.contains("verify")
-                        || dep_name.contains("require")
-                        || dep_name.contains("permission")
-                        || dep_name.contains("role")
-                        || dep_name.contains("scope")
-                        || dep_name.contains("key")
-                        || dep_name.contains("credential")
-                        || dep_name.contains("oauth")
-                        || dep_name.contains("bearer")
-                        || dep_name.contains("jwt")
-                        || dep_name.contains("guard")
-                    {
-                        return true;
-                    }
-                }
+            if tail == "Depends"
+                && (is_auth_param_name || call_first_arg_matches_auth_dep(call))
+            {
+                return true;
             }
             call.arguments
                 .args
@@ -1022,4 +900,12 @@ fn expr_contains_security_or_auth_depends(expr: &Expr, is_auth_param_name: bool)
             .any(|e| expr_contains_security_or_auth_depends(e, is_auth_param_name)),
         _ => false,
     }
+}
+
+fn call_first_arg_matches_auth_dep(call: &ExprCall) -> bool {
+    let Some(dep_arg) = call.arguments.args.first() else {
+        return false;
+    };
+    let dep_name = callee_qualified_name(dep_arg).to_ascii_lowercase();
+    AUTH_DEP_KEYWORDS.iter().any(|kw| dep_name.contains(kw))
 }

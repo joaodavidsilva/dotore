@@ -24,18 +24,17 @@ pub(crate) fn extract_security_diagnostics(
     suite: &[Stmt],
     out: &mut Vec<Diagnostic>,
 ) {
-    if is_stub_file {
-        return;
+    if !is_stub_file && !suite.is_empty() {
+        let mut visitor = SecurityRuleVisitor {
+            path,
+            source,
+            line_starts,
+            out,
+            scope: PyScopeTracker::new(),
+            interpolated_sql_vars: HashSet::new(),
+        };
+        visitor.visit_suite(suite);
     }
-    let mut visitor = SecurityRuleVisitor {
-        path,
-        source,
-        line_starts,
-        out,
-        scope: PyScopeTracker::new(),
-        interpolated_sql_vars: HashSet::new(),
-    };
-    visitor.visit_suite(suite);
 }
 
 struct SecurityRuleVisitor<'a> {
@@ -56,7 +55,7 @@ impl<'a> SecurityRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses relevant Python statement variants for SQL injection and deserialization/shell rules"
+        reason = "Traverses relevant Python statement variants for SQL injection and deserialization/shell rules (#50)"
     )]
     fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
@@ -73,34 +72,6 @@ impl<'a> SecurityRuleVisitor<'a> {
                 self.record_interpolated_sql_from_assign(assign);
                 self.visit_expr(&assign.value);
             }
-            Stmt::AugAssign(aug) => self.visit_expr(&aug.value),
-            Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
-            Stmt::Return(ret) => {
-                if let Some(val) = &ret.value {
-                    self.visit_expr(val);
-                }
-            }
-            Stmt::Raise(raise_stmt) => {
-                if let Some(exc) = &raise_stmt.exc {
-                    self.visit_expr(exc);
-                }
-            }
-            Stmt::Assert(assert_stmt) => {
-                self.visit_expr(&assert_stmt.test);
-                if let Some(msg) = &assert_stmt.msg {
-                    self.visit_expr(msg);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
-                self.visit_suite(&if_stmt.body);
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
-                    }
-                    self.visit_suite(&clause.body);
-                }
-            }
             Stmt::For(for_stmt) => {
                 self.visit_expr(&for_stmt.iter);
                 self.scope.enter_loop();
@@ -115,31 +86,10 @@ impl<'a> SecurityRuleVisitor<'a> {
                 self.visit_suite(&while_stmt.orelse);
                 self.scope.exit_loop();
             }
-            Stmt::With(with_stmt) => {
-                for item in &with_stmt.items {
-                    self.visit_expr(&item.context_expr);
-                }
-                self.visit_suite(&with_stmt.body);
+            _ => {
+                crate::matchers::walk_stmt_exprs(stmt, |e| self.visit_expr(e));
+                crate::matchers::walk_stmt_sub_stmts(stmt, |s| self.visit_stmt(s));
             }
-            Stmt::Try(try_stmt) => {
-                self.visit_suite(&try_stmt.body);
-                for handler in &try_stmt.handlers {
-                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    self.visit_suite(&h.body);
-                }
-                self.visit_suite(&try_stmt.orelse);
-                self.visit_suite(&try_stmt.finalbody);
-            }
-            Stmt::Match(match_stmt) => {
-                self.visit_expr(&match_stmt.subject);
-                for case in &match_stmt.cases {
-                    if let Some(guard) = &case.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_suite(&case.body);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -166,82 +116,13 @@ impl<'a> SecurityRuleVisitor<'a> {
         self.interpolated_sql_vars = saved_sql_vars;
     }
 
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "Traverses Python expression nodes for security call inspection"
-    )]
     fn visit_expr(&mut self, expr: &Expr) {
-        match expr {
-            Expr::Call(call) => {
-                let callee = callee_qualified_name(&call.func);
-                self.check_raw_sql_interpolation(call, &callee);
-                self.check_unsafe_deserialization_or_shell(call, &callee);
-                self.visit_expr(&call.func);
-                for arg in &call.arguments.args {
-                    self.visit_expr(arg);
-                }
-                for kw in &call.arguments.keywords {
-                    self.visit_expr(&kw.value);
-                }
-            }
-            Expr::Attribute(attr) => self.visit_expr(&attr.value),
-            Expr::Await(aw) => self.visit_expr(&aw.value),
-            Expr::Yield(y) => {
-                if let Some(v) = &y.value {
-                    self.visit_expr(v);
-                }
-            }
-            Expr::YieldFrom(yf) => self.visit_expr(&yf.value),
-            Expr::BinOp(bin) => {
-                self.visit_expr(&bin.left);
-                self.visit_expr(&bin.right);
-            }
-            Expr::UnaryOp(un) => self.visit_expr(&un.operand),
-            Expr::BoolOp(b) => {
-                for v in &b.values {
-                    self.visit_expr(v);
-                }
-            }
-            Expr::Compare(cmp) => {
-                for op_expr in &cmp.operands {
-                    self.visit_expr(op_expr);
-                }
-            }
-            Expr::Subscript(sub) => {
-                self.visit_expr(&sub.value);
-                self.visit_expr(&sub.slice);
-            }
-            Expr::If(if_expr) => {
-                self.visit_expr(&if_expr.test);
-                self.visit_expr(&if_expr.body);
-                self.visit_expr(&if_expr.orelse);
-            }
-            Expr::List(l) => {
-                for e in &l.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Tuple(t) => {
-                for e in &t.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Set(s) => {
-                for e in &s.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Dict(d) => {
-                for item in &d.items {
-                    if let Some(k) = &item.key {
-                        self.visit_expr(k);
-                    }
-                    self.visit_expr(&item.value);
-                }
-            }
-            Expr::Named(n) => self.visit_expr(&n.value),
-            _ => {}
+        if let Expr::Call(call) = expr {
+            let callee = callee_qualified_name(&call.func);
+            self.check_raw_sql_interpolation(call, &callee);
+            self.check_unsafe_deserialization_or_shell(call, &callee);
         }
+        crate::matchers::walk_expr_children(expr, |child| self.visit_expr(child));
     }
 
     fn record_interpolated_sql_from_assign(&mut self, assign: &StmtAssign) {

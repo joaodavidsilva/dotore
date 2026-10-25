@@ -230,6 +230,38 @@ fn is_valid_interaction(val: &serde_json::Value) -> bool {
         && obj.get("targetTag").is_some_and(is_nullable_bounded_string)
 }
 
+fn is_valid_probe_support(support: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let valid_build_type = support.get("reactBuildType").is_some_and(|v| {
+        v.is_null()
+            || v.as_str()
+                .is_some_and(|s| s == "development" || s == "production")
+    });
+    let bool_keys = [
+        "reactDetected",
+        "nativeReactTracks",
+        "bippyComponentTracks",
+        "loaf",
+    ];
+    bool_keys
+        .iter()
+        .all(|k| support.get(*k).is_some_and(serde_json::Value::is_boolean))
+        && support
+            .get("reactVersion")
+            .is_some_and(is_nullable_bounded_string)
+        && valid_build_type
+}
+
+fn has_valid_dropped_counters(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    [
+        "droppedLongAnimationFrames",
+        "droppedScriptTimings",
+        "droppedComponentEvents",
+        "droppedInteractions",
+    ]
+    .iter()
+    .all(|k| obj.get(*k).is_some_and(is_non_negative_safe_integer))
+}
+
 /// Validates whether an arbitrary JSON value conforms to [`RuntimeScanProbeSnapshot`] schema and byte bounds.
 #[must_use]
 pub fn is_runtime_scan_probe_snapshot(value: &serde_json::Value) -> bool {
@@ -239,28 +271,7 @@ pub fn is_runtime_scan_probe_snapshot(value: &serde_json::Value) -> bool {
     let Some(support) = obj.get("support").and_then(serde_json::Value::as_object) else {
         return false;
     };
-    let valid_build_type = support.get("reactBuildType").is_some_and(|v| {
-        v.is_null()
-            || v.as_str()
-                .is_some_and(|s| s == "development" || s == "production")
-    });
-    let valid_support = support
-        .get("reactDetected")
-        .is_some_and(serde_json::Value::is_boolean)
-        && support
-            .get("reactVersion")
-            .is_some_and(is_nullable_bounded_string)
-        && valid_build_type
-        && support
-            .get("nativeReactTracks")
-            .is_some_and(serde_json::Value::is_boolean)
-        && support
-            .get("bippyComponentTracks")
-            .is_some_and(serde_json::Value::is_boolean)
-        && support
-            .get("loaf")
-            .is_some_and(serde_json::Value::is_boolean);
-    if !valid_support {
+    if !is_valid_probe_support(support) {
         return false;
     }
 
@@ -304,22 +315,9 @@ pub fn is_runtime_scan_probe_snapshot(value: &serde_json::Value) -> bool {
             .get("cumulativeLayoutShift")
             .is_some_and(is_non_negative_finite_number)
         && valid_lcp
-        && obj
-            .get("droppedLongAnimationFrames")
-            .is_some_and(is_non_negative_safe_integer)
-        && obj
-            .get("droppedScriptTimings")
-            .is_some_and(is_non_negative_safe_integer)
-        && obj
-            .get("droppedComponentEvents")
-            .is_some_and(is_non_negative_safe_integer)
-        && obj
-            .get("droppedInteractions")
-            .is_some_and(is_non_negative_safe_integer);
-    if !fields_ok {
-        return false;
-    }
-    serde_json::to_string(value).is_ok_and(|s| s.len() <= RUNTIME_SCAN_MAX_SNAPSHOT_BYTES)
+        && has_valid_dropped_counters(obj);
+    fields_ok
+        && serde_json::to_string(value).is_ok_and(|s| s.len() <= RUNTIME_SCAN_MAX_SNAPSHOT_BYTES)
 }
 
 /// Parses and validates a relay envelope (`{ token, snapshot }`) from the browser probe.
@@ -351,6 +349,45 @@ fn shift_optional_timestamp(timestamp: f64, offset: f64) -> f64 {
     }
 }
 
+fn shift_loaf_frame(
+    frame: &RuntimeScanLongAnimationFrame,
+    offset: f64,
+) -> RuntimeScanLongAnimationFrame {
+    RuntimeScanLongAnimationFrame {
+        start_time: frame.start_time + offset,
+        duration_ms: frame.duration_ms,
+        blocking_duration_ms: frame.blocking_duration_ms,
+        render_start: shift_optional_timestamp(frame.render_start, offset),
+        style_and_layout_start: shift_optional_timestamp(frame.style_and_layout_start, offset),
+        first_ui_event_timestamp: shift_optional_timestamp(frame.first_ui_event_timestamp, offset),
+        scripts: frame
+            .scripts
+            .iter()
+            .map(|script| RuntimeScanScriptTiming {
+                invoker: script.invoker.clone(),
+                invoker_type: script.invoker_type.clone(),
+                source_url: script.source_url.clone(),
+                source_function_name: script.source_function_name.clone(),
+                source_char_position: script.source_char_position,
+                execution_start: shift_optional_timestamp(script.execution_start, offset),
+                duration_ms: script.duration_ms,
+                forced_style_and_layout_duration_ms: script.forced_style_and_layout_duration_ms,
+                pause_duration_ms: script.pause_duration_ms,
+            })
+            .collect(),
+    }
+}
+
+fn sort_and_cap_events<T>(items: &mut Vec<T>, limit: usize, start_time_of: fn(&T) -> f64) -> u64 {
+    items.sort_by(|a, b| start_time_of(a).total_cmp(&start_time_of(b)));
+    let overflow = items.len().saturating_sub(limit) as u64;
+    if items.len() > limit {
+        let drain_count = items.len() - limit;
+        items.drain(0..drain_count);
+    }
+    overflow
+}
+
 /// Merges probe snapshots captured across multiple document navigations.
 ///
 /// # Errors
@@ -361,7 +398,6 @@ pub fn merge_probe_snapshots(
     if captured_snapshots.is_empty() {
         return Err("At least one runtime scan probe snapshot is required.".to_string());
     }
-    // Deduplicate by timeOrigin in insertion order (replacing earlier entry at the end).
     let mut snapshots: Vec<&RuntimeScanProbeSnapshot> =
         Vec::with_capacity(captured_snapshots.len());
     for snap in captured_snapshots {
@@ -390,51 +426,24 @@ pub fn merge_probe_snapshots(
             .position(|s| (s.time_origin - snap.time_origin).abs() <= f64::EPSILON)
             .unwrap_or(0) as u64;
 
-        for frame in &snap.long_animation_frames {
-            all_loafs.push(RuntimeScanLongAnimationFrame {
-                start_time: frame.start_time + offset,
-                duration_ms: frame.duration_ms,
-                blocking_duration_ms: frame.blocking_duration_ms,
-                render_start: shift_optional_timestamp(frame.render_start, offset),
-                style_and_layout_start: shift_optional_timestamp(
-                    frame.style_and_layout_start,
-                    offset,
-                ),
-                first_ui_event_timestamp: shift_optional_timestamp(
-                    frame.first_ui_event_timestamp,
-                    offset,
-                ),
-                scripts: frame
-                    .scripts
-                    .iter()
-                    .map(|script| RuntimeScanScriptTiming {
-                        invoker: script.invoker.clone(),
-                        invoker_type: script.invoker_type.clone(),
-                        source_url: script.source_url.clone(),
-                        source_function_name: script.source_function_name.clone(),
-                        source_char_position: script.source_char_position,
-                        execution_start: shift_optional_timestamp(script.execution_start, offset),
-                        duration_ms: script.duration_ms,
-                        forced_style_and_layout_duration_ms: script
-                            .forced_style_and_layout_duration_ms,
-                        pause_duration_ms: script.pause_duration_ms,
-                    })
-                    .collect(),
-            });
-        }
-
-        for comp in &snap.component_events {
-            all_components.push(RuntimeScanComponentEvent {
-                name: comp.name.clone(),
-                start_time: comp.start_time + offset,
-                duration_ms: comp.duration_ms,
-                depth: comp.depth,
-                source: comp.source,
-            });
-        }
-
-        for interaction in &snap.interactions {
-            all_interactions.push(RuntimeScanInteraction {
+        all_loafs.extend(
+            snap.long_animation_frames
+                .iter()
+                .map(|frame| shift_loaf_frame(frame, offset)),
+        );
+        all_components.extend(
+            snap.component_events
+                .iter()
+                .map(|comp| RuntimeScanComponentEvent {
+                    name: comp.name.clone(),
+                    start_time: comp.start_time + offset,
+                    duration_ms: comp.duration_ms,
+                    depth: comp.depth,
+                    source: comp.source,
+                }),
+        );
+        all_interactions.extend(snap.interactions.iter().map(|interaction| {
+            RuntimeScanInteraction {
                 name: interaction.name.clone(),
                 start_time: interaction.start_time + offset,
                 duration_ms: interaction.duration_ms,
@@ -443,39 +452,24 @@ pub fn merge_probe_snapshots(
                 interaction_id: interaction.interaction_id,
                 document_index: Some(doc_index),
                 target_tag: interaction.target_tag.clone(),
-            });
-        }
+            }
+        }));
     }
 
-    all_loafs.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
-    let overflow_loafs = all_loafs
-        .len()
-        .saturating_sub(RUNTIME_SCAN_MAX_LOAF_ENTRIES) as u64;
-    if all_loafs.len() > RUNTIME_SCAN_MAX_LOAF_ENTRIES {
-        let drain_count = all_loafs.len() - RUNTIME_SCAN_MAX_LOAF_ENTRIES;
-        all_loafs.drain(0..drain_count);
-    }
-
-    all_components.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
-    let overflow_components = all_components
-        .len()
-        .saturating_sub(RUNTIME_SCAN_MAX_COMPONENT_EVENTS) as u64;
-    if all_components.len() > RUNTIME_SCAN_MAX_COMPONENT_EVENTS {
-        let drain_count = all_components.len() - RUNTIME_SCAN_MAX_COMPONENT_EVENTS;
-        all_components.drain(0..drain_count);
-    }
-
-    all_interactions.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
-    let overflow_interactions = all_interactions
-        .len()
-        .saturating_sub(RUNTIME_SCAN_MAX_INTERACTIONS) as u64;
-    if all_interactions.len() > RUNTIME_SCAN_MAX_INTERACTIONS {
-        let drain_count = all_interactions.len() - RUNTIME_SCAN_MAX_INTERACTIONS;
-        all_interactions.drain(0..drain_count);
-    }
+    let overflow_loafs =
+        sort_and_cap_events(&mut all_loafs, RUNTIME_SCAN_MAX_LOAF_ENTRIES, |f| {
+            f.start_time
+        });
+    let overflow_components =
+        sort_and_cap_events(&mut all_components, RUNTIME_SCAN_MAX_COMPONENT_EVENTS, |c| {
+            c.start_time
+        });
+    let overflow_interactions =
+        sort_and_cap_events(&mut all_interactions, RUNTIME_SCAN_MAX_INTERACTIONS, |i| {
+            i.start_time
+        });
 
     let latest_react = snapshots.iter().rev().find(|s| s.support.react_detected);
-
     let max_cls = snapshots
         .iter()
         .map(|s| s.cumulative_layout_shift)

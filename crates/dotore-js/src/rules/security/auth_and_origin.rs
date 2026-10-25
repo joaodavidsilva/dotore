@@ -231,83 +231,116 @@ pub(super) fn check_cors_cookie_trust_risk(
     out: &mut Vec<Diagnostic>,
 ) {
     let src = &file.source;
-
-    // 1. Existing wildcard / broad subdomain with Access-Control-Allow-Credentials: true
-    let has_allow_creds = src.contains("Access-Control-Allow-Credentials") && src.contains("true");
-    if has_allow_creds && src.contains("Access-Control-Allow-Origin") {
-        let is_wildcard_or_broad =
-            src.contains("\"*\"") || src.contains("'*'") || src.contains("https://docs.");
-        let reads_request_origin = src.contains("req.headers.origin")
-            || src.contains("req.headers[\"origin\"]")
-            || src.contains("req.headers['origin']")
-            || src.contains("request.headers.get(\"origin\")")
-            || src.contains("request.headers.get('origin')")
-            || src.contains("req.get(\"origin\")")
-            || src.contains("req.get('origin')")
-            || src.contains("headers().get(\"origin\")")
-            || src.contains("headers().get('origin')");
-        let has_origin_guard = has_origin_allowlist_guard(src);
-
-        if is_wildcard_or_broad || (reads_request_origin && !has_origin_guard) {
-            let line_idx = src
-                .lines()
-                .position(|l| l.contains("Access-Control-Allow-Origin"))
-                .or_else(|| src.lines().position(|l| l.contains("Access-Control-Allow-")))
-                .unwrap_or(0);
-            emit_line_diag(
-                out,
-                file,
-                RuleId::CorsCookieTrustRisk,
-                "corsCookieTrustRisk",
-                "Access-Control-Allow-Origin",
-                "Credentialed CORS reflects an unvalidated `Origin` header or uses a wildcard/broad origin alongside `Access-Control-Allow-Credentials: true`.",
-                line_idx,
-                src.lines().nth(line_idx).unwrap_or(""),
-                line_starts,
-            );
-            return;
-        }
+    if check_cors_headers_cookie_trust(file, src, line_starts, out) {
+        return;
     }
+    check_cors_middleware_cookie_trust(file, src, line_starts, out);
+}
 
-    // 2. cors({ origin: true | "*" | (o, cb) => cb(null, true), credentials: true })
+fn check_cors_headers_cookie_trust(
+    file: &FileIr,
+    src: &str,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) -> bool {
+    let has_allow_creds = src.contains("Access-Control-Allow-Credentials") && src.contains("true");
+    if !has_allow_creds || !src.contains("Access-Control-Allow-Origin") {
+        return false;
+    }
+    let is_wildcard_or_broad =
+        src.contains("\"*\"") || src.contains("'*'") || src.contains("https://docs.");
+    let reads_request_origin = src_reads_request_origin_header(src);
+    if !is_wildcard_or_broad && !(reads_request_origin && !has_origin_allowlist_guard(src)) {
+        return false;
+    }
+    let line_idx = src
+        .lines()
+        .position(|l| l.contains("Access-Control-Allow-Origin"))
+        .or_else(|| src.lines().position(|l| l.contains("Access-Control-Allow-")))
+        .unwrap_or(0);
+    emit_line_diag(
+        out,
+        file,
+        RuleId::CorsCookieTrustRisk,
+        "corsCookieTrustRisk",
+        "Access-Control-Allow-Origin",
+        "Credentialed CORS reflects an unvalidated `Origin` header or uses a wildcard/broad origin alongside `Access-Control-Allow-Credentials: true`.",
+        line_idx,
+        src.lines().nth(line_idx).unwrap_or(""),
+        line_starts,
+    );
+    true
+}
+
+fn src_reads_request_origin_header(src: &str) -> bool {
+    [
+        "req.headers.origin",
+        "req.headers[\"origin\"]",
+        "req.headers['origin']",
+        "request.headers.get(\"origin\")",
+        "request.headers.get('origin')",
+        "req.get(\"origin\")",
+        "req.get('origin')",
+        "headers().get(\"origin\")",
+        "headers().get('origin')",
+    ]
+    .iter()
+    .any(|p| src.contains(p))
+}
+
+fn check_cors_middleware_cookie_trust(
+    file: &FileIr,
+    src: &str,
+    line_starts: &[u32],
+    out: &mut Vec<Diagnostic>,
+) {
     let compact: String = src.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact.contains("credentials:true") && !has_origin_allowlist_guard(src) {
-        let is_permissive_cors_obj = compact.contains("origin:true")
-            || compact.contains("origin:\"*\"")
-            || compact.contains("origin:'*'")
-            || compact.contains("cb(null,true)")
-            || compact.contains("callback(null,true)");
-        if is_permissive_cors_obj {
-            let line_idx = src
-                .lines()
-                .position(|l| l.contains("cors(") || l.contains("origin:"))
-                .unwrap_or(0);
-            emit_line_diag(
-                out,
-                file,
-                RuleId::CorsCookieTrustRisk,
-                "corsCookieTrustRisk",
-                "cors",
-                "CORS configuration enables `credentials: true` while reflecting or allowing any origin without an allowlist.",
-                line_idx,
-                src.lines().nth(line_idx).unwrap_or(""),
-                line_starts,
-            );
-        }
+    if !compact.contains("credentials:true") || has_origin_allowlist_guard(src) {
+        return;
+    }
+    let is_permissive_cors_obj = [
+        "origin:true",
+        "origin:\"*\"",
+        "origin:'*'",
+        "cb(null,true)",
+        "callback(null,true)",
+    ]
+    .iter()
+    .any(|p| compact.contains(p));
+    if is_permissive_cors_obj {
+        let line_idx = src
+            .lines()
+            .position(|l| l.contains("cors(") || l.contains("origin:"))
+            .unwrap_or(0);
+        emit_line_diag(
+            out,
+            file,
+            RuleId::CorsCookieTrustRisk,
+            "corsCookieTrustRisk",
+            "cors",
+            "CORS configuration enables `credentials: true` while reflecting or allowing any origin without an allowlist.",
+            line_idx,
+            src.lines().nth(line_idx).unwrap_or(""),
+            line_starts,
+        );
     }
 }
 
 fn has_origin_allowlist_guard(src: &str) -> bool {
     let lower = src.to_ascii_lowercase();
-    lower.contains(".includes(")
-        || lower.contains(".has(")
-        || lower.contains("allowlist")
+    lower.contains("allowlist")
         || lower.contains("whitelist")
         || lower.contains("allowedorigins")
         || lower.contains("allowed_origins")
+        || lower.contains("trustedorigins")
+        || lower.contains("trusted_origins")
         || src.contains("ALLOWED")
         || src.contains("origin === ")
         || src.contains("origin !== ")
+        || lower.contains(".includes(origin")
+        || lower.contains(".includes(req.headers.origin")
+        || lower.contains(".has(origin")
+        || lower.contains(".has(req.headers.origin")
 }
 
 pub(super) fn check_jwt_insecure_verification(
@@ -316,120 +349,28 @@ pub(super) fn check_jwt_insecure_verification(
     out: &mut Vec<Diagnostic>,
 ) {
     let src = &file.source;
-    if !src.contains("jwt")
-        && !src.contains("jsonwebtoken")
-        && !src.contains("jose")
-        && !src.contains("decodeJwt")
-        && !src.contains("jwtVerify")
-    {
+    if !src_mentions_jwt(src) {
         return;
     }
-
-    let module_verifies_jwt = src.contains("jwt.verify(")
-        || src.contains("jwtVerify(")
-        || src.contains(".verify(")
-        || src.contains("createRemoteJWKSet(");
+    let module_verifies_jwt = src_verifies_jwt(src);
 
     for (idx, line) in src.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') {
             continue;
         }
-        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-        let lower = compact.to_ascii_lowercase();
-
-        // 1. Explicit `none` algorithm
-        if lower.contains("alg:\"none\"")
-            || lower.contains("alg:'none'")
-            || lower.contains("algorithms:[\"none\"]")
-            || lower.contains("algorithms:['none']")
-            || lower.contains("algorithm:\"none\"")
-            || lower.contains("algorithm:'none'")
+        let line_offset = usize::try_from(line_starts.get(idx).copied().unwrap_or(0)).unwrap_or(0);
+        let tail_from_line = src.get(line_offset..).unwrap_or(line);
+        if let Some((target, msg)) =
+            classify_jwt_insecure_line(src, line, tail_from_line, module_verifies_jwt)
         {
             emit_line_diag(
                 out,
                 file,
                 RuleId::JwtInsecureVerification,
                 "jwtInsecureVerification",
-                "none",
-                "JWT is configured with the 'none' algorithm, which disables signature verification, so any forged token is accepted.",
-                idx,
-                line,
-                line_starts,
-            );
-            continue;
-        }
-
-        // 2. Asymmetric + symmetric algorithm confusion (`RS256` + `HS256`)
-        let has_asymmetric = ["rs256", "rs384", "rs512", "es256", "es384", "es512", "ps256", "eddsa"]
-            .iter()
-            .any(|a| lower.contains(a));
-        let has_symmetric = ["hs256", "hs384", "hs512"].iter().any(|s| lower.contains(s));
-        if lower.contains("algorithms:[") && has_asymmetric && has_symmetric {
-            emit_line_diag(
-                out,
-                file,
-                RuleId::JwtInsecureVerification,
-                "jwtInsecureVerification",
-                "algorithms",
-                "JWT verification mixes asymmetric (`RS*`/`ES*`) and symmetric (`HS*`) algorithms, enabling key-confusion forgery.",
-                idx,
-                line,
-                line_starts,
-            );
-            continue;
-        }
-        if has_unpinned_public_key_jwt_verify(line) {
-            emit_line_diag(
-                out,
-                file,
-                RuleId::JwtInsecureVerification,
-                "jwtInsecureVerification",
-                "jwt.verify",
-                "`jwt.verify` passes an asymmetric public key without pinning `algorithms: [\"RS256\"]`, allowing `HS256` key-confusion forgery.",
-                idx,
-                line,
-                line_starts,
-            );
-            continue;
-        }
-
-        // 3. Unvalidated `header.jku` or `header.x5u` key fetch
-        if (line.contains(".jku") || line.contains(".x5u"))
-            && (line.contains("fetch(")
-                || line.contains("axios.")
-                || line.contains("got(")
-                || line.contains("createRemoteJWKSet(")
-                || line.contains("jwksUri"))
-            && !has_origin_allowlist_guard(src)
-        {
-            emit_line_diag(
-                out,
-                file,
-                RuleId::JwtInsecureVerification,
-                "jwtInsecureVerification",
-                "jku",
-                "JWT verification fetches signing keys from an unvalidated `header.jku` or `header.x5u` URL.",
-                idx,
-                line,
-                line_starts,
-            );
-            continue;
-        }
-
-        // 4. `jwt.decode` / `decodeJwt` used without signature verification in the module
-        if !module_verifies_jwt
-            && (line.contains("jwt.decode(")
-                || line.contains("jose.decodeJwt(")
-                || find_standalone_call(line, "decodeJwt(").is_some())
-        {
-            emit_line_diag(
-                out,
-                file,
-                RuleId::JwtInsecureVerification,
-                "jwtInsecureVerification",
-                "decode",
-                "`jwt.decode()` / `decodeJwt()` reads token claims without verifying the cryptographic signature.",
+                target,
+                msg,
                 idx,
                 line,
                 line_starts,
@@ -438,11 +379,120 @@ pub(super) fn check_jwt_insecure_verification(
     }
 }
 
-fn has_unpinned_public_key_jwt_verify(line: &str) -> bool {
-    let Some(pos) = line.find("jwt.verify(") else {
+fn src_mentions_jwt(src: &str) -> bool {
+    ["jwt", "jsonwebtoken", "jose", "decodeJwt", "jwtVerify"]
+        .iter()
+        .any(|k| src.contains(k))
+}
+
+fn src_verifies_jwt(src: &str) -> bool {
+    ["jwt.verify(", "jwtVerify(", ".verify(", "createRemoteJWKSet("]
+        .iter()
+        .any(|k| src.contains(k))
+}
+
+fn classify_jwt_insecure_line(
+    src: &str,
+    line: &str,
+    tail_from_line: &str,
+    module_verifies_jwt: bool,
+) -> Option<(&'static str, &'static str)> {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = compact.to_ascii_lowercase();
+
+    if is_jwt_none_algorithm_config(&lower) {
+        return Some((
+            "none",
+            "JWT is configured with the 'none' algorithm, which disables signature verification, so any forged token is accepted.",
+        ));
+    }
+    if lower.contains("algorithms:[")
+        && has_mixed_asymmetric_and_symmetric_algorithms(tail_from_line)
+    {
+        return Some((
+            "algorithms",
+            "JWT verification mixes asymmetric (`RS*`/`ES*`) and symmetric (`HS*`) algorithms, enabling key-confusion forgery.",
+        ));
+    }
+    if has_unpinned_public_key_jwt_verify(line, tail_from_line) {
+        return Some((
+            "jwt.verify",
+            "`jwt.verify` passes an asymmetric public key without pinning `algorithms: [\"RS256\"]`, allowing `HS256` key-confusion forgery.",
+        ));
+    }
+    if is_unvalidated_jku_or_x5u_fetch(src, line) {
+        return Some((
+            "jku",
+            "JWT verification fetches signing keys from an unvalidated `header.jku` or `header.x5u` URL.",
+        ));
+    }
+    if !module_verifies_jwt
+        && (line.contains("jwt.decode(")
+            || line.contains("jose.decodeJwt(")
+            || find_standalone_call(line, "decodeJwt(").is_some())
+    {
+        return Some((
+            "decode",
+            "`jwt.decode()` / `decodeJwt()` reads token claims without verifying the cryptographic signature.",
+        ));
+    }
+    None
+}
+
+fn is_jwt_none_algorithm_config(lower_compact: &str) -> bool {
+    [
+        "alg:\"none\"",
+        "alg:'none'",
+        "algorithms:[\"none\"]",
+        "algorithms:['none']",
+        "algorithm:\"none\"",
+        "algorithm:'none'",
+    ]
+    .iter()
+    .any(|p| lower_compact.contains(p))
+}
+
+fn is_unvalidated_jku_or_x5u_fetch(src: &str, line: &str) -> bool {
+    (line.contains(".jku") || line.contains(".x5u"))
+        && [
+            "fetch(",
+            "axios.",
+            "got(",
+            "createRemoteJWKSet(",
+            "jwksUri",
+        ]
+        .iter()
+        .any(|p| line.contains(p))
+        && !has_origin_allowlist_guard(src)
+}
+
+fn has_mixed_asymmetric_and_symmetric_algorithms(tail_from_line: &str) -> bool {
+    let window_end = tail_from_line
+        .find(']')
+        .map_or_else(|| tail_from_line.len().min(256), |p| p + 1);
+    let slice = tail_from_line
+        .get(..window_end)
+        .unwrap_or(tail_from_line)
+        .to_ascii_lowercase();
+    let has_asymmetric = [
+        "rs256", "rs384", "rs512", "es256", "es384", "es512", "ps256", "eddsa",
+    ]
+    .iter()
+    .any(|a| slice.contains(a));
+    let has_symmetric = ["hs256", "hs384", "hs512"]
+        .iter()
+        .any(|s| slice.contains(s));
+    has_asymmetric && has_symmetric
+}
+
+fn has_unpinned_public_key_jwt_verify(line: &str, tail_from_line: &str) -> bool {
+    if !line.contains("jwt.verify(") {
+        return false;
+    }
+    let Some(pos) = tail_from_line.find("jwt.verify(") else {
         return false;
     };
-    let after = &line[pos + "jwt.verify(".len()..];
+    let after = &tail_from_line[pos + "jwt.verify(".len()..];
     let Some((inside, _)) = split_balanced_parens(after) else {
         return false;
     };
@@ -476,14 +526,13 @@ pub(super) fn check_insecure_crypto_risk(
     ]
     .iter()
     .any(|w| lower_src.contains(w));
-    let has_constant_time_eq =
-        src.contains("timingSafeEqual") || src.contains("constantTimeEqual");
-
     for (idx, line) in src.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') {
             continue;
         }
+        let line_offset = line_starts.get(idx).copied().unwrap_or(0);
+        let tail_from_line = src.get(line_offset as usize..).unwrap_or(line);
         let lower_line = line.to_ascii_lowercase();
 
         let is_weak_hash = (lower_line.contains("createhash(\"md5\")")
@@ -494,22 +543,16 @@ pub(super) fn check_insecure_crypto_risk(
             && has_sec_ctx;
         let is_weak_cipher = lower_line.contains("createcipher(")
             || lower_line.contains("createdecipher(")
-            || lower_line.contains("createcipheriv(\"des")
-            || lower_line.contains("createcipheriv('des")
-            || lower_line.contains("createcipheriv(\"rc4")
-            || lower_line.contains("createcipheriv('rc4")
-            || ((lower_line.contains("createcipheriv(")
-                || lower_line.contains("createdecipheriv("))
-                && (lower_line.contains("-ecb\"") || lower_line.contains("-ecb'")));
-        let is_static_iv = !is_weak_cipher && has_static_iv_in_cipheriv(line, src);
+            || has_weak_or_ecb_cipheriv(line, tail_from_line);
+        let is_static_iv = !is_weak_cipher && has_static_iv_in_cipheriv(line, tail_from_line, src);
         let is_math_random_secret = line.contains("Math.random(")
             && [
                 "token", "secret", "password", "nonce", "salt", "csrf", "otp",
             ]
             .iter()
             .any(|w| lower_line.contains(w));
-        let is_non_constant_time_cmp =
-            !has_constant_time_eq && has_non_constant_time_secret_comparison(line);
+        let is_non_constant_time_cmp = !scope_uses_constant_time_eq(file, line_offset)
+            && has_non_constant_time_secret_comparison(line);
 
         if is_weak_hash
             || is_weak_cipher
@@ -532,11 +575,75 @@ pub(super) fn check_insecure_crypto_risk(
     }
 }
 
-fn has_static_iv_in_cipheriv(line: &str, src: &str) -> bool {
-    let Some(pos) = line.find("createCipheriv(") else {
+fn scope_uses_constant_time_eq(file: &FileIr, line_offset: u32) -> bool {
+    if let Some(span) = file
+        .symbol_outlines
+        .iter()
+        .filter(|o| o.span.start <= line_offset && line_offset <= o.span.end)
+        .min_by_key(|o| o.span.end.saturating_sub(o.span.start))
+        .map(|o| o.span)
+        .or_else(|| {
+            file.subjects
+                .iter()
+                .find(|s| s.span.start <= line_offset && line_offset <= s.span.end)
+                .map(|s| s.span)
+        })
+    {
+        let start = usize::try_from(span.start).unwrap_or(0);
+        let end = usize::try_from(span.end).unwrap_or(file.source.len());
+        let body = file.source.get(start..end).unwrap_or(&file.source);
+        return body.contains("timingSafeEqual") || body.contains("constantTimeEqual");
+    }
+    file.source.contains("timingSafeEqual") || file.source.contains("constantTimeEqual")
+}
+
+fn has_weak_or_ecb_cipheriv(line: &str, tail_from_line: &str) -> bool {
+    let lower_line = line.to_ascii_lowercase();
+    if !lower_line.contains("createcipheriv(") && !lower_line.contains("createdecipheriv(") {
+        return false;
+    }
+    let lower_tail = tail_from_line.to_ascii_lowercase();
+    let Some(pos) = lower_tail
+        .find("createcipheriv(")
+        .or_else(|| lower_tail.find("createdecipheriv("))
+    else {
         return false;
     };
-    let after = &line[pos + "createCipheriv(".len()..];
+    let call_len = if lower_tail
+        .get(pos..)
+        .is_some_and(|s| s.starts_with("createcipheriv("))
+    {
+        "createcipheriv(".len()
+    } else {
+        "createdecipheriv(".len()
+    };
+    let Some(after) = tail_from_line.get(pos + call_len..) else {
+        return false;
+    };
+    let Some((inside, _)) = split_balanced_parens(after) else {
+        return false;
+    };
+    let args = split_top_level_args(inside);
+    let Some(first_arg) = args.first() else {
+        return false;
+    };
+    let alg = first_arg.to_ascii_lowercase();
+    alg.contains("\"des")
+        || alg.contains("'des")
+        || alg.contains("\"rc4")
+        || alg.contains("'rc4")
+        || alg.contains("-ecb\"")
+        || alg.contains("-ecb'")
+}
+
+fn has_static_iv_in_cipheriv(line: &str, tail_from_line: &str, src: &str) -> bool {
+    if !line.contains("createCipheriv(") {
+        return false;
+    }
+    let Some(pos) = tail_from_line.find("createCipheriv(") else {
+        return false;
+    };
+    let after = &tail_from_line[pos + "createCipheriv(".len()..];
     let Some((inside, _)) = split_balanced_parens(after) else {
         return false;
     };

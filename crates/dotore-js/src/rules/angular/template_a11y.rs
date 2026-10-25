@@ -28,42 +28,17 @@ const NATIVE_INTERACTIVE_ELEMENTS: &[&str] = &[
 ];
 
 const INTERACTIVE_ARIA_ROLES: &[&str] = &[
-    "button",
-    "checkbox",
-    "columnheader",
-    "combobox",
-    "gridcell",
-    "link",
-    "listbox",
-    "menuitem",
-    "menuitemcheckbox",
-    "menuitemradio",
-    "option",
-    "progressbar",
-    "radio",
-    "rowheader",
-    "scrollbar",
-    "searchbox",
-    "slider",
-    "spinbutton",
-    "switch",
-    "tab",
-    "textbox",
-    "treeitem",
+    "button", "checkbox", "columnheader", "combobox", "gridcell", "link", "listbox", "menuitem",
+    "menuitemcheckbox", "menuitemradio", "option", "progressbar", "radio", "rowheader",
+    "scrollbar", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem",
 ];
 
 const VALID_TABLE_SCOPES: &[&str] = &["col", "row", "colgroup", "rowgroup"];
 
 const MATERIAL_BUTTON_DIRECTIVES: &[&str] = &[
-    "mat-button",
-    "mat-raised-button",
-    "mat-flat-button",
-    "mat-stroked-button",
-    "mat-icon-button",
-    "mat-fab",
-    "mat-mini-fab",
+    "mat-button", "mat-raised-button", "mat-flat-button", "mat-stroked-button", "mat-icon-button",
+    "mat-fab", "mat-mini-fab",
 ];
-
 #[derive(Debug, Clone)]
 struct ParsedTemplateAttr<'a> {
     raw_name: &'a str,
@@ -90,27 +65,9 @@ pub(crate) fn extract_angular_html_template_sites(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    scan_for_track_violations(
-        template_source,
-        base_byte_offset,
-        subject_name,
-        line_starts,
-        sites,
-    );
-    scan_template_no_any(
-        template_source,
-        base_byte_offset,
-        subject_name,
-        line_starts,
-        sites,
-    );
-    scan_template_elements(
-        template_source,
-        base_byte_offset,
-        subject_name,
-        line_starts,
-        sites,
-    );
+    scan_for_track_violations(template_source, base_byte_offset, subject_name, line_starts, sites);
+    scan_template_no_any(template_source, base_byte_offset, subject_name, line_starts, sites);
+    scan_template_elements(template_source, base_byte_offset, subject_name, line_starts, sites);
 }
 
 fn scan_for_track_violations(
@@ -271,102 +228,112 @@ fn scan_template_elements(
 
 fn parse_opening_element(src: &str, open_lt: usize) -> Option<ParsedTemplateElement<'_>> {
     let bytes = src.as_bytes();
-    let mut cursor = open_lt + 1;
-    while cursor < bytes.len()
-        && (bytes[cursor].is_ascii_alphanumeric()
-            || bytes[cursor] == b'-'
-            || bytes[cursor] == b':'
-            || bytes[cursor] == b'_')
-    {
-        cursor += 1;
-    }
-    if cursor == open_lt + 1 {
+    let tag_end = scan_tag_name_end(bytes, open_lt + 1);
+    if tag_end == open_lt + 1 {
         return None;
     }
-    let tag_lower = src.get(open_lt + 1..cursor)?.to_ascii_lowercase();
+    let tag_lower = src.get(open_lt + 1..tag_end)?.to_ascii_lowercase();
     let mut attrs = Vec::new();
+    let mut cursor = tag_end;
 
     while cursor < bytes.len() {
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
+        cursor = skip_ascii_whitespace(bytes, cursor);
         if cursor >= bytes.len() {
             return None;
         }
-        if bytes[cursor] == b'>' {
+        if let Some((open_end, is_self_closing)) = match_opening_tag_close(bytes, cursor) {
             return Some(ParsedTemplateElement {
                 tag_lower,
                 attrs,
                 open_start: open_lt,
-                open_end: cursor + 1,
-                is_self_closing: false,
+                open_end,
+                is_self_closing,
             });
         }
-        if bytes[cursor] == b'/' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'>' {
-            return Some(ParsedTemplateElement {
-                tag_lower,
-                attrs,
-                open_start: open_lt,
-                open_end: cursor + 2,
-                is_self_closing: true,
-            });
-        }
-
         let attr_start = cursor;
-        while cursor < bytes.len()
-            && !bytes[cursor].is_ascii_whitespace()
-            && bytes[cursor] != b'='
-            && bytes[cursor] != b'>'
-            && !(bytes[cursor] == b'/' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'>')
-        {
-            cursor += 1;
-        }
+        cursor = scan_attr_name_end(bytes, cursor);
         if cursor == attr_start {
             cursor += 1;
             continue;
         }
         let raw_name = &src[attr_start..cursor];
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
+        cursor = skip_ascii_whitespace(bytes, cursor);
         let (value, next_cursor) = parse_attr_value(src, cursor);
         cursor = next_cursor;
-        let attr_end = cursor;
         attrs.push(ParsedTemplateAttr {
             raw_name,
             value,
             start: attr_start,
-            end: attr_end,
+            end: cursor,
         });
     }
     None
 }
 
+fn scan_tag_name_end(bytes: &[u8], mut cursor: usize) -> usize {
+    while let Some(&b) = bytes.get(cursor)
+        && (b.is_ascii_alphanumeric() || matches!(b, b'-' | b':' | b'_'))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn match_opening_tag_close(bytes: &[u8], cursor: usize) -> Option<(usize, bool)> {
+    if bytes.get(cursor) == Some(&b'>') {
+        return Some((cursor + 1, false));
+    }
+    if bytes.get(cursor..cursor + 2) == Some(b"/>") {
+        return Some((cursor + 2, true));
+    }
+    None
+}
+
+fn scan_attr_name_end(bytes: &[u8], mut cursor: usize) -> usize {
+    while let Some(&b) = bytes.get(cursor) {
+        if b.is_ascii_whitespace()
+            || b == b'='
+            || b == b'>'
+            || bytes.get(cursor..cursor + 2) == Some(b"/>")
+        {
+            break;
+        }
+        cursor += 1;
+    }
+    cursor
+}
+
 fn parse_attr_value(src: &str, mut cursor: usize) -> (Option<&str>, usize) {
     let bytes = src.as_bytes();
-    if cursor >= bytes.len() || bytes[cursor] != b'=' {
+    if bytes.get(cursor) != Some(&b'=') {
         return (None, cursor);
     }
-    cursor += 1;
-    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-        cursor += 1;
-    }
-    if cursor < bytes.len() && (bytes[cursor] == b'"' || bytes[cursor] == b'\'') {
-        let quote = bytes[cursor];
+    cursor = skip_ascii_whitespace(bytes, cursor + 1);
+    if let Some(&quote @ (b'"' | b'\'')) = bytes.get(cursor) {
         let val_start = cursor + 1;
         cursor += 1;
-        while cursor < bytes.len() && bytes[cursor] != quote {
-            let step = if bytes[cursor] == b'\\' { 2 } else { 1 };
-            cursor = (cursor + step).min(bytes.len());
+        while let Some(&b) = bytes.get(cursor)
+            && b != quote
+        {
+            cursor = (cursor + if b == b'\\' { 2 } else { 1 }).min(bytes.len());
         }
         let value = src.get(val_start..cursor);
-        if cursor < bytes.len() && bytes[cursor] == quote {
+        if bytes.get(cursor) == Some(&quote) {
             cursor += 1;
         }
         (value, cursor)
     } else {
         let val_start = cursor;
-        while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() && bytes[cursor] != b'>'
+        while let Some(&b) = bytes.get(cursor)
+            && !b.is_ascii_whitespace()
+            && b != b'>'
         {
             cursor += 1;
         }
@@ -579,9 +546,8 @@ fn check_element_has_content(
         return;
     }
     let has_content_binding = el.attrs.iter().any(|a| {
-        let norm = normalize_bound_attr_name(a.raw_name);
         matches!(
-            norm.as_str(),
+            normalize_bound_attr_name(a.raw_name).as_str(),
             "innerhtml"
                 | "innertext"
                 | "textcontent"
@@ -595,25 +561,24 @@ fn check_element_has_content(
                 | "*ngtemplateoutlet"
         )
     });
-    if has_content_binding || element_has_non_empty_inner_content(template_source, el) {
-        return;
+    if !has_content_binding && !element_has_non_empty_inner_content(template_source, el) {
+        push_template_site(
+            sites,
+            RuleId::AngularTemplateElementsHaveContent,
+            subject_name,
+            "angularTemplateElementsHaveContent",
+            el.tag_lower.clone(),
+            format!(
+                "`<{}>` element has no accessible text, child content, `[innerHTML]`, or `aria-label`.",
+                el.tag_lower
+            ),
+            base_byte_offset,
+            el.open_start,
+            el.open_end,
+            line_starts,
+            None,
+        );
     }
-    push_template_site(
-        sites,
-        RuleId::AngularTemplateElementsHaveContent,
-        subject_name,
-        "angularTemplateElementsHaveContent",
-        el.tag_lower.clone(),
-        format!(
-            "`<{}>` element has no accessible text, child content, `[innerHTML]`, or `aria-label`.",
-            el.tag_lower
-        ),
-        base_byte_offset,
-        el.open_start,
-        el.open_end,
-        line_starts,
-        None,
-    );
 }
 
 fn check_element_interactive_supports_focus(
@@ -635,31 +600,36 @@ fn check_element_interactive_supports_focus(
     if !has_interactive_role {
         return;
     }
-    let has_tabindex = el.attrs.iter().any(|a| {
+    let has_interactive_event = el
+        .attrs
+        .iter()
+        .any(|a| normalize_event_attr_name(a.raw_name).is_some());
+    if !has_interactive_event {
+        return;
+    }
+    if !el.attrs.iter().any(|a| {
         matches!(
             normalize_bound_attr_name(a.raw_name).as_str(),
             "tabindex" | "attr.tabindex"
         )
-    });
-    if has_tabindex {
-        return;
+    }) {
+        push_template_site(
+            sites,
+            RuleId::AngularTemplateInteractiveSupportsFocus,
+            subject_name,
+            "angularTemplateInteractiveSupportsFocus",
+            el.tag_lower.clone(),
+            format!(
+                "Non-interactive `<{}>` with an interactive ARIA `role` must specify `tabindex` / `[attr.tabindex]` to be keyboard focusable.",
+                el.tag_lower
+            ),
+            base_byte_offset,
+            el.open_start,
+            el.open_end,
+            line_starts,
+            None,
+        );
     }
-    push_template_site(
-        sites,
-        RuleId::AngularTemplateInteractiveSupportsFocus,
-        subject_name,
-        "angularTemplateInteractiveSupportsFocus",
-        el.tag_lower.clone(),
-        format!(
-            "Non-interactive `<{}>` with an interactive ARIA `role` must specify `tabindex` / `[attr.tabindex]` to be keyboard focusable.",
-            el.tag_lower
-        ),
-        base_byte_offset,
-        el.open_start,
-        el.open_end,
-        line_starts,
-        None,
-    );
 }
 
 fn check_element_table_scope(
@@ -855,17 +825,11 @@ fn is_native_or_custom_interactive_tag(tag_lower: &str) -> bool {
 fn is_decorative_or_aria_hidden(el: &ParsedTemplateElement<'_>) -> bool {
     el.attrs.iter().any(|a| {
         let norm = normalize_bound_attr_name(a.raw_name);
-        if norm == "aria-hidden" {
-            a.value
-                .map(|v| v.trim().trim_matches(['\'', '"']))
-                .is_some_and(|v| v == "true")
-        } else if norm == "role" {
-            a.value
-                .map(|v| v.trim().trim_matches(['\'', '"']))
-                .is_some_and(|v| matches!(v, "presentation" | "none"))
-        } else {
-            false
-        }
+        let Some(v) = a.value.map(|v| v.trim().trim_matches(['\'', '"'])) else {
+            return false;
+        };
+        (norm == "aria-hidden" && v == "true")
+            || (norm == "role" && matches!(v, "presentation" | "none"))
     })
 }
 
@@ -878,17 +842,16 @@ fn normalize_bound_attr_name(raw_name: &str) -> String {
         .or_else(|| trimmed.strip_prefix("bindon-"))
         .or_else(|| trimmed.strip_prefix("bind-"))
         .unwrap_or(trimmed);
-    let without_attr = unwrapped.strip_prefix("attr.").unwrap_or(unwrapped);
-    without_attr.to_ascii_lowercase()
+    unwrapped.strip_prefix("attr.").unwrap_or(unwrapped).to_ascii_lowercase()
 }
 
 fn normalize_event_attr_name(raw_name: &str) -> Option<String> {
     let trimmed = raw_name.trim();
-    let ev = trimmed
+    trimmed
         .strip_prefix('(')
         .and_then(|s| s.strip_suffix(')'))
-        .or_else(|| trimmed.strip_prefix("on-"))?;
-    Some(ev.to_ascii_lowercase())
+        .or_else(|| trimmed.strip_prefix("on-"))
+        .map(str::to_ascii_lowercase)
 }
 
 #[expect(
@@ -923,21 +886,16 @@ fn push_template_site(
 }
 
 fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_quote: Option<u8> = None;
-    let bytes = text.as_bytes();
-    let mut idx = open_idx;
-    while idx < bytes.len() {
-        let b = bytes[idx];
+    let (mut depth, mut in_quote, bytes, mut idx) = (0usize, None, text.as_bytes(), open_idx);
+    while let Some(&b) = bytes.get(idx) {
         if let Some(q) = in_quote {
             if b == b'\\' {
                 idx += 2;
                 continue;
-            }
-            if b == q {
+            } else if b == q {
                 in_quote = None;
             }
-        } else if b == b'\'' || b == b'"' {
+        } else if matches!(b, b'\'' | b'"') {
             in_quote = Some(b);
         } else if b == b'(' {
             depth += 1;
@@ -954,31 +912,25 @@ fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
 
 fn classify_for_header_track_violation(header: &str) -> Option<(String, String)> {
     let mut segments = header.split(';');
-    let first_seg = segments.next()?.trim();
-    let (item_part, _collection_part) = first_seg.split_once(" of ")?;
+    let (item_part, _) = segments.next()?.trim().split_once(" of ")?;
     let item_var = item_part.trim();
     if item_var.is_empty() {
         return None;
     }
-
-    let mut index_aliases: HashSet<&str> = HashSet::from(["$index"]);
-    let mut track_expr: Option<&str> = None;
-
+    let mut index_aliases = HashSet::from(["$index"]);
+    let mut track_expr = None;
     for seg in segments {
         let trimmed = seg.trim();
-        if let Some(rest) = trimmed.strip_prefix("let ") {
-            if let Some((alias, rhs)) = rest.split_once('=')
-                && rhs.trim() == "$index"
-            {
-                index_aliases.insert(alias.trim());
-            }
+        if let Some((alias, rhs)) = trimmed.strip_prefix("let ").and_then(|r| r.split_once('='))
+            && rhs.trim() == "$index"
+        {
+            index_aliases.insert(alias.trim());
         } else if let Some(rest) = trimmed.strip_prefix("track")
             && rest.starts_with(char::is_whitespace)
         {
             track_expr = Some(rest.trim());
         }
     }
-
     let track = track_expr?;
     if index_aliases.contains(track) {
         return Some((
@@ -988,13 +940,12 @@ fn classify_for_header_track_violation(header: &str) -> Option<(String, String)>
             ),
         ));
     }
-    if track == item_var {
-        return Some((
+    (track == item_var).then(|| {
+        (
             track.to_string(),
             format!(
                 "`@for` loop tracks raw object identity `track {item_var}`; track a unique key property like `track {item_var}.id` so immutable updates do not tear down DOM nodes."
             ),
-        ));
-    }
-    None
+        )
+    })
 }

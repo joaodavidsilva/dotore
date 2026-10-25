@@ -9,20 +9,27 @@ use std::collections::{HashMap, HashSet};
 
 use dotore_core::{ByteSpan, RuleId, SourceLoc};
 use syn::{
-    Attribute, Block, Expr, ExprBreak, ExprCall, ExprField, ExprForLoop, ExprIf, ExprLet, ExprLoop,
-    ExprMatch, ExprMethodCall, ExprReturn, ExprStruct, ExprTuple, ExprWhile, Fields, File, FnArg,
-    GenericArgument, ImplItemFn, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic,
-    ItemStruct, Lit, Local, Macro, Pat, PathArguments, Signature, Stmt, Token, TraitItemFn, Type,
-    parse::Parser,
-    punctuated::Punctuated,
+    Block, Expr, ExprBreak, ExprCall, ExprForLoop, ExprIf, ExprLet, ExprLoop, ExprMatch,
+    ExprMethodCall, ExprReturn, ExprStruct, ExprTuple, ExprWhile, Fields, File, FnArg, ImplItemFn,
+    ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemStruct, Lit, Local, Macro, Pat,
+    Signature, Stmt, TraitItemFn,
     spanned::Spanned,
     visit::{self, Visit},
 };
 
-use crate::matchers::{
-    RsCandidateFinding, RsScopeTracker, extract_expr_ident, extract_pat_ident,
-    extract_receiver_label, is_cheap_clone_ctor, is_cheap_clone_type, is_cheap_handle_ident,
-    is_format_macro_path, loc_at, path_to_string, span_to_bytes,
+use crate::{
+    matchers::{
+        RsCandidateFinding, RsScopeTracker, extract_expr_ident, extract_pat_ident,
+        extract_receiver_label, is_cheap_clone_ctor, is_cheap_clone_type, is_cheap_handle_ident,
+        is_format_macro_path, loc_at, path_to_string, span_to_bytes,
+    },
+    perf_helpers::{
+        attrs_derive_serialize, collect_let_cond_idents, collect_pat_idents,
+        collect_unconditional_pushed_vecs, expr_has_branch_bare_clone, extract_root_ident,
+        field_has_deterministic_or_skip_serde_attr, is_bare_clone_call, is_bare_ident_receiver,
+        is_bare_loop_item_clone, is_empty_vec_init, is_lazy_lock_init_call,
+        is_unnecessary_format_tokens, is_unsized_loop_iterator, unordered_collection_type_name,
+    },
 };
 
 /// All 9 Tokio async hazard, Rust allocation performance, and deterministic serialization rules.
@@ -369,6 +376,61 @@ impl PerfVisitor<'_> {
             self.cheap_clone_vars.insert(ident);
         }
     }
+
+    fn check_clone_in_loop_method(&mut self, node: &ExprMethodCall, method_name: &str) {
+        if self.scope.in_test()
+            || !self.scope.in_loop()
+            || self.in_diverging_expr > 0
+            || method_name != "clone"
+            || !node.args.is_empty()
+            || self.is_cheap_clone_receiver(&node.receiver)
+            || self.is_per_element_ownership_transfer(&node.receiver)
+        {
+            return;
+        }
+        let span = self.span_to_bytes(node.span());
+        let loc = self.loc_at(span.start);
+        let recv_label =
+            extract_receiver_label(&node.receiver).unwrap_or_else(|| "value".to_string());
+        self.findings.push(RsCandidateFinding::new(
+            RuleId::RsPerfNoCloneInLoop,
+            self.scope.subject_name(),
+            format!("{recv_label}.clone()"),
+            "rsPerfNoCloneInLoop",
+            format!(
+                "Heap `.clone()` on `{recv_label}` inside a loop allocates on every iteration; borrow `&{recv_label}`, hoist the clone outside the loop, or wrap shared data in `Arc`."
+            ),
+            loc,
+            span,
+        ));
+    }
+
+    fn classify_method_call_sink(&self, node: &ExprMethodCall, method_name: &str) -> (bool, bool, bool) {
+        let is_collection_whole_item_push =
+            matches!(method_name, "push" | "push_back" | "push_front")
+                && node.args.len() == 1
+                && is_bare_ident_receiver(&node.receiver)
+                && node
+                    .args
+                    .first()
+                    .is_some_and(|arg| is_bare_loop_item_clone(arg, &self.direct_for_loop_vars));
+        let is_borrow_query_method = matches!(
+            method_name,
+            "contains"
+                | "contains_key"
+                | "get"
+                | "get_mut"
+                | "get_key_value"
+                | "remove"
+                | "remove_entry"
+        );
+        let is_record_assembly = (node.args.len() >= 2
+            || method_name.starts_with("with_")
+            || matches!(method_name, "unwrap_or_else" | "map_or_else"))
+            && !is_borrow_query_method;
+        let is_owned_sink = !is_collection_whole_item_push && !is_borrow_query_method;
+        (is_owned_sink, is_record_assembly, is_borrow_query_method)
+    }
 }
 
 impl<'ast> Visit<'ast> for PerfVisitor<'_> {
@@ -666,118 +728,40 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method_name = node.method.to_string();
-
-        if !self.scope.in_test()
-            && self.scope.in_loop()
-            && self.in_diverging_expr == 0
-            && method_name == "clone"
-            && node.args.is_empty()
-            && !self.is_cheap_clone_receiver(&node.receiver)
-            && !self.is_per_element_ownership_transfer(&node.receiver)
-        {
-            let span = self.span_to_bytes(node.span());
-            let loc = self.loc_at(span.start);
-            let recv_label =
-                extract_receiver_label(&node.receiver).unwrap_or_else(|| "value".to_string());
-            self.findings.push(RsCandidateFinding::new(
-                RuleId::RsPerfNoCloneInLoop,
-                self.scope.subject_name(),
-                format!("{recv_label}.clone()"),
-                "rsPerfNoCloneInLoop",
-                format!(
-                    "Heap `.clone()` on `{recv_label}` inside a loop allocates on every iteration; borrow `&{recv_label}`, hoist the clone outside the loop, or wrap shared data in `Arc`."
-                ),
-                loc,
-                span,
-            ));
-        }
+        self.check_clone_in_loop_method(node, &method_name);
 
         let is_once_init = matches!(
             method_name.as_str(),
             "get_or_init" | "get_or_try_init" | "call_once"
         );
-        let is_iter_adapter = matches!(
-            method_name.as_str(),
-            "map"
-                | "filter"
-                | "filter_map"
-                | "flat_map"
-                | "for_each"
-                | "any"
-                | "all"
-                | "find"
-                | "find_map"
-                | "position"
-                | "max_by_key"
-                | "min_by_key"
-                | "sort_by"
-                | "sort_by_key"
-        ) && node.args.iter().any(|arg| matches!(arg, Expr::Closure(_)));
+        let is_iter_adapter = is_iter_closure_adapter_method(&method_name, node);
         if is_once_init {
             self.scope.in_static_or_lazy_init += 1;
         }
         for attr in &node.attrs {
             self.visit_attribute(attr);
         }
-        let is_option_fallback_adapter = matches!(
+        let is_option_fallback = matches!(
             method_name.as_str(),
             "unwrap_or_else" | "unwrap_or" | "map_or_else" | "map_or" | "or_else"
         );
-        if is_option_fallback_adapter {
-            self.in_owned_record_sink += 1;
-        }
+        self.in_owned_record_sink += u32::from(is_option_fallback);
         self.visit_expr(&node.receiver);
-        if is_option_fallback_adapter {
-            self.in_owned_record_sink -= 1;
-        }
-        if is_iter_adapter {
-            self.in_iter_closure += 1;
-        }
-        let is_collection_whole_item_push =
-            matches!(method_name.as_str(), "push" | "push_back" | "push_front")
-                && node.args.len() == 1
-                && is_bare_ident_receiver(&node.receiver)
-                && node
-                    .args
-                    .first()
-                    .is_some_and(|arg| is_bare_loop_item_clone(arg, &self.direct_for_loop_vars));
-        let is_borrow_query_method = matches!(
-            method_name.as_str(),
-            "contains"
-                | "contains_key"
-                | "get"
-                | "get_mut"
-                | "get_key_value"
-                | "remove"
-                | "remove_entry"
-        );
-        let is_record_assembly_method = node.args.len() >= 2
-            || method_name.starts_with("with_")
-            || matches!(method_name.as_str(), "unwrap_or_else" | "map_or_else");
-        if !is_collection_whole_item_push && !is_borrow_query_method {
-            self.in_owned_record_sink += 1;
-        }
-        if is_record_assembly_method && !is_borrow_query_method {
-            self.in_record_assembly_sink += 1;
-        }
-        if is_borrow_query_method {
-            self.in_borrow_query_arg += 1;
-        }
+        self.in_owned_record_sink -= u32::from(is_option_fallback);
+        self.in_iter_closure += u32::from(is_iter_adapter);
+
+        let (owned_sink, record_assembly, borrow_query) =
+            self.classify_method_call_sink(node, &method_name);
+        self.in_owned_record_sink += u32::from(owned_sink);
+        self.in_record_assembly_sink += u32::from(record_assembly);
+        self.in_borrow_query_arg += u32::from(borrow_query);
         for arg in &node.args {
             self.visit_expr(arg);
         }
-        if is_borrow_query_method {
-            self.in_borrow_query_arg -= 1;
-        }
-        if is_record_assembly_method && !is_borrow_query_method {
-            self.in_record_assembly_sink -= 1;
-        }
-        if !is_collection_whole_item_push && !is_borrow_query_method {
-            self.in_owned_record_sink -= 1;
-        }
-        if is_iter_adapter {
-            self.in_iter_closure -= 1;
-        }
+        self.in_borrow_query_arg -= u32::from(borrow_query);
+        self.in_record_assembly_sink -= u32::from(record_assembly);
+        self.in_owned_record_sink -= u32::from(owned_sink);
+        self.in_iter_closure -= u32::from(is_iter_adapter);
         if is_once_init {
             self.scope.in_static_or_lazy_init -= 1;
         }
@@ -804,390 +788,22 @@ impl<'ast> Visit<'ast> for PerfVisitor<'_> {
     }
 }
 
-fn collect_pat_idents(pat: &Pat, out: &mut HashSet<String>) {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Pat has many variants; recursively extracts bound local identifiers"
-    )]
-    match pat {
-        Pat::Ident(pi) => {
-            out.insert(pi.ident.to_string());
-            if let Some((_, sub)) = &pi.subpat {
-                collect_pat_idents(sub, out);
-            }
-        }
-        Pat::Reference(r) => collect_pat_idents(&r.pat, out),
-        Pat::Type(t) => collect_pat_idents(&t.pat, out),
-        Pat::Tuple(t) => {
-            for elem in &t.elems {
-                collect_pat_idents(elem, out);
-            }
-        }
-        Pat::TupleStruct(ts) => {
-            for elem in &ts.elems {
-                collect_pat_idents(elem, out);
-            }
-        }
-        Pat::Struct(s) => {
-            for field in &s.fields {
-                collect_pat_idents(&field.pat, out);
-            }
-        }
-        Pat::Slice(sl) => {
-            for elem in &sl.elems {
-                collect_pat_idents(elem, out);
-            }
-        }
-        Pat::Or(or_pat) => {
-            for case in &or_pat.cases {
-                collect_pat_idents(case, out);
-            }
-        }
-        Pat::Paren(p) => collect_pat_idents(&p.pat, out),
-        _ => {}
-    }
-}
-
-fn collect_let_cond_idents(expr: &Expr, out: &mut HashSet<String>) {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; inspects Let and && chains in while-let conditions"
-    )]
-    match expr {
-        Expr::Let(expr_let) => collect_pat_idents(&expr_let.pat, out),
-        Expr::Binary(bin) => {
-            collect_let_cond_idents(&bin.left, out);
-            collect_let_cond_idents(&bin.right, out);
-        }
-        Expr::Paren(p) => collect_let_cond_idents(&p.expr, out),
-        Expr::Group(g) => collect_let_cond_idents(&g.expr, out),
-        _ => {}
-    }
-}
-
-fn extract_root_ident(expr: &Expr) -> Option<String> {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; walks receiver chain to find root local variable"
-    )]
-    match expr {
-        Expr::Paren(p) => extract_root_ident(&p.expr),
-        Expr::Group(g) => extract_root_ident(&g.expr),
-        Expr::Reference(r) => extract_root_ident(&r.expr),
-        Expr::Path(ep) if ep.qself.is_none() => ep.path.get_ident().map(ToString::to_string),
-        Expr::Field(ExprField { base, .. }) => extract_root_ident(base),
-        Expr::Index(idx) => extract_root_ident(&idx.expr),
-        Expr::MethodCall(mc) => extract_root_ident(&mc.receiver),
-        Expr::Try(t) => extract_root_ident(&t.expr),
-        Expr::Unary(u) => extract_root_ident(&u.expr),
-        _ => None,
-    }
-}
-
-fn is_bare_ident_receiver(expr: &Expr) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; checks whether receiver is a bare identifier without field/index projection"
-    )]
-    match expr {
-        Expr::Paren(p) => is_bare_ident_receiver(&p.expr),
-        Expr::Group(g) => is_bare_ident_receiver(&g.expr),
-        Expr::Reference(r) => is_bare_ident_receiver(&r.expr),
-        Expr::Path(ep) => ep.qself.is_none() && ep.path.get_ident().is_some(),
-        _ => false,
-    }
-}
-
-fn is_bare_clone_call(expr: &Expr) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; checks direct `.clone()` calls"
-    )]
-    match expr {
-        Expr::Paren(p) => is_bare_clone_call(&p.expr),
-        Expr::Group(g) => is_bare_clone_call(&g.expr),
-        Expr::MethodCall(mc) => mc.method == "clone" && mc.args.is_empty(),
-        _ => false,
-    }
-}
-
-fn is_bare_loop_item_clone(expr: &Expr, loop_scoped_vars: &[HashSet<String>]) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; checks `item.clone()` on a bare loop variable"
-    )]
-    match expr {
-        Expr::Paren(p) => is_bare_loop_item_clone(&p.expr, loop_scoped_vars),
-        Expr::Group(g) => is_bare_loop_item_clone(&g.expr, loop_scoped_vars),
-        Expr::MethodCall(mc) if mc.method == "clone" && mc.args.is_empty() => {
-            is_bare_ident_receiver(&mc.receiver)
-                && extract_root_ident(&mc.receiver).is_some_and(|id| {
-                    loop_scoped_vars.iter().any(|set| set.contains(&id))
-                })
-        }
-        _ => false,
-    }
-}
-
-fn expr_has_branch_bare_clone(expr: &Expr) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; checks whether an if/match/block initializer has a bare `.clone()` tail expression"
-    )]
-    match expr {
-        Expr::Paren(p) => expr_has_branch_bare_clone(&p.expr),
-        Expr::Group(g) => expr_has_branch_bare_clone(&g.expr),
-        Expr::Block(b) => block_tail_is_bare_clone(&b.block),
-        Expr::If(expr_if) => {
-            block_tail_is_bare_clone(&expr_if.then_branch)
-                || expr_if
-                    .else_branch
-                    .as_ref()
-                    .is_some_and(|(_, eb)| is_bare_clone_call(eb) || expr_has_branch_bare_clone(eb))
-        }
-        Expr::Match(expr_match) => expr_match
-            .arms
-            .iter()
-            .any(|arm| is_bare_clone_call(&arm.body) || expr_has_branch_bare_clone(&arm.body)),
-        _ => false,
-    }
-}
-
-fn block_tail_is_bare_clone(block: &Block) -> bool {
+fn is_iter_closure_adapter_method(method_name: &str, node: &ExprMethodCall) -> bool {
     matches!(
-        block.stmts.last(),
-        Some(Stmt::Expr(tail, None)) if is_bare_clone_call(tail) || expr_has_branch_bare_clone(tail)
-    )
-}
-
-fn is_lazy_lock_init_call(node: &ExprCall) -> bool {
-    if let Expr::Path(ep) = node.func.as_ref() {
-        let full = path_to_string(&ep.path);
-        return full.ends_with("LazyLock::new") || full.ends_with("Lazy::new");
-    }
-    false
-}
-
-fn is_empty_vec_init(expr: &Expr) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; checks Vec::new() calls and empty vec![] macros"
-    )]
-    match expr {
-        Expr::Paren(p) => is_empty_vec_init(&p.expr),
-        Expr::Group(g) => is_empty_vec_init(&g.expr),
-        Expr::Call(call) if call.args.is_empty() => {
-            if let Expr::Path(ep) = call.func.as_ref() {
-                let full = path_to_string(&ep.path);
-                matches!(
-                    full.as_str(),
-                    "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new"
-                )
-            } else {
-                false
-            }
-        }
-        Expr::Macro(expr_macro) => {
-            expr_macro.mac.path.is_ident("vec") && expr_macro.mac.tokens.is_empty()
-        }
-        _ => false,
-    }
-}
-
-fn is_unsized_loop_iterator(expr: &Expr) -> bool {
-    #[expect(
-        clippy::wildcard_enum_match_arm,
-        reason = "syn::Expr has many variants; inspects method call chains for unsized/filter iterators"
-    )]
-    match expr {
-        Expr::Paren(p) => is_unsized_loop_iterator(&p.expr),
-        Expr::Group(g) => is_unsized_loop_iterator(&g.expr),
-        Expr::Reference(r) => is_unsized_loop_iterator(&r.expr),
-        Expr::MethodCall(mc) => {
-            let method = mc.method.to_string();
-            if matches!(
-                method.as_str(),
-                "ancestors"
-                    | "split"
-                    | "split_whitespace"
-                    | "split_ascii_whitespace"
-                    | "split_terminator"
-                    | "split_inclusive"
-                    | "rsplit"
-                    | "lines"
-                    | "chars"
-                    | "char_indices"
-                    | "filter"
-                    | "filter_map"
-                    | "flat_map"
-                    | "flatten"
-                    | "take_while"
-                    | "skip_while"
-            ) {
-                return true;
-            }
-            is_unsized_loop_iterator(&mc.receiver)
-        }
-        _ => false,
-    }
-}
-
-struct LoopControlFlowChecker {
-    has_continue: bool,
-    has_break: bool,
-}
-
-impl<'ast> Visit<'ast> for LoopControlFlowChecker {
-    fn visit_expr_for_loop(&mut self, _i: &'ast ExprForLoop) {}
-    fn visit_expr_while(&mut self, _i: &'ast ExprWhile) {}
-    fn visit_expr_loop(&mut self, _i: &'ast ExprLoop) {}
-    fn visit_expr_closure(&mut self, _i: &'ast syn::ExprClosure) {}
-    fn visit_item(&mut self, _i: &'ast syn::Item) {}
-
-    fn visit_expr_continue(&mut self, _i: &'ast syn::ExprContinue) {
-        self.has_continue = true;
-    }
-
-    fn visit_expr_break(&mut self, _i: &'ast syn::ExprBreak) {
-        self.has_break = true;
-    }
-}
-
-fn stmt_has_continue_or_break(stmt: &Stmt) -> (bool, bool) {
-    let mut checker = LoopControlFlowChecker {
-        has_continue: false,
-        has_break: false,
-    };
-    checker.visit_stmt(stmt);
-    (checker.has_continue, checker.has_break)
-}
-
-fn collect_unconditional_pushed_vecs(block: &Block, out: &mut Vec<String>) {
-    if block.stmts.iter().any(|s| stmt_has_continue_or_break(s).1) {
-        return;
-    }
-    for stmt in &block.stmts {
-        let (has_continue, has_break) = stmt_has_continue_or_break(stmt);
-        if has_continue || has_break {
-            break;
-        }
-        if let Stmt::Expr(expr, _) = stmt
-            && let Expr::MethodCall(mc) = expr
-            && mc.method == "push"
-            && mc.args.len() == 1
-            && let Some(recv) = extract_expr_ident(&mc.receiver)
-            && !out.contains(&recv)
-        {
-            out.push(recv);
-        }
-    }
-}
-
-fn is_unnecessary_format_tokens(tokens: &proc_macro2::TokenStream) -> bool {
-    let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
-    let Ok(args) = parser.parse2(tokens.clone()) else {
-        return false;
-    };
-    let Some(Expr::Lit(expr_lit)) = args.first() else {
-        return false;
-    };
-    let Lit::Str(lit_str) = &expr_lit.lit else {
-        return false;
-    };
-    let val = lit_str.value();
-    match args.len() {
-        1 => !has_format_placeholder(&val) || is_single_trivial_placeholder(&val),
-        2 => val == "{}" || val == "{0}",
-        _ => false,
-    }
-}
-
-fn has_format_placeholder(s: &str) -> bool {
-    let cleaned = s.replace("{{", "").replace("}}", "");
-    cleaned.contains('{') && cleaned.contains('}')
-}
-
-fn is_single_trivial_placeholder(s: &str) -> bool {
-    let Some(inner) = s.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')) else {
-        return false;
-    };
-    if inner.is_empty() {
-        return true;
-    }
-    !inner.contains('{')
-        && !inner.contains('}')
-        && !inner.contains(':')
-        && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn attrs_derive_serialize(attrs: &[Attribute]) -> bool {
-    let mut has_serialize = false;
-    for attr in attrs {
-        if !attr.path().is_ident("derive") {
-            continue;
-        }
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta
-                .path
-                .segments
-                .last()
-                .is_some_and(|seg| seg.ident == "Serialize")
-            {
-                has_serialize = true;
-            }
-            Ok(())
-        });
-    }
-    has_serialize
-}
-
-fn field_has_deterministic_or_skip_serde_attr(attrs: &[Attribute]) -> bool {
-    let mut safe = false;
-    for attr in attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("serialize_with")
-                || meta.path.is_ident("with")
-                || meta.path.is_ident("skip")
-                || meta.path.is_ident("skip_serializing")
-                || meta.path.is_ident("into")
-            {
-                safe = true;
-            }
-            if meta.input.peek(Token![=]) {
-                let _: Token![=] = meta.input.parse()?;
-                let _: syn::Expr = meta.input.parse()?;
-            }
-            Ok(())
-        });
-    }
-    safe
-}
-
-fn unordered_collection_type_name(ty: &Type) -> Option<&'static str> {
-    let Type::Path(tp) = ty else {
-        return None;
-    };
-    let last = tp.path.segments.last()?;
-    let ident_str = last.ident.to_string();
-    if ident_str == "HashSet" {
-        return Some("HashSet");
-    }
-    if ident_str == "HashMap" {
-        return Some("HashMap");
-    }
-    if matches!(ident_str.as_str(), "Option" | "Vec" | "Box" | "Arc" | "Rc")
-        && let PathArguments::AngleBracketed(args) = &last.arguments
-    {
-        for arg in &args.args {
-            if let GenericArgument::Type(inner_ty) = arg
-                && let Some(found) = unordered_collection_type_name(inner_ty)
-            {
-                return Some(found);
-            }
-        }
-    }
-    None
+        method_name,
+        "map"
+            | "filter"
+            | "filter_map"
+            | "flat_map"
+            | "for_each"
+            | "any"
+            | "all"
+            | "find"
+            | "find_map"
+            | "position"
+            | "max_by_key"
+            | "min_by_key"
+            | "sort_by"
+            | "sort_by_key"
+    ) && node.args.iter().any(|arg| matches!(arg, Expr::Closure(_)))
 }

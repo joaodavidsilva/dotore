@@ -5,23 +5,28 @@
 )]
 
 mod animation_and_jsx;
+mod hook_initializers;
 mod hydration_and_routing;
 mod rerender_and_hooks;
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use oxc_ast::{
     AstKind,
     ast::{CallExpression, Expression, JSXElementName},
 };
-use oxc_semantic::Semantic;
+use oxc_semantic::{NodeId, Semantic};
 use oxc_span::GetSpan;
 
 use self::{
     animation_and_jsx::{
-        check_jsx_opening_performance_rules, check_motion_value_constructor_in_render,
-        check_no_global_css_variable_animation, check_no_unthrottled_scroll_mutation,
-        check_unbounded_animation_frame_loop, check_web_animation_keyframes,
+        check_jsx_opening_performance_rules, check_no_global_css_variable_animation,
+        check_no_unthrottled_scroll_mutation, check_unbounded_animation_frame_loop,
+    },
+    hook_initializers::{
+        check_motion_value_constructor_in_render, check_no_eager_new_in_use_state_initializer,
+        check_no_match_media_in_state_initializer, check_no_usememo_simple_expression,
+        check_rerender_transitions_scroll, check_web_animation_keyframes,
     },
     hydration_and_routing::{
         check_no_hydration_branch_on_browser_global, check_no_locale_format_in_render,
@@ -31,10 +36,7 @@ use self::{
         check_rendering_hydration_no_flicker,
     },
     rerender_and_hooks::{
-        build_same_file_memo_registry, check_component_function,
-        check_no_eager_new_in_use_state_initializer, check_no_match_media_in_state_initializer,
-        check_no_usememo_simple_expression, check_rerender_transitions_scroll,
-        extract_component_fn_parts,
+        build_same_file_memo_registry, check_component_function, extract_component_fn_parts,
     },
 };
 use crate::{
@@ -172,94 +174,27 @@ pub(crate) fn extract_performance_sites(
     for (node_id, node) in semantic.nodes().iter_enumerated() {
         match node.kind() {
             AstKind::Function(func) => {
-                if let Some(id) = &func.id
-                    && is_component_name(id.name.as_str())
-                    && let Some(body) = &func.body
-                {
-                    check_component_function(
-                        node_id,
-                        &func.params.items,
-                        &body.statements,
-                        body.span,
-                        &memo_registry,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-                check_unbounded_animation_frame_loop(
+                check_performance_function_node(
                     node_id,
-                    func.id.as_ref().map(|i| i.name.as_str()),
-                    func.body.as_ref().map(|b| b.span),
+                    func,
+                    &memo_registry,
                     semantic,
                     line_starts,
                     out,
                 );
             }
             AstKind::VariableDeclarator(decl) => {
-                if let Some(id) = decl.id.get_binding_identifier()
-                    && let Some(init) = &decl.init
-                {
-                    let name = id.name.as_str();
-                    if is_component_name(name)
-                        && let Some((params, stmts, body_span)) = extract_component_fn_parts(init)
-                    {
-                        check_component_function(
-                            node_id,
-                            params,
-                            stmts,
-                            body_span,
-                            &memo_registry,
-                            semantic,
-                            line_starts,
-                            out,
-                        );
-                    }
-                    let fn_body_span = match unwrap_expr(init) {
-                        Expression::ArrowFunctionExpression(a) => Some(a.body.span()),
-                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.span),
-                        _ => None,
-                    };
-                    check_unbounded_animation_frame_loop(
-                        node_id,
-                        Some(name),
-                        fn_body_span,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
+                check_performance_variable_declarator_node(
+                    node_id,
+                    decl,
+                    &memo_registry,
+                    semantic,
+                    line_starts,
+                    out,
+                );
             }
             AstKind::CallExpression(call) => {
-                check_rerender_transitions_scroll(node_id, call, semantic, line_starts, out);
-                check_no_match_media_in_state_initializer(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                check_no_eager_new_in_use_state_initializer(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                check_no_usememo_simple_expression(node_id, call, semantic, line_starts, out);
-                check_no_unthrottled_scroll_mutation(node_id, call, semantic, line_starts, out);
-                check_no_global_css_variable_animation(node_id, call, semantic, line_starts, out);
-                check_web_animation_keyframes(node_id, call, semantic, line_starts, out);
-                check_motion_value_constructor_in_render(node_id, call, semantic, line_starts, out);
-                check_rendering_hydration_no_flicker(node_id, call, semantic, line_starts, out);
-                check_no_locale_format_in_render(node_id, call, semantic, line_starts, out);
-                check_react_router_loader_fetch_forwards_signal(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
+                check_performance_call_expression(node_id, call, semantic, line_starts, out);
             }
             AstKind::JSXOpeningElement(opening) => {
                 check_jsx_opening_performance_rules(
@@ -313,6 +248,103 @@ pub(crate) fn extract_performance_sites(
             _ => {}
         }
     }
+}
+
+fn check_performance_function_node(
+    node_id: NodeId,
+    func: &oxc_ast::ast::Function<'_>,
+    memo_registry: &HashMap<String, MemoStatus>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    if let Some(id) = &func.id
+        && is_component_name(id.name.as_str())
+        && let Some(body) = &func.body
+    {
+        check_component_function(
+            node_id,
+            &func.params.items,
+            &body.statements,
+            body.span,
+            memo_registry,
+            semantic,
+            line_starts,
+            out,
+        );
+    }
+    check_unbounded_animation_frame_loop(
+        node_id,
+        func.id.as_ref().map(|i| i.name.as_str()),
+        func.body.as_ref().map(|b| b.span),
+        semantic,
+        line_starts,
+        out,
+    );
+}
+
+fn check_performance_variable_declarator_node(
+    node_id: NodeId,
+    decl: &oxc_ast::ast::VariableDeclarator<'_>,
+    memo_registry: &HashMap<String, MemoStatus>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(id) = decl.id.get_binding_identifier() else {
+        return;
+    };
+    let Some(init) = &decl.init else {
+        return;
+    };
+    let name = id.name.as_str();
+    if is_component_name(name)
+        && let Some((params, stmts, body_span)) = extract_component_fn_parts(init)
+    {
+        check_component_function(
+            node_id,
+            params,
+            stmts,
+            body_span,
+            memo_registry,
+            semantic,
+            line_starts,
+            out,
+        );
+    }
+    let fn_body_span = match unwrap_expr(init) {
+        Expression::ArrowFunctionExpression(a) => Some(a.body.span()),
+        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.span),
+        _ => None,
+    };
+    check_unbounded_animation_frame_loop(
+        node_id,
+        Some(name),
+        fn_body_span,
+        semantic,
+        line_starts,
+        out,
+    );
+}
+
+fn check_performance_call_expression(
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    check_rerender_transitions_scroll(node_id, call, semantic, line_starts, out);
+    check_no_match_media_in_state_initializer(node_id, call, semantic, line_starts, out);
+    check_no_eager_new_in_use_state_initializer(node_id, call, semantic, line_starts, out);
+    check_no_usememo_simple_expression(node_id, call, semantic, line_starts, out);
+    check_no_unthrottled_scroll_mutation(node_id, call, semantic, line_starts, out);
+    check_no_global_css_variable_animation(node_id, call, semantic, line_starts, out);
+    check_web_animation_keyframes(node_id, call, semantic, line_starts, out);
+    check_motion_value_constructor_in_render(node_id, call, semantic, line_starts, out);
+    check_rendering_hydration_no_flicker(node_id, call, semantic, line_starts, out);
+    check_no_locale_format_in_render(node_id, call, semantic, line_starts, out);
+    check_react_router_loader_fetch_forwards_signal(node_id, call, semantic, line_starts, out);
 }
 
 fn is_react_named_hook_call(call: &CallExpression<'_>, hook_name: &str) -> bool {

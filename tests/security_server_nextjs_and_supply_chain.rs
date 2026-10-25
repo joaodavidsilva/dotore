@@ -1503,6 +1503,48 @@ fn upgraded_security_rules_catch_bypass_patterns_and_allow_safe_guards() {
         Some(iframe_rules),
     );
     assert!(safe_iframe.is_empty());
+    let safe_relative_iframe = analyze_source(
+        Path::new("src/components/PreviewFrame.tsx"),
+        r#"export const PreviewFrame = () => (
+            <iframe src="/embedded/preview.html" sandbox="allow-scripts allow-same-origin" />
+        );"#,
+        Some(iframe_rules),
+    );
+    assert!(
+        safe_relative_iframe.is_empty(),
+        "Expected static relative same-origin src to be allowed, got: {safe_relative_iframe:?}"
+    );
+
+    // Multi-line `jwt.verify(token, publicKey)` and scoped `timingSafeEqual`
+    let multiline_jwt = analyze_source(
+        Path::new("src/server/jwt-multi.ts"),
+        r#"import jwt from "jsonwebtoken";
+        export function checkMulti(token: string, publicKey: string) {
+            return jwt.verify(
+                token,
+                publicKey
+            );
+        }"#,
+        Some(jwt_rules),
+    );
+    assert_eq!(multiline_jwt.len(), 1);
+
+    let scoped_crypto = analyze_source(
+        Path::new("src/server/crypto-scoped.ts"),
+        r#"import crypto from "node:crypto";
+        export function safeCompare(a: string, b: string) {
+            return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+        }
+        export function unsafeCompare(signature: string, expectedSignature: string) {
+            return signature === expectedSignature;
+        }"#,
+        Some(crypto_rules),
+    );
+    assert_eq!(
+        scoped_crypto.len(),
+        1,
+        "Expected timingSafeEqual in safeCompare not to suppress unsafeCompare"
+    );
 }
 
 #[test]

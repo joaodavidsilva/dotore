@@ -343,62 +343,70 @@ fn has_balanced_delimiters(source: &str) -> bool {
     let mut stack: Vec<u8> = Vec::new();
     let mut i = 0;
 
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-            i += 2;
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
+    while let Some(&b) = bytes.get(i) {
+        if skip_delimiter_comment(bytes, &mut i) {
             continue;
         }
-        if b == b'#' {
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(bytes.len());
-            continue;
-        }
-        if b == b'\'' || b == b'"' || b == b'`' {
-            let quote = b;
-            i += 1;
-            let mut closed = false;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == quote {
-                    closed = true;
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            if !closed {
+        if matches!(b, b'\'' | b'"' | b'`') {
+            if !skip_quoted_literal(bytes, &mut i, b) {
                 return false;
             }
             continue;
         }
-        match b {
-            b'(' => stack.push(b')'),
-            b'[' => stack.push(b']'),
-            b'{' => stack.push(b'}'),
-            b')' | b']' | b'}' if stack.pop() != Some(b) => {
-                return false;
-            }
-            _ => {}
+        if !update_delimiter_stack(b, &mut stack) {
+            return false;
         }
         i += 1;
     }
 
     stack.is_empty()
+}
+
+fn skip_delimiter_comment(bytes: &[u8], i: &mut usize) -> bool {
+    let Some(&b) = bytes.get(*i) else {
+        return false;
+    };
+    if b == b'#' || (b == b'/' && bytes.get(*i + 1) == Some(&b'/')) {
+        while bytes.get(*i).is_some_and(|&c| c != b'\n') {
+            *i += 1;
+        }
+        return true;
+    }
+    if b == b'/' && bytes.get(*i + 1) == Some(&b'*') {
+        *i += 2;
+        while *i + 1 < bytes.len()
+            && !(bytes.get(*i) == Some(&b'*') && bytes.get(*i + 1) == Some(&b'/'))
+        {
+            *i += 1;
+        }
+        *i = (*i + 2).min(bytes.len());
+        return true;
+    }
+    false
+}
+
+fn skip_quoted_literal(bytes: &[u8], i: &mut usize, quote: u8) -> bool {
+    *i += 1;
+    while let Some(&cur) = bytes.get(*i) {
+        if cur == b'\\' {
+            *i += 2;
+            continue;
+        }
+        *i += 1;
+        if cur == quote {
+            return true;
+        }
+    }
+    false
+}
+
+fn update_delimiter_stack(b: u8, stack: &mut Vec<u8>) -> bool {
+    match b {
+        b'(' => stack.push(b')'),
+        b'[' => stack.push(b']'),
+        b'{' => stack.push(b'}'),
+        b')' | b']' | b'}' => return stack.pop() == Some(b),
+        _ => {}
+    }
+    true
 }

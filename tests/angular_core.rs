@@ -1,3 +1,5 @@
+//! Integration tests for Ticket #52: Angular Signals, lifecycle, decorator, and DI rules (`#50`).
+
 use std::path::PathBuf;
 
 use std::path::Path;
@@ -270,6 +272,30 @@ export class StatusComponent {
         .is_empty()
     );
 
+    // Arithmetic expressions like `this.count + 1` are type errors, not uncalled boolean/relational conditions
+    let arithmetic_sig = r#"
+import { Component, ChangeDetectionStrategy, signal } from '@angular/core';
+@Component({
+  selector: 'app-arith',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `<div>Arith</div>`,
+})
+export class ArithComponent {
+  count = signal(0);
+  compute(): number {
+    return (this.count as unknown as number) + 1;
+  }
+}
+"#;
+    assert!(
+        analyze_source(
+            Path::new("src/arith.component.ts"),
+            arithmetic_sig,
+            Some(&[RuleId::AngularNoUncalledSignals]),
+        )
+        .is_empty()
+    );
+
     // 2. `angular-prefer-signal-model`
     let invalid_model = r#"
 import { Component, ChangeDetectionStrategy, Input, Output, EventEmitter } from '@angular/core';
@@ -469,6 +495,42 @@ export class LifecycleComponent {
     assert!(lc_rules.contains(&RuleId::AngularRequireLifecycleOnPrototype));
     assert!(lc_rules.contains(&RuleId::AngularNoEmptyLifecycleMethod));
     assert!(lc_rules.contains(&RuleId::AngularUseLifecycleInterface));
+    // `async ngOnInit()` containing `await` must NOT emit a syntax-breaking autofix,
+    // whereas an `async` lifecycle method without `await` does emit an autofix,
+    // and arrow-function lifecycle properties preserve their parameters `(changes: SimpleChanges)`.
+    let async_diag = lc_diags
+        .iter()
+        .find(|d| d.rule == RuleId::AngularNoAsyncLifecycleMethod)
+        .unwrap();
+    assert!(
+        async_diag.autofix.is_none(),
+        "Expected no autofix when async lifecycle body contains await"
+    );
+    let proto_changes = r#"
+import { Component, ChangeDetectionStrategy, SimpleChanges } from '@angular/core';
+@Component({
+  selector: 'app-proto',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `<p>Proto</p>`,
+})
+export class ProtoComponent {
+  ngOnChanges = (changes: SimpleChanges): void => {
+    console.log(changes);
+  };
+}
+"#;
+    let proto_diags = analyze_source(
+        Path::new("src/proto.component.ts"),
+        proto_changes,
+        Some(&[RuleId::AngularRequireLifecycleOnPrototype]),
+    );
+    assert_eq!(proto_diags.len(), 1);
+    let (fixed_proto, applied_proto) = apply_patches_to_source(proto_changes, &proto_diags);
+    assert_eq!(applied_proto.len(), 1);
+    assert!(
+        fixed_proto.contains("ngOnChanges(changes: SimpleChanges)"),
+        "Expected prototype conversion to preserve arrow function parameters, got:\n{fixed_proto}"
+    );
 
     // 12. `angular-use-pipe-transform-interface`
     let bad_pipe = r#"

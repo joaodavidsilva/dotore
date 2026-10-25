@@ -378,56 +378,59 @@ pub fn install_dotore(options: &InstallOptions) -> Result<InstallResult, String>
     } else {
         options.cwd.as_path()
     };
-
-    let claude_skill = cwd
-        .join(".claude")
-        .join("skills")
-        .join("dotore")
-        .join("SKILL.md");
-    let agents_skill = cwd
-        .join(".agents")
-        .join("skills")
-        .join("dotore")
-        .join("SKILL.md");
-    let skill_files = vec![claude_skill, agents_skill];
-
+    let skill_files = vec![
+        cwd.join(".claude/skills/dotore/SKILL.md"),
+        cwd.join(".agents/skills/dotore/SKILL.md"),
+    ];
     let pkg_json_path = cwd.join("package.json");
-    let package_json_updated = if pkg_json_path.is_file() {
-        let raw = fs::read_to_string(&pkg_json_path)
-            .map_err(|e| format!("Failed to read {}: {e}", pkg_json_path.display()))?;
-        !raw.contains("\"dotore\":")
-    } else {
-        false
-    };
-
-    let git_hook_path = if cwd.join(".husky").is_dir() {
-        Some(cwd.join(".husky").join("pre-commit"))
-    } else if cwd.join(".git").exists() || options.yes {
-        Some(cwd.join(".git").join("hooks").join("pre-commit"))
-    } else {
-        None
-    };
-
+    let package_json_updated = needs_dotore_script_in_package_json(&pkg_json_path)?;
+    let git_hook_path = resolve_git_pre_commit_hook_path(cwd, options.yes);
     let agent_hook_files = if options.agent_hooks || options.yes {
         vec![
-            cwd.join(".claude").join("settings.json"),
-            cwd.join(".claude").join("hooks").join("dotore.mjs"),
+            cwd.join(".claude/settings.json"),
+            cwd.join(".claude/hooks/dotore.mjs"),
         ]
     } else {
         Vec::new()
     };
-
-    if options.dry_run {
-        return Ok(InstallResult {
-            skill_files,
-            package_json_updated,
-            git_hook_path,
-            agent_hook_files,
-            dry_run: true,
-        });
+    let result = InstallResult {
+        skill_files,
+        package_json_updated,
+        git_hook_path,
+        agent_hook_files,
+        dry_run: options.dry_run,
+    };
+    if !options.dry_run {
+        apply_install_plan(cwd, &pkg_json_path, &result)?;
     }
+    Ok(result)
+}
 
-    for skill_path in &skill_files {
+fn needs_dotore_script_in_package_json(pkg_json_path: &Path) -> Result<bool, String> {
+    if !pkg_json_path.is_file() {
+        return Ok(false);
+    }
+    let raw = fs::read_to_string(pkg_json_path)
+        .map_err(|e| format!("Failed to read {}: {e}", pkg_json_path.display()))?;
+    Ok(!raw.contains("\"dotore\":"))
+}
+
+fn resolve_git_pre_commit_hook_path(cwd: &Path, force_git_hook: bool) -> Option<PathBuf> {
+    if cwd.join(".husky").is_dir() {
+        Some(cwd.join(".husky/pre-commit"))
+    } else if cwd.join(".git").exists() || force_git_hook {
+        Some(cwd.join(".git/hooks/pre-commit"))
+    } else {
+        None
+    }
+}
+
+fn apply_install_plan(
+    cwd: &Path,
+    pkg_json_path: &Path,
+    result: &InstallResult,
+) -> Result<(), String> {
+    for skill_path in &result.skill_files {
         if let Some(parent) = skill_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
@@ -435,26 +438,16 @@ pub fn install_dotore(options: &InstallOptions) -> Result<InstallResult, String>
         fs::write(skill_path, DOTORE_SKILL_CONTENT)
             .map_err(|e| format!("Failed to write {}: {e}", skill_path.display()))?;
     }
-
-    if package_json_updated {
-        add_dotore_script_to_package_json(&pkg_json_path)?;
+    if result.package_json_updated {
+        add_dotore_script_to_package_json(pkg_json_path)?;
     }
-
-    if let Some(hook_path) = &git_hook_path {
+    if let Some(hook_path) = &result.git_hook_path {
         write_git_pre_commit_hook(hook_path)?;
     }
-
-    if !agent_hook_files.is_empty() {
+    if !result.agent_hook_files.is_empty() {
         write_claude_agent_hooks(cwd)?;
     }
-
-    Ok(InstallResult {
-        skill_files,
-        package_json_updated,
-        git_hook_path,
-        agent_hook_files,
-        dry_run: false,
-    })
+    Ok(())
 }
 
 /// Formats the terminal summary for [`install_dotore`] (`dotore install`).
@@ -584,16 +577,7 @@ process.exit(0);
         if let Some(hooks_obj) = hooks_val.as_object_mut() {
             hooks_obj.insert(
                 "Stop".to_string(),
-                serde_json::json!([
-                    {
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": cmd
-                            }
-                        ]
-                    }
-                ]),
+                serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd }] }]),
             );
         }
     }
@@ -961,10 +945,7 @@ mod tests {
                 Diagnostic::new(
                     RuleId::NoDerivedState,
                     "./src/components/Cart.tsx",
-                    SourceLoc {
-                        line: 14,
-                        column: 5,
-                    },
+                    SourceLoc { line: 14, column: 5 },
                     ByteSpan { start: 10, end: 30 },
                     "total",
                     "Compute derived value during render.",

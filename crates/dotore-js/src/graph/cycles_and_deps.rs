@@ -24,64 +24,99 @@ pub(super) fn detect_unused_dependencies(
     manifests: &HashMap<PathBuf, String>,
     consumed_external_packages: &HashSet<String>,
 ) -> Vec<UnusedDependencyFinding> {
-    let mut findings = Vec::new();
+    let _ = files;
     if pkg_manifests.is_empty() {
-        return findings;
+        return Vec::new();
     }
 
+    let all_used_packages =
+        collect_all_used_packages(pkg_manifests, manifests, consumed_external_packages);
+
+    let mut findings = Vec::new();
+    for pkg in pkg_manifests {
+        collect_unused_findings_for_package(
+            pkg,
+            &all_used_packages,
+            packages_with_entrypoints,
+            &mut findings,
+        );
+    }
+    findings
+}
+
+fn collect_all_used_packages(
+    pkg_manifests: &[PackageManifestInfo],
+    manifests: &HashMap<PathBuf, String>,
+    consumed_external_packages: &HashSet<String>,
+) -> HashSet<String> {
     let mut all_used_packages = consumed_external_packages.clone();
     for &implicit in IMPLICIT_DEPENDENCIES {
         all_used_packages.insert(implicit.to_string());
     }
 
     for pkg in pkg_manifests {
-        for peer in &pkg.peer_and_optional_dependencies {
-            all_used_packages.insert(peer.clone());
-        }
-        for cmd in &pkg.script_commands {
-            for candidate in pkg.dependencies.iter().chain(pkg.dev_dependencies.iter()) {
-                let short_bin = candidate.rsplit('/').next().unwrap_or(candidate.as_str());
-                if command_mentions_token(cmd, candidate) || command_mentions_token(cmd, short_bin)
-                {
-                    all_used_packages.insert(candidate.clone());
-                }
-            }
-        }
+        all_used_packages.extend(pkg.peer_and_optional_dependencies.iter().cloned());
+        collect_script_mentioned_packages(pkg, &mut all_used_packages);
     }
 
     for content in manifests.values() {
-        for pkg in pkg_manifests {
-            for candidate in pkg.dependencies.iter().chain(pkg.dev_dependencies.iter()) {
-                if content_mentions_quoted_package(content, candidate) {
-                    all_used_packages.insert(candidate.clone());
-                }
+        collect_manifest_mentioned_packages(content, pkg_manifests, &mut all_used_packages);
+    }
+    all_used_packages
+}
+
+fn collect_script_mentioned_packages(
+    pkg: &PackageManifestInfo,
+    used_packages: &mut HashSet<String>,
+) {
+    for cmd in &pkg.script_commands {
+        for candidate in pkg.dependencies.iter().chain(pkg.dev_dependencies.iter()) {
+            let short_bin = candidate.rsplit('/').next().unwrap_or(candidate.as_str());
+            if command_mentions_token(cmd, candidate) || command_mentions_token(cmd, short_bin) {
+                used_packages.insert(candidate.clone());
             }
         }
     }
+}
 
-    let _ = files;
-
+fn collect_manifest_mentioned_packages(
+    content: &str,
+    pkg_manifests: &[PackageManifestInfo],
+    used_packages: &mut HashSet<String>,
+) {
     for pkg in pkg_manifests {
-        for (dep_list, is_dev) in [(&pkg.dependencies, false), (&pkg.dev_dependencies, true)] {
-            for dep_name in dep_list {
-                if is_package_considered_used(dep_name, &all_used_packages) {
-                    continue;
-                }
-                let (loc, span) = find_json_key_loc(&pkg.raw_content, dep_name);
-                findings.push(UnusedDependencyFinding {
-                    manifest_path: pkg.manifest_path.clone(),
-                    package_root: pkg.root_dir.clone(),
-                    package_name: dep_name.clone(),
-                    is_dev_dependency: is_dev,
-                    has_package_entrypoint: packages_with_entrypoints.contains(&pkg.norm_root),
-                    loc,
-                    span,
-                });
+        for candidate in pkg.dependencies.iter().chain(pkg.dev_dependencies.iter()) {
+            if content_mentions_quoted_package(content, candidate) {
+                used_packages.insert(candidate.clone());
             }
         }
     }
+}
 
-    findings
+fn collect_unused_findings_for_package(
+    pkg: &PackageManifestInfo,
+    all_used_packages: &HashSet<String>,
+    packages_with_entrypoints: &HashSet<String>,
+    findings: &mut Vec<UnusedDependencyFinding>,
+) {
+    let has_package_entrypoint = packages_with_entrypoints.contains(&pkg.norm_root);
+    for (dep_list, is_dev) in [(&pkg.dependencies, false), (&pkg.dev_dependencies, true)] {
+        for dep_name in dep_list {
+            if is_package_considered_used(dep_name, all_used_packages) {
+                continue;
+            }
+            let (loc, span) = find_json_key_loc(&pkg.raw_content, dep_name);
+            findings.push(UnusedDependencyFinding {
+                manifest_path: pkg.manifest_path.clone(),
+                package_root: pkg.root_dir.clone(),
+                package_name: dep_name.clone(),
+                is_dev_dependency: is_dev,
+                has_package_entrypoint,
+                loc,
+                span,
+            });
+        }
+    }
 }
 
 fn is_package_considered_used(dep_name: &str, used: &HashSet<String>) -> bool {
@@ -155,61 +190,13 @@ pub(super) fn detect_circular_dependencies(
     files: &[FileIr],
     edges: &[ModuleEdge],
 ) -> Vec<CircularDependencyFinding> {
-    let n = files.len();
-    if n < 2 {
+    if files.len() < 2 {
         return Vec::new();
     }
 
-    let mut adj_sets: Vec<HashSet<usize>> = vec![HashSet::new(); n];
-    for edge in edges {
-        if edge.is_dynamic || edge.is_type_only {
-            continue;
-        }
-        if !edge.imported_symbols.is_empty() && edge.imported_symbols.iter().all(|s| s.is_type_only)
-        {
-            continue;
-        }
-        if is_compile_time_erased_edge(edge, files) {
-            continue;
-        }
-        if edge.target < n
-            && edge.source != edge.target
-            && let Some(set) = adj_sets.get_mut(edge.source)
-        {
-            set.insert(edge.target);
-        }
-    }
-
-    let adj: Vec<Vec<usize>> = adj_sets
-        .into_iter()
-        .map(|s| {
-            let mut v: Vec<usize> = s.into_iter().collect();
-            v.sort_unstable();
-            v
-        })
-        .collect();
-
+    let adj = build_cycle_adjacency_list(files, edges);
     let sccs = tarjan_sccs(&adj);
-    let mut all_cycles: Vec<Vec<usize>> = Vec::new();
-    let mut seen_keys: HashSet<Vec<usize>> = HashSet::new();
-
-    for mut scc in sccs {
-        if scc.len() < 2 {
-            continue;
-        }
-        scc.sort_unstable();
-        for cycle in enumerate_elementary_cycles(&scc, &adj, files) {
-            if seen_keys.insert(cycle.clone()) {
-                all_cycles.push(cycle);
-                if all_cycles.len() >= MAX_TOTAL_CYCLES {
-                    break;
-                }
-            }
-        }
-        if all_cycles.len() >= MAX_TOTAL_CYCLES {
-            break;
-        }
-    }
+    let mut all_cycles = collect_unique_cycles_from_sccs(sccs, &adj, files);
 
     all_cycles.sort_by(|a, b| {
         a.len().cmp(&b.len()).then_with(|| {
@@ -221,20 +208,84 @@ pub(super) fn detect_circular_dependencies(
 
     all_cycles
         .into_iter()
-        .filter_map(|cycle| {
-            let &primary_file_index = cycle.first()?;
-            let primary_file = files.get(primary_file_index)?;
-            let mut cycle_paths: Vec<PathBuf> = cycle
-                .iter()
-                .filter_map(|&idx| files.get(idx).map(|f| f.path.clone()))
-                .collect();
-            cycle_paths.push(primary_file.path.clone());
-            Some(CircularDependencyFinding {
-                primary_file_index,
-                cycle_paths,
-            })
+        .filter_map(|cycle| build_circular_dependency_finding(&cycle, files))
+        .collect()
+}
+
+fn build_cycle_adjacency_list(files: &[FileIr], edges: &[ModuleEdge]) -> Vec<Vec<usize>> {
+    let n = files.len();
+    let mut adj_sets: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    for edge in edges {
+        if is_ignored_cycle_edge(edge, files) {
+            continue;
+        }
+        if edge.target < n
+            && edge.source != edge.target
+            && let Some(set) = adj_sets.get_mut(edge.source)
+        {
+            set.insert(edge.target);
+        }
+    }
+    adj_sets
+        .into_iter()
+        .map(|s| {
+            let mut v: Vec<usize> = s.into_iter().collect();
+            v.sort_unstable();
+            v
         })
         .collect()
+}
+
+fn is_ignored_cycle_edge(edge: &ModuleEdge, files: &[FileIr]) -> bool {
+    if edge.is_dynamic || edge.is_type_only {
+        return true;
+    }
+    if !edge.imported_symbols.is_empty() && edge.imported_symbols.iter().all(|s| s.is_type_only) {
+        return true;
+    }
+    is_compile_time_erased_edge(edge, files)
+}
+
+fn collect_unique_cycles_from_sccs(
+    sccs: Vec<Vec<usize>>,
+    adj: &[Vec<usize>],
+    files: &[FileIr],
+) -> Vec<Vec<usize>> {
+    let mut all_cycles: Vec<Vec<usize>> = Vec::new();
+    let mut seen_keys: HashSet<Vec<usize>> = HashSet::new();
+
+    for mut scc in sccs {
+        if scc.len() < 2 {
+            continue;
+        }
+        scc.sort_unstable();
+        for cycle in enumerate_elementary_cycles(&scc, adj, files) {
+            if seen_keys.insert(cycle.clone()) {
+                all_cycles.push(cycle);
+                if all_cycles.len() >= MAX_TOTAL_CYCLES {
+                    return all_cycles;
+                }
+            }
+        }
+    }
+    all_cycles
+}
+
+fn build_circular_dependency_finding(
+    cycle: &[usize],
+    files: &[FileIr],
+) -> Option<CircularDependencyFinding> {
+    let &primary_file_index = cycle.first()?;
+    let primary_file = files.get(primary_file_index)?;
+    let mut cycle_paths: Vec<PathBuf> = cycle
+        .iter()
+        .filter_map(|&idx| files.get(idx).map(|f| f.path.clone()))
+        .collect();
+    cycle_paths.push(primary_file.path.clone());
+    Some(CircularDependencyFinding {
+        primary_file_index,
+        cycle_paths,
+    })
 }
 
 fn is_compile_time_erased_edge(edge: &ModuleEdge, files: &[FileIr]) -> bool {

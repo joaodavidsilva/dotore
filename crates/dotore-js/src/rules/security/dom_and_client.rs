@@ -152,68 +152,85 @@ fn is_safe_html_sink_expression(
         return false;
     }
     let trimmed = expr.trim();
-    if trimmed.is_empty() {
+    if is_trivially_safe_html_sink_expr(trimmed) {
         return true;
     }
-
-    // 1. Static string literal or substitution-free template literal
-    if is_static_string_or_no_interp_template(trimmed) {
+    if is_safe_template_html_sink_expr(graph, file, trimmed, depth) {
         return true;
     }
+    if trimmed.contains("katex.renderToString(") {
+        return is_katex_call_options_safe(trimmed);
+    }
+    if let Some(safe) = try_evaluate_html_helper_or_member(graph, file, trimmed, depth) {
+        return safe;
+    }
+    if is_identifier_token(trimmed) {
+        return is_safe_html_identifier_binding(graph, file, trimmed, depth);
+    }
+    false
+}
 
-    // 2. SCREAMING_SNAKE_CASE module constant (`LOGO_SVG_MARKUP`)
-    if is_screaming_constant_ident(trimmed) {
+fn is_trivially_safe_html_sink_expr(trimmed: &str) -> bool {
+    if trimmed.is_empty()
+        || is_static_string_or_no_interp_template(trimmed)
+        || is_screaming_constant_ident(trimmed)
+    {
         return true;
     }
-
-    // 3. DOM-to-DOM read (`svg.outerHTML`, `button.innerHTML`) without `+`
     if !trimmed.contains('+')
         && (trimmed.ends_with(".outerHTML") || trimmed.ends_with(".innerHTML"))
     {
         return true;
     }
+    is_direct_sanitizer_or_serializer_call(&trimmed.to_ascii_lowercase())
+}
 
-    // 4. Template literal whose interpolations are only `process.env.*` or safe expressions
-    if trimmed.starts_with('`') && trimmed.ends_with('`') {
-        let interps = extract_template_interpolations(trimmed);
-        if !interps.is_empty()
-            && interps.iter().all(|interp| {
-                interp.trim().starts_with("process.env.")
-                    || is_safe_html_sink_expression(graph, file, interp, depth + 1)
-            })
-        {
-            return true;
-        }
-    }
-
-    // 5. Direct sanitizer, i18n, or safe serializer call
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("dompurify.sanitize(")
-        || lower.starts_with("sanitize(")
-        || lower.starts_with("sanitizehtml(")
-        || lower.starts_with("purify(")
-        || lower.starts_with("escapehtml(")
+fn is_direct_sanitizer_or_serializer_call(lower: &str) -> bool {
+    lower.contains("dompurify.sanitize(")
         || (lower.contains("safehtml(") && !lower.contains("unsafehtml("))
-        || lower.starts_with("t(")
-        || lower.starts_with("i18n.")
-        || lower.starts_with("translate(")
-        || lower.starts_with("formatmessage(")
-        || lower.starts_with("codetohtml(")
-        || lower.starts_with("hl.codetohtml(")
-        || lower.starts_with("shiki.")
-        || lower.starts_with("hljs.highlight")
-        || lower.starts_with("prism.highlight")
-        || lower.starts_with("rendertostaticmarkup(")
-    {
-        return true;
-    }
+        || [
+            "sanitize(",
+            "sanitizehtml(",
+            "purify(",
+            "escapehtml(",
+            "t(",
+            "i18n.",
+            "translate(",
+            "formatmessage(",
+            "codetohtml(",
+            "hl.codetohtml(",
+            "shiki.",
+            "hljs.highlight",
+            "prism.highlight",
+            "rendertostaticmarkup(",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
 
-    // 6. Direct `katex.renderToString(expr, opts)` call
-    if trimmed.contains("katex.renderToString(") {
-        return is_katex_call_options_safe(trimmed);
+fn is_safe_template_html_sink_expr(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    trimmed: &str,
+    depth: usize,
+) -> bool {
+    if !trimmed.starts_with('`') || !trimmed.ends_with('`') {
+        return false;
     }
+    let interps = extract_template_interpolations(trimmed);
+    !interps.is_empty()
+        && interps.iter().all(|interp| {
+            interp.trim().starts_with("process.env.")
+                || is_safe_html_sink_expression(graph, file, interp, depth + 1)
+        })
+}
 
-    // 7. Function call `fnName(args...)` -> resolve locally or across files via `ProjectGraph`
+fn try_evaluate_html_helper_or_member(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    trimmed: &str,
+    depth: usize,
+) -> Option<bool> {
     if let Some(open_paren) = trimmed.find('(')
         && trimmed.ends_with(')')
     {
@@ -223,11 +240,10 @@ fn is_safe_html_sink_expression(
             && let Some(safe) =
                 evaluate_html_helper_call(graph, file, callee, args_str, None, depth + 1)
         {
-            return safe;
+            return Some(safe);
         }
     }
 
-    // 8. Member access `obj.html` where `obj = helper(...)`
     if let Some((base_ident, prop_name)) = trimmed.split_once('.')
         && is_identifier_token(base_ident.trim())
         && is_identifier_token(prop_name.trim())
@@ -237,34 +253,34 @@ fn is_safe_html_sink_expression(
     {
         let callee = init[..open_paren].trim();
         let args_str = &init[open_paren + 1..init.len() - 1];
-        if is_identifier_token(callee)
-            && let Some(safe) = evaluate_html_helper_call(
+        if is_identifier_token(callee) {
+            return evaluate_html_helper_call(
                 graph,
                 file,
                 callee,
                 args_str,
                 Some(prop_name.trim()),
                 depth + 1,
-            )
-        {
-            return safe;
+            );
         }
     }
+    None
+}
 
-    // 9. Bare identifier `payload` or `html` -> resolve initializer in `file.source`
-    if is_identifier_token(trimmed) {
-        if let Some(init) = find_binding_initializer_in_source(&file.source, trimmed) {
-            return is_safe_html_sink_expression(graph, file, &init, depth + 1);
-        }
-        // Cross-file imported constant
-        if let Some((target_file, target_local)) = resolve_imported_binding(graph, file, trimmed)
-            && let Some(init) =
-                find_binding_initializer_in_source(&target_file.source, &target_local)
-        {
-            return is_safe_html_sink_expression(graph, target_file, &init, depth + 1);
-        }
+fn is_safe_html_identifier_binding(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    ident: &str,
+    depth: usize,
+) -> bool {
+    if let Some(init) = find_binding_initializer_in_source(&file.source, ident) {
+        return is_safe_html_sink_expression(graph, file, &init, depth + 1);
     }
-
+    if let Some((target_file, target_local)) = resolve_imported_binding(graph, file, ident)
+        && let Some(init) = find_binding_initializer_in_source(&target_file.source, &target_local)
+    {
+        return is_safe_html_sink_expression(graph, target_file, &init, depth + 1);
+    }
     false
 }
 
@@ -311,69 +327,68 @@ fn evaluate_html_helper_call(
 }
 
 fn is_helper_body_safe_html(
-    file_source: &str,
+    _file_source: &str,
     fn_body: &str,
     call_args_str: &str,
     accessed_property: Option<&str>,
 ) -> bool {
-    let _ = file_source;
     let has_sanitizer_or_katex = fn_body.contains("DOMPurify.sanitize(")
         || fn_body.contains("sanitizeHtml(")
         || fn_body.contains("katex.renderToString(");
     if !has_sanitizer_or_katex {
         return false;
     }
-
-    // If helper calls `katex.renderToString(...)`, check if helper body itself sets `trust: true`
-    if fn_body.contains("katex.renderToString(") && !is_katex_call_options_safe(fn_body) {
+    if fn_body.contains("katex.renderToString(")
+        && !is_katex_helper_body_and_args_safe(fn_body, call_args_str)
+    {
         return false;
     }
-
-    // If helper forwards a 2nd positional options parameter `katex.renderToString(val, options)`
-    // and caller passes a bare variable `options` (not `{ trust: false }` or `{ throwOnError: false }`),
-    // then options are unproven!
-    if fn_body.contains("katex.renderToString(") {
-        let top_args = split_top_level_args(call_args_str);
-        if let Some(second_arg) = top_args.get(1) {
-            let trimmed_opt = second_arg.trim();
-            if !trimmed_opt.is_empty() && !trimmed_opt.starts_with('{') {
-                return false;
-            }
-        }
+    if accessed_property.is_some_and(|prop| !fn_body.contains(&format!("{prop}:"))) {
+        return false;
     }
+    is_helper_catch_fallback_safe(fn_body)
+}
 
-    if let Some(prop) = accessed_property {
-        let needle = format!("{prop}:");
-        if !fn_body.contains(&needle) {
+fn is_katex_helper_body_and_args_safe(fn_body: &str, call_args_str: &str) -> bool {
+    if !is_katex_call_options_safe(fn_body) {
+        return false;
+    }
+    let top_args = split_top_level_args(call_args_str);
+    if let Some(second_arg) = top_args.get(1) {
+        let trimmed_opt = second_arg.trim();
+        if !trimmed_opt.is_empty() && !trimmed_opt.starts_with('{') {
             return false;
         }
     }
-
-    // If helper has a `catch` block, check that the `catch` block does NOT return a raw unescaped parameter
-    if let Some(catch_pos) = fn_body.find("catch") {
-        let catch_tail = &fn_body[catch_pos..];
-        if let Some(ret_pos) = catch_tail.find("return ") {
-            let ret_expr = catch_tail
-                .get(ret_pos + "return ".len()..)
-                .unwrap_or_default()
-                .split([';', '}'])
-                .next()
-                .unwrap_or("")
-                .trim();
-            let is_safe_fallback = is_static_string_or_no_interp_template(ret_expr)
-                || ret_expr.starts_with("String(error")
-                || ret_expr.starts_with("String(err")
-                || ret_expr.contains("escapeHtml(")
-                || ret_expr.contains("DOMPurify.sanitize(")
-                || ret_expr.contains(".replaceAll(\"<\"")
-                || ret_expr.contains(".replace(/</g");
-            if !is_safe_fallback {
-                return false;
-            }
-        }
-    }
-
     true
+}
+
+fn is_helper_catch_fallback_safe(fn_body: &str) -> bool {
+    let Some(catch_pos) = fn_body.find("catch") else {
+        return true;
+    };
+    let catch_tail = &fn_body[catch_pos..];
+    let Some(ret_pos) = catch_tail.find("return ") else {
+        return true;
+    };
+    let ret_expr = catch_tail
+        .get(ret_pos + "return ".len()..)
+        .unwrap_or_default()
+        .split([';', '}'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    is_static_string_or_no_interp_template(ret_expr)
+        || ret_expr.starts_with("String(error")
+        || ret_expr.starts_with("String(err")
+        || [
+            "escapeHtml(",
+            "DOMPurify.sanitize(",
+            ".replaceAll(\"<\"",
+            ".replace(/</g",
+        ]
+        .iter()
+        .any(|p| ret_expr.contains(p))
 }
 
 fn call_args_have_unsafe_katex_options(args_str: &str) -> bool {
@@ -404,89 +419,9 @@ pub(super) fn check_window_open_without_noopener(
 ) {
     let src = &file.source;
     for (line_idx, line) in src.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") || trimmed.starts_with('*') {
-            continue;
-        }
-        let open_pos = line
-            .find("window.open(")
-            .or_else(|| line.find("globalThis.open("))
-            .or_else(|| line.find("self.open("))
-            .or_else(|| line.find("parent.open("))
-            .or_else(|| line.find("top.open("));
-        let Some(col_offset) = open_pos else {
+        let Some(col_offset) = find_unhandled_window_open_in_line(graph, file, src, line) else {
             continue;
         };
-
-        let before = line.get(..col_offset).unwrap_or_default().trim_end();
-        // If handle is captured (`const win = window.open(...)`, `w = window.open(...)`, `return window.open(...)`), skip
-        if before.ends_with('=') && !before.ends_with("=>") && !before.ends_with("==") {
-            continue;
-        }
-        if before.ends_with("return") {
-            continue;
-        }
-        // If `const openPopup = () => window.open(...)` stored in variable (not JSX prop), skip
-        if before.ends_with("=>")
-            && (before.contains("const ") || before.contains("let "))
-            && !before.contains("onClick")
-        {
-            continue;
-        }
-
-        let after_callee = line.get(col_offset..).unwrap_or_default();
-        let Some(open_paren_rel) = after_callee.find('(') else {
-            continue;
-        };
-        let args_tail = after_callee.get(open_paren_rel + 1..).unwrap_or_default();
-        let Some((args_inside, after_close)) = split_balanced_parens(args_tail) else {
-            continue;
-        };
-        // If result is immediately chained (`window.open(url).focus()`), handle is used -> skip
-        if after_close.trim_start().starts_with('.') || after_close.trim_start().starts_with("?.") {
-            continue;
-        }
-
-        let args = split_top_level_args(args_inside);
-        let url_arg = args.first().map(|s| s.trim()).unwrap_or("");
-        let target_arg = args.get(1).map(|s| s.trim()).unwrap_or("");
-        let features_arg = args.get(2).map(|s| s.trim());
-
-        // 1. Empty or nullish URL (`window.open()`, `window.open(null)`, `window.open(undefined)`, `window.open(void 0)`)
-        if is_nullish_url_expr(url_arg) {
-            continue;
-        }
-
-        // 2. Navigating target (`_self`, `_top`, `_parent`)
-        if let Some(target_lit) = unquote_js_string_literal(target_arg)
-            && matches!(target_lit, "_self" | "_top" | "_parent")
-        {
-            continue;
-        }
-
-        // 3. Features argument contains `noopener` or `noreferrer` (directly or via `const` string)
-        if let Some(feat_expr) = features_arg
-            && !is_nullish_url_expr(feat_expr)
-        {
-            if let Some(feat_text) = resolve_static_string_in_file(src, feat_expr) {
-                if features_protect_opener(&feat_text) {
-                    continue;
-                }
-            } else {
-                // Opaque non-null features expression
-                continue;
-            }
-        }
-
-        // 4. Check if URL argument is a direct external literal vs trusted destination
-        let is_direct_external_literal = unquote_js_string_literal(url_arg)
-            .is_some_and(|lit| !lit.trim().is_empty() && !is_same_origin_or_protocol_url(lit));
-        if !is_direct_external_literal
-            && is_trusted_window_open_destination(graph, file, url_arg, false, 0)
-        {
-            continue;
-        }
-
         let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
         let byte_start = line_start + u32::try_from(col_offset).unwrap_or(0);
         let byte_end = line_start + u32::try_from(line.len()).unwrap_or(0);
@@ -506,6 +441,96 @@ pub(super) fn check_window_open_without_noopener(
     }
 }
 
+fn find_unhandled_window_open_in_line(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    src: &str,
+    line: &str,
+) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || trimmed.starts_with('*') {
+        return None;
+    }
+    let col_offset = [
+        "window.open(",
+        "globalThis.open(",
+        "self.open(",
+        "parent.open(",
+        "top.open(",
+    ]
+    .into_iter()
+    .find_map(|pat| line.find(pat))?;
+
+    let before = line.get(..col_offset).unwrap_or_default().trim_end();
+    if is_captured_window_open_prefix(before) {
+        return None;
+    }
+
+    let after_callee = line.get(col_offset..).unwrap_or_default();
+    let open_paren_rel = after_callee.find('(')?;
+    let args_tail = after_callee.get(open_paren_rel + 1..).unwrap_or_default();
+    let (args_inside, after_close) = split_balanced_parens(args_tail)?;
+    let after_trimmed = after_close.trim_start();
+    if after_trimmed.starts_with('.') || after_trimmed.starts_with("?.") {
+        return None;
+    }
+
+    let args = split_top_level_args(args_inside);
+    let url_arg = args.first().map(|s| s.trim()).unwrap_or("");
+    let target_arg = args.get(1).map(|s| s.trim()).unwrap_or("");
+    let features_arg = args.get(2).map(|s| s.trim());
+
+    if is_window_open_args_protected(graph, file, src, url_arg, target_arg, features_arg) {
+        None
+    } else {
+        Some(col_offset)
+    }
+}
+
+fn is_captured_window_open_prefix(before: &str) -> bool {
+    if before.ends_with('=') && !before.ends_with("=>") && !before.ends_with("==") {
+        return true;
+    }
+    if before.ends_with("return") {
+        return true;
+    }
+    before.ends_with("=>")
+        && (before.contains("const ") || before.contains("let "))
+        && !before.contains("onClick")
+}
+
+fn is_window_open_args_protected(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    src: &str,
+    url_arg: &str,
+    target_arg: &str,
+    features_arg: Option<&str>,
+) -> bool {
+    if is_nullish_url_expr(url_arg) {
+        return true;
+    }
+    if let Some(target_lit) = unquote_js_string_literal(target_arg)
+        && matches!(target_lit, "_self" | "_top" | "_parent")
+    {
+        return true;
+    }
+    if let Some(feat_expr) = features_arg
+        && !is_nullish_url_expr(feat_expr)
+    {
+        let Some(feat_text) = resolve_static_string_in_file(src, feat_expr) else {
+            return true;
+        };
+        if features_protect_opener(&feat_text) {
+            return true;
+        }
+    }
+    let is_direct_external_literal = unquote_js_string_literal(url_arg)
+        .is_some_and(|lit| !lit.trim().is_empty() && !is_same_origin_or_protocol_url(lit));
+    !is_direct_external_literal
+        && is_trusted_window_open_destination(graph, file, url_arg, false, 0)
+}
+
 fn is_trusted_window_open_destination(
     graph: &ProjectGraph,
     file: &FileIr,
@@ -517,87 +542,75 @@ fn is_trusted_window_open_destination(
         return false;
     }
     let trimmed = expr.trim();
+    if let Some(trusted) = classify_direct_window_open_dest(file, trimmed, is_foreign, depth) {
+        return trusted;
+    }
+    if let Some((_cond, then_branch, else_branch)) = split_top_level_ternary(trimmed) {
+        return is_trusted_window_open_destination(graph, file, then_branch, is_foreign, depth + 1)
+            && is_trusted_window_open_destination(graph, file, else_branch, is_foreign, depth + 1);
+    }
+    if let Some((left, right)) = trimmed.split_once("&&") {
+        return is_nullish_url_expr(left.trim())
+            || is_trusted_window_open_destination(graph, file, right.trim(), is_foreign, depth + 1);
+    }
+    if is_identifier_token(trimmed) {
+        return is_trusted_window_open_ident_binding(graph, file, trimmed, is_foreign, depth);
+    }
+    false
+}
+
+fn classify_direct_window_open_dest(
+    file: &FileIr,
+    trimmed: &str,
+    is_foreign: bool,
+    depth: usize,
+) -> Option<bool> {
     if is_nullish_url_expr(trimmed) {
-        return true;
+        return Some(true);
     }
-
-    // Direct string literal: trusted if same-origin / non-browsing scheme, OR if in-file `const` binding
     if let Some(lit) = unquote_js_string_literal(trimmed) {
-        if is_same_origin_or_protocol_url(lit) {
-            return true;
-        }
-        return !is_foreign && depth > 0;
+        return Some(is_same_origin_or_protocol_url(lit) || (!is_foreign && depth > 0));
     }
-
-    // Template literal: trusted if prefix pins origin (`https://host/...`, `/path...`, `mailto:...`)
     if trimmed.starts_with('`') && trimmed.ends_with('`') {
         let inner = &trimmed[1..trimmed.len() - 1];
         let static_prefix = inner.split("${").next().unwrap_or(inner);
-        if is_same_origin_or_protocol_url(static_prefix) && static_prefix != "/" {
-            return true;
-        }
-        if !is_foreign && has_complete_origin_prefix(static_prefix) {
-            return true;
-        }
-        return false;
+        let safe = (is_same_origin_or_protocol_url(static_prefix) && static_prefix != "/")
+            || (!is_foreign && has_complete_origin_prefix(static_prefix));
+        return Some(safe);
     }
-
-    // `chrome.runtime.getURL(...)` or `URL.createObjectURL(...)`
     if (trimmed.starts_with("chrome.runtime.getURL(")
         && !file.source.contains("const chrome")
         && !file.source.contains("chrome.runtime.getURL ="))
         || trimmed.starts_with("URL.createObjectURL(")
     {
-        return true;
+        return Some(true);
     }
+    None
+}
 
-    // Ternary `cond ? a : b` -> trusted only if BOTH branches are trusted
-    if let Some((_cond, then_branch, else_branch)) = split_top_level_ternary(trimmed) {
-        return is_trusted_window_open_destination(graph, file, then_branch, is_foreign, depth + 1)
-            && is_trusted_window_open_destination(graph, file, else_branch, is_foreign, depth + 1);
+fn is_trusted_window_open_ident_binding(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    ident: &str,
+    is_foreign: bool,
+    depth: usize,
+) -> bool {
+    if let Some(const_init) = find_const_initializer_in_source(&file.source, ident) {
+        return is_trusted_window_open_destination(graph, file, &const_init, is_foreign, depth + 1);
     }
-
-    // Logical `a && b`: if `a` is nullish (`null && x`), result is nullish -> trusted
-    if let Some((left, right)) = trimmed.split_once("&&") {
-        if is_nullish_url_expr(left.trim()) {
-            return true;
-        }
+    if !is_foreign
+        && let Some((target_file, target_local)) = resolve_imported_binding(graph, file, ident)
+        && let Some(foreign_init) =
+            find_const_initializer_in_source(&target_file.source, &target_local)
+    {
         return is_trusted_window_open_destination(
             graph,
-            file,
-            right.trim(),
-            is_foreign,
+            target_file,
+            &foreign_init,
+            true,
             depth + 1,
         );
     }
-
-    // Identifier -> resolve `const` initializer in `file.source` (never `let` if reassigned)
-    if is_identifier_token(trimmed) {
-        if let Some(const_init) = find_const_initializer_in_source(&file.source, trimmed) {
-            return is_trusted_window_open_destination(
-                graph,
-                file,
-                &const_init,
-                is_foreign,
-                depth + 1,
-            );
-        }
-        if !is_foreign
-            && let Some((target_file, target_local)) =
-                resolve_imported_binding(graph, file, trimmed)
-            && let Some(foreign_init) =
-                find_const_initializer_in_source(&target_file.source, &target_local)
-        {
-            return is_trusted_window_open_destination(
-                graph,
-                target_file,
-                &foreign_init,
-                true,
-                depth + 1,
-            );
-        }
-    }
-
     false
 }
 

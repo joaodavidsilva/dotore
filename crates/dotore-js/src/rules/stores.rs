@@ -374,40 +374,44 @@ fn find_in_place_zustand_state_mutation(
         if !body_span.contains_inclusive(node.span()) {
             continue;
         }
-        match node.kind() {
-            AstKind::AssignmentExpression(assign) => {
-                let lhs = assign.left.span().source_text(source).trim();
-                if lhs.starts_with(&format!("{state_param}."))
-                    || lhs.starts_with(&format!("{state_param}["))
-                {
-                    return Some(assign.span);
-                }
-            }
-            AstKind::UpdateExpression(upd) => {
-                let arg = upd.argument.span().source_text(source).trim();
-                if arg.starts_with(&format!("{state_param}."))
-                    || arg.starts_with(&format!("{state_param}["))
-                {
-                    return Some(upd.span);
-                }
-            }
-            AstKind::CallExpression(c) => {
-                if let Expression::StaticMemberExpression(mem) = c.callee.without_parentheses()
-                    && MUTATING_ARRAY_METHODS.contains(&mem.property.name.as_str())
-                {
-                    let recv = mem.object.span().source_text(source).trim();
-                    if recv == state_param
-                        || recv.starts_with(&format!("{state_param}."))
-                        || recv.starts_with(&format!("{state_param}["))
-                    {
-                        return Some(c.span);
-                    }
-                }
-            }
-            _ => {}
+        if let Some(span) = zustand_node_state_mutation_span(node.kind(), state_param, source) {
+            return Some(span);
         }
     }
     None
+}
+
+fn zustand_node_state_mutation_span(
+    kind: AstKind<'_>,
+    state_param: &str,
+    source: &str,
+) -> Option<Span> {
+    match kind {
+        AstKind::AssignmentExpression(assign) => {
+            let lhs = assign.left.span().source_text(source).trim();
+            is_state_member_target(lhs, state_param).then_some(assign.span)
+        }
+        AstKind::UpdateExpression(upd) => {
+            let arg = upd.argument.span().source_text(source).trim();
+            is_state_member_target(arg, state_param).then_some(upd.span)
+        }
+        AstKind::CallExpression(c) => {
+            let Expression::StaticMemberExpression(mem) = c.callee.without_parentheses() else {
+                return None;
+            };
+            if !MUTATING_ARRAY_METHODS.contains(&mem.property.name.as_str()) {
+                return None;
+            }
+            let recv = mem.object.span().source_text(source).trim();
+            (recv == state_param || is_state_member_target(recv, state_param)).then_some(c.span)
+        }
+        _ => None,
+    }
+}
+
+fn is_state_member_target(text: &str, state_param: &str) -> bool {
+    text.strip_prefix(state_param)
+        .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
 }
 
 #[expect(
@@ -799,66 +803,101 @@ fn check_valtio_call_rules(
     };
     let subj_span = semantic.nodes().get_node(enclosing_subj_id).span();
 
-    // 1. `valtio-no-proxy-read-in-render`: reading `proxy.prop` directly during render in the same Subject
-    if let Some(proxy_ref_id) = proxy_ident.reference_id.get()
-        && let Some(proxy_sym_id) = semantic.scoping().get_reference(proxy_ref_id).symbol_id()
-    {
-        for r in semantic.scoping().get_resolved_references(proxy_sym_id) {
+    check_valtio_proxy_read_in_render(
+        semantic,
+        proxy_ident,
+        subj_span,
+        subject_name,
+        line_starts,
+        sites,
+    );
+    check_valtio_snapshot_in_callback(
+        semantic,
+        node_id,
+        subj_span,
+        subject_name,
+        line_starts,
+        sites,
+    );
+}
+
+fn check_valtio_proxy_read_in_render(
+    semantic: &Semantic<'_>,
+    proxy_ident: &oxc_ast::ast::IdentifierReference<'_>,
+    subj_span: Span,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(proxy_ref_id) = proxy_ident.reference_id.get() else {
+        return;
+    };
+    let Some(proxy_sym_id) = semantic.scoping().get_reference(proxy_ref_id).symbol_id() else {
+        return;
+    };
+    for r in semantic.scoping().get_resolved_references(proxy_sym_id) {
+        let ref_node_id = r.node_id();
+        let ref_span = semantic.nodes().get_node(ref_node_id).span();
+        if ref_span == proxy_ident.span || !subj_span.contains_inclusive(ref_span) {
+            continue;
+        }
+        let p_id = semantic.nodes().parent_id(ref_node_id);
+        let AstKind::StaticMemberExpression(mem) = semantic.nodes().kind(p_id) else {
+            continue;
+        };
+        if is_direct_render_phase_node(semantic, ref_node_id) {
+            sites.push(SemanticRuleSite {
+                rule: RuleId::ValtioNoProxyReadInRender,
+                subject_name: subject_name.clone(),
+                message_id: "valtioNoProxyReadInRender",
+                target_name: proxy_ident.name.to_string(),
+                message: "Read this Valtio value from the useSnapshot result during render. Keep proxy reads for callbacks so render uses the tracked, consistent snapshot.".to_string(),
+                loc: loc_from_line_starts(line_starts, mem.span.start),
+                span: ByteSpan {
+                    start: mem.span.start,
+                    end: mem.span.end,
+                },
+                autofix: None,
+            });
+        }
+    }
+}
+
+fn check_valtio_snapshot_in_callback(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    subj_span: Span,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let parent_id = semantic.nodes().parent_id(node_id);
+    let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(parent_id) else {
+        return;
+    };
+    let mut snap_syms: Vec<SymbolId> = Vec::new();
+    collect_pattern_symbols(&decl.id, &mut snap_syms);
+    for snap_sym in snap_syms {
+        for r in semantic.scoping().get_resolved_references(snap_sym) {
             let ref_node_id = r.node_id();
             let ref_span = semantic.nodes().get_node(ref_node_id).span();
-            if ref_span == proxy_ident.span || !subj_span.contains_inclusive(ref_span) {
+            if !subj_span.contains_inclusive(ref_span) {
                 continue;
             }
-            let p_id = semantic.nodes().parent_id(ref_node_id);
-            let AstKind::StaticMemberExpression(mem) = semantic.nodes().kind(p_id) else {
-                continue;
-            };
-            // Must be in render body (not inside a nested callback/handler/effect)
-            if is_direct_render_phase_node(semantic, ref_node_id) {
+            if !is_direct_render_phase_node(semantic, ref_node_id) {
                 sites.push(SemanticRuleSite {
-                    rule: RuleId::ValtioNoProxyReadInRender,
+                    rule: RuleId::ValtioNoSnapshotInCallback,
                     subject_name: subject_name.clone(),
-                    message_id: "valtioNoProxyReadInRender",
-                    target_name: proxy_ident.name.to_string(),
-                    message: "Read this Valtio value from the useSnapshot result during render. Keep proxy reads for callbacks so render uses the tracked, consistent snapshot.".to_string(),
-                    loc: loc_from_line_starts(line_starts, mem.span.start),
+                    message_id: "valtioNoSnapshotInCallback",
+                    target_name: semantic.scoping().symbol_name(snap_sym).to_string(),
+                    message: "Read or mutate the underlying Valtio proxy inside callbacks instead of reading a stale `useSnapshot` value.".to_string(),
+                    loc: loc_from_line_starts(line_starts, ref_span.start),
                     span: ByteSpan {
-                        start: mem.span.start,
-                        end: mem.span.end,
+                        start: ref_span.start,
+                        end: ref_span.end,
                     },
                     autofix: None,
                 });
-            }
-        }
-    }
-
-    // 2. `valtio-no-snapshot-in-callback`: reading `snap` inside an event handler or effect callback
-    let parent_id = semantic.nodes().parent_id(node_id);
-    if let AstKind::VariableDeclarator(decl) = semantic.nodes().kind(parent_id) {
-        let mut snap_syms: Vec<SymbolId> = Vec::new();
-        collect_pattern_symbols(&decl.id, &mut snap_syms);
-        for snap_sym in snap_syms {
-            for r in semantic.scoping().get_resolved_references(snap_sym) {
-                let ref_node_id = r.node_id();
-                let ref_span = semantic.nodes().get_node(ref_node_id).span();
-                if !subj_span.contains_inclusive(ref_span) {
-                    continue;
-                }
-                if !is_direct_render_phase_node(semantic, ref_node_id) {
-                    sites.push(SemanticRuleSite {
-                        rule: RuleId::ValtioNoSnapshotInCallback,
-                        subject_name: subject_name.clone(),
-                        message_id: "valtioNoSnapshotInCallback",
-                        target_name: semantic.scoping().symbol_name(snap_sym).to_string(),
-                        message: "Read or mutate the underlying Valtio proxy inside callbacks instead of reading a stale `useSnapshot` value.".to_string(),
-                        loc: loc_from_line_starts(line_starts, ref_span.start),
-                        span: ByteSpan {
-                            start: ref_span.start,
-                            end: ref_span.end,
-                        },
-                        autofix: None,
-                    });
-                }
             }
         }
     }

@@ -3,7 +3,6 @@
 
 use std::{
     collections::HashMap,
-    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -34,6 +33,10 @@ pub(crate) mod score;
 pub(crate) mod search;
 /// Interactive TUI explorer (`hjkl`/arrow navigation, dynamic filter tabs, grouping modes, `/` search, `ESC` exit).
 pub(crate) mod tui;
+/// In-memory virtual workspace package and manifest extraction.
+pub(crate) mod virtual_workspace;
+/// Disk-backed workspace scanning, scan result caching, and `dotore design` orchestration.
+pub(crate) mod workspace_scan;
 
 pub use cli::{Cli, Commands, run_cli};
 pub use config::{
@@ -167,15 +170,14 @@ pub use tui::{
     render_tui_body_lines, render_tui_body_lines_for_width, render_tui_frame,
     render_tui_frame_with_state, run_interactive_tui, should_launch_tui,
 };
-
-use diff::{collect_git_diff, load_baseline_entries};
-use dotore_core::scanner::collect_source_files_for_analyzers;
-#[cfg(feature = "js")]
-use dotore_js::{
-    enrich_cross_file_autofixes, evaluate_file_in_package, evaluate_project_with_packages,
+pub use workspace_scan::{
+    design_rule_ids, scan_design, scan_workspace, scan_workspace_with_overrides,
 };
+
 #[cfg(feature = "js")]
-use scanner::collect_style_files;
+use dotore_js::{enrich_cross_file_autofixes, evaluate_project_with_packages};
+use virtual_workspace::extract_virtual_workspace_packages;
+pub(crate) use workspace_scan::load_disk_manifests;
 
 const DEFAULT_ANALYZERS: &[&dyn LanguageAnalyzer] = &[
     #[cfg(feature = "js")]
@@ -205,6 +207,18 @@ pub fn analyze_source(
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
     register_active_core_hooks();
+    let mut diagnostics = analyze_source_unmasked(path, source, enabled_rules);
+    for diag in &mut diagnostics {
+        diag.message = mask_credentials(&diag.message);
+    }
+    diagnostics
+}
+
+fn analyze_source_unmasked(
+    path: &Path,
+    source: &str,
+    enabled_rules: Option<&[RuleId]>,
+) -> Vec<Diagnostic> {
     #[cfg(feature = "rs")]
     if RsLanguageAnalyzer.supports_path(path) {
         return dotore_rs::analyze_rs_source(path, source, enabled_rules);
@@ -260,30 +274,41 @@ fn is_standalone_angular_source(path: &Path, source: &str) -> bool {
     if source.contains("from 'react'") || source.contains("from \"react\"") {
         return false;
     }
+    if [
+        "@angular/",
+        "@ngrx/",
+        "@Component(",
+        "@Directive(",
+        "@Injectable(",
+        "@Pipe(",
+        "@NgModule(",
+        "@Effect(",
+        "createEffect(",
+        "createReducer(",
+        "@include mat.",
+    ]
+    .iter()
+    .any(|marker| source.contains(marker))
+    {
+        return true;
+    }
     let path_str = path.to_string_lossy();
-    source.contains("@angular/")
-        || source.contains("@ngrx/")
-        || source.contains("@Component(")
-        || source.contains("@Directive(")
-        || source.contains("@Injectable(")
-        || source.contains("@Pipe(")
-        || source.contains("@NgModule(")
-        || source.contains("@Effect(")
-        || source.contains("createEffect(")
-        || source.contains("createReducer(")
-        || source.contains("@include mat.")
-        || path_str.ends_with(".component.ts")
-        || path_str.ends_with(".directive.ts")
-        || path_str.ends_with(".service.ts")
-        || path_str.ends_with(".pipe.ts")
-        || path_str.ends_with(".module.ts")
-        || path_str.ends_with(".effects.ts")
-        || path_str.ends_with(".reducer.ts")
-        || path_str.ends_with(".actions.ts")
-        || path_str.ends_with(".selectors.ts")
-        || path_str.ends_with(".facade.ts")
-        || path_str.ends_with(".store.ts")
-        || path_str.ends_with(".component.html")
+    [
+        ".component.ts",
+        ".directive.ts",
+        ".service.ts",
+        ".pipe.ts",
+        ".module.ts",
+        ".effects.ts",
+        ".reducer.ts",
+        ".actions.ts",
+        ".selectors.ts",
+        ".facade.ts",
+        ".store.ts",
+        ".component.html",
+    ]
+    .iter()
+    .any(|suffix| path_str.ends_with(suffix))
         || matches!(
             path.extension().and_then(|e| e.to_str()),
             Some("html" | "htm")
@@ -301,6 +326,21 @@ pub fn analyze_source_with_config(
     enabled_rules: Option<&[RuleId]>,
 ) -> Vec<Diagnostic> {
     register_active_core_hooks();
+    let mut diagnostics =
+        analyze_source_with_config_unmasked(path, source, config, gate, enabled_rules);
+    for diag in &mut diagnostics {
+        diag.message = mask_credentials(&diag.message);
+    }
+    diagnostics
+}
+
+fn analyze_source_with_config_unmasked(
+    path: &Path,
+    source: &str,
+    config: &DotoreConfig,
+    gate: &CapabilityGate,
+    enabled_rules: Option<&[RuleId]>,
+) -> Vec<Diagnostic> {
     #[cfg(feature = "rs")]
     if RsLanguageAnalyzer.supports_path(path) {
         return dotore_rs::analyze_rs_source_with_config(path, source, config, gate, enabled_rules);
@@ -342,6 +382,38 @@ pub fn analyze_source_with_config(
     }
 }
 
+#[cfg(feature = "js")]
+fn has_non_js_or_manifest_entries(files: &[(PathBuf, String)]) -> bool {
+    files.iter().any(|(p, _)| {
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        if matches!(ext, "py" | "pyi" | "rs") {
+            return true;
+        }
+        let norm_p = p.to_string_lossy().replace('\\', "/");
+        if norm_p.ends_with(".cargo/config.toml") || norm_p.ends_with(".cargo/config") {
+            return true;
+        }
+        p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+            matches!(
+                name,
+                "package.json"
+                    | "angular.json"
+                    | "pyproject.toml"
+                    | "requirements.txt"
+                    | "Cargo.toml"
+                    | "Cargo.lock"
+                    | "tsconfig.json"
+                    | "jsconfig.json"
+                    | "pnpm-workspace.yaml"
+                    | "pnpm-lock.yaml"
+                    | "package-lock.json"
+                    | "yarn.lock"
+            ) || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+                || name.starts_with("dotore.config.")
+        })
+    })
+}
+
 /// Analyzes multiple in-memory `(PathBuf, String)` files with full cross-file graph resolution
 /// dispatched across all active [`LanguageAnalyzer`]s.
 ///
@@ -356,59 +428,30 @@ pub fn analyze_project_sources(
     register_active_core_hooks();
 
     #[cfg(feature = "js")]
-    {
-        let has_non_js_or_manifests = files.iter().any(|(p, _)| {
-            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default();
-            if matches!(ext, "py" | "pyi" | "rs") {
-                return true;
-            }
-            let norm_p = p.to_string_lossy().replace('\\', "/");
-            if norm_p.ends_with(".cargo/config.toml") || norm_p.ends_with(".cargo/config") {
-                return true;
-            }
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
-                name == "package.json"
-                    || name == "angular.json"
-                    || name == "pyproject.toml"
-                    || name == "requirements.txt"
-                    || name == "Cargo.toml"
-                    || name == "Cargo.lock"
-                    || name == "tsconfig.json"
-                    || name == "jsconfig.json"
-                    || name == "pnpm-workspace.yaml"
-                    || name == "pnpm-lock.yaml"
-                    || name == "package-lock.json"
-                    || name == "yarn.lock"
-                    || (name.starts_with("tsconfig.") && name.ends_with(".json"))
-                    || name.starts_with("dotore.config.")
-            })
-        });
-
-        if !has_non_js_or_manifests {
-            let js_analyzer = JsLanguageAnalyzer;
-            let sources: HashMap<PathBuf, String> = files.iter().cloned().collect();
-            let extracted_files: Vec<ExtractedFile> = files
-                .into_par_iter()
-                .map(|(path, source)| js_analyzer.extract_file(&path, &source))
-                .collect();
-            let has_angular = extracted_files
-                .iter()
-                .any(|f| is_standalone_angular_source(&f.path, &f.source));
-            let mut capability_gate = CapabilityGate::default_react();
-            if has_angular {
-                capability_gate.merge(&CapabilityGate::default_angular());
-            }
-            let default_pkg = WorkspacePackage {
-                name: "default".to_string(),
-                root_dir: PathBuf::from("."),
-                capability_gate,
-                config: DotoreConfig::default(),
-            };
-            let pkg_result =
-                js_analyzer.analyze_package(&default_pkg, &extracted_files, enabled_rules);
-            let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
-            return build_report(&graph, pkg_result.diagnostics, &sources);
+    if !has_non_js_or_manifest_entries(&files) {
+        let js_analyzer = JsLanguageAnalyzer;
+        let sources: HashMap<PathBuf, String> = files.iter().cloned().collect();
+        let extracted_files: Vec<ExtractedFile> = files
+            .into_par_iter()
+            .map(|(path, source)| js_analyzer.extract_file(&path, &source))
+            .collect();
+        let has_angular = extracted_files
+            .iter()
+            .any(|f| is_standalone_angular_source(&f.path, &f.source));
+        let mut capability_gate = CapabilityGate::default_react();
+        if has_angular {
+            capability_gate.merge(&CapabilityGate::default_angular());
         }
+        let default_pkg = WorkspacePackage {
+            name: "default".to_string(),
+            root_dir: PathBuf::from("."),
+            capability_gate,
+            config: DotoreConfig::default(),
+        };
+        let pkg_result =
+            js_analyzer.analyze_package(&default_pkg, &extracted_files, enabled_rules);
+        let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
+        return build_report(&graph, pkg_result.diagnostics, &sources);
     }
 
     let split = extract_virtual_workspace_packages(files);
@@ -472,6 +515,7 @@ impl PlannerContext for PolyglotPlannerContext<'_> {
         }
         self.extracted_files.subject_spans_for_file(file)
     }
+
     fn callers_of(&self, target_file: &Path, subject_name: &str) -> Vec<ResolvedCallerSite> {
         #[cfg(feature = "js")]
         if let Some(g) = self.js_graph {
@@ -559,7 +603,7 @@ type OptionalJsGraph = Option<ProjectGraph>;
 #[cfg(not(feature = "js"))]
 type OptionalJsGraph = Option<()>;
 
-fn build_polyglot_report(
+pub(crate) fn build_polyglot_report(
     all_extracted: &[ExtractedFile],
     #[cfg(feature = "js")] js_graph: Option<&ProjectGraph>,
     #[cfg(not(feature = "js"))] _js_graph: Option<&()>,
@@ -610,7 +654,104 @@ fn resolve_package_index_for_file(
         .position(|p| p.root_dir == resolved.root_dir)
 }
 
-fn analyze_polyglot_sources(
+#[cfg(any(feature = "py", feature = "rs"))]
+fn bucket_extracted_by_package(
+    extracted: Vec<ExtractedFile>,
+    packages: &[WorkspacePackage],
+    unmatched_out: &mut Vec<ExtractedFile>,
+) -> Vec<Vec<ExtractedFile>> {
+    let mut buckets: Vec<Vec<ExtractedFile>> = (0..packages.len()).map(|_| Vec::new()).collect();
+    for file in extracted {
+        if let Some(idx) = resolve_package_index_for_file(&file.path, packages)
+            && let Some(bucket) = buckets.get_mut(idx)
+        {
+            bucket.push(file);
+        } else {
+            unmatched_out.push(file);
+        }
+    }
+    buckets
+}
+
+#[cfg(feature = "py")]
+fn evaluate_py_extracted(
+    py_extracted: Vec<ExtractedFile>,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    all_extracted: &mut Vec<ExtractedFile>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if py_extracted.is_empty() {
+        return;
+    }
+    let py = PyLanguageAnalyzer::new();
+    let buckets = bucket_extracted_by_package(py_extracted, packages, all_extracted);
+    for (pkg, bucket) in packages.iter().zip(buckets) {
+        if !bucket.is_empty() {
+            let res = py.analyze_package(pkg, &bucket, enabled_rules);
+            diagnostics.extend(res.diagnostics);
+            all_extracted.extend(bucket);
+        }
+    }
+}
+
+#[cfg(feature = "rs")]
+fn evaluate_rs_extracted(
+    rs_extracted: Vec<ExtractedFile>,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    all_extracted: &mut Vec<ExtractedFile>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if rs_extracted.is_empty()
+        && !packages
+            .iter()
+            .any(|p| p.capability_gate.has(Capability::Rust))
+    {
+        return;
+    }
+    let buckets = bucket_extracted_by_package(rs_extracted, packages, all_extracted);
+    let rs_pkg_count = buckets.iter().filter(|b| !b.is_empty()).count();
+    if rs_pkg_count >= 2 {
+        dotore_rs::evaluate_workspace_near_duplicate_functions(
+            packages,
+            &buckets,
+            enabled_rules,
+            diagnostics,
+        );
+    }
+    for (pkg, bucket) in packages.iter().zip(buckets) {
+        let has_rs_manifests = pkg
+            .capability_gate
+            .dependencies
+            .keys()
+            .any(|k| k.starts_with("__manifest:"));
+        if !bucket.is_empty() || has_rs_manifests {
+            let res = RsLanguageAnalyzer.analyze_package(pkg, &bucket, enabled_rules);
+            diagnostics.extend(res.diagnostics);
+            all_extracted.extend(bucket);
+        }
+    }
+}
+
+#[cfg(any(feature = "js", feature = "py", feature = "rs"))]
+fn extract_files_in_parallel(
+    pairs: Vec<(PathBuf, String)>,
+    analyzer: &(dyn LanguageAnalyzer + Sync),
+) -> Vec<ExtractedFile> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    pairs
+        .into_par_iter()
+        .map(|(path, source)| {
+            tick_progress_file(&path);
+            analyzer.extract_file(&path, &source)
+        })
+        .collect()
+}
+
+pub(crate) fn analyze_polyglot_sources(
     packages: &[WorkspacePackage],
     manifests: HashMap<PathBuf, String>,
     filtered_sources: Vec<(PathBuf, String)>,
@@ -662,123 +803,49 @@ fn analyze_polyglot_sources(
             let _ = (path, content);
         }
 
-        let mut all_extracted: Vec<ExtractedFile> = Vec::new();
-        let mut diagnostics: Vec<Diagnostic> = Vec::new();
-
-        let total_to_extract = {
-            let mut n = 0usize;
-            #[cfg(feature = "py")]
-            {
-                n += py_pairs.len();
-            }
-            #[cfg(feature = "rs")]
-            {
-                n += rs_pairs.len();
-            }
-            #[cfg(feature = "js")]
-            {
-                n += js_pairs.len();
-            }
-            n
-        };
+        let mut total_to_extract = 0usize;
+        #[cfg(feature = "py")]
+        {
+            total_to_extract += py_pairs.len();
+        }
+        #[cfg(feature = "rs")]
+        {
+            total_to_extract += rs_pairs.len();
+        }
+        #[cfg(feature = "js")]
+        {
+            total_to_extract += js_pairs.len();
+        }
         set_progress_phase(3, total_to_extract);
 
         #[cfg(feature = "py")]
-        let py_extracted: Vec<ExtractedFile> = if !py_pairs.is_empty() {
-            let py = PyLanguageAnalyzer::new();
-            py_pairs
-                .into_par_iter()
-                .map(|(path, source)| {
-                    tick_progress_file(&path);
-                    py.extract_file(&path, &source)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
+        let py_extracted = extract_files_in_parallel(py_pairs, &PyLanguageAnalyzer::new());
         #[cfg(feature = "rs")]
-        let rs_extracted: Vec<ExtractedFile> = if !rs_pairs.is_empty() {
-            rs_pairs
-                .into_par_iter()
-                .map(|(path, source)| {
-                    tick_progress_file(&path);
-                    RsLanguageAnalyzer.extract_file(&path, &source)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
+        let rs_extracted = extract_files_in_parallel(rs_pairs, &RsLanguageAnalyzer);
         #[cfg(feature = "js")]
-        let js_extracted: Vec<ExtractedFile> = if !js_pairs.is_empty() {
-            let js_analyzer = JsLanguageAnalyzer;
-            js_pairs
-                .into_par_iter()
-                .map(|(path, source)| {
-                    tick_progress_file(&path);
-                    js_analyzer.extract_file(&path, &source)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let js_extracted = extract_files_in_parallel(js_pairs, &JsLanguageAnalyzer);
 
         set_progress_phase(4, total_to_extract);
 
-        #[cfg(feature = "py")]
-        if !py_extracted.is_empty() {
-            let py = PyLanguageAnalyzer::new();
-            let mut buckets: Vec<Vec<ExtractedFile>> =
-                (0..packages.len()).map(|_| Vec::new()).collect();
-            for file in py_extracted {
-                if let Some(idx) = resolve_package_index_for_file(&file.path, packages)
-                    && let Some(bucket) = buckets.get_mut(idx)
-                {
-                    bucket.push(file);
-                } else {
-                    all_extracted.push(file);
-                }
-            }
-            for (pkg, bucket) in packages.iter().zip(buckets) {
-                if !bucket.is_empty() {
-                    let res = py.analyze_package(pkg, &bucket, enabled_rules);
-                    diagnostics.extend(res.diagnostics);
-                    all_extracted.extend(bucket);
-                }
-            }
-        }
+        let mut all_extracted: Vec<ExtractedFile> = Vec::new();
+        let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
+        #[cfg(feature = "py")]
+        evaluate_py_extracted(
+            py_extracted,
+            packages,
+            enabled_rules,
+            &mut all_extracted,
+            &mut diagnostics,
+        );
         #[cfg(feature = "rs")]
-        if !rs_extracted.is_empty()
-            || packages
-                .iter()
-                .any(|p| p.capability_gate.has(Capability::Rust))
-        {
-            let mut buckets: Vec<Vec<ExtractedFile>> =
-                (0..packages.len()).map(|_| Vec::new()).collect();
-            for file in rs_extracted {
-                if let Some(idx) = resolve_package_index_for_file(&file.path, packages)
-                    && let Some(bucket) = buckets.get_mut(idx)
-                {
-                    bucket.push(file);
-                } else {
-                    all_extracted.push(file);
-                }
-            }
-            for (pkg, bucket) in packages.iter().zip(buckets) {
-                let has_rs_manifests = pkg
-                    .capability_gate
-                    .dependencies
-                    .keys()
-                    .any(|k| k.starts_with("__manifest:"));
-                if !bucket.is_empty() || has_rs_manifests {
-                    let res = RsLanguageAnalyzer.analyze_package(pkg, &bucket, enabled_rules);
-                    diagnostics.extend(res.diagnostics);
-                    all_extracted.extend(bucket);
-                }
-            }
-        }
+        evaluate_rs_extracted(
+            rs_extracted,
+            packages,
+            enabled_rules,
+            &mut all_extracted,
+            &mut diagnostics,
+        );
 
         #[cfg(feature = "js")]
         let js_graph_opt = if !js_extracted.is_empty() || !manifests.is_empty() {
@@ -800,1183 +867,4 @@ fn analyze_polyglot_sources(
 
         (all_extracted, js_graph_opt, diagnostics)
     }
-}
-struct VirtualWorkspaceSplit {
-    packages: Vec<WorkspacePackage>,
-    manifests: HashMap<PathBuf, String>,
-    source_files: Vec<(PathBuf, String)>,
-}
-
-fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualWorkspaceSplit {
-    let mut pkg_jsons: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut angular_jsons: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut py_manifests: Vec<(PathBuf, PathBuf, String)> = Vec::new();
-    let mut py_typed_paths: Vec<PathBuf> = Vec::new();
-    let mut cargo_tomls: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
-    let mut compiler_configs: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut manifests: HashMap<PathBuf, String> = HashMap::new();
-    let mut source_files: Vec<(PathBuf, String)> = Vec::new();
-
-    for (path, content) in files {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let parent_dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-
-        let is_in_node_modules = path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .contains("node_modules/");
-        if file_name == "package.json" {
-            if !is_in_node_modules {
-                pkg_jsons.push((parent_dir, path.clone()));
-            }
-            manifests.insert(path, content);
-        } else if file_name == "angular.json" {
-            if !is_in_node_modules {
-                angular_jsons.push((parent_dir, path.clone()));
-            }
-            manifests.insert(path, content);
-        } else if file_name == "pyproject.toml"
-            || file_name == "requirements.txt"
-            || (file_name.starts_with("requirements") && file_name.ends_with(".txt"))
-            || (file_name.starts_with("constraints") && file_name.ends_with(".txt"))
-        {
-            py_manifests.push((parent_dir, path, content));
-        } else if file_name == "py.typed" {
-            py_typed_paths.push(path);
-        } else if file_name == "Cargo.toml" {
-            cargo_tomls.push((parent_dir, path.clone()));
-            manifests.insert(path, content);
-        } else if file_name == "Cargo.lock"
-            || path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .ends_with(".cargo/config.toml")
-            || path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .ends_with(".cargo/config")
-        {
-            manifests.insert(path, content);
-        } else if is_non_js_manifest_filename(file_name) {
-            if is_compiler_config_name(file_name) {
-                compiler_configs.push((parent_dir, path.clone()));
-            }
-            manifests.insert(path, content);
-        } else if file_name.starts_with("dotore.config.") {
-            config_files.push((parent_dir, path, content));
-        } else {
-            if is_compiler_config_name(file_name) {
-                compiler_configs.push((parent_dir, path.clone()));
-                manifests.insert(path.clone(), content.clone());
-            } else if file_name.contains(".config.") || file_name.contains(".setup.") {
-                manifests.insert(path.clone(), content.clone());
-            }
-            source_files.push((path, content));
-        }
-    }
-
-    let root_config = config_files
-        .iter()
-        .find(|(dir, _, _)| dir == Path::new("."))
-        .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-        .or_else(|| {
-            pkg_jsons
-                .iter()
-                .find(|(dir, _)| dir == Path::new("."))
-                .and_then(|(_, p)| manifests.get(p))
-                .and_then(|c| DotoreConfig::from_package_json_str(c))
-        })
-        .or_else(|| find_pyproject_config_in_dir(&py_manifests, Path::new(".")))
-        .or_else(|| {
-            config_files
-                .first()
-                .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-        })
-        .unwrap_or_default();
-
-    let mut packages: Vec<WorkspacePackage> = Vec::new();
-
-    #[cfg(feature = "js")]
-    {
-        let js_analyzer = JsLanguageAnalyzer;
-        for (dir, pkg_path) in &pkg_jsons {
-            let pkg_content = manifests.get(pkg_path).map_or("", String::as_str);
-            let mut dir_manifest_sources: Vec<(PathBuf, &str)> =
-                vec![(dir.join("package.json"), pkg_content)];
-            for (ng_dir, ng_path) in &angular_jsons {
-                if (ng_dir == dir || ng_dir == Path::new("."))
-                    && let Some(ng_text) = manifests.get(ng_path)
-                {
-                    dir_manifest_sources.push((ng_path.clone(), ng_text.as_str()));
-                }
-            }
-            for (c_dir, c_path) in &compiler_configs {
-                if c_dir == dir
-                    && let Some(c_text) = manifests.get(c_path)
-                {
-                    dir_manifest_sources.push((c_path.clone(), c_text.as_str()));
-                }
-            }
-            let gate = js_analyzer.infer_capability_gate(dir, &dir_manifest_sources);
-            let local_cfg = config_files
-                .iter()
-                .find(|(c_dir, _, _)| c_dir == dir)
-                .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-                .or_else(|| DotoreConfig::from_package_json_str(pkg_content))
-                .unwrap_or_else(|| root_config.clone());
-
-            let name = dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("root")
-                .to_string();
-            packages.push(WorkspacePackage {
-                name,
-                root_dir: dir.clone(),
-                capability_gate: gate,
-                config: local_cfg,
-            });
-        }
-
-        for (ng_dir, ng_path) in &angular_jsons {
-            let ng_text = manifests.get(ng_path).map_or("", String::as_str);
-            if !packages.iter().any(|p| &p.root_dir == ng_dir) {
-                let dir_manifest_sources: Vec<(PathBuf, &str)> =
-                    vec![(ng_path.clone(), ng_text)];
-                let gate = js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources);
-                let local_cfg = config_files
-                    .iter()
-                    .find(|(c_dir, _, _)| c_dir == ng_dir)
-                    .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-                    .unwrap_or_else(|| root_config.clone());
-                let name = ng_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("root")
-                    .to_string();
-                packages.push(WorkspacePackage {
-                    name,
-                    root_dir: ng_dir.clone(),
-                    capability_gate: gate,
-                    config: local_cfg,
-                });
-            }
-
-            let ng_projects = dotore_core::parse_angular_workspace_projects(ng_text);
-            if ng_projects.is_empty() {
-                continue;
-            }
-            let (base_gate, base_cfg) = packages
-                .iter()
-                .find(|p| &p.root_dir == ng_dir)
-                .map_or_else(
-                    || {
-                        let dir_manifest_sources: Vec<(PathBuf, &str)> =
-                            vec![(ng_path.clone(), ng_text)];
-                        (
-                            js_analyzer.infer_capability_gate(ng_dir, &dir_manifest_sources),
-                            root_config.clone(),
-                        )
-                    },
-                    |p| (p.capability_gate.clone(), p.config.clone()),
-                );
-            let has_root_project = ng_projects.iter().any(|p| p.root_rel.is_empty());
-            let sub_dirs: Vec<PathBuf> = ng_projects
-                .iter()
-                .filter(|p| !p.root_rel.is_empty())
-                .map(|p| {
-                    if ng_dir == Path::new(".") {
-                        PathBuf::from(&p.root_rel)
-                    } else {
-                        ng_dir.join(&p.root_rel)
-                    }
-                })
-                .collect();
-            let has_non_js_at_ng_dir = py_manifests.iter().any(|(d, _, _)| d == ng_dir)
-                || cargo_tomls.iter().any(|(d, _)| d == ng_dir);
-            let has_root_only_source = source_files.iter().any(|(p, _)| {
-                let in_ng_dir = ng_dir == Path::new(".") || p.starts_with(ng_dir);
-                in_ng_dir && !sub_dirs.iter().any(|sd| p.starts_with(sd))
-            });
-            if !has_root_project && !has_non_js_at_ng_dir && !has_root_only_source {
-                packages.retain(|p| &p.root_dir != ng_dir);
-            }
-            for spec in ng_projects {
-                apply_virtual_angular_project_spec(
-                    ng_dir,
-                    &base_gate,
-                    &base_cfg,
-                    &config_files,
-                    spec,
-                    &mut packages,
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "py")]
-    {
-        let py = PyLanguageAnalyzer::new();
-        let mut py_dirs: Vec<&Path> = Vec::new();
-        for (dir, _, _) in &py_manifests {
-            if !py_dirs.contains(&dir.as_path()) {
-                py_dirs.push(dir.as_path());
-            }
-        }
-        for dir in py_dirs {
-            let mut dir_manifests: Vec<(PathBuf, &str)> = py_manifests
-                .iter()
-                .filter(|(d, _, _)| d.as_path() == dir)
-                .map(|(_, p, c)| (p.clone(), c.as_str()))
-                .collect();
-            for pt in &py_typed_paths {
-                if dir == Path::new(".") || pt.starts_with(dir) {
-                    dir_manifests.push((pt.clone(), ""));
-                }
-            }
-            let py_gate = py.infer_capability_gate(dir, &dir_manifests);
-            if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == dir) {
-                existing.capability_gate.merge(&py_gate);
-            } else {
-                let local_cfg = config_files
-                    .iter()
-                    .find(|(c_dir, _, _)| c_dir.as_path() == dir)
-                    .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-                    .or_else(|| find_pyproject_config_in_dir(&py_manifests, dir))
-                    .unwrap_or_else(|| root_config.clone());
-                let name = dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("root")
-                    .to_string();
-                packages.push(WorkspacePackage {
-                    name,
-                    root_dir: dir.to_path_buf(),
-                    capability_gate: py_gate,
-                    config: local_cfg,
-                });
-            }
-        }
-    }
-
-    #[cfg(feature = "rs")]
-    {
-    let rs_extra_manifests: Vec<(PathBuf, &str)> = manifests
-        .iter()
-        .filter(|(p, _)| {
-            let s = p.to_string_lossy().replace('\\', "/");
-            s.ends_with("Cargo.lock")
-                || s.ends_with(".cargo/config.toml")
-                || s.ends_with(".cargo/config")
-        })
-        .map(|(p, c)| (p.clone(), c.as_str()))
-        .collect();
-    for (idx, (dir, cargo_path)) in cargo_tomls.iter().enumerate() {
-        let cargo_content = manifests.get(cargo_path).map_or("", String::as_str);
-        let mut rs_sources = vec![
-            (cargo_path.clone(), cargo_content),
-            (PathBuf::from("__virtual__"), ""),
-        ];
-        rs_sources.extend(rs_extra_manifests.iter().cloned());
-        let mut rs_gate = RsLanguageAnalyzer.infer_capability_gate(dir, &rs_sources);
-        if idx > 0 {
-            rs_gate
-                .dependencies
-                .insert("__owns_workspace_manifests".to_string(), "false".to_string());
-        }
-        if let Some(existing) = packages.iter_mut().find(|p| &p.root_dir == dir) {
-            existing.capability_gate.merge(&rs_gate);
-        } else {
-            let local_cfg = config_files
-                .iter()
-                .find(|(c_dir, _, _)| c_dir == dir)
-                .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-                .unwrap_or_else(|| root_config.clone());
-            let name = dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("root")
-                .to_string();
-            packages.push(WorkspacePackage {
-                name,
-                root_dir: dir.clone(),
-                capability_gate: rs_gate,
-                config: local_cfg,
-            });
-        }
-    }
-    if cargo_tomls.is_empty() && !rs_extra_manifests.is_empty() {
-        let mut rs_sources = vec![(PathBuf::from("__virtual__"), "")];
-        rs_sources.extend(rs_extra_manifests.iter().cloned());
-        let rs_gate = RsLanguageAnalyzer.infer_capability_gate(Path::new("."), &rs_sources);
-        if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == Path::new(".")) {
-            existing.capability_gate.merge(&rs_gate);
-        } else {
-            packages.push(WorkspacePackage {
-                name: "root".to_string(),
-                root_dir: PathBuf::from("."),
-                capability_gate: rs_gate,
-                config: root_config.clone(),
-            });
-        }
-    }
-    }
-
-    #[cfg(feature = "py")]
-    let has_py_files = source_files
-        .iter()
-        .any(|(p, _)| PyLanguageAnalyzer.supports_path(p));
-    #[cfg(not(feature = "py"))]
-    let has_py_files = false;
-
-    #[cfg(feature = "rs")]
-    let has_rs_files = source_files
-        .iter()
-        .any(|(p, _)| RsLanguageAnalyzer.supports_path(p));
-    #[cfg(not(feature = "rs"))]
-    let has_rs_files = false;
-
-    if packages.is_empty() {
-        let mut default_gate = CapabilityGate::default_react();
-        if has_py_files {
-            let mut py_default = CapabilityGate::default_python();
-            if !py_typed_paths.is_empty() {
-                py_default.entrypoints.insert(PathBuf::from("py.typed"));
-            }
-            default_gate.merge(&py_default);
-        }
-        if has_rs_files {
-            default_gate.merge(&CapabilityGate::default_rust());
-        }
-        packages.push(WorkspacePackage {
-            name: "root".to_string(),
-            root_dir: PathBuf::from("."),
-            capability_gate: default_gate,
-            config: root_config,
-        });
-    } else {
-        if py_manifests.is_empty() && has_py_files {
-            let py_default = CapabilityGate::default_python();
-            for pkg in &mut packages {
-                pkg.capability_gate.merge(&py_default);
-            }
-        }
-        if cargo_tomls.is_empty() && has_rs_files {
-            let rs_default = CapabilityGate::default_rust();
-            for pkg in &mut packages {
-                pkg.capability_gate.merge(&rs_default);
-            }
-        }
-    }
-
-fn find_pyproject_config_in_dir(
-    py_manifests: &[(PathBuf, PathBuf, String)],
-    dir: &Path,
-) -> Option<DotoreConfig> {
-    py_manifests
-        .iter()
-        .find(|(d, p, _)| {
-            d.as_path() == dir && p.file_name().and_then(|n| n.to_str()) == Some("pyproject.toml")
-        })
-        .and_then(|(_, _, c)| DotoreConfig::from_pyproject_toml_str(c))
-}
-
-    VirtualWorkspaceSplit {
-        packages,
-        manifests,
-        source_files,
-    }
-}
-
-#[cfg(feature = "js")]
-fn apply_virtual_angular_project_spec(
-    ng_dir: &Path,
-    base_gate: &CapabilityGate,
-    base_cfg: &DotoreConfig,
-    config_files: &[(PathBuf, PathBuf, String)],
-    spec: dotore_core::AngularWorkspaceProject,
-    packages: &mut Vec<WorkspacePackage>,
-) {
-    let proj_dir = if spec.root_rel.is_empty() {
-        ng_dir.to_path_buf()
-    } else if ng_dir == Path::new(".") {
-        PathBuf::from(&spec.root_rel)
-    } else {
-        ng_dir.join(&spec.root_rel)
-    };
-    if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
-        existing.name.clone_from(&spec.name);
-        existing.capability_gate.merge(base_gate);
-        existing.capability_gate.package_role = spec.package_role;
-        existing
-            .capability_gate
-            .entrypoints
-            .extend(spec.entrypoints);
-    } else {
-        let mut gate = base_gate.clone();
-        gate.package_role = spec.package_role;
-        gate.entrypoints.extend(spec.entrypoints);
-        let local_cfg = config_files
-            .iter()
-            .find(|(c_dir, _, _)| c_dir == &proj_dir)
-            .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
-            .unwrap_or_else(|| base_cfg.clone());
-        packages.push(WorkspacePackage {
-            name: spec.name,
-            root_dir: proj_dir,
-            capability_gate: gate,
-            config: local_cfg,
-        });
-    }
-}
-
-fn is_compiler_config_name(file_name: &str) -> bool {
-    file_name.starts_with("next.config.")
-        || file_name.starts_with("babel.config.")
-        || file_name.starts_with(".babelrc")
-        || file_name.starts_with("vite.config.")
-        || file_name == "app.json"
-        || file_name.starts_with("app.config.")
-}
-
-fn is_non_js_manifest_filename(file_name: &str) -> bool {
-    file_name == "angular.json"
-        || file_name == "tsconfig.json"
-        || file_name == "jsconfig.json"
-        || (file_name.starts_with("tsconfig.") && file_name.ends_with(".json"))
-        || file_name == "app.json"
-        || file_name == "app.config.json"
-        || file_name == "babel.config.json"
-        || file_name == ".babelrc"
-        || file_name == ".babelrc.json"
-        || file_name == "build.gradle"
-        || file_name == "build.gradle.kts"
-        || file_name == ".gitignore"
-        || file_name == "pnpm-lock.yaml"
-        || file_name == "yarn.lock"
-        || file_name == "package-lock.json"
-        || file_name == "bun.lockb"
-        || file_name == "bun.lock"
-        || file_name == "pnpm-workspace.yaml"
-        || file_name.starts_with(".env")
-}
-
-/// Scans the filesystem according to [`ScanOptions`], returning the [`JsonReport`] and source map.
-///
-/// # Errors
-/// Returns an `io::Error` if reading discovered files fails.
-pub fn scan_workspace(options: &ScanOptions) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
-    scan_workspace_with_overrides(options, &CliOverrides::default())
-}
-
-/// Scans the filesystem according to [`ScanOptions`] and [`CliOverrides`] across all active
-/// [`LanguageAnalyzer`]s, returning the [`JsonReport`] and source map.
-///
-/// # Errors
-/// Returns an `io::Error` if reading discovered files or an explicit `--config` file fails.
-pub fn scan_workspace_with_overrides(
-    options: &ScanOptions,
-    overrides: &CliOverrides,
-) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
-    register_active_core_hooks();
-    set_progress_phase(1, 0);
-    let analyzers = default_analyzers();
-    let (workspace_root, all_packages, packages, paths) =
-        discover_filtered_workspace_packages_and_paths(options, overrides, analyzers)?;
-    set_progress_phase(2, paths.len());
-    #[cfg(any(feature = "js", feature = "py", feature = "rs"))]
-    let mut pairs: Vec<(PathBuf, String)> = paths
-        .into_par_iter()
-        .filter_map(|path| {
-            let content = fs::read_to_string(&path).ok()?;
-            tick_progress_file(&path);
-            Some((path, content))
-        })
-        .collect();
-    #[cfg(not(any(feature = "js", feature = "py", feature = "rs")))]
-    let pairs: Vec<(PathBuf, String)> = paths
-        .into_iter()
-        .filter_map(|path| {
-            let content = fs::read_to_string(&path).ok()?;
-            tick_progress_file(&path);
-            Some((path, content))
-        })
-        .collect();
-    let sources: HashMap<PathBuf, String> = pairs.iter().cloned().collect();
-    #[cfg(feature = "js")]
-    if packages
-        .iter()
-        .any(|pkg| pkg.capability_gate.has(Capability::Motion))
-    {
-        for style_path in collect_style_files(&options.paths) {
-            if resolve_package_for_file(&style_path, &all_packages).is_none_or(|resolved_pkg| {
-                packages
-                    .iter()
-                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
-                    && !resolved_pkg
-                        .config
-                        .is_file_ignored(&style_path, &resolved_pkg.root_dir)
-            }) && let Ok(content) = fs::read_to_string(&style_path)
-            {
-                pairs.push((style_path, content));
-            }
-        }
-    }
-
-    let manifests = load_disk_manifests(&workspace_root, &packages, &sources);
-    let cache_context = if !is_cache_disabled(overrides.no_cache)
-        && let Some(cache_path) = resolve_scan_cache_path()
-    {
-        let (cache_key, canonical_root, head_sha) = compute_scan_cache_meta_and_key(
-            &workspace_root,
-            options,
-            overrides,
-            &packages,
-            &pairs,
-            &manifests,
-        );
-        if let Some(cached_report) = lookup_scan_cache(&cache_path, &cache_key) {
-            return Ok((cached_report, sources));
-        }
-        Some((cache_path, cache_key, canonical_root, head_sha))
-    } else {
-        None
-    };
-    let (all_extracted, js_graph_opt, mut diagnostics) = analyze_polyglot_sources(
-        &packages,
-        manifests,
-        pairs,
-        &sources,
-        options.rules.as_deref(),
-    );
-
-    if let Some(allowed_tiers) = &options.tiers {
-        diagnostics.retain(|d| allowed_tiers.contains(&d.tier));
-    }
-
-    let effective_scope = if overrides.staged && overrides.scope == DiffScope::Full {
-        DiffScope::Changed
-    } else {
-        overrides.scope
-    };
-
-    let mut mode = ScanMode::Full;
-    let mut diff_info = None;
-    let mut baseline_summary = None;
-    let mut baseline_degraded = false;
-    if effective_scope != DiffScope::Full || overrides.staged || overrides.base_ref.is_some() {
-        let diff_snap = collect_git_diff(
-            &workspace_root,
-            overrides.base_ref.as_deref(),
-            overrides.staged,
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        diagnostics = filter_diagnostics_by_scope(
-            diagnostics,
-            effective_scope,
-            &diff_snap.repo_root,
-            &diff_snap.changed_files,
-            &diff_snap.line_ranges,
-            &all_extracted,
-            &sources,
-        );
-        diff_info = Some(diff_snap.info);
-        mode = if overrides.staged {
-            ScanMode::Staged
-        } else {
-            ScanMode::Diff
-        };
-    }
-
-    if let Some(baseline_arg) = &overrides.baseline_path {
-        match load_baseline_entries(&workspace_root, baseline_arg, options.rules.as_deref()) {
-            Ok(base_entries) => {
-                let delta = compare_baseline_diagnostics(
-                    &diagnostics,
-                    &sources,
-                    &base_entries,
-                    &baseline_arg.to_string_lossy(),
-                );
-                diagnostics = delta.introduced_diagnostics;
-                baseline_summary = Some(delta.summary);
-                mode = ScanMode::Baseline;
-            }
-            Err(_) => {
-                baseline_degraded = true;
-                mode = ScanMode::Diff;
-                if diff_info.is_none()
-                    && let Ok(diff_snap) = collect_git_diff(
-                        &workspace_root,
-                        overrides.base_ref.as_deref(),
-                        overrides.staged,
-                    )
-                {
-                    diagnostics = filter_diagnostics_by_scope(
-                        diagnostics,
-                        DiffScope::Changed,
-                        &diff_snap.repo_root,
-                        &diff_snap.changed_files,
-                        &diff_snap.line_ranges,
-                        &all_extracted,
-                        &sources,
-                    );
-                    diff_info = Some(diff_snap.info);
-                }
-            }
-        }
-    }
-
-    let mut report = build_polyglot_report(
-        &all_extracted,
-        js_graph_opt.as_ref(),
-        diagnostics,
-        &sources,
-        &packages,
-    );
-    report.mode = mode;
-    report.diff = diff_info;
-    report.baseline = baseline_summary;
-    report.baseline_degraded = baseline_degraded;
-
-    if let Some((cache_path, cache_key, canonical_root, head_sha)) = cache_context {
-        let updated_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|d| u64::try_from(d.as_millis()).ok())
-            .unwrap_or(0);
-        let _ = store_scan_cache(
-            &cache_path,
-            ScanCacheEntry {
-                key: cache_key,
-                workspace_root: canonical_root,
-                head_sha,
-                tool_version: env!("CARGO_PKG_VERSION").to_string(),
-                updated_at_ms,
-                report: report.clone(),
-            },
-        );
-    }
-    Ok((report, sources))
-}
-
-fn run_git_capture(workspace_root: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace_root)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8(out.stdout).ok()
-}
-
-fn compute_scan_cache_meta_and_key(
-    workspace_root: &Path,
-    options: &ScanOptions,
-    overrides: &CliOverrides,
-    packages: &[WorkspacePackage],
-    pairs: &[(PathBuf, String)],
-    manifests: &HashMap<PathBuf, String>,
-) -> (String, String, String) {
-    use dotore_core::ir::{FNV1A_64_OFFSET_BASIS, fnv1a_64_step, fnv1a_64_str};
-
-    let canonical_root = fs::canonicalize(workspace_root)
-        .unwrap_or_else(|_| dotore_core::config::normalize_path_buf(workspace_root));
-    let canonical_root_str = canonical_root.to_string_lossy().to_string();
-
-    let head_sha = if let Some(sha) = run_git_capture(workspace_root, &["rev-parse", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        sha
-    } else if workspace_root.join(".git").exists()
-        || run_git_capture(workspace_root, &["rev-parse", "--is-inside-work-tree"]).is_some()
-    {
-        "uncommitted".to_string()
-    } else {
-        "no-git".to_string()
-    };
-
-    let mut hash = FNV1A_64_OFFSET_BASIS;
-    fnv1a_64_str(&mut hash, env!("CARGO_PKG_VERSION"));
-    if let Ok(exe_path) = std::env::current_exe()
-        && let Ok(meta) = fs::metadata(&exe_path)
-    {
-        fnv1a_64_str(&mut hash, &meta.len().to_string());
-        if let Ok(modified) = meta.modified()
-            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            fnv1a_64_str(&mut hash, &dur.as_nanos().to_string());
-        }
-    }
-    fnv1a_64_str(&mut hash, &JSON_REPORT_SCHEMA_VERSION.to_string());
-    fnv1a_64_str(&mut hash, &SCAN_CACHE_SCHEMA_VERSION.to_string());
-    fnv1a_64_str(&mut hash, &canonical_root_str);
-
-    fnv1a_64_str(&mut hash, &options.paths.len().to_string());
-    for p in &options.paths {
-        fnv1a_64_str(&mut hash, &p.to_string_lossy());
-    }
-    fnv1a_64_str(
-        &mut hash,
-        if options.include_tests {
-            "tests:1"
-        } else {
-            "tests:0"
-        },
-    );
-    if let Some(rules) = &options.rules {
-        fnv1a_64_str(&mut hash, &format!("rules:{}", rules.len()));
-        for r in rules {
-            fnv1a_64_str(&mut hash, r.as_str());
-        }
-    } else {
-        fnv1a_64_str(&mut hash, "rules:all");
-    }
-    if let Some(tiers) = &options.tiers {
-        fnv1a_64_str(&mut hash, &format!("tiers:{}", tiers.len()));
-        for t in tiers {
-            fnv1a_64_str(&mut hash, t.as_str());
-        }
-    } else {
-        fnv1a_64_str(&mut hash, "tiers:all");
-    }
-
-    fnv1a_64_str(
-        &mut hash,
-        if overrides.no_inline_disables {
-            "nid:1"
-        } else {
-            "nid:0"
-        },
-    );
-    fnv1a_64_str(
-        &mut hash,
-        if overrides.custom_rules_only {
-            "cro:1"
-        } else {
-            "cro:0"
-        },
-    );
-    fnv1a_64_str(&mut hash, &format!("tags:{}", overrides.ignore_tags.len()));
-    for tag in &overrides.ignore_tags {
-        fnv1a_64_str(&mut hash, tag);
-    }
-    fnv1a_64_str(&mut hash, &format!("projects:{}", overrides.projects.len()));
-    for proj in &overrides.projects {
-        fnv1a_64_str(&mut hash, proj);
-    }
-    fnv1a_64_str(&mut hash, overrides.scope.as_str());
-    fnv1a_64_str(&mut hash, overrides.base_ref.as_deref().unwrap_or(""));
-    fnv1a_64_str(
-        &mut hash,
-        if overrides.staged {
-            "staged:1"
-        } else {
-            "staged:0"
-        },
-    );
-    if let Some(cfg_path) = &overrides.config_path {
-        fnv1a_64_str(&mut hash, &cfg_path.to_string_lossy());
-        if let Ok(cfg_bytes) = fs::read_to_string(cfg_path) {
-            fnv1a_64_str(&mut hash, &cfg_bytes);
-        }
-    }
-    if let Some(base_path) = &overrides.baseline_path {
-        fnv1a_64_str(&mut hash, &base_path.to_string_lossy());
-        let resolved_base = if base_path.is_file() {
-            Some(base_path.clone())
-        } else {
-            let cand = workspace_root.join(base_path);
-            cand.is_file().then_some(cand)
-        };
-        if let Some(rp) = resolved_base
-            && let Ok(base_bytes) = fs::read_to_string(&rp)
-        {
-            fnv1a_64_str(&mut hash, &base_bytes);
-        } else if let Some(rev_out) =
-            run_git_capture(workspace_root, &["rev-parse", &base_path.to_string_lossy()])
-        {
-            fnv1a_64_str(&mut hash, &rev_out);
-        }
-    }
-
-    fnv1a_64_str(&mut hash, &head_sha);
-    if head_sha != "no-git" {
-        if let Some(status_out) =
-            run_git_capture(workspace_root, &["status", "--porcelain", "-uall"])
-        {
-            fnv1a_64_str(&mut hash, &status_out);
-        }
-        if overrides.staged || overrides.scope != DiffScope::Full || overrides.base_ref.is_some() {
-            if let Some(cached_diff) = run_git_capture(workspace_root, &["diff", "--cached"]) {
-                fnv1a_64_str(&mut hash, &cached_diff);
-            }
-            if let Some(work_diff) = run_git_capture(workspace_root, &["diff"]) {
-                fnv1a_64_str(&mut hash, &work_diff);
-            }
-            if let Some(base_ref) = &overrides.base_ref
-                && let Some(base_sha) = run_git_capture(workspace_root, &["rev-parse", base_ref])
-            {
-                fnv1a_64_str(&mut hash, &base_sha);
-            }
-        }
-    }
-
-    fnv1a_64_str(&mut hash, &format!("pkgs:{}", packages.len()));
-    for pkg in packages {
-        fnv1a_64_str(&mut hash, &pkg.name);
-        fnv1a_64_str(&mut hash, &pkg.root_dir.to_string_lossy());
-        if let Ok(pkg_json) = serde_json::to_string(pkg) {
-            fnv1a_64_str(&mut hash, &pkg_json);
-        }
-        for cfg_name in [
-            "dotore.config.json",
-            "dotore.config.js",
-            "dotore.config.ts",
-            "dotore.config.mjs",
-            "dotore.config.cjs",
-            "pyproject.toml",
-            "requirements.txt",
-            "Cargo.toml",
-            "angular.json",
-        ] {
-            let p = pkg.root_dir.join(cfg_name);
-            if let Ok(content) = fs::read_to_string(&p) {
-                fnv1a_64_str(&mut hash, cfg_name);
-                fnv1a_64_str(&mut hash, &content);
-            }
-        }
-    }
-
-    let mut sorted_pairs: Vec<(&Path, &str)> = pairs
-        .iter()
-        .map(|(p, c)| (p.as_path(), c.as_str()))
-        .collect();
-    sorted_pairs.sort_by_key(|(a, _)| *a);
-    fnv1a_64_str(&mut hash, &format!("pairs:{}", sorted_pairs.len()));
-    for (path, content) in sorted_pairs {
-        fnv1a_64_str(&mut hash, &path.to_string_lossy());
-        fnv1a_64_str(&mut hash, &content.len().to_string());
-        hash = fnv1a_64_step(hash, content.as_bytes());
-    }
-
-    let mut sorted_manifests: Vec<(&Path, &str)> = manifests
-        .iter()
-        .map(|(p, c)| (p.as_path(), c.as_str()))
-        .collect();
-    sorted_manifests.sort_by_key(|(a, _)| *a);
-    fnv1a_64_str(&mut hash, &format!("manifests:{}", sorted_manifests.len()));
-    for (path, content) in sorted_manifests {
-        fnv1a_64_str(&mut hash, &path.to_string_lossy());
-        fnv1a_64_str(&mut hash, &content.len().to_string());
-        hash = fnv1a_64_step(hash, content.as_bytes());
-    }
-
-    (format!("scan::{hash:016x}"), canonical_root_str, head_sha)
-}
-
-/// Returns all [`RuleId`]s tagged with [`RuleTag::Design`] (excluding whole-project analysis rules).
-#[must_use]
-pub fn design_rule_ids() -> Vec<RuleId> {
-    rule_registry()
-        .iter()
-        .filter(|meta| {
-            meta.tags.contains(&RuleTag::Design) && !meta.tags.contains(&RuleTag::ProjectAnalysis)
-        })
-        .map(|meta| meta.id)
-        .collect()
-}
-
-/// Runs a focused UI design audit (`dotore design`), enabling all [`RuleTag::Design`] rules
-/// while skipping unrelated project-analysis, supply-chain, and general effect/state rules.
-///
-/// # Errors
-/// Returns an `io::Error` if reading discovered files or an explicit `--config` file fails.
-pub fn scan_design(
-    options: &ScanOptions,
-    overrides: &CliOverrides,
-) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
-    register_active_core_hooks();
-    #[cfg(feature = "js")]
-    {
-        scan_design_js(options, overrides)
-    }
-    #[cfg(not(feature = "js"))]
-    {
-        let _ = (options, overrides);
-        let sources = HashMap::new();
-        let mut report = build_extracted_report(&[], Vec::new(), &sources);
-        report.summary.health_score = 100;
-        report.summary.score_label = "Excellent".to_string();
-        Ok((report, sources))
-    }
-}
-
-#[cfg(feature = "js")]
-fn scan_design_js(
-    options: &ScanOptions,
-    overrides: &CliOverrides,
-) -> io::Result<(JsonReport, HashMap<PathBuf, String>)> {
-    let mut design_rules = design_rule_ids();
-    if let Some(explicit_rules) = &options.rules {
-        design_rules.retain(|r| explicit_rules.contains(r));
-    }
-    let js_analyzer = JsLanguageAnalyzer;
-    let analyzers: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
-    let (_, _, packages, paths) =
-        discover_filtered_workspace_packages_and_paths(options, overrides, analyzers)?;
-    set_progress_phase(2, paths.len());
-    let pairs: Vec<(PathBuf, String)> = paths
-        .into_par_iter()
-        .filter_map(|path| {
-            let content = fs::read_to_string(&path).ok()?;
-            tick_progress_file(&path);
-            Some((path, content))
-        })
-        .collect();
-    let sources: HashMap<PathBuf, String> = pairs.iter().cloned().collect();
-
-    set_progress_phase(3, pairs.len());
-    let extracted_files: Vec<ExtractedFile> = pairs
-        .into_par_iter()
-        .map(|(path, source)| {
-            tick_progress_file(&path);
-            js_analyzer.extract_file(&path, &source)
-        })
-        .collect();
-    set_progress_phase(4, extracted_files.len());
-    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, HashMap::new());
-
-    let mut diagnostics = Vec::new();
-    let mut design_cfg = DotoreConfig::default();
-    for file in &graph.files {
-        tick_progress_file(&file.path);
-        let Some(pkg) = resolve_package_for_file(&file.path, &packages) else {
-            continue;
-        };
-        design_cfg.clone_from(&pkg.config);
-        for &rule in &design_rules {
-            if design_cfg.explicit_rule_override(rule).is_none() {
-                let meta = rule.metadata();
-                if file.file_context != FileContext::Production
-                    && meta.tags.contains(&RuleTag::TestNoise)
-                    && !meta.tags.contains(&RuleTag::MigrationHint)
-                    && options.rules.is_none()
-                {
-                    continue;
-                }
-                let default_ov = match meta.default_severity {
-                    RuleSeverity::Error => RuleSeverityOverride::Error,
-                    RuleSeverity::Warning => RuleSeverityOverride::Warn,
-                };
-                design_cfg
-                    .rules
-                    .insert(rule.as_str().to_string(), default_ov);
-            }
-        }
-        let mut file_diags = Vec::new();
-        evaluate_file_in_package(
-            &graph,
-            file,
-            &pkg.root_dir,
-            &pkg.capability_gate,
-            &design_cfg,
-            None,
-            &mut file_diags,
-        );
-        file_diags.retain(|d| design_rules.contains(&d.rule));
-        diagnostics.extend(file_diags);
-    }
-
-    if let Some(allowed_tiers) = &options.tiers {
-        diagnostics.retain(|d| allowed_tiers.contains(&d.tier));
-    }
-
-    let mut report = build_report_with_packages(&graph, diagnostics, &sources, &packages);
-    report.summary.health_score = 100;
-    report.summary.score_label = "Excellent".to_string();
-    for proj in &mut report.projects {
-        proj.health_score = 100;
-        proj.score_label = "Excellent".to_string();
-    }
-    Ok((report, sources))
-}
-type DiscoveredWorkspaceSelection = (
-    PathBuf,
-    Vec<WorkspacePackage>,
-    Vec<WorkspacePackage>,
-    Vec<PathBuf>,
-);
-
-fn discover_filtered_workspace_packages_and_paths(
-    options: &ScanOptions,
-    overrides: &CliOverrides,
-    analyzers: &[&dyn LanguageAnalyzer],
-) -> io::Result<DiscoveredWorkspaceSelection> {
-    let workspace_root = determine_workspace_root(&options.paths);
-    let all_packages = discover_workspace_packages_with_analyzers(&workspace_root, analyzers);
-    let mut packages =
-        filter_workspace_packages(&all_packages, &workspace_root, &overrides.projects)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    let explicit_cfg = if let Some(cfg_path) = &overrides.config_path {
-        let content = fs::read_to_string(cfg_path)?;
-        Some(
-            DotoreConfig::from_config_file_str(cfg_path, &content)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        )
-    } else {
-        None
-    };
-
-    for pkg in &mut packages {
-        if let Some(cfg) = &explicit_cfg {
-            pkg.config.clone_from(cfg);
-        }
-        apply_cli_overrides_to_config(&mut pkg.config, overrides);
-    }
-
-    let raw_paths =
-        collect_source_files_for_analyzers(&options.paths, options.include_tests, analyzers);
-    let paths: Vec<PathBuf> = raw_paths
-        .into_iter()
-        .filter(|p| {
-            resolve_package_for_file(p, &all_packages).is_none_or(|resolved_pkg| {
-                packages
-                    .iter()
-                    .any(|sel| sel.root_dir == resolved_pkg.root_dir)
-                    && !resolved_pkg
-                        .config
-                        .is_file_ignored(p, &resolved_pkg.root_dir)
-            })
-        })
-        .collect();
-
-    Ok((workspace_root, all_packages, packages, paths))
-}
-
-fn determine_workspace_root(paths: &[PathBuf]) -> PathBuf {
-    let Some(first) = paths.first() else {
-        return PathBuf::from(".");
-    };
-    let dir_of = |p: &Path| -> PathBuf {
-        if p.is_dir() {
-            p.to_path_buf()
-        } else {
-            p.parent()
-                .filter(|par| !par.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf()
-        }
-    };
-    let mut common = dir_of(first);
-    for other in paths.iter().skip(1) {
-        let other_dir = dir_of(other);
-        while !other_dir.starts_with(&common) {
-            let Some(parent) = common.parent() else {
-                break;
-            };
-            if parent.as_os_str().is_empty() {
-                common = PathBuf::from(".");
-                break;
-            }
-            common = parent.to_path_buf();
-        }
-    }
-    common
-}
-
-fn apply_cli_overrides_to_config(config: &mut DotoreConfig, overrides: &CliOverrides) {
-    if overrides.no_inline_disables {
-        config.respect_inline_disables = false;
-    }
-    if overrides.custom_rules_only {
-        config.custom_rules_only = true;
-    }
-    for tag in &overrides.ignore_tags {
-        if !config.ignore.tags.contains(tag) {
-            config.ignore.tags.push(tag.to_string());
-        }
-    }
-}
-
-pub(crate) fn load_disk_manifests(
-    workspace_root: &Path,
-    packages: &[WorkspacePackage],
-    sources: &HashMap<PathBuf, String>,
-) -> HashMap<PathBuf, String> {
-    let mut manifests = HashMap::new();
-    let mut candidate_dirs = Vec::new();
-    for pkg in packages {
-        if !candidate_dirs.contains(&pkg.root_dir) {
-            candidate_dirs.push(pkg.root_dir.clone());
-        }
-    }
-    if candidate_dirs.is_empty() {
-        candidate_dirs.push(workspace_root.to_path_buf());
-    }
-    for dir in candidate_dirs {
-        for name in [
-            "package.json",
-            "tsconfig.json",
-            "tsconfig.base.json",
-            "tsconfig.app.json",
-            "jsconfig.json",
-            "app.json",
-            "app.config.json",
-            "babel.config.json",
-            ".babelrc",
-            ".babelrc.json",
-            "android/app/build.gradle",
-            "android/app/build.gradle.kts",
-            ".gitignore",
-            "Cargo.toml",
-            "Cargo.lock",
-            ".cargo/config.toml",
-            ".cargo/config",
-            "bun.lockb",
-            "bun.lock",
-            ".env.local",
-            ".env.development.local",
-            ".env.production.local",
-            ".env.test.local",
-            "pnpm-workspace.yaml",
-            "pnpm-lock.yaml",
-            "package-lock.json",
-            "yarn.lock",
-            "node_modules/next/package.json",
-            "node_modules/react-server-dom-webpack/package.json",
-            "node_modules/react-server-dom-parcel/package.json",
-            "node_modules/react-server-dom-turbopack/package.json",
-        ] {
-            let p = if dir == Path::new(".") {
-                PathBuf::from(name)
-            } else {
-                dir.join(name)
-            };
-            if let Ok(content) = fs::read_to_string(&p) {
-                manifests.insert(p, content);
-            }
-        }
-    }
-    for (path, content) in sources {
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.contains(".config.") || n.contains(".setup."))
-        {
-            manifests.insert(path.clone(), content.clone());
-        }
-    }
-    manifests
 }

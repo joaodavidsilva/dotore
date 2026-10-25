@@ -2,7 +2,6 @@
 //! (`radix-ui`, `base-ui`, `shadcn`, `styled-components`) single-pass rule detectors.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     clippy::too_many_arguments,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
@@ -207,40 +206,36 @@ fn selector_computes_inline_derivation(semantic: &Semantic<'_>, sel_arg: &Expres
         _ => return false,
     };
 
-    for node in semantic.nodes() {
-        if !body_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        match node.kind() {
-            AstKind::CallExpression(call) => {
-                if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() {
-                    let prop = mem.property.name.as_str();
-                    if REDUX_DERIVATION_METHODS.contains(&prop) {
-                        return true;
-                    }
-                    if let Expression::Identifier(obj) = mem.object.without_parentheses() {
-                        if obj.name == "Object"
-                            && matches!(prop, "keys" | "values" | "entries" | "fromEntries")
-                        {
-                            return true;
-                        }
-                        if obj.name == "Array" && prop == "from" {
-                            return true;
-                        }
-                    }
-                }
+    semantic
+        .nodes()
+        .iter()
+        .any(|node| body_span.contains_inclusive(node.span()) && is_redux_derivation_node(node.kind()))
+}
+
+fn is_redux_derivation_node(kind: AstKind<'_>) -> bool {
+    match kind {
+        AstKind::CallExpression(call) => {
+            let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+                return false;
+            };
+            let prop = mem.property.name.as_str();
+            if REDUX_DERIVATION_METHODS.contains(&prop) {
+                return true;
             }
-            AstKind::NewExpression(new_expr) => {
-                if let Expression::Identifier(id) = new_expr.callee.without_parentheses()
-                    && matches!(id.name.as_str(), "Map" | "Set")
-                {
-                    return true;
-                }
-            }
-            _ => {}
+            let Expression::Identifier(obj) = mem.object.without_parentheses() else {
+                return false;
+            };
+            (obj.name == "Object" && matches!(prop, "keys" | "values" | "entries" | "fromEntries"))
+                || (obj.name == "Array" && prop == "from")
         }
+        AstKind::NewExpression(new_expr) => {
+            matches!(
+                new_expr.callee.without_parentheses(),
+                Expression::Identifier(id) if matches!(id.name.as_str(), "Map" | "Set")
+            )
+        }
+        _ => false,
     }
-    false
 }
 
 fn extract_function_returned_expr<'a>(fn_expr: &'a Expression<'a>) -> Option<&'a Expression<'a>> {

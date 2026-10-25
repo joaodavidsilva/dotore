@@ -10,6 +10,7 @@ use oxc_ast::{
     AstKind,
     ast::{
         Argument, ArrowFunctionBody, BindingPattern, CallExpression, Expression, FormalParameters,
+        FunctionBody,
         JSXChild, JSXElement, JSXElementName, JSXMemberExpressionObject, ObjectExpression,
         ObjectPropertyKind, Program, Statement,
     },
@@ -166,45 +167,16 @@ fn check_server_fn_chain_rules(
         return;
     }
 
-    // 1. `tanstack-start-server-fn-method-order` (report on the outermost call that violates order)
     if own_method == "handler" || chain.method_names.last().map(String::as_str) == Some(own_method)
     {
-        let mut last_idx: Option<usize> = None;
-        for m in &chain.method_names {
-            let normalized = if m == "inputValidator" {
-                "validator"
-            } else {
-                m.as_str()
-            };
-            let Some(curr_idx) = TANSTACK_MIDDLEWARE_METHOD_ORDER
-                .iter()
-                .position(|&item| item == normalized)
-            else {
-                continue;
-            };
-            if let Some(prev_idx) = last_idx
-                && curr_idx < prev_idx
-            {
-                if own_method == "handler"
-                    && let Some(&expected_before) = TANSTACK_MIDDLEWARE_METHOD_ORDER.get(prev_idx)
-                {
-                    push_semantic_site(
-                        sites,
-                        RuleId::TanstackStartServerFnMethodOrder,
-                        subject_name.clone(),
-                        "tanstackStartServerFnMethodOrder",
-                        m,
-                        format!(
-                            "Chaining .{m}() after .{expected_before}() breaks type inference."
-                        ),
-                        line_starts,
-                        call.span,
-                    );
-                }
-                break;
-            }
-            last_idx = Some(curr_idx);
-        }
+        check_server_fn_method_order(
+            call.span,
+            own_method,
+            &chain.method_names,
+            subject_name,
+            line_starts,
+            sites,
+        );
     }
 
     if own_method != "handler" {
@@ -227,36 +199,19 @@ fn check_server_fn_chain_rules(
         _ => return,
     };
 
-    // 2. `tanstack-start-no-use-server-in-handler`
-    if let Some(body) = body_opt {
-        let has_use_server = body
-            .directives
-            .iter()
-            .any(|d| d.directive.as_str() == "use server")
-            || body.statements.iter().any(|s| {
-                if let Statement::ExpressionStatement(es) = s
-                    && let Expression::StringLiteral(lit) = es.expression.without_parentheses()
-                {
-                    lit.value == "use server"
-                } else {
-                    false
-                }
-            });
-        if has_use_server {
-            push_semantic_site(
-                sites,
-                RuleId::TanstackStartNoUseServerInHandler,
-                subject_name.clone(),
-                "tanstackStartNoUseServerInHandler",
-                "use server",
-                "\"use server\" inside a createServerFn handler duplicates TanStack Start's server boundary, so the route can fail to compile.".to_string(),
-                line_starts,
-                handler_span,
-            );
-        }
+    if body_opt.is_some_and(function_body_has_use_server) {
+        push_semantic_site(
+            sites,
+            RuleId::TanstackStartNoUseServerInHandler,
+            subject_name.clone(),
+            "tanstackStartNoUseServerInHandler",
+            "use server",
+            "\"use server\" inside a createServerFn handler duplicates TanStack Start's server boundary, so the route can fail to compile.".to_string(),
+            line_starts,
+            handler_span,
+        );
     }
 
-    // 3. `tanstack-start-server-fn-validate-input`
     if !chain.has_input_validation && handler_accesses_input_data(params, handler_span, source) {
         push_semantic_site(
             sites,
@@ -270,7 +225,6 @@ fn check_server_fn_chain_rules(
         );
     }
 
-    // 4. `tanstack-start-get-mutation`
     let is_mutating_method = chain
         .specified_method
         .as_deref()
@@ -290,6 +244,65 @@ fn check_server_fn_chain_rules(
             call.span,
         );
     }
+}
+
+fn check_server_fn_method_order(
+    call_span: Span,
+    own_method: &str,
+    method_names: &[String],
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let mut last_idx: Option<usize> = None;
+    for m in method_names {
+        let normalized = if m == "inputValidator" {
+            "validator"
+        } else {
+            m.as_str()
+        };
+        let Some(curr_idx) = TANSTACK_MIDDLEWARE_METHOD_ORDER
+            .iter()
+            .position(|&item| item == normalized)
+        else {
+            continue;
+        };
+        if let Some(prev_idx) = last_idx
+            && curr_idx < prev_idx
+        {
+            if own_method == "handler"
+                && let Some(&expected_before) = TANSTACK_MIDDLEWARE_METHOD_ORDER.get(prev_idx)
+            {
+                push_semantic_site(
+                    sites,
+                    RuleId::TanstackStartServerFnMethodOrder,
+                    subject_name.clone(),
+                    "tanstackStartServerFnMethodOrder",
+                    m,
+                    format!("Chaining .{m}() after .{expected_before}() breaks type inference."),
+                    line_starts,
+                    call_span,
+                );
+            }
+            break;
+        }
+        last_idx = Some(curr_idx);
+    }
+}
+
+fn function_body_has_use_server(body: &FunctionBody<'_>) -> bool {
+    body.directives
+        .iter()
+        .any(|d| d.directive.as_str() == "use server")
+        || body.statements.iter().any(|s| {
+            if let Statement::ExpressionStatement(es) = s
+                && let Expression::StringLiteral(lit) = es.expression.without_parentheses()
+            {
+                lit.value == "use server"
+            } else {
+                false
+            }
+        })
 }
 
 fn handler_accesses_input_data(

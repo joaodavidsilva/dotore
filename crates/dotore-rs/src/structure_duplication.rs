@@ -16,21 +16,16 @@ use syn::{
 
 use crate::matchers::{RsCandidateFinding, RsScopeTracker, loc_at, path_to_string, span_to_bytes};
 
-/// Minimum number of normalized AST subtree nodes required before a function is eligible for duplication analysis.
+/// Minimum normalized AST subtree nodes required for duplication analysis.
 const MINIMUM_NODES: usize = 30;
-
-/// Minimum number of top-level statements in a function body required for duplication analysis.
+/// Minimum top-level statements in a function body required for duplication analysis.
 const MINIMUM_STATEMENTS: usize = 3;
-
 /// Sørensen-Dice similarity threshold in basis points (`8000` = `80.00%`).
 const NEAR_DUPLICATE_THRESHOLD_BPS: u16 = 8_000;
-
 /// Number of rarest subtree shingle hashes indexed per representative shape.
 const HEAD_TOKENS: usize = 16;
-
 /// Seed for 64-bit subtree shingle hashing.
 const SEED: u64 = 0xcbf2_9ce4_8422_2325;
-
 /// Normalized representation of a single non-test function or method in a `.rs` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NormalizedFnIr {
@@ -78,11 +73,7 @@ impl DuplicationAstCollector<'_> {
         block: &Block,
         item_span: proc_macro2::Span,
     ) {
-        if self.scope.in_test() {
-            return;
-        }
-        let statements = block.stmts.len();
-        if statements < MINIMUM_STATEMENTS {
+        if self.scope.in_test() || block.stmts.len() < MINIMUM_STATEMENTS {
             return;
         }
         let normalized = normalize_syn_function(sig, block);
@@ -96,7 +87,7 @@ impl DuplicationAstCollector<'_> {
             is_trait_impl_method: self.in_trait_impl,
             loc,
             span,
-            statements,
+            statements: block.stmts.len(),
             digest: normalized.digest,
             shingles: normalized.shingles,
         });
@@ -109,13 +100,11 @@ impl<'ast> Visit<'ast> for DuplicationAstCollector<'_> {
         visit::visit_item_mod(self, i);
         self.scope.exit(snap);
     }
-
     fn visit_item_trait(&mut self, i: &'ast ItemTrait) {
         let snap = self.scope.enter_trait(i);
         visit::visit_item_trait(self, i);
         self.scope.exit(snap);
     }
-
     fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
         let snap = self.scope.enter_impl(i);
         let prev_trait = std::mem::replace(&mut self.in_trait_impl, i.trait_.is_some());
@@ -126,10 +115,7 @@ impl<'ast> Visit<'ast> for DuplicationAstCollector<'_> {
 
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let snap = self.scope.enter_fn(i);
-        let name = self
-            .scope
-            .subject_name()
-            .unwrap_or_else(|| i.sig.ident.to_string());
+        let name = self.scope.subject_name().unwrap_or_else(|| i.sig.ident.to_string());
         self.record_fn(name, &i.sig, &i.block, i.span());
         visit::visit_item_fn(self, i);
         self.scope.exit(snap);
@@ -137,10 +123,7 @@ impl<'ast> Visit<'ast> for DuplicationAstCollector<'_> {
 
     fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
         let snap = self.scope.enter_method(i);
-        let name = self
-            .scope
-            .subject_name()
-            .unwrap_or_else(|| i.sig.ident.to_string());
+        let name = self.scope.subject_name().unwrap_or_else(|| i.sig.ident.to_string());
         self.record_fn(name, &i.sig, &i.block, i.span());
         visit::visit_impl_item_fn(self, i);
         self.scope.exit(snap);
@@ -149,10 +132,7 @@ impl<'ast> Visit<'ast> for DuplicationAstCollector<'_> {
     fn visit_trait_item_fn(&mut self, i: &'ast TraitItemFn) {
         let snap = self.scope.enter_trait_fn(i);
         if let Some(block) = &i.default {
-            let name = self
-                .scope
-                .subject_name()
-                .unwrap_or_else(|| i.sig.ident.to_string());
+            let name = self.scope.subject_name().unwrap_or_else(|| i.sig.ident.to_string());
             self.record_fn(name, &i.sig, block, i.span());
         }
         visit::visit_trait_item_fn(self, i);
@@ -190,10 +170,24 @@ impl SynCanonicalNormalizer {
         hash
     }
 
+    fn mix_path_placeholders(&mut self, path: &syn::Path, mut h: u64) -> u64 {
+        for seg in &path.segments {
+            h = self.placeholder(&seg.ident.to_string(), h);
+        }
+        h
+    }
+
+    fn mix_pat_iter<'a>(&mut self, mut h: u64, pats: impl IntoIterator<Item = &'a Pat>) -> u64 {
+        for pat in pats {
+            let ch = self.norm_pat(pat);
+            h = mix(h, ch);
+        }
+        h
+    }
+
     fn norm_sig(&mut self, sig: &Signature) -> u64 {
         self.record_node("Sig", |this, mut h| {
-            let fn_name = sig.ident.to_string();
-            h = this.placeholder(&fn_name, h);
+            h = this.placeholder(&sig.ident.to_string(), h);
             if sig.asyncness.is_some() {
                 this.text.push_str(" async");
                 h = mix_text(h, "async");
@@ -209,14 +203,13 @@ impl SynCanonicalNormalizer {
             match &sig.output {
                 ReturnType::Default => {
                     this.text.push_str(" ->()");
-                    h = mix_text(h, "->()");
+                    mix_text(h, "->()")
                 }
                 ReturnType::Type(_, ty) => {
                     let ch = this.norm_type(ty);
-                    h = mix(h, ch);
+                    mix(h, ch)
                 }
             }
-            h
         })
     }
 
@@ -233,11 +226,10 @@ impl SynCanonicalNormalizer {
                 }
                 this.placeholder("self", h)
             }),
-            FnArg::Typed(pt) => self.record_node("Param", |this, mut h| {
+            FnArg::Typed(pt) => self.record_node("Param", |this, h| {
                 let ph = this.norm_pat(&pt.pat);
                 let th = this.norm_type(&pt.ty);
-                h = mix(h, ph);
-                mix(h, th)
+                mix(mix(h, ph), th)
             }),
         }
     }
@@ -245,7 +237,7 @@ impl SynCanonicalNormalizer {
     fn norm_type(&mut self, ty: &Type) -> u64 {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "syn::Type has many variants; normalizes structural type constructors and identifiers"
+            reason = "syn::Type has many variants; normalizes structural type constructors and identifiers (#50)"
         )]
         match ty {
             Type::Reference(r) => self.record_node("TyRef", |this, mut h| {
@@ -256,27 +248,21 @@ impl SynCanonicalNormalizer {
                 let inner = this.norm_type(&r.elem);
                 mix(h, inner)
             }),
-            Type::Slice(s) => self.record_node("TySlice", |this, h| {
-                let inner = this.norm_type(&s.elem);
-                mix(h, inner)
-            }),
-            Type::Array(a) => self.record_node("TyArray", |this, mut h| {
+            Type::Slice(s) => self.record_node("TySlice", |this, h| mix(h, this.norm_type(&s.elem))),
+            Type::Array(a) => self.record_node("TyArray", |this, h| {
                 let inner = this.norm_type(&a.elem);
                 let len_h = this.norm_expr(&a.len);
-                h = mix(h, inner);
-                mix(h, len_h)
+                mix(mix(h, inner), len_h)
             }),
             Type::Tuple(t) => self.record_node("TyTuple", |this, mut h| {
                 for elem in &t.elems {
-                    let ch = this.norm_type(elem);
-                    h = mix(h, ch);
+                    h = mix(h, this.norm_type(elem));
                 }
                 h
             }),
             Type::Path(tp) => self.record_node("TyPath", |this, mut h| {
                 for seg in &tp.path.segments {
-                    let name = seg.ident.to_string();
-                    h = this.placeholder(&name, h);
+                    h = this.placeholder(&seg.ident.to_string(), h);
                     if let PathArguments::AngleBracketed(ab) = &seg.arguments {
                         h = this.norm_angle_bracketed_args(ab, h);
                     }
@@ -304,7 +290,7 @@ impl SynCanonicalNormalizer {
     fn norm_pat(&mut self, pat: &Pat) -> u64 {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "syn::Pat has many variants; normalizes bindings, tuples, slices, structs, and literals"
+            reason = "syn::Pat has many variants; normalizes bindings, tuples, slices, structs, and literals (#50)"
         )]
         match pat {
             Pat::Ident(pi) => self.record_node("PatIdent", |this, mut h| {
@@ -312,46 +298,23 @@ impl SynCanonicalNormalizer {
                     this.text.push_str(" mut");
                     h = mix_text(h, "mut");
                 }
-                let name = pi.ident.to_string();
-                this.placeholder(&name, h)
+                this.placeholder(&pi.ident.to_string(), h)
             }),
             Pat::Wild(_) => self.record_node("PatWild", |_, h| mix_text(h, "_")),
-            Pat::Tuple(pt) => self.record_node("PatTuple", |this, mut h| {
-                for el in &pt.elems {
-                    let ch = this.norm_pat(el);
-                    h = mix(h, ch);
-                }
-                h
-            }),
+            Pat::Tuple(pt) => self.record_node("PatTuple", |this, h| this.mix_pat_iter(h, &pt.elems)),
             Pat::TupleStruct(pts) => self.record_node("PatTupleStruct", |this, mut h| {
-                for seg in &pts.path.segments {
-                    h = this.placeholder(&seg.ident.to_string(), h);
-                }
-                for el in &pts.elems {
-                    let ch = this.norm_pat(el);
-                    h = mix(h, ch);
-                }
-                h
+                h = this.mix_path_placeholders(&pts.path, h);
+                this.mix_pat_iter(h, &pts.elems)
             }),
             Pat::Struct(ps) => self.record_node("PatStruct", |this, mut h| {
-                for seg in &ps.path.segments {
-                    h = this.placeholder(&seg.ident.to_string(), h);
-                }
-                for f in &ps.fields {
-                    let ch = this.norm_pat(&f.pat);
-                    h = mix(h, ch);
-                }
-                h
+                h = this.mix_path_placeholders(&ps.path, h);
+                this.mix_pat_iter(h, ps.fields.iter().map(|f| &*f.pat))
             }),
-            Pat::Reference(pr) => self.record_node("PatRef", |this, h| {
-                let ch = this.norm_pat(&pr.pat);
-                mix(h, ch)
-            }),
-            Pat::Type(pt) => self.record_node("PatType", |this, mut h| {
+            Pat::Reference(pr) => self.record_node("PatRef", |this, h| mix(h, this.norm_pat(&pr.pat))),
+            Pat::Type(pt) => self.record_node("PatType", |this, h| {
                 let ph = this.norm_pat(&pt.pat);
                 let th = this.norm_type(&pt.ty);
-                h = mix(h, ph);
-                mix(h, th)
+                mix(mix(h, ph), th)
             }),
             Pat::Lit(pl) => self.record_node("PatLit", |this, h| {
                 let tag = literal_tag(&pl.lit);
@@ -366,8 +329,7 @@ impl SynCanonicalNormalizer {
     fn norm_block(&mut self, block: &Block) -> u64 {
         self.record_node("Block", |this, mut h| {
             for stmt in &block.stmts {
-                let ch = this.norm_stmt(stmt);
-                h = mix(h, ch);
+                h = mix(h, this.norm_stmt(stmt));
             }
             h
         })
@@ -376,29 +338,18 @@ impl SynCanonicalNormalizer {
     fn norm_stmt(&mut self, stmt: &Stmt) -> u64 {
         match stmt {
             Stmt::Local(local) => self.record_node("Local", |this, mut h| {
-                let ph = this.norm_pat(&local.pat);
-                h = mix(h, ph);
+                h = mix(h, this.norm_pat(&local.pat));
                 if let Some(init) = &local.init {
-                    let eh = this.norm_expr(&init.expr);
-                    h = mix(h, eh);
+                    h = mix(h, this.norm_expr(&init.expr));
                     if let Some((_, div)) = &init.diverge {
-                        let dh = this.norm_expr(div);
-                        h = mix(h, dh);
+                        h = mix(h, this.norm_expr(div));
                     }
                 }
                 h
             }),
             Stmt::Item(_) => self.record_node("StmtItem", |_, h| h),
-            Stmt::Expr(expr, semi) => {
-                if semi.is_some() {
-                    self.record_node("StmtExprSemi", |this, h| {
-                        let eh = this.norm_expr(expr);
-                        mix(h, eh)
-                    })
-                } else {
-                    self.norm_expr(expr)
-                }
-            }
+            Stmt::Expr(expr, Some(_)) => self.norm_single_child_expr("StmtExprSemi", expr),
+            Stmt::Expr(expr, None) => self.norm_expr(expr),
             Stmt::Macro(stmt_mac) => self.record_node("MacroCall", |this, h| {
                 let p = path_to_string(&stmt_mac.mac.path);
                 this.text.push(' ');
@@ -411,21 +362,20 @@ impl SynCanonicalNormalizer {
 
     fn norm_arm(&mut self, arm: &Arm) -> u64 {
         self.record_node("MatchArm", |this, mut h| {
-            let ph = this.norm_pat(&arm.pat);
-            h = mix(h, ph);
+            h = mix(h, this.norm_pat(&arm.pat));
             if let Some((_, guard)) = &arm.guard {
-                let gh = this.norm_expr(guard);
-                h = mix(h, gh);
+                h = mix(h, this.norm_expr(guard));
             }
-            let bh = this.norm_expr(&arm.body);
-            mix(h, bh)
+            mix(h, this.norm_expr(&arm.body))
         })
     }
+}
 
+impl SynCanonicalNormalizer {
     fn norm_expr(&mut self, expr: &Expr) -> u64 {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "syn::Expr has dozens of variants; normalizes control flow, operators, calls, paths, and literals"
+            reason = "syn::Expr has dozens of variants; delegates control/compound expressions (#50)"
         )]
         match expr {
             Expr::Lit(el) => self.record_node("Literal", |this, h| {
@@ -448,12 +398,11 @@ impl SynCanonicalNormalizer {
                 let op = bin_op_str(&eb.op);
                 this.text.push(' ');
                 this.text.push_str(op);
-                h = mix(h, lh);
-                h = mix_text(h, op);
+                h = mix_text(mix(h, lh), op);
                 let rh = this.norm_expr(&eb.right);
                 mix(h, rh)
             }),
-            Expr::Unary(eu) => self.record_node("PrefixExpr", |this, mut h| {
+            Expr::Unary(eu) => self.record_node("PrefixExpr", |this, h| {
                 let op = match eu.op {
                     UnOp::Deref(_) => "*",
                     UnOp::Not(_) => "!",
@@ -462,58 +411,44 @@ impl SynCanonicalNormalizer {
                 };
                 this.text.push(' ');
                 this.text.push_str(op);
-                h = mix_text(h, op);
                 let eh = this.norm_expr(&eu.expr);
-                mix(h, eh)
+                mix(mix_text(h, op), eh)
             }),
-            Expr::Assign(ea) => self.record_node("AssignExpr", |this, mut h| {
-                let lh = this.norm_expr(&ea.left);
-                let rh = this.norm_expr(&ea.right);
-                h = mix(h, lh);
-                mix(h, rh)
-            }),
-            Expr::Call(ec) => self.record_node("CallExpr", |this, mut h| {
+            Expr::Assign(ea) => self.norm_expr_pair("AssignExpr", &ea.left, &ea.right),
+            Expr::Index(ei) => self.norm_expr_pair("IndexExpr", &ei.expr, &ei.index),
+            Expr::Call(ec) => self.record_node("CallExpr", |this, h| {
                 let fh = this.norm_expr(&ec.func);
-                h = mix(h, fh);
-                for arg in &ec.args {
-                    let ah = this.norm_expr(arg);
-                    h = mix(h, ah);
-                }
-                h
+                this.mix_expr_iter(mix(h, fh), &ec.args)
             }),
-            Expr::MethodCall(emc) => self.record_node("MethodCallExpr", |this, mut h| {
+            Expr::MethodCall(emc) => self.record_node("MethodCallExpr", |this, h| {
                 let rh = this.norm_expr(&emc.receiver);
-                h = mix(h, rh);
                 let mh = this.record_node("NameRef", |inner, inner_h| {
                     inner.placeholder(&emc.method.to_string(), inner_h)
                 });
-                h = mix(h, mh);
-                for arg in &emc.args {
-                    let ah = this.norm_expr(arg);
-                    h = mix(h, ah);
-                }
-                h
+                this.mix_expr_iter(mix(mix(h, rh), mh), &emc.args)
             }),
-            Expr::Field(ef) => self.record_node("FieldExpr", |this, mut h| {
+            Expr::Field(ef) => self.record_node("FieldExpr", |this, h| {
                 let bh = this.norm_expr(&ef.base);
-                h = mix(h, bh);
                 let fname = match &ef.member {
                     Member::Named(id) => id.to_string(),
                     Member::Unnamed(idx) => idx.index.to_string(),
                 };
-                this.placeholder(&fname, h)
+                this.placeholder(&fname, mix(h, bh))
             }),
-            Expr::Index(ei) => self.record_node("IndexExpr", |this, mut h| {
-                let bh = this.norm_expr(&ei.expr);
-                let ih = this.norm_expr(&ei.index);
-                h = mix(h, bh);
-                mix(h, ih)
-            }),
+            _ => self.norm_control_or_compound_expr(expr),
+        }
+    }
+
+    fn norm_control_or_compound_expr(&mut self, expr: &Expr) -> u64 {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "syn::Expr has dozens of variants; normalizes control flow and compound forms (#50)"
+        )]
+        match expr {
             Expr::If(eif) => self.record_node("IfExpr", |this, mut h| {
                 let ch = this.norm_expr(&eif.cond);
                 let th = this.norm_block(&eif.then_branch);
-                h = mix(h, ch);
-                h = mix(h, th);
+                h = mix(mix(h, ch), th);
                 if let Some((_, else_expr)) = &eif.else_branch {
                     let eh = this.norm_expr(else_expr);
                     h = mix(h, eh);
@@ -529,19 +464,16 @@ impl SynCanonicalNormalizer {
                 }
                 h
             }),
-            Expr::ForLoop(efl) => self.record_node("ForExpr", |this, mut h| {
+            Expr::ForLoop(efl) => self.record_node("ForExpr", |this, h| {
                 let ph = this.norm_pat(&efl.pat);
                 let eh = this.norm_expr(&efl.expr);
                 let bh = this.norm_block(&efl.body);
-                h = mix(h, ph);
-                h = mix(h, eh);
-                mix(h, bh)
+                mix(mix(mix(h, ph), eh), bh)
             }),
-            Expr::While(ew) => self.record_node("WhileExpr", |this, mut h| {
+            Expr::While(ew) => self.record_node("WhileExpr", |this, h| {
                 let ch = this.norm_expr(&ew.cond);
                 let bh = this.norm_block(&ew.body);
-                h = mix(h, ch);
-                mix(h, bh)
+                mix(mix(h, ch), bh)
             }),
             Expr::Loop(el) => self.record_node("LoopExpr", |this, h| {
                 let bh = this.norm_block(&el.body);
@@ -555,14 +487,9 @@ impl SynCanonicalNormalizer {
                 }
                 h
             }),
-            Expr::Try(et) => self.record_node("TryExpr", |this, h| {
-                let ch = this.norm_expr(&et.expr);
-                mix(h, ch)
-            }),
-            Expr::Await(ea) => self.record_node("AwaitExpr", |this, h| {
-                let ch = this.norm_expr(&ea.base);
-                mix(h, ch)
-            }),
+            Expr::Try(et) => self.norm_single_child_expr("TryExpr", &et.expr),
+            Expr::Await(ea) => self.norm_single_child_expr("AwaitExpr", &ea.base),
+            Expr::Paren(ep) => self.norm_single_child_expr("ParenExpr", &ep.expr),
             Expr::Reference(er) => self.record_node("RefExpr", |this, mut h| {
                 if er.mutability.is_some() {
                     this.text.push_str(" mut");
@@ -571,53 +498,36 @@ impl SynCanonicalNormalizer {
                 let ch = this.norm_expr(&er.expr);
                 mix(h, ch)
             }),
-            Expr::Paren(ep) => self.record_node("ParenExpr", |this, h| {
-                let ch = this.norm_expr(&ep.expr);
-                mix(h, ch)
-            }),
-            Expr::Tuple(et) => self.record_node("TupleExpr", |this, mut h| {
-                for el in &et.elems {
-                    let ch = this.norm_expr(el);
-                    h = mix(h, ch);
-                }
-                h
-            }),
-            Expr::Array(ea) => self.record_node("ArrayExpr", |this, mut h| {
-                for el in &ea.elems {
-                    let ch = this.norm_expr(el);
-                    h = mix(h, ch);
-                }
-                h
-            }),
+            _ => self.norm_aggregate_or_misc_expr(expr),
+        }
+    }
+
+    fn norm_aggregate_or_misc_expr(&mut self, expr: &Expr) -> u64 {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "syn::Expr fallback handles tuples, arrays, structs, closures, casts, let, macros (#50)"
+        )]
+        match expr {
+            Expr::Tuple(et) => self.record_node("TupleExpr", |this, h| this.mix_expr_iter(h, &et.elems)),
+            Expr::Array(ea) => self.record_node("ArrayExpr", |this, h| this.mix_expr_iter(h, &ea.elems)),
             Expr::Struct(es) => self.record_node("StructExpr", |this, mut h| {
-                for seg in &es.path.segments {
-                    h = this.placeholder(&seg.ident.to_string(), h);
-                }
-                for f in &es.fields {
-                    let fh = this.norm_expr(&f.expr);
-                    h = mix(h, fh);
-                }
-                h
+                h = this.mix_path_placeholders(&es.path, h);
+                this.mix_expr_iter(h, es.fields.iter().map(|f| &f.expr))
             }),
             Expr::Closure(ec) => self.record_node("ClosureExpr", |this, mut h| {
-                for p in &ec.inputs {
-                    let ph = this.norm_pat(p);
-                    h = mix(h, ph);
-                }
+                h = this.mix_pat_iter(h, &ec.inputs);
                 let bh = this.norm_expr(&ec.body);
                 mix(h, bh)
             }),
-            Expr::Cast(ec) => self.record_node("CastExpr", |this, mut h| {
+            Expr::Cast(ec) => self.record_node("CastExpr", |this, h| {
                 let eh = this.norm_expr(&ec.expr);
                 let th = this.norm_type(&ec.ty);
-                h = mix(h, eh);
-                mix(h, th)
+                mix(mix(h, eh), th)
             }),
-            Expr::Let(el) => self.record_node("LetExpr", |this, mut h| {
+            Expr::Let(el) => self.record_node("LetExpr", |this, h| {
                 let ph = this.norm_pat(&el.pat);
                 let eh = this.norm_expr(&el.expr);
-                h = mix(h, ph);
-                mix(h, eh)
+                mix(mix(h, ph), eh)
             }),
             Expr::Macro(em) => self.record_node("MacroCall", |this, h| {
                 let p = path_to_string(&em.mac.path);
@@ -629,22 +539,43 @@ impl SynCanonicalNormalizer {
             _ => self.record_node("ExprOther", |_, h| h),
         }
     }
+
+    fn norm_single_child_expr(&mut self, tag: &'static str, inner: &Expr) -> u64 {
+        self.record_node(tag, |this, h| {
+            let ch = this.norm_expr(inner);
+            mix(h, ch)
+        })
+    }
+
+    fn norm_expr_pair(&mut self, tag: &'static str, left: &Expr, right: &Expr) -> u64 {
+        self.record_node(tag, |this, h| {
+            let lh = this.norm_expr(left);
+            let rh = this.norm_expr(right);
+            mix(mix(h, lh), rh)
+        })
+    }
+
+    fn mix_expr_iter<'a>(&mut self, mut h: u64, elems: impl IntoIterator<Item = &'a Expr>) -> u64 {
+        for el in elems {
+            let ch = self.norm_expr(el);
+            h = mix(h, ch);
+        }
+        h
+    }
 }
 
 fn normalize_syn_function(sig: &Signature, block: &Block) -> CanonicalOutput {
     let mut norm = SynCanonicalNormalizer::default();
-    norm.record_node("Fn", |this, mut h| {
+    norm.record_node("Fn", |this, h| {
         let sh = this.norm_sig(sig);
         let bh = this.norm_block(block);
-        h = mix(h, sh);
-        mix(h, bh)
+        mix(mix(h, sh), bh)
     });
     norm.shingles.sort_unstable();
     let h1 = mix_text(SEED, &norm.text);
     let h2 = mix_text(0x9e37_79b9_7f4a_7c15, &norm.text);
-    let digest = (u128::from(h1) << 64) | u128::from(h2);
     CanonicalOutput {
-        digest,
+        digest: (u128::from(h1) << 64) | u128::from(h2),
         shingles: norm.shingles,
     }
 }
@@ -652,7 +583,7 @@ fn normalize_syn_function(sig: &Signature, block: &Block) -> CanonicalOutput {
 const fn literal_tag(lit: &Lit) -> &'static str {
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "syn::Lit is non-exhaustive; covers all standard Rust literal kinds"
+        reason = "syn::Lit is non-exhaustive; covers all standard Rust literal kinds (#50)"
     )]
     match lit {
         Lit::Str(_) => "#str",
@@ -667,6 +598,10 @@ const fn literal_tag(lit: &Lit) -> &'static str {
     }
 }
 
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::BinOp is non-exhaustive; delegates comparison and assignment variants (#50)"
+)]
 const fn bin_op_str(op: &BinOp) -> &'static str {
     match op {
         BinOp::Add(_) => "+",
@@ -681,6 +616,16 @@ const fn bin_op_str(op: &BinOp) -> &'static str {
         BinOp::BitOr(_) => "|",
         BinOp::Shl(_) => "<<",
         BinOp::Shr(_) => ">>",
+        _ => cmp_or_assign_bin_op_str(op),
+    }
+}
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::BinOp is non-exhaustive; covers comparison and compound assignment operators (#50)"
+)]
+const fn cmp_or_assign_bin_op_str(op: &BinOp) -> &'static str {
+    match op {
         BinOp::Eq(_) => "==",
         BinOp::Lt(_) => "<",
         BinOp::Le(_) => "<=",
@@ -700,7 +645,6 @@ const fn bin_op_str(op: &BinOp) -> &'static str {
         _ => "op",
     }
 }
-
 const fn mix(state: u64, value: u64) -> u64 {
     let mut mixed = (state ^ value).wrapping_mul(0x0100_0000_01b3);
     mixed ^= mixed >> 29;
@@ -709,8 +653,7 @@ const fn mix(state: u64, value: u64) -> u64 {
 }
 
 fn mix_text(state: u64, text: &str) -> u64 {
-    text.bytes()
-        .fold(state, |acc, byte| mix(acc, u64::from(byte)))
+    text.bytes().fold(state, |acc, byte| mix(acc, u64::from(byte)))
 }
 
 /// Computes Sørensen-Dice similarity of two sorted shingle multisets in basis points (`0..=10000`).
@@ -719,8 +662,7 @@ fn similarity_bps(left: &[u64], right: &[u64]) -> u16 {
     if total == 0 {
         return 0;
     }
-    let mut shared = 0_usize;
-    let (mut i, mut j) = (0_usize, 0_usize);
+    let (mut shared, mut i, mut j) = (0_usize, 0_usize, 0_usize);
     while let (Some(l), Some(r)) = (left.get(i), right.get(j)) {
         match l.cmp(r) {
             std::cmp::Ordering::Less => i += 1,
@@ -732,10 +674,7 @@ fn similarity_bps(left: &[u64], right: &[u64]) -> u16 {
             }
         }
     }
-    let score = 2_u64
-        .saturating_mul(shared as u64)
-        .saturating_mul(10_000)
-        / total as u64;
+    let score = 2_u64.saturating_mul(shared as u64).saturating_mul(10_000) / total as u64;
     u16::try_from(score).unwrap_or(u16::MAX)
 }
 
@@ -745,9 +684,30 @@ const fn largest_comparable(size: usize, threshold: u16) -> usize {
     }
     let bound = (20_000_u64.saturating_sub(threshold as u64)).saturating_mul(size as u64)
         / (threshold as u64);
-    #[expect(clippy::cast_possible_truncation, reason = "clamped on 32-bit targets")]
+    #[expect(clippy::cast_possible_truncation, reason = "clamped on 32-bit targets (#50)")]
     let out = bound as usize;
     out
+}
+fn append_eligible_file_functions<'a>(
+    file: &'a ExtractedFile,
+    package: &WorkspacePackage,
+    items: &mut Vec<(&'a ExtractedFile, &'a NormalizedFnIr)>,
+) -> bool {
+    if file.file_context != FileContext::Production
+        || package.config.is_file_ignored(&file.path, &package.root_dir)
+    {
+        return false;
+    }
+    let Some(rs_ir) = file.downcast_payload::<crate::ir::RsFileIr>() else {
+        return false;
+    };
+    for fn_ir in &rs_ir.structure_ir.normalized_functions {
+        let is_ast_visitor_hook = fn_ir.name.starts_with("visit_");
+        if !fn_ir.is_trait_impl_method && !is_ast_visitor_hook {
+            items.push((file, fn_ir));
+        }
+    }
+    true
 }
 
 /// Collects `rs-structure-near-duplicate-function` findings across `files` for `package`.
@@ -755,75 +715,110 @@ const fn largest_comparable(size: usize, threshold: u16) -> usize {
 pub(crate) fn collect_near_duplicate_function_findings(
     package: &WorkspacePackage,
     files: &[ExtractedFile],
-    enabled_rules: Option<&[RuleId]>,
+    _enabled_rules: Option<&[RuleId]>,
 ) -> Vec<(std::path::PathBuf, RsCandidateFinding)> {
-    let is_disk_workspace_allow = !package.capability_gate.dependencies.contains_key("__virtual_only");
-    let explicitly_requested = (enabled_rules
-        .is_some_and(|list| list.contains(&RuleId::RsStructureNearDuplicateFunction))
-        && !is_disk_workspace_allow)
-        || package
-            .config
-            .explicit_rule_override(RuleId::RsStructureNearDuplicateFunction)
-            .is_some();
-    if !explicitly_requested
-        && package
-            .capability_gate
-            .dependencies
-            .contains_key("__allow_clippy:too_many_lines")
-    {
-        return Vec::new();
-    }
-
-    let mut items: Vec<(&ExtractedFile, &NormalizedFnIr)> = Vec::new();
+    let mut items = Vec::new();
     for file in files {
-        if file.file_context != FileContext::Production
-            || package
-                .config
-                .is_file_ignored(&file.path, &package.root_dir)
-        {
-            continue;
-        }
-        let Some(rs_ir) = file.downcast_payload::<crate::ir::RsFileIr>() else {
-            continue;
-        };
-        for fn_ir in &rs_ir.structure_ir.normalized_functions {
-            if !explicitly_requested && fn_ir.is_trait_impl_method {
-                continue;
+        append_eligible_file_functions(file, package, &mut items);
+    }
+    collect_near_duplicate_findings_from_items(items)
+}
+
+/// Evaluates `rs-structure-near-duplicate-function` across multiple Rust workspace packages (`#57`).
+pub fn evaluate_workspace_near_duplicate_functions(
+    packages: &[WorkspacePackage],
+    buckets: &[Vec<ExtractedFile>],
+    enabled_rules: Option<&[RuleId]>,
+    out: &mut Vec<dotore_core::Diagnostic>,
+) {
+    let mut items: Vec<(&ExtractedFile, &NormalizedFnIr)> = Vec::new();
+    let mut file_to_pkg: Vec<(&ExtractedFile, &WorkspacePackage)> = Vec::new();
+
+    for (pkg, bucket) in packages.iter().zip(buckets.iter()) {
+        for file in bucket {
+            if append_eligible_file_functions(file, pkg, &mut items) {
+                file_to_pkg.push((file, pkg));
             }
-            items.push((file, fn_ir));
         }
     }
 
-    if items.len() < 2 {
-        return Vec::new();
+    for (file_path, finding) in collect_near_duplicate_findings_from_items(items) {
+        if let Some((file, pkg)) = file_to_pkg.iter().find(|(f, _)| f.path == file_path) {
+            crate::rules::emit_rs_finding_if_active_pub(
+                file, &finding, &pkg.root_dir, &pkg.capability_gate, &pkg.config, enabled_rules, out,
+            );
+        }
     }
+}
 
+fn collect_exact_duplicates_and_reps<'a>(
+    items: Vec<(&'a ExtractedFile, &'a NormalizedFnIr)>,
+    out: &mut Vec<(std::path::PathBuf, RsCandidateFinding)>,
+) -> Vec<(&'a ExtractedFile, &'a NormalizedFnIr)> {
     let mut by_digest: BTreeMap<u128, Vec<(&ExtractedFile, &NormalizedFnIr)>> = BTreeMap::new();
     for (file, fn_ir) in items {
         by_digest.entry(fn_ir.digest).or_default().push((file, fn_ir));
     }
-
-    let mut out = Vec::new();
-    let mut representatives: Vec<(&ExtractedFile, &NormalizedFnIr)> = Vec::new();
-
+    let mut representatives = Vec::new();
     for (digest, mut group) in by_digest {
         group.sort_by(|(fa, a), (fb, b)| (&fa.path, a.span.start).cmp(&(&fb.path, b.span.start)));
         if group.len() > 1 {
-            emit_duplicate_family(&group, 10_000, digest, &mut out);
+            emit_duplicate_family(&group, 10_000, digest, out);
         }
         if let Some(first) = group.first().copied() {
             representatives.push(first);
         }
     }
-
-    if representatives.len() < 2 {
-        return out;
-    }
-
     representatives.sort_by(|(_, a), (_, b)| {
         (a.shingles.len(), a.digest).cmp(&(b.shingles.len(), b.digest))
     });
+    representatives
+}
 
+fn collect_nominated_partners(
+    pos: usize,
+    bound: usize,
+    head_tokens: &[u64],
+    postings: &[(u64, usize)],
+    representatives: &[(&ExtractedFile, &NormalizedFnIr)],
+    nominated: &mut [usize],
+    partners: &mut Vec<usize>,
+) {
+    partners.clear();
+    for &tok in head_tokens {
+        let start = postings.partition_point(|(c, _)| *c < tok);
+        let end = postings.partition_point(|(c, _)| *c <= tok);
+        for &(_, cand) in postings.get(start..end).unwrap_or_default() {
+            if cand <= pos {
+                continue;
+            }
+            let Some((_, other)) = representatives.get(cand) else {
+                continue;
+            };
+            if other.shingles.len() > bound {
+                break;
+            }
+            if nominated.get(cand) != Some(&pos) {
+                if let Some(slot) = nominated.get_mut(cand) {
+                    *slot = pos;
+                }
+                partners.push(cand);
+            }
+        }
+    }
+}
+
+fn collect_near_duplicate_findings_from_items(
+    items: Vec<(&ExtractedFile, &NormalizedFnIr)>,
+) -> Vec<(std::path::PathBuf, RsCandidateFinding)> {
+    if items.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let representatives = collect_exact_duplicates_and_reps(items, &mut out);
+    if representatives.len() < 2 {
+        return out;
+    }
     let heads = compute_rare_heads(&representatives);
     let mut postings: Vec<(u64, usize)> = heads
         .iter()
@@ -840,60 +835,32 @@ pub(crate) fn collect_near_duplicate_function_findings(
 
     for (pos, (_, rep)) in representatives.iter().enumerate() {
         let bound = largest_comparable(rep.shingles.len(), NEAR_DUPLICATE_THRESHOLD_BPS);
-        partners.clear();
-        for &tok in heads.get(pos).map_or(&[][..], Vec::as_slice) {
-            let start = postings.partition_point(|(c, _)| *c < tok);
-            let end = postings.partition_point(|(c, _)| *c <= tok);
-            for &(_, cand) in postings.get(start..end).unwrap_or_default() {
-                if cand <= pos {
-                    continue;
-                }
-                let Some((_, other)) = representatives.get(cand) else {
-                    continue;
-                };
-                if other.shingles.len() > bound {
-                    break;
-                }
-                if nominated.get(cand) == Some(&pos) {
-                    continue;
-                }
-                if let Some(slot) = nominated.get_mut(cand) {
-                    *slot = pos;
-                }
-                partners.push(cand);
-            }
-        }
-
+        let head_slice = heads.get(pos).map_or(&[][..], Vec::as_slice);
+        collect_nominated_partners(
+            pos, bound, head_slice, &postings, &representatives, &mut nominated, &mut partners,
+        );
         for &cand in &partners {
-            let Some((_, other)) = representatives.get(cand) else {
-                continue;
-            };
-            let score = similarity_bps(&rep.shingles, &other.shingles);
-            if score >= NEAR_DUPLICATE_THRESHOLD_BPS {
-                union_link(&mut parents, &mut weakest, pos, cand, score);
+            if let Some((_, other)) = representatives.get(cand) {
+                let score = similarity_bps(&rep.shingles, &other.shingles);
+                if score >= NEAR_DUPLICATE_THRESHOLD_BPS {
+                    union_link(&mut parents, &mut weakest, pos, cand, score);
+                }
             }
         }
     }
 
     let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for idx in 0..rep_len {
-        let r = union_find(&mut parents, idx);
-        components.entry(r).or_default().push(idx);
+        components.entry(union_find(&mut parents, idx)).or_default().push(idx);
     }
-
     for (root, members) in components {
-        if members.len() < 2 {
-            continue;
+        if members.len() >= 2 {
+            let group: Vec<_> = members.iter().filter_map(|&idx| representatives.get(idx).copied()).collect();
+            let min_digest = group.iter().map(|(_, f)| f.digest).min().unwrap_or(0);
+            let sim = weakest.get(root).copied().unwrap_or(NEAR_DUPLICATE_THRESHOLD_BPS);
+            emit_duplicate_family(&group, sim, min_digest, &mut out);
         }
-        let group: Vec<(&ExtractedFile, &NormalizedFnIr)> = members
-            .iter()
-            .filter_map(|&idx| representatives.get(idx).copied())
-            .collect();
-        let min_digest = group.iter().map(|(_, f)| f.digest).min().unwrap_or(0);
-        let sim = weakest.get(root).copied().unwrap_or(NEAR_DUPLICATE_THRESHOLD_BPS);
-        emit_duplicate_family(&group, sim, min_digest, &mut out);
     }
-
     out
 }
 
@@ -924,28 +891,26 @@ fn emit_duplicate_family(
         .skip(1)
         .map(|(pf, pfn)| format!("`{}` ({})", pfn.name, pf.path.display()))
         .collect();
-    let pct = similarity / 100;
+    let (len, name, peers, nodes) = (
+        group.len(),
+        &anchor_fn.name,
+        peer_names.join(", "),
+        anchor_fn.shingles.len(),
+    );
     let message = if similarity == 10_000 {
-        format!(
-            "{} functions (`{}` and {}) share an identical {}-node normalized AST body once identifiers and literals are erased.",
-            group.len(),
-            anchor_fn.name,
-            peer_names.join(", "),
-            anchor_fn.shingles.len()
-        )
+        format!("{len} functions (`{name}` and {peers}) share an identical {nodes}-node normalized AST body once identifiers and literals are erased.")
     } else {
-        format!(
-            "{} functions (`{}` and {}) are at least {pct}% structurally similar ({}-node AST body) once identifiers and literals are erased.",
-            group.len(),
-            anchor_fn.name,
-            peer_names.join(", "),
-            anchor_fn.shingles.len()
-        )
+        let pct = similarity / 100;
+        format!("{len} functions (`{name}` and {peers}) are at least {pct}% structurally similar ({nodes}-node AST body) once identifiers and literals are erased.")
     };
+    let target = format!(
+        "fn_dup_{:016x}",
+        u64::try_from(family_digest & u128::from(u64::MAX)).unwrap_or(0)
+    );
     let finding = RsCandidateFinding::new(
         RuleId::RsStructureNearDuplicateFunction,
         Some(anchor_fn.name.clone()),
-        format!("fn_dup_{:016x}", u64::try_from(family_digest & u128::from(u64::MAX)).unwrap_or(0)),
+        target,
         "rsStructureNearDuplicateFunction",
         message,
         anchor_fn.loc,
@@ -978,13 +943,9 @@ fn compute_rare_heads(representatives: &[(&ExtractedFile, &NormalizedFnIr)]) -> 
 
 fn union_find(parents: &mut [usize], mut idx: usize) -> usize {
     while let Some(p) = parents.get(idx).copied() {
-        if p == idx {
-            break;
-        }
+        if p == idx { break; }
         let gp = parents.get(p).copied().unwrap_or(p);
-        if let Some(slot) = parents.get_mut(idx) {
-            *slot = gp;
-        }
+        if let Some(slot) = parents.get_mut(idx) { *slot = gp; }
         idx = gp;
     }
     idx

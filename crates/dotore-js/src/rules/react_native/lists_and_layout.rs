@@ -2,7 +2,6 @@
 //! and layout container rule detectors.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
 
@@ -29,7 +28,7 @@ use crate::{ir::types::SemanticRuleSite, matchers::push_semantic_site, rules::Ru
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Single-pass JSXElement visitor for all React Native JSX rules"
+    reason = "Single-pass JSXElement visitor for all React Native JSX rules (#50)"
 )]
 pub(crate) fn check_rn_jsx_element_rules(
     program: &Program<'_>,
@@ -44,7 +43,75 @@ pub(crate) fn check_rn_jsx_element_rules(
     let opening = &jsx_el.opening_element;
     let el_name = opening.name.span().source_text(source).trim();
 
-    // 1. Style attribute legacy shadow check
+    check_jsx_style_attributes(opening, subject_name, line_starts, sites);
+    check_jsx_falsy_and_render_children(jsx_el, subject_name, source, line_starts, sites);
+
+    if el_name == "Image"
+        && is_named_import_from(program, "Image", "Image", "react-native")
+        && jsx_el.children.iter().any(is_meaningful_jsx_child)
+    {
+        push_semantic_site(
+            sites,
+            RuleId::RnNoImageChildren,
+            subject_name.clone(),
+            "rnNoImageChildren",
+            "Image",
+            "React Native's <Image> does not render children, so this content silently disappears. Use <ImageBackground> to layer content over an image.".to_string(),
+            line_starts,
+            opening.span,
+        );
+    }
+
+    check_bottom_sheet_jsx_rules(
+        program,
+        semantic,
+        jsx_el,
+        el_name,
+        subject_name,
+        source,
+        line_starts,
+        sites,
+    );
+    check_scrollview_and_list_jsx_rules(
+        program,
+        semantic,
+        jsx_el,
+        el_name,
+        subject_name,
+        source,
+        line_starts,
+        sites,
+    );
+    check_gesture_and_pressable_jsx_rules(
+        semantic,
+        jsx_el,
+        el_name,
+        subject_name,
+        source,
+        line_starts,
+        sites,
+    );
+
+    if el_name == "SafeAreaView" && has_scrollable_direct_child(jsx_el, source) {
+        push_semantic_site(
+            sites,
+            RuleId::RnPreferContentInsetAdjustment,
+            subject_name.clone(),
+            "rnPreferContentInsetAdjustment",
+            "SafeAreaView",
+            "Prefer `contentInsetAdjustmentBehavior=\"automatic\"` on the scrollable container instead of wrapping it in `<SafeAreaView>`.".to_string(),
+            line_starts,
+            opening.span,
+        );
+    }
+}
+
+fn check_jsx_style_attributes(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
     for attr_item in &opening.attributes {
         let Some(attr) = attr_item.as_attribute() else {
             continue;
@@ -53,48 +120,59 @@ pub(crate) fn check_rn_jsx_element_rules(
             continue;
         };
         let attr_name = attr_id.name.as_str();
-        if (attr_name == "style" || attr_name.ends_with("Style"))
-            && let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value
-            && let Some(expr) = container.expression.as_expression()
-        {
-            match expr.without_parentheses() {
-                Expression::ObjectExpression(obj) => {
-                    check_style_object_shadows(obj, subject_name, line_starts, sites);
-                }
-                Expression::ArrayExpression(arr) => {
-                    for elem in &arr.elements {
-                        if let Some(e) = elem.as_expression()
-                            && let Expression::ObjectExpression(obj) = e.without_parentheses()
-                        {
-                            check_style_object_shadows(obj, subject_name, line_starts, sites);
-                        }
-                    }
-                    if arr.elements.len() == 1
-                        && !matches!(
-                            &arr.elements[0],
-                            oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
-                        )
-                    {
-                        push_semantic_site(
-                            sites,
-                            RuleId::RnNoSingleElementStyleArray,
-                            subject_name.clone(),
-                            "rnNoSingleElementStyleArray",
-                            attr_name,
-                            format!(
-                                "Single-element style array `{attr_name}={{[...]}}` allocates an unnecessary array wrapper; pass the style value directly."
-                            ),
-                            line_starts,
-                            attr.span,
-                        );
-                    }
-                }
-                _ => {}
+        if attr_name != "style" && !attr_name.ends_with("Style") {
+            continue;
+        }
+        let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value else {
+            continue;
+        };
+        let Some(expr) = container.expression.as_expression() else {
+            continue;
+        };
+        match expr.without_parentheses() {
+            Expression::ObjectExpression(obj) => {
+                check_style_object_shadows(obj, subject_name, line_starts, sites);
             }
+            Expression::ArrayExpression(arr) => {
+                for elem in &arr.elements {
+                    if let Some(e) = elem.as_expression()
+                        && let Expression::ObjectExpression(obj) = e.without_parentheses()
+                    {
+                        check_style_object_shadows(obj, subject_name, line_starts, sites);
+                    }
+                }
+                if arr.elements.len() == 1
+                    && !matches!(
+                        &arr.elements[0],
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                    )
+                {
+                    push_semantic_site(
+                        sites,
+                        RuleId::RnNoSingleElementStyleArray,
+                        subject_name.clone(),
+                        "rnNoSingleElementStyleArray",
+                        attr_name,
+                        format!(
+                            "Single-element style array `{attr_name}={{[...]}}` allocates an unnecessary array wrapper; pass the style value directly."
+                        ),
+                        line_starts,
+                        attr.span,
+                    );
+                }
+            }
+            _ => {}
         }
     }
+}
 
-    // 2. `rn-no-falsy-and-render`: `{items.length && <Text>...}`
+fn check_jsx_falsy_and_render_children(
+    jsx_el: &JSXElement<'_>,
+    subject_name: &Option<String>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
     for child in &jsx_el.children {
         if let JSXChild::ExpressionContainer(container) = child
             && let JSXExpression::LogicalExpression(logical) = &container.expression
@@ -113,91 +191,27 @@ pub(crate) fn check_rn_jsx_element_rules(
             );
         }
     }
+}
 
-    // 3. `rn-no-image-children`
-    if el_name == "Image"
-        && is_named_import_from(program, "Image", "Image", "react-native")
-        && jsx_el.children.iter().any(is_meaningful_jsx_child)
-    {
-        push_semantic_site(
-            sites,
-            RuleId::RnNoImageChildren,
-            subject_name.clone(),
-            "rnNoImageChildren",
-            "Image",
-            "React Native's <Image> does not render children, so this content silently disappears. Use <ImageBackground> to layer content over an image.".to_string(),
-            line_starts,
-            opening.span,
-        );
-    }
-
-    // 4. `rn-bottom-sheet-*`
-    check_bottom_sheet_jsx_rules(
-        program,
-        semantic,
-        jsx_el,
-        el_name,
-        subject_name,
-        source,
-        line_starts,
-        sites,
-    );
-
-    // 5. ScrollView & List rules
-    check_scrollview_and_list_jsx_rules(
-        program,
-        semantic,
-        jsx_el,
-        el_name,
-        subject_name,
-        source,
-        line_starts,
-        sites,
-    );
-
-    // 6. `rn-prefer-pressable-over-gesture-detector` & `rn-pressable-shared-value-mutation`
-    check_gesture_and_pressable_jsx_rules(
-        semantic,
-        jsx_el,
-        el_name,
-        subject_name,
-        source,
-        line_starts,
-        sites,
-    );
-
-    // 7. `rn-prefer-content-inset-adjustment`
-    if el_name == "SafeAreaView"
-        && jsx_el.children.iter().any(|c| {
-            if let JSXChild::Element(child_el) = c {
-                let child_name = child_el
-                    .opening_element
-                    .name
-                    .span()
-                    .source_text(source)
-                    .trim();
-                SCROLL_CONTAINER_NAMES.contains(&child_name)
-            } else {
-                false
-            }
-        })
-    {
-        push_semantic_site(
-            sites,
-            RuleId::RnPreferContentInsetAdjustment,
-            subject_name.clone(),
-            "rnPreferContentInsetAdjustment",
-            "SafeAreaView",
-            "Prefer `contentInsetAdjustmentBehavior=\"automatic\"` on the scrollable container instead of wrapping it in `<SafeAreaView>`.".to_string(),
-            line_starts,
-            opening.span,
-        );
-    }
+fn has_scrollable_direct_child(jsx_el: &JSXElement<'_>, source: &str) -> bool {
+    jsx_el.children.iter().any(|c| {
+        if let JSXChild::Element(child_el) = c {
+            let child_name = child_el
+                .opening_element
+                .name
+                .span()
+                .source_text(source)
+                .trim();
+            SCROLL_CONTAINER_NAMES.contains(&child_name)
+        } else {
+            false
+        }
+    })
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Evaluates ScrollView and virtualized list JSX rules in one pass"
+    reason = "Evaluates ScrollView and virtualized list JSX rules in one pass (#50)"
 )]
 pub(crate) fn check_scrollview_and_list_jsx_rules(
     program: &Program<'_>,
@@ -211,7 +225,6 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
 ) {
     let opening = &jsx_el.opening_element;
 
-    // `onScroll` state setter (`rn-no-scroll-state`)
     if let Some(on_scroll_attr) = find_jsx_attr(opening, "onScroll")
         && let Some(setter_span) = find_state_setter_in_attr(semantic, on_scroll_attr)
     {
@@ -227,92 +240,140 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
         );
     }
 
-    // `ScrollView` mapped list (`rn-no-scrollview-mapped-list`)
     if el_name == "ScrollView" {
-        for child in &jsx_el.children {
-            if let JSXChild::ExpressionContainer(container) = child
-                && let Some(expr) = container.expression.as_expression()
-                && let Expression::CallExpression(call) = expr.without_parentheses()
-                && let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
-                && matches!(mem.property.name.as_str(), "map" | "flatMap")
-                && !matches!(mem.object.without_parentheses(), Expression::ArrayExpression(arr) if arr.elements.len() <= 10)
-            {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnNoScrollviewMappedList,
-                    subject_name.clone(),
-                    "rnNoScrollviewMappedList",
-                    "ScrollView",
-                    "Rendering a dynamic .map() list inside <ScrollView> mounts every item at once; use FlashList, LegendList, or FlatList instead.".to_string(),
-                    line_starts,
-                    call.span,
-                );
-            }
-        }
+        check_scrollview_mapped_list(jsx_el, subject_name, line_starts, sites);
     }
 
-    // `contentContainerStyle` rules (`rn-scrollview-flex-in-content-container`, `rn-scrollview-dynamic-padding`)
-    if SCROLL_CONTAINER_NAMES.contains(&el_name)
-        && let Some(ccs_attr) = find_jsx_attr(opening, "contentContainerStyle")
-        && let Some(JSXAttributeValue::ExpressionContainer(container)) = &ccs_attr.value
-        && let Some(expr) = container.expression.as_expression()
-        && let Expression::ObjectExpression(ccs_obj) = expr.without_parentheses()
-    {
-        let has_explicit_flex_grow_or_basis = ccs_obj.properties.iter().any(|p| {
-            let ObjectPropertyKind::ObjectProperty(prop) = p else {
-                return false;
-            };
-            matches!(
-                prop.key.static_name().as_ref().and_then(|n| n.as_str()),
-                Some("flexGrow" | "flexBasis")
-            )
-        });
-
-        for prop_kind in &ccs_obj.properties {
-            let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                continue;
-            };
-            let key_name = prop.key.static_name();
-            let Some(k) = key_name.as_ref().and_then(|n| n.as_str()) else {
-                continue;
-            };
-            if k == "flex" && !has_explicit_flex_grow_or_basis {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnScrollviewFlexInContentContainer,
-                    subject_name.clone(),
-                    "rnScrollviewFlexInContentContainer",
-                    "flex",
-                    "Using `flex` on `contentContainerStyle` sets `flexBasis: 0` and clips scrolling when content overflows; use `flexGrow: 1` instead.".to_string(),
-                    line_starts,
-                    prop.span,
-                );
-            }
-            if matches!(k, "paddingBottom" | "paddingTop")
-                && !is_static_style_value(semantic, &prop.value)
-            {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnScrollviewDynamicPadding,
-                    subject_name.clone(),
-                    "rnScrollviewDynamicPadding",
-                    k,
-                    format!(
-                        "Dynamic `{k}` on `contentContainerStyle` relayouts the entire scroll content on every change; use `contentInset` instead."
-                    ),
-                    line_starts,
-                    prop.span,
-                );
-            }
-        }
+    if SCROLL_CONTAINER_NAMES.contains(&el_name) {
+        check_scroll_content_container_style(semantic, opening, subject_name, line_starts, sites);
     }
 
-    // List component rules
     if !REACT_NATIVE_LIST_COMPONENTS.contains(&el_name) {
         return;
     }
 
-    // `rn-list-data-mapped`
+    check_virtualized_list_props_and_render_items(
+        program,
+        semantic,
+        opening,
+        el_name,
+        subject_name,
+        source,
+        line_starts,
+        sites,
+    );
+}
+
+fn check_scrollview_mapped_list(
+    jsx_el: &JSXElement<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for child in &jsx_el.children {
+        if let JSXChild::ExpressionContainer(container) = child
+            && let Some(expr) = container.expression.as_expression()
+            && let Expression::CallExpression(call) = expr.without_parentheses()
+            && let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
+            && matches!(mem.property.name.as_str(), "map" | "flatMap")
+            && !matches!(mem.object.without_parentheses(), Expression::ArrayExpression(arr) if arr.elements.len() <= 10)
+        {
+            push_semantic_site(
+                sites,
+                RuleId::RnNoScrollviewMappedList,
+                subject_name.clone(),
+                "rnNoScrollviewMappedList",
+                "ScrollView",
+                "Rendering a dynamic .map() list inside <ScrollView> mounts every item at once; use FlashList, LegendList, or FlatList instead.".to_string(),
+                line_starts,
+                call.span,
+            );
+        }
+    }
+}
+
+fn check_scroll_content_container_style(
+    semantic: &Semantic<'_>,
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(ccs_attr) = find_jsx_attr(opening, "contentContainerStyle") else {
+        return;
+    };
+    let Some(JSXAttributeValue::ExpressionContainer(container)) = &ccs_attr.value else {
+        return;
+    };
+    let Some(expr) = container.expression.as_expression() else {
+        return;
+    };
+    let Expression::ObjectExpression(ccs_obj) = expr.without_parentheses() else {
+        return;
+    };
+    let has_explicit_flex_grow_or_basis = ccs_obj.properties.iter().any(|p| {
+        let ObjectPropertyKind::ObjectProperty(prop) = p else {
+            return false;
+        };
+        matches!(
+            prop.key.static_name().as_ref().and_then(|n| n.as_str()),
+            Some("flexGrow" | "flexBasis")
+        )
+    });
+
+    for prop_kind in &ccs_obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let key_name = prop.key.static_name();
+        let Some(k) = key_name.as_ref().and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if k == "flex" && !has_explicit_flex_grow_or_basis {
+            push_semantic_site(
+                sites,
+                RuleId::RnScrollviewFlexInContentContainer,
+                subject_name.clone(),
+                "rnScrollviewFlexInContentContainer",
+                "flex",
+                "Using `flex` on `contentContainerStyle` sets `flexBasis: 0` and clips scrolling when content overflows; use `flexGrow: 1` instead.".to_string(),
+                line_starts,
+                prop.span,
+            );
+        }
+        if matches!(k, "paddingBottom" | "paddingTop")
+            && !is_static_style_value(semantic, &prop.value)
+        {
+            push_semantic_site(
+                sites,
+                RuleId::RnScrollviewDynamicPadding,
+                subject_name.clone(),
+                "rnScrollviewDynamicPadding",
+                k,
+                format!(
+                    "Dynamic `{k}` on `contentContainerStyle` relayouts the entire scroll content on every change; use `contentInset` instead."
+                ),
+                line_starts,
+                prop.span,
+            );
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Evaluates virtualized list data, estimated size, and renderItem props together (#50)"
+)]
+fn check_virtualized_list_props_and_render_items(
+    program: &Program<'_>,
+    semantic: &Semantic<'_>,
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    el_name: &str,
+    subject_name: &Option<String>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
     if let Some(data_attr) = find_jsx_attr(opening, "data")
         && let Some(JSXAttributeValue::ExpressionContainer(container)) = &data_attr.value
         && let Some(expr) = container.expression.as_expression()
@@ -343,7 +404,6 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
     ) && (is_named_import_from(program, el_name, el_name, "@shopify/flash-list")
         || is_named_import_from(program, el_name, el_name, "@legendapp/list"));
 
-    // `rn-list-missing-estimated-item-size`
     if is_recycler
         && find_jsx_attr(opening, "estimatedItemSize").is_none()
         && find_jsx_attr(opening, "estimatedListSize").is_none()
@@ -362,7 +422,6 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
         );
     }
 
-    // `renderItem` rules
     for &prop_name in RENDER_ITEM_PROP_NAMES {
         let Some(render_attr) = find_jsx_attr(opening, prop_name) else {
             continue;
@@ -382,7 +441,6 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
         }
         let fn_span = fn_expr.span();
 
-        // 1. `rn-no-inline-flatlist-renderitem`
         if prop_name == "renderItem" {
             push_semantic_site(
                 sites,
@@ -398,7 +456,6 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
             );
         }
 
-        // 2. `rn-list-recyclable-without-types`
         if is_recycler
             && prop_name == "renderItem"
             && find_jsx_attr(opening, "getItemType").is_none()
@@ -418,77 +475,83 @@ pub(crate) fn check_scrollview_and_list_jsx_rules(
             );
         }
 
-        // Scan JSX elements inside `renderItem` for:
-        // - `rn-list-callback-per-row`
-        // - `rn-no-inline-object-in-list-item`
-        // - `rn-no-renderitem-key`
-        let mut reported_key = false;
-        for (_, inner_node) in semantic.nodes().iter_enumerated() {
-            let AstKind::JSXOpeningElement(inner_open) = inner_node.kind() else {
+        scan_render_item_jsx_nodes(semantic, fn_span, prop_name, subject_name, line_starts, sites);
+    }
+}
+
+fn scan_render_item_jsx_nodes(
+    semantic: &Semantic<'_>,
+    fn_span: Span,
+    prop_name: &str,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let mut reported_key = false;
+    for (_, inner_node) in semantic.nodes().iter_enumerated() {
+        let AstKind::JSXOpeningElement(inner_open) = inner_node.kind() else {
+            continue;
+        };
+        if !fn_span.contains_inclusive(inner_open.span) {
+            continue;
+        }
+        for attr_item in &inner_open.attributes {
+            let Some(attr) = attr_item.as_attribute() else {
                 continue;
             };
-            if !fn_span.contains_inclusive(inner_open.span) {
+            let JSXAttributeName::Identifier(attr_id) = &attr.name else {
                 continue;
+            };
+            let k = attr_id.name.as_str();
+            if k == "key" && !reported_key {
+                reported_key = true;
+                push_semantic_site(
+                    sites,
+                    RuleId::RnNoRenderitemKey,
+                    subject_name.clone(),
+                    "rnNoRenderitemKey",
+                    "key",
+                    "A `key` on the JSX returned from `renderItem` is ignored by React Native lists; use `keyExtractor` on the list instead.".to_string(),
+                    line_starts,
+                    attr.span,
+                );
             }
-            for attr_item in &inner_open.attributes {
-                let Some(attr) = attr_item.as_attribute() else {
-                    continue;
-                };
-                let JSXAttributeName::Identifier(attr_id) = &attr.name else {
-                    continue;
-                };
-                let k = attr_id.name.as_str();
-                if k == "key" && !reported_key {
-                    reported_key = true;
+            if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value
+                && let Some(val_expr) = c.expression.as_expression()
+            {
+                let unwrapped = val_expr.without_parentheses();
+                if LIST_ROW_PRESS_PROPS.contains(&k)
+                    && matches!(
+                        unwrapped,
+                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                    )
+                {
                     push_semantic_site(
                         sites,
-                        RuleId::RnNoRenderitemKey,
+                        RuleId::RnListCallbackPerRow,
                         subject_name.clone(),
-                        "rnNoRenderitemKey",
-                        "key",
-                        "A `key` on the JSX returned from `renderItem` is ignored by React Native lists; use `keyExtractor` on the list instead.".to_string(),
+                        "rnListCallbackPerRow",
+                        k,
+                        format!(
+                            "Inline `{k}` closure inside `{prop_name}` allocates a new function for every row on every render."
+                        ),
                         line_starts,
-                        attr.span,
+                        unwrapped.span(),
                     );
                 }
-                if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value
-                    && let Some(val_expr) = c.expression.as_expression()
-                {
-                    let unwrapped = val_expr.without_parentheses();
-                    if LIST_ROW_PRESS_PROPS.contains(&k)
-                        && matches!(
-                            unwrapped,
-                            Expression::ArrowFunctionExpression(_)
-                                | Expression::FunctionExpression(_)
-                        )
-                    {
-                        push_semantic_site(
-                            sites,
-                            RuleId::RnListCallbackPerRow,
-                            subject_name.clone(),
-                            "rnListCallbackPerRow",
-                            k,
-                            format!(
-                                "Inline `{k}` closure inside `{prop_name}` allocates a new function for every row on every render."
-                            ),
-                            line_starts,
-                            unwrapped.span(),
-                        );
-                    }
-                    if matches!(unwrapped, Expression::ObjectExpression(_)) {
-                        push_semantic_site(
-                            sites,
-                            RuleId::RnNoInlineObjectInListItem,
-                            subject_name.clone(),
-                            "rnNoInlineObjectInListItem",
-                            k,
-                            format!(
-                                "Inline object literal on `{k}` inside `{prop_name}` allocates a new reference per row."
-                            ),
-                            line_starts,
-                            unwrapped.span(),
-                        );
-                    }
+                if matches!(unwrapped, Expression::ObjectExpression(_)) {
+                    push_semantic_site(
+                        sites,
+                        RuleId::RnNoInlineObjectInListItem,
+                        subject_name.clone(),
+                        "rnNoInlineObjectInListItem",
+                        k,
+                        format!(
+                            "Inline object literal on `{k}` inside `{prop_name}` allocates a new reference per row."
+                        ),
+                        line_starts,
+                        unwrapped.span(),
+                    );
                 }
             }
         }

@@ -6,10 +6,10 @@
 )]
 
 mod aria_and_roles;
+mod custom_and_ui_a11y;
 mod forms_media_and_content;
 mod keyboard_and_focus;
 mod tables;
-
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
@@ -219,52 +219,62 @@ fn collect_a11y_module_bindings(
     const_strings: &mut HashMap<SymbolId, String>,
     imported_sources: &mut HashMap<SymbolId, String>,
 ) {
+    let _ = program;
     for (_, node) in semantic.nodes().iter_enumerated() {
         match node.kind() {
-            AstKind::ImportDeclaration(imp) => {
-                if imp.import_kind.is_type() {
-                    continue;
-                }
-                let src = imp.source.value.as_str().unwrap_or_default().to_string();
-                if let Some(specs) = &imp.specifiers {
-                    for spec in specs {
-                        let sym_opt = match spec {
-                            ImportDeclarationSpecifier::ImportSpecifier(s)
-                                if !s.import_kind.is_type() =>
-                            {
-                                s.local.symbol_id.get()
-                            }
-                            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                                s.local.symbol_id.get()
-                            }
-                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                                s.local.symbol_id.get()
-                            }
-                            _ => None,
-                        };
-                        if let Some(sym_id) = sym_opt {
-                            imported_sources.insert(sym_id, src.clone());
-                        }
-                    }
-                }
+            AstKind::ImportDeclaration(imp) if !imp.import_kind.is_type() => {
+                record_a11y_import_declaration(imp, imported_sources);
             }
             AstKind::VariableDeclaration(var_decl)
                 if var_decl.kind == VariableDeclarationKind::Const =>
             {
-                for decl in &var_decl.declarations {
-                    if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id
-                        && let Some(sym_id) = id.symbol_id.get()
-                        && let Some(init) = &decl.init
-                        && let Some(val) = eval_static_str(semantic, init, const_strings)
-                    {
-                        const_strings.insert(sym_id, val);
-                    }
-                }
+                record_a11y_const_declarations(semantic, var_decl, const_strings);
             }
             _ => {}
         }
     }
-    let _ = program;
+}
+
+fn record_a11y_import_declaration(
+    imp: &oxc_ast::ast::ImportDeclaration<'_>,
+    imported_sources: &mut HashMap<SymbolId, String>,
+) {
+    let src = imp.source.value.as_str().unwrap_or_default().to_string();
+    let Some(specs) = &imp.specifiers else {
+        return;
+    };
+    for spec in specs {
+        if let Some(sym_id) = import_specifier_symbol_id(spec) {
+            imported_sources.insert(sym_id, src.clone());
+        }
+    }
+}
+
+fn import_specifier_symbol_id(spec: &ImportDeclarationSpecifier<'_>) -> Option<SymbolId> {
+    match spec {
+        ImportDeclarationSpecifier::ImportSpecifier(s) if !s.import_kind.is_type() => {
+            s.local.symbol_id.get()
+        }
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => s.local.symbol_id.get(),
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => s.local.symbol_id.get(),
+        _ => None,
+    }
+}
+
+fn record_a11y_const_declarations(
+    semantic: &Semantic<'_>,
+    var_decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    const_strings: &mut HashMap<SymbolId, String>,
+) {
+    for decl in &var_decl.declarations {
+        if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id
+            && let Some(sym_id) = id.symbol_id.get()
+            && let Some(init) = &decl.init
+            && let Some(val) = eval_static_str(semantic, init, const_strings)
+        {
+            const_strings.insert(sym_id, val);
+        }
+    }
 }
 
 fn collect_file_labels_and_dom_ids(
@@ -285,41 +295,58 @@ fn collect_file_labels_and_dom_ids(
             && !is_inside_jsx_attribute(semantic, node_id)
             && let Some(html_for_attr) = find_attr(&opening.attributes, "htmlFor")
         {
-            for key in extract_attr_match_keys(semantic, html_for_attr, const_strings) {
-                label_html_for_ids.insert(key);
-            }
+            label_html_for_ids.extend(extract_attr_match_keys(
+                semantic,
+                html_for_attr,
+                const_strings,
+            ));
         }
 
         if !is_inside_template_element(semantic, node_id) {
-            for attr_item in &opening.attributes {
-                if let JSXAttributeItem::SpreadAttribute(spread) = attr_item {
-                    if let Expression::ObjectExpression(obj) = spread.argument.without_parentheses()
-                    {
-                        for prop in &obj.properties {
-                            if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop
-                                && p.key
-                                    .static_name()
-                                    .is_some_and(|n| n.as_str() == Some("id"))
-                                && let Some(id_val) =
-                                    eval_static_str(semantic, &p.value, const_strings)
-                            {
-                                static_dom_ids.push(id_val);
-                            } else if matches!(
-                                prop,
-                                oxc_ast::ast::ObjectPropertyKind::SpreadProperty(_)
-                            ) {
-                                *has_unresolved_id_spread = true;
-                            }
-                        }
-                    } else {
-                        *has_unresolved_id_spread = true;
+            collect_opening_dom_ids(
+                semantic,
+                opening,
+                const_strings,
+                static_dom_ids,
+                has_unresolved_id_spread,
+            );
+        }
+    }
+}
+
+fn collect_opening_dom_ids(
+    semantic: &Semantic<'_>,
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    const_strings: &HashMap<SymbolId, String>,
+    static_dom_ids: &mut Vec<String>,
+    has_unresolved_id_spread: &mut bool,
+) {
+    for attr_item in &opening.attributes {
+        let JSXAttributeItem::SpreadAttribute(spread) = attr_item else {
+            continue;
+        };
+        let Expression::ObjectExpression(obj) = spread.argument.without_parentheses() else {
+            *has_unresolved_id_spread = true;
+            continue;
+        };
+        for prop in &obj.properties {
+            match prop {
+                oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p)
+                    if p.key.static_name().is_some_and(|n| n.as_str() == Some("id")) =>
+                {
+                    if let Some(id_val) = eval_static_str(semantic, &p.value, const_strings) {
+                        static_dom_ids.push(id_val);
                     }
                 }
-            }
-            if let Some(id_attr) = find_last_attr(&opening.attributes, "id") {
-                collect_known_attr_strings(semantic, id_attr, const_strings, static_dom_ids);
+                oxc_ast::ast::ObjectPropertyKind::SpreadProperty(_) => {
+                    *has_unresolved_id_spread = true;
+                }
+                _ => {}
             }
         }
+    }
+    if let Some(id_attr) = find_last_attr(&opening.attributes, "id") {
+        collect_known_attr_strings(semantic, id_attr, const_strings, static_dom_ids);
     }
 }
 

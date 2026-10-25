@@ -30,6 +30,13 @@ const CLI_SUPPRESSED_RULES: &[&str] = &[
     "bandit/B607",
 ];
 
+// Library-only structure rules (`py-structure-missing-py-typed`, `py-structure-low-type-hint-coverage`)
+// are suppressed in `dotore-py` when `__python_profile == "script"` (or explicit `"script"` profile in `[tool.dotore]`).
+const SCRIPT_SUPPRESSED_RULES: &[&str] = &[
+    "py-structure-missing-py-typed",
+    "py-structure-low-type-hint-coverage",
+];
+
 impl DotoreConfig {
     /// Extracts a [`DotoreConfig`] from `[tool.dotore]` and `[tool.python-doctor]` in a
     /// `pyproject.toml` string (including Python `cli`/`script` profile rule suppressions).
@@ -45,10 +52,7 @@ impl DotoreConfig {
             .and_then(toml::Value::as_table);
 
         let profile = infer_python_profile_from_pyproject_doc(&doc);
-        if dotore_tbl.is_none()
-            && py_doctor_tbl.is_none()
-            && !matches!(profile, Some("cli" | "script"))
-        {
+        if dotore_tbl.is_none() && py_doctor_tbl.is_none() && profile != Some("cli") {
             return None;
         }
 
@@ -62,6 +66,16 @@ impl DotoreConfig {
 
         if profile == Some("cli") {
             for &rule_key in CLI_SUPPRESSED_RULES {
+                let is_explicitly_enabled = RuleId::parse(rule_key)
+                    .and_then(|id| cfg.explicit_rule_override(id))
+                    .is_some();
+                if !is_explicitly_enabled && !cfg.ignore.rules.iter().any(|r| r == rule_key) {
+                    cfg.ignore.rules.push(rule_key.to_string());
+                }
+            }
+        }
+        if profile == Some("script") {
+            for &rule_key in SCRIPT_SUPPRESSED_RULES {
                 let is_explicitly_enabled = RuleId::parse(rule_key)
                     .and_then(|id| cfg.explicit_rule_override(id))
                     .is_some();
@@ -106,6 +120,17 @@ pub fn infer_python_profile_from_pyproject_doc(doc: &toml::Value) -> Option<&'st
         .is_some()
     {
         return Some("library");
+    }
+    if doc
+        .get("project")
+        .and_then(toml::Value::as_table)
+        .is_some()
+        || doc
+            .get("tool")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|t| t.contains_key("poetry"))
+    {
+        return Some("script");
     }
     None
 }
@@ -162,7 +187,7 @@ fn collect_pyproject_dep_names(doc: &toml::Value) -> Vec<String> {
         .and_then(toml::Value::as_table)
     {
         for key in poetry_deps.keys() {
-            let bare = normalize_dep_name(key);
+            let bare = normalize_python_dep_name(key);
             if !bare.is_empty() && bare != "python" {
                 names.push(bare);
             }
@@ -175,10 +200,12 @@ fn extract_bare_pep508_name(raw: &str) -> String {
     let end = raw
         .find(['>', '<', '=', '!', '~', '[', ';', '@', ' ', '\t'])
         .unwrap_or(raw.len());
-    normalize_dep_name(&raw[..end])
+    normalize_python_dep_name(&raw[..end])
 }
 
-fn normalize_dep_name(raw: &str) -> String {
+/// Normalizes a PEP 508 / Python distribution package name to lowercase hyphen-separated form.
+#[must_use]
+pub fn normalize_python_dep_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut prev_dash = false;
     for ch in raw.trim().chars() {
@@ -203,72 +230,76 @@ fn apply_pyproject_tool_table(
     cfg: &mut DotoreConfig,
 ) {
     if let Some(suppress_arr) = tbl.get("suppress").and_then(toml::Value::as_array) {
-        for rule in suppress_arr.iter().filter_map(toml::Value::as_str) {
-            let trimmed = rule.trim();
-            if !trimmed.is_empty() && !cfg.ignore.rules.iter().any(|r| r == trimmed) {
-                cfg.ignore.rules.push(trimmed.to_string());
-            }
+        push_unique_toml_strings(&mut cfg.ignore.rules, suppress_arr, true);
+    }
+    apply_pyproject_per_file_suppress(tbl, cfg);
+    apply_pyproject_severity_tables(tbl, cfg);
+    if let Some(ignore_tbl) = tbl.get("ignore").and_then(toml::Value::as_table) {
+        if let Some(rules) = ignore_tbl.get("rules").and_then(toml::Value::as_array) {
+            push_unique_toml_strings(&mut cfg.ignore.rules, rules, false);
+        }
+        if let Some(files) = ignore_tbl.get("files").and_then(toml::Value::as_array) {
+            push_unique_toml_strings(&mut cfg.ignore.files, files, false);
+        }
+        if let Some(tags) = ignore_tbl.get("tags").and_then(toml::Value::as_array) {
+            push_unique_toml_strings(&mut cfg.ignore.tags, tags, false);
         }
     }
+    apply_pyproject_boolean_flags(tbl, cfg);
+}
 
+fn push_unique_toml_strings(target: &mut Vec<String>, arr: &[toml::Value], trim: bool) {
+    for raw in arr.iter().filter_map(toml::Value::as_str) {
+        let item = if trim { raw.trim() } else { raw };
+        if (!trim || !item.is_empty()) && !target.iter().any(|existing| existing == item) {
+            target.push(item.to_string());
+        }
+    }
+}
+
+fn apply_pyproject_per_file_suppress(
+    tbl: &toml::map::Map<String, toml::Value>,
+    cfg: &mut DotoreConfig,
+) {
     for key in ["per-file-suppress", "per_file_suppress", "perFileSuppress"] {
-        if let Some(per_file_tbl) = tbl.get(key).and_then(toml::Value::as_table) {
-            for (pat, val) in per_file_tbl {
-                let rules = extract_string_or_array(val);
-                if !pat.trim().is_empty() {
-                    cfg.ignore.overrides.push(IgnoreOverride {
-                        files: vec![pat.clone()],
-                        rules,
-                    });
-                }
+        let Some(per_file_tbl) = tbl.get(key).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (pat, val) in per_file_tbl {
+            if !pat.trim().is_empty() {
+                cfg.ignore.overrides.push(IgnoreOverride {
+                    files: vec![pat.clone()],
+                    rules: extract_string_or_array(val),
+                });
             }
         }
     }
+}
 
+fn apply_pyproject_severity_tables(
+    tbl: &toml::map::Map<String, toml::Value>,
+    cfg: &mut DotoreConfig,
+) {
     if let Some(rules_tbl) = tbl.get("rules").and_then(toml::Value::as_table) {
         for (rule_key, val) in rules_tbl {
-            if let Some(sev_str) = val.as_str()
-                && let Some(sev) = parse_severity_override_str(sev_str)
-            {
+            if let Some(sev) = val.as_str().and_then(parse_severity_override_str) {
                 cfg.rules.insert(rule_key.clone(), sev);
             }
         }
     }
-
     if let Some(cats_tbl) = tbl.get("categories").and_then(toml::Value::as_table) {
         for (cat_key, val) in cats_tbl {
-            if let Some(sev_str) = val.as_str()
-                && let Some(sev) = parse_severity_override_str(sev_str)
-            {
+            if let Some(sev) = val.as_str().and_then(parse_severity_override_str) {
                 cfg.categories.insert(cat_key.clone(), sev);
             }
         }
     }
+}
 
-    if let Some(ignore_tbl) = tbl.get("ignore").and_then(toml::Value::as_table) {
-        if let Some(rules) = ignore_tbl.get("rules").and_then(toml::Value::as_array) {
-            for r in rules.iter().filter_map(toml::Value::as_str) {
-                if !cfg.ignore.rules.iter().any(|existing| existing == r) {
-                    cfg.ignore.rules.push(r.to_string());
-                }
-            }
-        }
-        if let Some(files) = ignore_tbl.get("files").and_then(toml::Value::as_array) {
-            for f in files.iter().filter_map(toml::Value::as_str) {
-                if !cfg.ignore.files.iter().any(|existing| existing == f) {
-                    cfg.ignore.files.push(f.to_string());
-                }
-            }
-        }
-        if let Some(tags) = ignore_tbl.get("tags").and_then(toml::Value::as_array) {
-            for t in tags.iter().filter_map(toml::Value::as_str) {
-                if !cfg.ignore.tags.iter().any(|existing| existing == t) {
-                    cfg.ignore.tags.push(t.to_string());
-                }
-            }
-        }
-    }
-
+fn apply_pyproject_boolean_flags(
+    tbl: &toml::map::Map<String, toml::Value>,
+    cfg: &mut DotoreConfig,
+) {
     if let Some(warnings) = tbl.get("warnings").and_then(toml::Value::as_bool) {
         cfg.warnings = warnings;
     }

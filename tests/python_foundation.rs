@@ -691,6 +691,45 @@ def active_fn(items: list = []):
         "Expected CLI profile to auto-suppress bandit/B110 (py-no-silent-broad-except), got {:?}",
         cli_report.diagnostics
     );
+    // 4. `script` profile inferred when `pyproject.toml` has `[project]` without `[build-system]` and without web/cli deps,
+    //    suppressing library-only `py-structure-missing-py-typed` and `py-structure-low-type-hint-coverage`.
+    let script_pyproject = r#"
+[project]
+name = "data-runner"
+version = "0.1.0"
+dependencies = ["requests>=2.31"]
+"#;
+    let script_gate = analyzer.infer_capability_gate(
+        Path::new("scripts/runner"),
+        &[(PathBuf::from("scripts/runner/pyproject.toml"), script_pyproject)],
+    );
+    assert_eq!(script_gate.package_role, PackageRole::Application);
+    let script_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("pyproject.toml"), script_pyproject.to_string()),
+            (
+                PathBuf::from("run_a.py"),
+                "def step_a(x: int) -> int:\n    return x + 1\n".to_string(),
+            ),
+            (
+                PathBuf::from("run_b.py"),
+                "def step_b(y):\n    return y * 2\n".to_string(),
+            ),
+            (
+                PathBuf::from("run_c.py"),
+                "def step_c(z):\n    return z - 1\n".to_string(),
+            ),
+        ],
+        None,
+    );
+    assert!(
+        !script_report.diagnostics.iter().any(|d| matches!(
+            d.rule,
+            RuleId::PyStructureMissingPyTyped | RuleId::PyStructureLowTypeHintCoverage
+        )),
+        "Expected script profile to suppress library-only structure rules, got: {:?}",
+        script_report.diagnostics
+    );
 }
 
 #[test]

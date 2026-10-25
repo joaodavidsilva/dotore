@@ -34,26 +34,50 @@ pub(super) fn check_rendering_hydration_mismatch_time(
     let Some(expr) = container.expression.as_expression() else {
         return;
     };
-    // Skip if inside a JSX attribute named `transition` on a motion element, or parent has `suppressHydrationWarning`
-    for anc_id in semantic.nodes().ancestor_ids(node_id) {
-        if let AstKind::JSXElement(el) = semantic.nodes().kind(anc_id) {
-            let has_suppress = el.opening_element.attributes.iter().any(|a| {
-                if let JSXAttributeItem::Attribute(attr) = a
-                    && let JSXAttributeName::Identifier(id) = &attr.name
-                {
-                    id.name == "suppressHydrationWarning"
-                } else {
-                    false
-                }
-            });
-            if has_suppress {
-                return;
-            }
-            break;
-        }
+    if enclosing_jsx_element_suppresses_hydration_warning(node_id, semantic) {
+        return;
     }
 
-    let matched_label = match unwrap_expr(expr) {
+    let Some(display) = hydration_mismatch_time_label(expr) else {
+        return;
+    };
+
+    let subject_name =
+        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
+    push_semantic_site(
+        out,
+        RuleId::RenderingHydrationMismatchTime,
+        subject_name,
+        "renderingHydrationMismatchTime",
+        display,
+        format!(
+            "This can cause a hydration mismatch because {display} in JSX gives a different value on the server than in the browser. Move it into useEffect+useState to run only in the browser, or add suppressHydrationWarning to the parent if it's on purpose."
+        ),
+        line_starts,
+        container.span,
+    );
+}
+
+fn enclosing_jsx_element_suppresses_hydration_warning(
+    node_id: NodeId,
+    semantic: &Semantic<'_>,
+) -> bool {
+    for anc_id in semantic.nodes().ancestor_ids(node_id) {
+        if let AstKind::JSXElement(el) = semantic.nodes().kind(anc_id) {
+            return el.opening_element.attributes.iter().any(|a| {
+                matches!(
+                    a,
+                    JSXAttributeItem::Attribute(attr)
+                        if matches!(&attr.name, JSXAttributeName::Identifier(id) if id.name == "suppressHydrationWarning")
+                )
+            });
+        }
+    }
+    false
+}
+
+fn hydration_mismatch_time_label(expr: &Expression<'_>) -> Option<&'static str> {
+    match unwrap_expr(expr) {
         Expression::NewExpression(new_expr) => {
             if matches!(unwrap_expr(&new_expr.callee), Expression::Identifier(id) if id.name == "Date")
                 && new_expr.arguments.is_empty()
@@ -64,38 +88,21 @@ pub(super) fn check_rendering_hydration_mismatch_time(
             }
         }
         Expression::CallExpression(call) => {
-            if let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee)
-                && let Expression::Identifier(obj_id) = unwrap_expr(&mem.object)
-            {
-                match (obj_id.name.as_str(), mem.property.name.as_str()) {
-                    ("Date", "now") => Some("Date.now()"),
-                    ("Math", "random") => Some("Math.random()"),
-                    ("performance", "now") => Some("performance.now()"),
-                    ("crypto", "randomUUID") => Some("crypto.randomUUID()"),
-                    _ => None,
-                }
-            } else {
-                None
+            let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
+                return None;
+            };
+            let Expression::Identifier(obj_id) = unwrap_expr(&mem.object) else {
+                return None;
+            };
+            match (obj_id.name.as_str(), mem.property.name.as_str()) {
+                ("Date", "now") => Some("Date.now()"),
+                ("Math", "random") => Some("Math.random()"),
+                ("performance", "now") => Some("performance.now()"),
+                ("crypto", "randomUUID") => Some("crypto.randomUUID()"),
+                _ => None,
             }
         }
         _ => None,
-    };
-
-    if let Some(display) = matched_label {
-        let subject_name = find_enclosing_react_node(semantic, node_id)
-            .and_then(|id| get_subject_name(semantic, id));
-        push_semantic_site(
-            out,
-            RuleId::RenderingHydrationMismatchTime,
-            subject_name,
-            "renderingHydrationMismatchTime",
-            display,
-            format!(
-                "This can cause a hydration mismatch because {display} in JSX gives a different value on the server than in the browser. Move it into useEffect+useState to run only in the browser, or add suppressHydrationWarning to the parent if it's on purpose."
-            ),
-            line_starts,
-            container.span,
-        );
     }
 }
 

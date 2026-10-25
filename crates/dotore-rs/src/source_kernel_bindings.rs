@@ -415,70 +415,52 @@ fn is_compound_assignment_op(op: &BinOp) -> bool {
     )
 }
 
-/// Unwraps parentheses, groups, and shared/mutable reference wrappers from `expr`.
-#[must_use]
-pub(crate) fn strip_wrappers(mut expr: &Expr) -> &Expr {
+fn strip_expr_ref(mut expr: &Expr, include_refs: bool) -> &Expr {
     loop {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "Only Paren, Group, and Reference expressions wrap an inner expression transparently"
+            reason = "Only Paren, Group, and optionally Reference expressions are unwrapped here (#50)"
         )]
         match expr {
             Expr::Paren(p) => expr = &p.expr,
             Expr::Group(g) => expr = &g.expr,
-            Expr::Reference(r) => expr = &r.expr,
+            Expr::Reference(r) if include_refs => expr = &r.expr,
             _ => return expr,
         }
     }
+}
+
+fn into_stripped_expr(mut expr: Expr, include_refs: bool) -> Expr {
+    loop {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "Only Paren, Group, and optionally Reference expressions are unwrapped here (#50)"
+        )]
+        match expr {
+            Expr::Paren(p) => expr = *p.expr,
+            Expr::Group(g) => expr = *g.expr,
+            Expr::Reference(r) if include_refs => expr = *r.expr,
+            other => return other,
+        }
+    }
+}
+
+/// Unwraps parentheses, groups, and shared/mutable reference wrappers from `expr`.
+#[must_use]
+pub(crate) fn strip_wrappers(expr: &Expr) -> &Expr {
+    strip_expr_ref(expr, true)
 }
 
 /// Unwraps parentheses and groups from `expr`.
 #[must_use]
-pub(crate) fn strip_parens(mut expr: &Expr) -> &Expr {
-    loop {
-        #[expect(
-            clippy::wildcard_enum_match_arm,
-            reason = "Only Paren and Group expressions are unwrapped here"
-        )]
-        match expr {
-            Expr::Paren(p) => expr = &p.expr,
-            Expr::Group(g) => expr = &g.expr,
-            _ => return expr,
-        }
-    }
-}
-
-/// Unwraps outer `Paren` and `Group` expressions by value.
-#[must_use]
-fn into_stripped_parens(mut expr: Expr) -> Expr {
-    loop {
-        #[expect(
-            clippy::wildcard_enum_match_arm,
-            reason = "Only Paren and Group expressions are unwrapped here"
-        )]
-        match expr {
-            Expr::Paren(p) => expr = *p.expr,
-            Expr::Group(g) => expr = *g.expr,
-            other => return other,
-        }
-    }
+pub(crate) fn strip_parens(expr: &Expr) -> &Expr {
+    strip_expr_ref(expr, false)
 }
 
 /// Unwraps outer `Paren`, `Group`, and `Reference` (`&` / `&mut`) expressions by value.
 #[must_use]
-pub(crate) fn into_stripped_wrappers(mut expr: Expr) -> Expr {
-    loop {
-        #[expect(
-            clippy::wildcard_enum_match_arm,
-            reason = "Only Paren, Group, and Reference expressions are unwrapped here"
-        )]
-        match expr {
-            Expr::Paren(p) => expr = *p.expr,
-            Expr::Group(g) => expr = *g.expr,
-            Expr::Reference(r) => expr = *r.expr,
-            other => return other,
-        }
-    }
+pub(crate) fn into_stripped_wrappers(expr: Expr) -> Expr {
+    into_stripped_expr(expr, true)
 }
 
 /// Extracts a bare single-segment identifier from `expr` (no path qualifier, no generic arguments).
@@ -665,8 +647,8 @@ impl<'a> KernelContext<'a> {
     #[must_use]
     pub(crate) fn resolve_value(&self, expr: &Expr) -> Option<Expr> {
         let mut current = expr.clone();
-        for _ in 0..BINDING_DEPTH {
-            current = into_stripped_parens(current);
+        for _ in 0..=BINDING_DEPTH {
+            current = into_stripped_expr(current, false);
             let Some(name) = bare_identifier(&current) else {
                 return Some(current);
             };

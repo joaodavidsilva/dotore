@@ -20,12 +20,16 @@ pub(crate) mod clippy_rules;
 pub(crate) mod graph;
 /// Single-pass `syn` AST, **Subject**, **Symbol Outline**, and suppression extraction for `.rs` files.
 pub(crate) mod ir;
+/// Single-pass architecture facet extraction and helper AST fingerprinting for `.rs` files.
+pub(crate) mod ir_facets;
 /// `Cargo.toml` **Capability Gate** inference and package role classification.
 pub(crate) mod manifest;
 /// Shared `syn` AST, type, attribute, span/line, and lexical-scope matchers and diagnostic helpers.
 pub(crate) mod matchers;
 /// Single-pass detectors for Rust allocation and hot-loop performance rules.
 pub(crate) mod perf;
+/// Shared AST helper matchers for `perf.rs`.
+pub(crate) mod perf_helpers;
 /// Rule activation gating and evaluation dispatcher for Rust rules.
 pub(crate) mod rules;
 /// Single-pass detectors for the 5 core production Rust safety rules.
@@ -51,6 +55,7 @@ pub use ir::{RsCandidateFinding, RsFileIr, RsSubjectIr, RsSubjectKind, extract_r
 pub use manifest::infer_cargo_toml_capability_gate;
 pub use perf::TOKIO_AND_PERF_RULES;
 pub use rules::{CORE_RUST_SAFETY_RULES, evaluate_rs_file, evaluate_rs_package};
+pub use structure_duplication::evaluate_workspace_near_duplicate_functions;
 
 /// Rust language analyzer implementing [`LanguageAnalyzer`] for `.rs` files and `Cargo.toml` manifests.
 #[derive(Debug, Clone, Copy, Default)]

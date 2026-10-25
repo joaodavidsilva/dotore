@@ -7,7 +7,7 @@
 mod async_waterfalls;
 mod collections_and_loops;
 mod dom_and_browser;
-
+mod loop_hoisting_and_lookups;
 use std::{collections::HashSet, path::Path};
 
 use oxc_ast::{AstKind, ast::Expression};
@@ -294,27 +294,11 @@ pub(crate) fn extract_js_performance_sites(
     line_starts: &[u32],
     out: &mut Vec<SemanticRuleSite>,
 ) {
-    let has_test_import = module.imports.iter().any(|imp| {
-        TEST_LIBRARY_IMPORTS.contains(&imp.source.as_str())
-            || imp.source.starts_with("@testing-library/")
-            || imp.source.starts_with("@playwright/")
-            || imp.source.starts_with("vitest/")
-            || imp.source.starts_with("@vitest/")
-            || imp.source.starts_with("@storybook/")
-    });
+    let has_test_import = module_has_test_import(module);
     let path_str = path.to_string_lossy().replace('\\', "/");
     let is_browser_test_file = path_str.contains(".browser.");
     let is_public_asset = path_str.starts_with("public/") || path_str.contains("/public/");
-
-    let imports_react_view_transition = module.imports.iter().any(|imp| {
-        imp.source == "react"
-            && !imp.is_type_only
-            && imp.bindings.iter().any(|b| {
-                !b.is_type_only
-                    && (b.imported_name == "ViewTransition"
-                        || b.imported_name == "unstable_ViewTransition")
-            })
-    });
+    let imports_react_view_transition = module_imports_react_view_transition(module);
 
     dom_and_browser::check_no_flush_sync(semantic, module, line_starts, out);
     dom_and_browser::check_js_cache_storage(semantic, line_starts, out);
@@ -323,254 +307,289 @@ pub(crate) fn extract_js_performance_sites(
     let mut covered_chain_spans: HashSet<Span> = HashSet::new();
 
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        match node.kind() {
-            AstKind::BlockStatement(block) => {
-                if !has_test_import && !is_browser_test_file {
-                    async_waterfalls::check_async_parallel_in_block(
-                        node_id,
-                        &block.body,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-                if async_waterfalls::is_inside_async_function(semantic, node_id) {
-                    async_waterfalls::check_async_defer_await_in_statements(
-                        &block.body,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-                dom_and_browser::check_js_batch_dom_css_in_block(
-                    node_id,
-                    &block.body,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::FunctionBody(body) => {
-                let is_block_body = body
-                    .span
-                    .source_text(semantic.source_text())
-                    .trim_start()
-                    .starts_with('{');
-                if is_block_body {
-                    if !has_test_import && !is_browser_test_file {
-                        async_waterfalls::check_async_parallel_in_block(
-                            node_id,
-                            &body.statements,
-                            semantic,
-                            line_starts,
-                            out,
-                        );
-                    }
-                    if async_waterfalls::is_inside_async_function(semantic, node_id) {
-                        async_waterfalls::check_async_defer_await_in_statements(
-                            &body.statements,
-                            semantic,
-                            line_starts,
-                            out,
-                        );
-                    }
-                    dom_and_browser::check_js_batch_dom_css_in_block(
-                        node_id,
-                        &body.statements,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-            }
-            AstKind::SwitchCase(case) => {
-                if async_waterfalls::is_inside_async_function(semantic, node_id) {
-                    async_waterfalls::check_async_defer_await_in_statements(
-                        &case.consequent,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-            }
-            AstKind::ForStatement(s) => {
-                async_waterfalls::check_loop_rules(
-                    node_id,
-                    s.body.span(),
-                    has_test_import,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::ForOfStatement(s) => {
-                if !s.r#await {
-                    async_waterfalls::check_loop_rules(
-                        node_id,
-                        s.body.span(),
-                        has_test_import,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-            }
-            AstKind::ForInStatement(s) => {
-                async_waterfalls::check_loop_rules(
-                    node_id,
-                    s.body.span(),
-                    has_test_import,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::WhileStatement(s) => {
-                async_waterfalls::check_loop_rules(
-                    node_id,
-                    s.body.span(),
-                    has_test_import,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::DoWhileStatement(s) => {
-                async_waterfalls::check_loop_rules(
-                    node_id,
-                    s.body.span(),
-                    has_test_import,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::CallExpression(call) => {
-                collections_and_loops::check_no_json_parse_stringify_clone(
-                    path,
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                if !is_public_asset {
-                    dom_and_browser::check_no_sync_xhr(node_id, call, semantic, line_starts, out);
-                }
-                dom_and_browser::check_no_document_write(node_id, call, semantic, line_starts, out);
-                collections_and_loops::check_no_spread_accumulator_in_reduce(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                async_waterfalls::check_js_async_reduce_without_awaited_acc(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                dom_and_browser::check_client_passive_event_listeners(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                if imports_react_view_transition {
-                    dom_and_browser::check_no_document_start_view_transition(
-                        node_id,
-                        call,
-                        semantic,
-                        line_starts,
-                        out,
-                    );
-                }
-                collections_and_loops::check_js_flatmap_filter(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                collections_and_loops::check_js_combine_iterations(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    &mut covered_chain_spans,
-                    out,
-                );
-                collections_and_loops::check_js_min_max_loop(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                collections_and_loops::check_js_length_check_first(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                collections_and_loops::check_js_hoist_regexp_call(
-                    node_id,
-                    call.span,
-                    &call.callee,
-                    &call.arguments,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                collections_and_loops::check_js_tosorted_immutable(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                dom_and_browser::check_client_localstorage_no_version(
-                    node_id,
-                    call,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::NewExpression(new_expr) => {
-                collections_and_loops::check_js_hoist_intl(
-                    node_id,
-                    new_expr,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-                collections_and_loops::check_js_hoist_regexp_call(
-                    node_id,
-                    new_expr.span,
-                    &new_expr.callee,
-                    &new_expr.arguments,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            AstKind::IfStatement(if_stmt) => {
-                collections_and_loops::check_js_early_exit(
-                    node_id,
-                    if_stmt,
-                    semantic,
-                    line_starts,
-                    out,
-                );
-            }
-            _ => {}
-        }
+        check_js_performance_ast_node(
+            path,
+            node_id,
+            node.kind(),
+            (has_test_import, is_browser_test_file, is_public_asset, imports_react_view_transition),
+            semantic,
+            line_starts,
+            &mut covered_chain_spans,
+            out,
+        );
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Dispatches single-pass JS performance AST node checks (#50)"
+)]
+fn check_js_performance_ast_node(
+    path: &Path,
+    node_id: NodeId,
+    kind: AstKind<'_>,
+    flags: (bool, bool, bool, bool),
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    covered_chain_spans: &mut HashSet<Span>,
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    let (has_test_import, is_browser_test_file, is_public_asset, imports_react_view_transition) =
+        flags;
+    if let Some(loop_body_span) = extract_non_await_loop_body_span(kind) {
+        async_waterfalls::check_loop_rules(
+            node_id,
+            loop_body_span,
+            has_test_import,
+            semantic,
+            line_starts,
+            out,
+        );
+        return;
+    }
+    match kind {
+        AstKind::BlockStatement(block) => {
+            check_statement_block_performance_rules(
+                node_id,
+                &block.body,
+                has_test_import,
+                is_browser_test_file,
+                semantic,
+                line_starts,
+                out,
+            );
+        }
+        AstKind::FunctionBody(body)
+            if body
+                .span
+                .source_text(semantic.source_text())
+                .trim_start()
+                .starts_with('{') =>
+        {
+            check_statement_block_performance_rules(
+                node_id,
+                &body.statements,
+                has_test_import,
+                is_browser_test_file,
+                semantic,
+                line_starts,
+                out,
+            );
+        }
+        AstKind::SwitchCase(case)
+            if async_waterfalls::is_inside_async_function(semantic, node_id) =>
+        {
+            async_waterfalls::check_async_defer_await_in_statements(
+                &case.consequent,
+                semantic,
+                line_starts,
+                out,
+            );
+        }
+        AstKind::CallExpression(call) => {
+            check_call_performance_rules(
+                path,
+                node_id,
+                call,
+                is_public_asset,
+                imports_react_view_transition,
+                semantic,
+                line_starts,
+                covered_chain_spans,
+                out,
+            );
+        }
+        AstKind::NewExpression(new_expr) => {
+            collections_and_loops::check_js_hoist_intl(
+                node_id,
+                new_expr,
+                semantic,
+                line_starts,
+                out,
+            );
+            collections_and_loops::check_js_hoist_regexp_call(
+                node_id,
+                new_expr.span,
+                &new_expr.callee,
+                &new_expr.arguments,
+                semantic,
+                line_starts,
+                out,
+            );
+        }
+        AstKind::IfStatement(if_stmt) => {
+            collections_and_loops::check_js_early_exit(
+                node_id,
+                if_stmt,
+                semantic,
+                line_starts,
+                out,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn extract_non_await_loop_body_span(kind: AstKind<'_>) -> Option<Span> {
+    match kind {
+        AstKind::ForStatement(s) => Some(s.body.span()),
+        AstKind::ForOfStatement(s) if !s.r#await => Some(s.body.span()),
+        AstKind::ForInStatement(s) => Some(s.body.span()),
+        AstKind::WhileStatement(s) => Some(s.body.span()),
+        AstKind::DoWhileStatement(s) => Some(s.body.span()),
+        _ => None,
+    }
+}
+
+fn module_has_test_import(module: &ModuleIr) -> bool {
+    module.imports.iter().any(|imp| {
+        TEST_LIBRARY_IMPORTS.contains(&imp.source.as_str())
+            || [
+                "@testing-library/",
+                "@playwright/",
+                "vitest/",
+                "@vitest/",
+                "@storybook/",
+            ]
+            .iter()
+            .any(|prefix| imp.source.starts_with(prefix))
+    })
+}
+
+fn module_imports_react_view_transition(module: &ModuleIr) -> bool {
+    module.imports.iter().any(|imp| {
+        imp.source == "react"
+            && !imp.is_type_only
+            && imp.bindings.iter().any(|b| {
+                !b.is_type_only
+                    && matches!(
+                        b.imported_name.as_str(),
+                        "ViewTransition" | "unstable_ViewTransition"
+                    )
+            })
+    })
+}
+
+fn check_statement_block_performance_rules(
+    node_id: NodeId,
+    statements: &[oxc_ast::ast::Statement<'_>],
+    has_test_import: bool,
+    is_browser_test_file: bool,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    if !has_test_import && !is_browser_test_file {
+        async_waterfalls::check_async_parallel_in_block(
+            node_id,
+            statements,
+            semantic,
+            line_starts,
+            out,
+        );
+    }
+    if async_waterfalls::is_inside_async_function(semantic, node_id) {
+        async_waterfalls::check_async_defer_await_in_statements(
+            statements,
+            semantic,
+            line_starts,
+            out,
+        );
+    }
+    dom_and_browser::check_js_batch_dom_css_in_block(
+        node_id,
+        statements,
+        semantic,
+        line_starts,
+        out,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Dispatches all CallExpression JS performance detectors in a single AST pass (#50)"
+)]
+fn check_call_performance_rules(
+    path: &Path,
+    node_id: NodeId,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    is_public_asset: bool,
+    imports_react_view_transition: bool,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    covered_chain_spans: &mut HashSet<Span>,
+    out: &mut Vec<SemanticRuleSite>,
+) {
+    collections_and_loops::check_no_json_parse_stringify_clone(
+        path,
+        node_id,
+        call,
+        semantic,
+        line_starts,
+        out,
+    );
+    if !is_public_asset {
+        dom_and_browser::check_no_sync_xhr(node_id, call, semantic, line_starts, out);
+    }
+    dom_and_browser::check_no_document_write(node_id, call, semantic, line_starts, out);
+    collections_and_loops::check_no_spread_accumulator_in_reduce(
+        node_id,
+        call,
+        semantic,
+        line_starts,
+        out,
+    );
+    async_waterfalls::check_js_async_reduce_without_awaited_acc(
+        node_id,
+        call,
+        semantic,
+        line_starts,
+        out,
+    );
+    dom_and_browser::check_client_passive_event_listeners(
+        node_id,
+        call,
+        semantic,
+        line_starts,
+        out,
+    );
+    if imports_react_view_transition {
+        dom_and_browser::check_no_document_start_view_transition(
+            node_id,
+            call,
+            semantic,
+            line_starts,
+            out,
+        );
+    }
+    collections_and_loops::check_js_flatmap_filter(node_id, call, semantic, line_starts, out);
+    collections_and_loops::check_js_combine_iterations(
+        node_id,
+        call,
+        semantic,
+        line_starts,
+        covered_chain_spans,
+        out,
+    );
+    collections_and_loops::check_js_min_max_loop(node_id, call, semantic, line_starts, out);
+    collections_and_loops::check_js_length_check_first(node_id, call, semantic, line_starts, out);
+    collections_and_loops::check_js_hoist_regexp_call(
+        node_id,
+        call.span,
+        &call.callee,
+        &call.arguments,
+        semantic,
+        line_starts,
+        out,
+    );
+    collections_and_loops::check_js_tosorted_immutable(node_id, call, semantic, line_starts, out);
+    dom_and_browser::check_client_localstorage_no_version(
+        node_id,
+        call,
+        semantic,
+        line_starts,
+        out,
+    );
 }
 
 pub(super) fn collect_callee_identifier_trail(expr: &Expression<'_>) -> Vec<String> {

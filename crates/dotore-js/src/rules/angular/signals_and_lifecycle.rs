@@ -272,8 +272,11 @@ fn is_in_boolean_or_relational_condition(
             AstKind::UnaryExpression(unary) => {
                 return unary.operator == UnaryOperator::LogicalNot;
             }
-            AstKind::LogicalExpression(_) | AstKind::BinaryExpression(_) => {
+            AstKind::LogicalExpression(_) => {
                 return true;
+            }
+            AstKind::BinaryExpression(bin) => {
+                return bin.operator.is_equality() || bin.operator.is_compare();
             }
             AstKind::IfStatement(if_stmt) => {
                 let test_span = if_stmt.test.span();
@@ -729,6 +732,14 @@ fn build_remove_async_keyword_patch(
     method: &MethodDefinition<'_>,
     source: &str,
 ) -> Option<AutofixPatch> {
+    if let Some(body) = &method.value.body {
+        let body_text = source
+            .get(body.span.start as usize..body.span.end as usize)
+            .unwrap_or_default();
+        if contains_await_token(body_text) {
+            return None;
+        }
+    }
     let key_start = method.key.span().start as usize;
     let method_start = method.span.start as usize;
     let prefix = source.get(method_start..key_start)?;
@@ -740,6 +751,25 @@ fn build_remove_async_keyword_patch(
         ByteSpan { start, end },
         "",
     ))
+}
+
+fn contains_await_token(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let is_ident_char = |b: Option<u8>| {
+        b.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$')
+    };
+    let mut from = 0;
+    while let Some(rel) = text.get(from..).and_then(|s| s.find("await")) {
+        let start = from + rel;
+        let end = start + 5;
+        if !is_ident_char(start.checked_sub(1).and_then(|i| bytes.get(i).copied()))
+            && !is_ident_char(bytes.get(end).copied())
+        {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 fn is_empty_lifecycle_method(method: &MethodDefinition<'_>, source: &str) -> bool {
@@ -762,15 +792,27 @@ fn build_prototype_lifecycle_patch(
 ) -> Option<AutofixPatch> {
     let val = prop.value.as_ref()?.without_parentheses();
     if let Expression::ArrowFunctionExpression(arrow) = val {
-        let body_text = source.get(arrow.body.span().start as usize..arrow.body.span().end as usize)?;
+        let body_text =
+            source.get(arrow.body.span().start as usize..arrow.body.span().end as usize)?;
         if body_text.starts_with('{') {
+            let raw_params = source
+                .get(arrow.params.span.start as usize..arrow.params.span.end as usize)
+                .unwrap_or("()")
+                .trim();
+            let params_text = if raw_params.starts_with('(') && raw_params.ends_with(')') {
+                raw_params.to_string()
+            } else if raw_params.is_empty() {
+                "()".to_string()
+            } else {
+                format!("({raw_params})")
+            };
             return Some(AutofixPatch::replace(
                 format!("Convert `{prop_name}` property into a prototype method"),
                 ByteSpan {
                     start: prop.span.start,
                     end: prop.span.end,
                 },
-                format!("{prop_name}() {body_text}"),
+                format!("{prop_name}{params_text} {body_text}"),
             ));
         }
     }

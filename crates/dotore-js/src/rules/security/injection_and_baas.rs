@@ -35,22 +35,25 @@ pub(super) fn evaluate_security_scan_patterns<F>(
 ) where
     F: Fn(RuleId) -> Option<RuleSeverity>,
 {
-    let src = &file.source;
+    check_injection_and_redirect_scan_rules(file, line_starts, is_active, out);
+    check_auth_crypto_and_cookie_scan_rules(file, path_str, line_starts, is_active, out);
+    check_supabase_and_firebase_scan_rules(file, path_str, line_starts, is_active, out);
+    check_mcp_agent_and_fallback_scan_rules(file, line_starts, is_active, out);
+    evaluate_remaining_security_scan_rules(file, path_str, line_starts, is_active, out);
+}
 
-    // 1. raw-sql-injection-risk
+fn check_injection_and_redirect_scan_rules<F>(
+    file: &FileIr,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let src = &file.source;
     if is_active(RuleId::RawSqlInjectionRisk).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains("$queryRawUnsafe(")
-                || line.contains("$executeRawUnsafe(")
-                || (line.contains("Prisma.raw(") && line.contains("${"))
-                || (line.contains("sql.raw(") && line.contains("${"))
-                || (line.contains(".query(")
-                    && line.contains("${")
-                    && (line.to_ascii_uppercase().contains("SELECT ")
-                        || line.to_ascii_uppercase().contains("INSERT ")
-                        || line.to_ascii_uppercase().contains("UPDATE ")
-                        || line.to_ascii_uppercase().contains("DELETE ")))
-            {
+            if is_raw_sql_injection_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -65,18 +68,9 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-
-    // 2. nosql-injection-risk
     if is_active(RuleId::NosqlInjectionRisk).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains("$where")
-                || (line.contains(".find(")
-                    && line.contains("JSON.parse(")
-                    && (line.contains("req.") || line.contains("request.")))
-                || (line.contains("$regex") && (line.contains("req.") || line.contains("request.")))
-                || (line.contains("new RegExp(")
-                    && (line.contains("req.") || line.contains("request.")))
-            {
+            if is_nosql_injection_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -91,22 +85,9 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-
-    // 3. command-execution-input-risk
     if is_active(RuleId::CommandExecutionInputRisk).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            let has_exec = find_standalone_call(line, "exec(").is_some()
-                || find_standalone_call(line, "execSync(").is_some()
-                || line.contains("child_process.exec")
-                || line.contains("cp.exec")
-                || (line.contains("spawn") && line.contains("shell: true"));
-            let has_taint = line.contains("req.")
-                || line.contains("request.")
-                || line.contains("params.")
-                || line.contains("query.")
-                || line.contains("body.")
-                || line.contains("searchParams");
-            if has_exec && has_taint {
+            if is_command_exec_input_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -121,22 +102,9 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-
-    // 4. path-traversal-risk
     if is_active(RuleId::PathTraversalRisk).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            let has_fs = line.contains("readFile(")
-                || line.contains("readFileSync(")
-                || line.contains("writeFile(")
-                || line.contains("writeFileSync(")
-                || line.contains("path.join(")
-                || line.contains("path.resolve(");
-            let has_taint = line.contains("req.")
-                || line.contains("request.")
-                || line.contains("params.")
-                || line.contains("query.")
-                || line.contains("body.");
-            if has_fs && has_taint && !line.contains("basename(") {
+            if is_path_traversal_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -151,23 +119,89 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
+    check_redirect_and_clickjacking_scan_rules(file, line_starts, is_active, out);
+}
 
-    // 5. untrusted-redirect-following
+fn is_raw_sql_injection_line(line: &str) -> bool {
+    if line.contains("$queryRawUnsafe(")
+        || line.contains("$executeRawUnsafe(")
+        || (line.contains("Prisma.raw(") && line.contains("${"))
+        || (line.contains("sql.raw(") && line.contains("${"))
+    {
+        return true;
+    }
+    if line.contains(".query(") && line.contains("${") {
+        let upper = line.to_ascii_uppercase();
+        return ["SELECT ", "INSERT ", "UPDATE ", "DELETE "]
+            .iter()
+            .any(|kw| upper.contains(kw));
+    }
+    false
+}
+
+fn is_nosql_injection_line(line: &str) -> bool {
+    if line.contains("$where") {
+        return true;
+    }
+    let has_req = line.contains("req.") || line.contains("request.");
+    has_req
+        && ((line.contains(".find(") && line.contains("JSON.parse("))
+            || line.contains("$regex")
+            || line.contains("new RegExp("))
+}
+
+fn is_command_exec_input_line(line: &str) -> bool {
+    let has_exec = find_standalone_call(line, "exec(").is_some()
+        || find_standalone_call(line, "execSync(").is_some()
+        || line.contains("child_process.exec")
+        || line.contains("cp.exec")
+        || (line.contains("spawn") && line.contains("shell: true"));
+    let has_taint = [
+        "req.",
+        "request.",
+        "params.",
+        "query.",
+        "body.",
+        "searchParams",
+    ]
+    .iter()
+    .any(|t| line.contains(t));
+    has_exec && has_taint
+}
+
+fn is_path_traversal_line(line: &str) -> bool {
+    let has_fs = [
+        "readFile(",
+        "readFileSync(",
+        "writeFile(",
+        "writeFileSync(",
+        "path.join(",
+        "path.resolve(",
+    ]
+    .iter()
+    .any(|p| line.contains(p));
+    let has_taint = ["req.", "request.", "params.", "query.", "body."]
+        .iter()
+        .any(|t| line.contains(t));
+    has_fs && has_taint && !line.contains("basename(")
+}
+
+fn check_redirect_and_clickjacking_scan_rules<F>(
+    file: &FileIr,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let src = &file.source;
     if is_active(RuleId::UntrustedRedirectFollowing).is_some()
         && !src.contains("redirect: \"manual\"")
         && !src.contains("redirect: 'manual'")
         && !src.contains("redirect: \"error\"")
     {
         for (idx, line) in src.lines().enumerate() {
-            if (line.contains("fetch(") || line.contains("axios.get(") || line.contains("got("))
-                && (line.contains("req.")
-                    || line.contains("request.")
-                    || line.contains("searchParams")
-                    || line.contains("targetUrl")
-                    || line.contains("callbackUrl")
-                    || line.contains("redirectUrl")
-                    || line.contains("webhookUrl"))
-            {
+            if is_untrusted_redirect_fetch_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -183,21 +217,9 @@ pub(super) fn evaluate_security_scan_patterns<F>(
         }
     }
 
-    // 6. clickjacking-redirect-risk & svg-filter-clickjacking-risk
     if is_active(RuleId::ClickjackingRedirectRisk).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            let is_unsafe_redirect = line.contains("redirect(")
-                && (line.contains("searchParams.get")
-                    || line.contains("nextUrl.searchParams")
-                    || line.contains("returnTo")
-                    || line.contains("callbackUrl"))
-                && !line.contains("safe")
-                && !line.contains("valid")
-                && !line.contains("allowlist");
-            let is_unsafe_frame = line.contains("frame-ancestors *")
-                || line.contains("X-Frame-Options: ALLOW")
-                || line.contains("\"X-Frame-Options\": \"ALLOW\"");
-            if is_unsafe_redirect || is_unsafe_frame {
+            if is_clickjacking_or_redirect_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -212,11 +234,12 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
+
     if is_active(RuleId::SvgFilterClickjackingRisk).is_some()
         && src.contains("<iframe")
-        && (src.contains("filter: url(#")
-            || src.contains("filter:url(#")
-            || src.contains("<feDisplacementMap"))
+        && ["filter: url(#", "filter:url(#", "<feDisplacementMap"]
+            .iter()
+            .any(|p| src.contains(p))
     {
         emit_line_diag(
             out,
@@ -230,41 +253,63 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             line_starts,
         );
     }
+}
 
-    // 7. jwt-insecure-verification
+fn is_untrusted_redirect_fetch_line(line: &str) -> bool {
+    (line.contains("fetch(") || line.contains("axios.get(") || line.contains("got("))
+        && [
+            "req.",
+            "request.",
+            "searchParams",
+            "targetUrl",
+            "callbackUrl",
+            "redirectUrl",
+            "webhookUrl",
+        ]
+        .iter()
+        .any(|p| line.contains(p))
+}
+
+fn is_clickjacking_or_redirect_line(line: &str) -> bool {
+    let is_unsafe_redirect = line.contains("redirect(")
+        && [
+            "searchParams.get",
+            "nextUrl.searchParams",
+            "returnTo",
+            "callbackUrl",
+        ]
+        .iter()
+        .any(|p| line.contains(p))
+        && !["safe", "valid", "allowlist"].iter().any(|g| line.contains(g));
+    let is_unsafe_frame = [
+        "frame-ancestors *",
+        "X-Frame-Options: ALLOW",
+        "\"X-Frame-Options\": \"ALLOW\"",
+    ]
+    .iter()
+    .any(|p| line.contains(p));
+    is_unsafe_redirect || is_unsafe_frame
+}
+
+fn check_auth_crypto_and_cookie_scan_rules<F>(
+    file: &FileIr,
+    path_str: &str,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let src = &file.source;
     if is_active(RuleId::JwtInsecureVerification).is_some() {
         check_jwt_insecure_verification(file, line_starts, out);
     }
-
-    // 8. insecure-crypto-risk
     if is_active(RuleId::InsecureCryptoRisk).is_some() {
         check_insecure_crypto_risk(file, line_starts, out);
     }
-
-    // 9. insecure-session-cookie
     if is_active(RuleId::InsecureSessionCookie).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            let lower = line.to_ascii_lowercase();
-            let is_cookie_set = lower.contains(".cookie(")
-                || lower.contains(".cookies.set(")
-                || lower.contains("cookies().set(")
-                || lower.contains("document.cookie");
-            let has_auth_name = [
-                "session",
-                "sess",
-                "sid",
-                "auth",
-                "jwt",
-                "access_token",
-                "refresh_token",
-                "id_token",
-            ]
-            .iter()
-            .any(|w| lower.contains(w));
-            let is_insecure = lower.contains("httponly: false")
-                || lower.contains("httponly:false")
-                || lower.contains("document.cookie");
-            if is_cookie_set && has_auth_name && is_insecure {
+            if is_insecure_session_cookie_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -279,67 +324,32 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-
-    // 10. webhook-signature-risk
-    if is_active(RuleId::WebhookSignatureRisk).is_some() {
-        let lower_path = path_str.to_ascii_lowercase();
-        let lower_src = src.to_ascii_lowercase();
-        let is_webhook_file =
-            lower_path.contains("webhook") || lower_src.contains("webhookhandler");
-        let has_post_handler = src.contains("function POST")
-            || src.contains("const POST")
-            || src.contains("webhookHandler");
-        let has_req_read = src.contains("request.") || src.contains("req.");
-        let has_verification = [
-            "verifysignature",
-            "constructevent",
-            "createhmac",
-            "timingsafeequal",
-            "svix",
-            "webhooksecret",
-            "stripe.webhooks",
-            "signature",
-        ]
-        .iter()
-        .any(|w| lower_src.contains(w));
-        if is_webhook_file && has_post_handler && has_req_read && !has_verification {
-            let line_idx = src
-                .lines()
-                .position(|l| l.contains("POST") || l.contains("webhook"))
-                .unwrap_or(0);
-            emit_line_diag(
-                out,
-                file,
-                RuleId::WebhookSignatureRisk,
-                "webhookSignatureRisk",
-                "POST",
-                "Webhook handler code does not show an obvious signature verification step.",
-                line_idx,
-                src.lines().nth(line_idx).unwrap_or(""),
-                line_starts,
-            );
-        }
+    if is_active(RuleId::WebhookSignatureRisk).is_some() && is_unverified_webhook_handler(path_str, src) {
+        let line_idx = src
+            .lines()
+            .position(|l| l.contains("POST") || l.contains("webhook"))
+            .unwrap_or(0);
+        emit_line_diag(
+            out,
+            file,
+            RuleId::WebhookSignatureRisk,
+            "webhookSignatureRisk",
+            "POST",
+            "Webhook handler code does not show an obvious signature verification step.",
+            line_idx,
+            src.lines().nth(line_idx).unwrap_or(""),
+            line_starts,
+        );
     }
-
-    // 11. postmessage-origin-risk
     if is_active(RuleId::PostmessageOriginRisk).is_some() {
         check_postmessage_origin_risk(file, line_starts, out);
     }
-
-    // 12. cors-cookie-trust-risk
     if is_active(RuleId::CorsCookieTrustRisk).is_some() {
         check_cors_cookie_trust_risk(file, line_starts, out);
     }
-
-    // 13. request-body-mass-assignment
     if is_active(RuleId::RequestBodyMassAssignment).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains("...req.body")
-                || line.contains("...request.body")
-                || line.contains("...req.query")
-                || (line.contains("Object.assign(")
-                    && (line.contains("req.body") || line.contains("request.body")))
-            {
+            if is_mass_assignment_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -354,8 +364,77 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
+}
 
-    // 14. supabase-table-missing-rls & supabase-rls-policy-risk & supabase-client-owned-authz-field
+fn is_insecure_session_cookie_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let is_cookie_set = [
+        ".cookie(",
+        ".cookies.set(",
+        "cookies().set(",
+        "document.cookie",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    let has_auth_name = [
+        "session",
+        "sess",
+        "sid",
+        "auth",
+        "jwt",
+        "access_token",
+        "refresh_token",
+        "id_token",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    let is_insecure = ["httponly: false", "httponly:false", "document.cookie"]
+        .iter()
+        .any(|p| lower.contains(p));
+    is_cookie_set && has_auth_name && is_insecure
+}
+
+fn is_unverified_webhook_handler(path_str: &str, src: &str) -> bool {
+    let lower_path = path_str.to_ascii_lowercase();
+    let lower_src = src.to_ascii_lowercase();
+    let is_webhook_file = lower_path.contains("webhook") || lower_src.contains("webhookhandler");
+    let has_post_handler = ["function POST", "const POST", "webhookHandler"]
+        .iter()
+        .any(|p| src.contains(p));
+    let has_req_read = src.contains("request.") || src.contains("req.");
+    let has_verification = [
+        "verifysignature",
+        "constructevent",
+        "createhmac",
+        "timingsafeequal",
+        "svix",
+        "webhooksecret",
+        "stripe.webhooks",
+        "signature",
+    ]
+    .iter()
+    .any(|w| lower_src.contains(w));
+    is_webhook_file && has_post_handler && has_req_read && !has_verification
+}
+
+fn is_mass_assignment_line(line: &str) -> bool {
+    ["...req.body", "...request.body", "...req.query"]
+        .iter()
+        .any(|p| line.contains(p))
+        || (line.contains("Object.assign(")
+            && (line.contains("req.body") || line.contains("request.body")))
+}
+
+fn check_supabase_and_firebase_scan_rules<F>(
+    file: &FileIr,
+    path_str: &str,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let src = &file.source;
     if is_active(RuleId::SupabaseTableMissingRls).is_some() && path_str.ends_with(".sql") {
         check_supabase_table_missing_rls(file, line_starts, out);
     }
@@ -364,22 +443,7 @@ pub(super) fn evaluate_security_scan_patterns<F>(
     }
     if is_active(RuleId::SupabaseClientOwnedAuthzField).is_some() && !file.module.has_use_server {
         for (idx, line) in src.lines().enumerate() {
-            if (line.contains("supabase") || line.contains(".from("))
-                && (line.contains(".insert(")
-                    || line.contains(".update(")
-                    || line.contains(".upsert("))
-                && [
-                    "ownerId",
-                    "creatorId",
-                    "userId",
-                    "orgId",
-                    "tenantId",
-                    "role",
-                    "isAdmin",
-                ]
-                .iter()
-                .any(|f| line.contains(f))
-            {
+            if is_supabase_client_authz_write_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -394,8 +458,6 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-
-    // 15. firebase-permissive-rules, firebase-client-owned-authz-field, firebase-query-filter-as-auth
     if is_active(RuleId::FirebasePermissiveRules).is_some() && path_str.ends_with(".rules") {
         for (idx, line) in src.lines().enumerate() {
             let lower = line.to_ascii_lowercase();
@@ -416,32 +478,48 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-    if is_active(RuleId::FirebaseClientOwnedAuthzField).is_some()
-        && (src.contains("firebase")
-            || src.contains("firestore")
-            || src.contains("setDoc(")
-            || src.contains("updateDoc(")
-            || src.contains("addDoc("))
-    {
+    check_firebase_client_code_rules(file, line_starts, is_active, out);
+}
+
+fn is_supabase_client_authz_write_line(line: &str) -> bool {
+    (line.contains("supabase") || line.contains(".from("))
+        && [".insert(", ".update(", ".upsert("]
+            .iter()
+            .any(|p| line.contains(p))
+        && [
+            "ownerId",
+            "creatorId",
+            "userId",
+            "orgId",
+            "tenantId",
+            "role",
+            "isAdmin",
+        ]
+        .iter()
+        .any(|f| line.contains(f))
+}
+
+fn check_firebase_client_code_rules<F>(
+    file: &FileIr,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let src = &file.source;
+    let has_firebase_ctx = [
+        "firebase",
+        "firestore",
+        "setDoc(",
+        "updateDoc(",
+        "addDoc(",
+    ]
+    .iter()
+    .any(|p| src.contains(p));
+    if is_active(RuleId::FirebaseClientOwnedAuthzField).is_some() && has_firebase_ctx {
         for (idx, line) in src.lines().enumerate() {
-            if (line.contains("setDoc(")
-                || line.contains("updateDoc(")
-                || line.contains("addDoc(")
-                || line.contains(".set(")
-                || line.contains(".update("))
-                && [
-                    "ownerId",
-                    "creatorId",
-                    "orgId",
-                    "tenantId",
-                    "workspaceId",
-                    "role",
-                    "roles",
-                    "isAdmin",
-                ]
-                .iter()
-                .any(|f| line.contains(f))
-            {
+            if is_firebase_client_authz_write_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -458,12 +536,7 @@ pub(super) fn evaluate_security_scan_patterns<F>(
     }
     if is_active(RuleId::FirebaseQueryFilterAsAuth).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains(".where(")
-                && (line.contains("\"==\"") || line.contains("'=='"))
-                && ["uid", "userId", "ownerId", "orgId", "tenantId", "role"]
-                    .iter()
-                    .any(|f| line.contains(&format!("\"{f}\"")) || line.contains(&format!("'{f}'")))
-            {
+            if is_firebase_query_filter_auth_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -478,8 +551,43 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
+}
 
-    // 16. mcp-tool-capability-risk & agent-tool-capability-risk
+fn is_firebase_client_authz_write_line(line: &str) -> bool {
+    ["setDoc(", "updateDoc(", "addDoc(", ".set(", ".update("]
+        .iter()
+        .any(|p| line.contains(p))
+        && [
+            "ownerId",
+            "creatorId",
+            "orgId",
+            "tenantId",
+            "workspaceId",
+            "role",
+            "roles",
+            "isAdmin",
+        ]
+        .iter()
+        .any(|f| line.contains(f))
+}
+
+fn is_firebase_query_filter_auth_line(line: &str) -> bool {
+    line.contains(".where(")
+        && (line.contains("\"==\"") || line.contains("'=='"))
+        && ["uid", "userId", "ownerId", "orgId", "tenantId", "role"]
+            .iter()
+            .any(|f| line.contains(&format!("\"{f}\"")) || line.contains(&format!("'{f}'")))
+}
+
+fn check_mcp_agent_and_fallback_scan_rules<F>(
+    file: &FileIr,
+    line_starts: &[u32],
+    is_active: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let src = &file.source;
     let has_dangerous_cap = [
         "exec(",
         "execSync(",
@@ -496,14 +604,14 @@ pub(super) fn evaluate_security_scan_patterns<F>(
     .any(|c| src.contains(c));
     if is_active(RuleId::McpToolCapabilityRisk).is_some()
         && has_dangerous_cap
-        && (src.contains("@modelcontextprotocol/sdk")
-            || src.contains("McpServer")
-            || src.contains("McpAgent"))
+        && ["@modelcontextprotocol/sdk", "McpServer", "McpAgent"]
+            .iter()
+            .any(|p| src.contains(p))
     {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains(".tool(")
-                || line.contains("registerTool(")
-                || line.contains("CallToolRequestSchema")
+            if [".tool(", "registerTool(", "CallToolRequestSchema"]
+                .iter()
+                .any(|p| line.contains(p))
             {
                 emit_line_diag(
                     out,
@@ -521,11 +629,15 @@ pub(super) fn evaluate_security_scan_patterns<F>(
     }
     if is_active(RuleId::AgentToolCapabilityRisk).is_some() && has_dangerous_cap {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains("createTool(")
-                || line.contains("defineTool(")
-                || line.contains("new DynamicTool(")
-                || line.contains("new StructuredTool(")
-                || line.contains("tool({")
+            if [
+                "createTool(",
+                "defineTool(",
+                "new DynamicTool(",
+                "new StructuredTool(",
+                "tool({",
+            ]
+            .iter()
+            .any(|p| line.contains(p))
             {
                 emit_line_diag(
                     out,
@@ -541,26 +653,9 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
-
-    // 17. secret-in-fallback
     if is_active(RuleId::SecretInFallback).is_some() {
         for (idx, line) in src.lines().enumerate() {
-            if line.contains("process.env.")
-                && (line.contains("??") || line.contains("||"))
-                && [
-                    "SECRET",
-                    "TOKEN",
-                    "PASSWORD",
-                    "PRIVATE_KEY",
-                    "API_KEY",
-                    "APIKEY",
-                    "CREDENTIAL",
-                    "SIGNING_KEY",
-                ]
-                .iter()
-                .any(|w| line.contains(w))
-                && (line.contains('"') || line.contains('\''))
-            {
+            if is_secret_in_fallback_line(line) {
                 emit_line_diag(
                     out,
                     file,
@@ -575,9 +670,24 @@ pub(super) fn evaluate_security_scan_patterns<F>(
             }
         }
     }
+}
 
-    // 18. Remaining security-scan rules
-    evaluate_remaining_security_scan_rules(file, path_str, line_starts, is_active, out);
+fn is_secret_in_fallback_line(line: &str) -> bool {
+    line.contains("process.env.")
+        && (line.contains("??") || line.contains("||"))
+        && (line.contains('"') || line.contains('\''))
+        && [
+            "SECRET",
+            "TOKEN",
+            "PASSWORD",
+            "PRIVATE_KEY",
+            "API_KEY",
+            "APIKEY",
+            "CREDENTIAL",
+            "SIGNING_KEY",
+        ]
+        .iter()
+        .any(|w| line.contains(w))
 }
 
 fn check_supabase_table_missing_rls(file: &FileIr, line_starts: &[u32], out: &mut Vec<Diagnostic>) {

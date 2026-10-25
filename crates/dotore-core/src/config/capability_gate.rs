@@ -41,62 +41,13 @@ const REACT_COMPILER_CONFIG_FILES: &[&str] = &[
 const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("react", &[Capability::React]),
     ("react-dom", &[Capability::React, Capability::Ssr]),
-    (
-        "next",
-        &[
-            Capability::React,
-            Capability::Nextjs,
-            Capability::ServerActions,
-            Capability::Ssr,
-        ],
-    ),
-    (
-        "react-native",
-        &[
-            Capability::React,
-            Capability::ReactNative,
-            Capability::ClientOnly,
-        ],
-    ),
-    (
-        "expo",
-        &[
-            Capability::React,
-            Capability::ReactNative,
-            Capability::Expo,
-            Capability::ClientOnly,
-        ],
-    ),
-    (
-        "expo-router",
-        &[
-            Capability::React,
-            Capability::ReactNative,
-            Capability::Expo,
-            Capability::ClientOnly,
-        ],
-    ),
-    (
-        "gatsby",
-        &[Capability::React, Capability::Ssr, Capability::ClientOnly],
-    ),
-    (
-        "@remix-run/react",
-        &[
-            Capability::React,
-            Capability::ServerActions,
-            Capability::Ssr,
-        ],
-    ),
-    (
-        "@tanstack/react-start",
-        &[
-            Capability::React,
-            Capability::TanstackStart,
-            Capability::ServerActions,
-            Capability::Ssr,
-        ],
-    ),
+    ("next", &[Capability::React, Capability::Nextjs, Capability::ServerActions, Capability::Ssr]),
+    ("react-native", &[Capability::React, Capability::ReactNative, Capability::ClientOnly]),
+    ("expo", &[Capability::React, Capability::ReactNative, Capability::Expo, Capability::ClientOnly]),
+    ("expo-router", &[Capability::React, Capability::ReactNative, Capability::Expo, Capability::ClientOnly]),
+    ("gatsby", &[Capability::React, Capability::Ssr, Capability::ClientOnly]),
+    ("@remix-run/react", &[Capability::React, Capability::ServerActions, Capability::Ssr]),
+    ("@tanstack/react-start", &[Capability::React, Capability::TanstackStart, Capability::ServerActions, Capability::Ssr]),
     ("@tanstack/react-query", &[Capability::TanstackQuery]),
     ("react-query", &[Capability::TanstackQuery]),
     (
@@ -161,6 +112,9 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("@base-ui-components/react", &[Capability::BaseUi]),
     ("react-aria-components", &[Capability::ReactAria]),
     ("styled-components", &[Capability::StyledComponents]),
+    ("shadcn", &[Capability::Shadcn]),
+    ("shadcn-ui", &[Capability::Shadcn]),
+    ("class-variance-authority", &[Capability::Shadcn]),
     ("@angular/core", &[Capability::Angular, Capability::Rxjs, Capability::TypeScript]),
     ("@angular/common", &[Capability::Angular, Capability::TypeScript]),
     ("@angular/router", &[Capability::Angular, Capability::TypeScript]),
@@ -176,6 +130,50 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("@ngrx/signals", &[Capability::Angular, Capability::NgRx, Capability::TypeScript]),
     ("@ngrx/operators", &[Capability::Angular, Capability::NgRx, Capability::Rxjs, Capability::TypeScript]),
     ("rxjs", &[Capability::Rxjs]),
+];
+
+const PREFIX_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
+    ("@angular/", &[Capability::Angular, Capability::TypeScript]),
+    ("@ngrx/", &[Capability::NgRx, Capability::Angular, Capability::TypeScript]),
+    ("@react-router/", &[Capability::React, Capability::ReactRouter]),
+    ("@remotion/", &[Capability::React, Capability::Remotion]),
+];
+
+const RUST_SQL_CAPABILITIES: &[Capability] = &[
+    Capability::Sqlx,
+    Capability::Diesel,
+    Capability::SeaOrm,
+    Capability::Rusqlite,
+    Capability::Postgres,
+];
+
+const RUST_CAPABILITIES: &[Capability] = &[
+    Capability::Rust,
+    Capability::Tokio,
+    Capability::Axum,
+    Capability::Sqlx,
+    Capability::Serde,
+    Capability::Tracing,
+    Capability::Leptos,
+    Capability::Dioxus,
+    Capability::Reqwest,
+    Capability::Diesel,
+    Capability::SeaOrm,
+    Capability::Rusqlite,
+    Capability::Postgres,
+    Capability::Futures,
+    Capability::TowerHttp,
+    Capability::ActixCors,
+    Capability::Cookie,
+    Capability::Jsonwebtoken,
+];
+
+const CAPABILITY_OR_GROUPS: &[(&[Capability], &[Capability])] = &[
+    (&[Capability::SqlAlchemy, Capability::Django], &[Capability::SqlAlchemy, Capability::Django]),
+    (&[Capability::Leptos, Capability::Dioxus], &[Capability::Leptos, Capability::Dioxus]),
+    (&[Capability::Sqlx, Capability::Diesel], RUST_SQL_CAPABILITIES),
+    (&[Capability::TowerHttp, Capability::ActixCors], &[Capability::TowerHttp, Capability::ActixCors]),
+    (&[Capability::Tokio, Capability::Futures], &[Capability::Tokio, Capability::Futures]),
 ];
 
 /// Technology capability token inferred for a project or workspace package.
@@ -323,54 +321,101 @@ impl Capability {
     /// Returns the canonical kebab-case capability token string.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
+        if let Some(s) = self.as_react_core_str() {
+            return s;
+        }
+        if let Some(s) = self.as_js_ui_str() {
+            return s;
+        }
+        if let Some(s) = self.as_ng_or_py_str() {
+            return s;
+        }
+        self.as_rust_str()
+    }
+
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Capability string lookup is partitioned into smaller category helpers (#50)"
+    )]
+    const fn as_react_core_str(self) -> Option<&'static str> {
         match self {
-            Self::React => "react",
-            Self::Nextjs => "nextjs",
-            Self::ReactNative => "react-native",
-            Self::Expo => "expo",
-            Self::TanstackQuery => "tanstack-query",
-            Self::TanstackStart => "tanstack-start",
-            Self::Three => "three",
-            Self::R3f => "r3f",
-            Self::Zustand => "zustand",
-            Self::Jotai => "jotai",
-            Self::Mobx => "mobx",
-            Self::Valtio => "valtio",
-            Self::Preact => "preact",
-            Self::PurePreact => "pure-preact",
-            Self::Ink => "ink",
-            Self::Zod => "zod",
-            Self::Motion => "motion",
-            Self::ReactCompiler => "react-compiler",
-            Self::ServerActions => "server-actions",
-            Self::Ssr => "ssr",
-            Self::ClientOnly => "client-only",
-            Self::TypeScript => "typescript",
-            Self::Tailwind => "tailwind",
-            Self::ReactRouter => "react-router",
-            Self::Remotion => "remotion",
-            Self::Redux => "redux",
-            Self::TanstackForm => "tanstack-form",
-            Self::TanstackTable => "tanstack-table",
-            Self::TanstackVirtual => "tanstack-virtual",
-            Self::Tailwind34 => "tailwind:3.4",
-            Self::Tailwind4 => "tailwind:4",
-            Self::RadixUi => "radix-ui",
-            Self::BaseUi => "base-ui",
-            Self::ReactAria => "react-aria",
-            Self::Shadcn => "shadcn",
-            Self::StyledComponents => "styled-components",
-            Self::Angular => "angular",
-            Self::Rxjs => "rxjs",
-            Self::NgRx => "ngrx",
-            Self::AngularMaterial => "angular-material",
-            Self::Python => "python",
-            Self::FastApi => "fastapi",
-            Self::Pydantic => "pydantic",
-            Self::SqlAlchemy => "sqlalchemy",
-            Self::Django => "django",
-            Self::Asyncio => "asyncio",
-            Self::Pytest => "pytest",
+            Self::React => Some("react"),
+            Self::Nextjs => Some("nextjs"),
+            Self::ReactNative => Some("react-native"),
+            Self::Expo => Some("expo"),
+            Self::TanstackQuery => Some("tanstack-query"),
+            Self::TanstackStart => Some("tanstack-start"),
+            Self::Three => Some("three"),
+            Self::R3f => Some("r3f"),
+            Self::Zustand => Some("zustand"),
+            Self::Jotai => Some("jotai"),
+            Self::Mobx => Some("mobx"),
+            Self::Valtio => Some("valtio"),
+            Self::Preact => Some("preact"),
+            Self::PurePreact => Some("pure-preact"),
+            Self::Ink => Some("ink"),
+            Self::Zod => Some("zod"),
+            Self::Motion => Some("motion"),
+            _ => None,
+        }
+    }
+
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Capability string lookup is partitioned into smaller category helpers (#50)"
+    )]
+    const fn as_js_ui_str(self) -> Option<&'static str> {
+        match self {
+            Self::ReactCompiler => Some("react-compiler"),
+            Self::ServerActions => Some("server-actions"),
+            Self::Ssr => Some("ssr"),
+            Self::ClientOnly => Some("client-only"),
+            Self::TypeScript => Some("typescript"),
+            Self::Tailwind => Some("tailwind"),
+            Self::ReactRouter => Some("react-router"),
+            Self::Remotion => Some("remotion"),
+            Self::Redux => Some("redux"),
+            Self::TanstackForm => Some("tanstack-form"),
+            Self::TanstackTable => Some("tanstack-table"),
+            Self::TanstackVirtual => Some("tanstack-virtual"),
+            Self::Tailwind34 => Some("tailwind:3.4"),
+            Self::Tailwind4 => Some("tailwind:4"),
+            Self::RadixUi => Some("radix-ui"),
+            Self::BaseUi => Some("base-ui"),
+            Self::ReactAria => Some("react-aria"),
+            _ => None,
+        }
+    }
+
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Capability string lookup is partitioned into smaller category helpers (#50)"
+    )]
+    const fn as_ng_or_py_str(self) -> Option<&'static str> {
+        match self {
+            Self::Shadcn => Some("shadcn"),
+            Self::StyledComponents => Some("styled-components"),
+            Self::Angular => Some("angular"),
+            Self::Rxjs => Some("rxjs"),
+            Self::NgRx => Some("ngrx"),
+            Self::AngularMaterial => Some("angular-material"),
+            Self::Python => Some("python"),
+            Self::FastApi => Some("fastapi"),
+            Self::Pydantic => Some("pydantic"),
+            Self::SqlAlchemy => Some("sqlalchemy"),
+            Self::Django => Some("django"),
+            Self::Asyncio => Some("asyncio"),
+            Self::Pytest => Some("pytest"),
+            _ => None,
+        }
+    }
+
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Capability string lookup is partitioned into smaller category helpers (#50)"
+    )]
+    const fn as_rust_str(self) -> &'static str {
+        match self {
             Self::Rust => "rust",
             Self::Tokio => "tokio",
             Self::Axum => "axum",
@@ -380,6 +425,16 @@ impl Capability {
             Self::Leptos => "leptos",
             Self::Dioxus => "dioxus",
             Self::Reqwest => "reqwest",
+            other => other.as_rust_db_and_web_str(),
+        }
+    }
+
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "Capability string lookup is partitioned into smaller category helpers (#50)"
+    )]
+    const fn as_rust_db_and_web_str(self) -> &'static str {
+        match self {
             Self::Diesel => "diesel",
             Self::SeaOrm => "sea-orm",
             Self::Rusqlite => "rusqlite",
@@ -389,6 +444,7 @@ impl Capability {
             Self::ActixCors => "actix-cors",
             Self::Cookie => "cookie",
             Self::Jsonwebtoken => "jsonwebtoken",
+            _ => "",
         }
     }
 }
@@ -575,26 +631,7 @@ impl CapabilityGate {
     /// Default capability gate for standalone Rust source analysis when no `Cargo.toml` is present.
     #[must_use]
     pub fn default_rust() -> Self {
-        Self::with_capabilities([
-            Capability::Rust,
-            Capability::Tokio,
-            Capability::Axum,
-            Capability::Sqlx,
-            Capability::Serde,
-            Capability::Tracing,
-            Capability::Leptos,
-            Capability::Dioxus,
-            Capability::Reqwest,
-            Capability::Diesel,
-            Capability::SeaOrm,
-            Capability::Rusqlite,
-            Capability::Postgres,
-            Capability::Futures,
-            Capability::TowerHttp,
-            Capability::ActixCors,
-            Capability::Cookie,
-            Capability::Jsonwebtoken,
-        ])
+        Self::with_capabilities(RUST_CAPABILITIES.iter().copied())
     }
 
     /// Constructs a [`CapabilityGate`] from an explicit iterator of [`Capability`] tokens.
@@ -728,81 +765,29 @@ impl CapabilityGate {
     #[must_use]
     pub fn allows_rule(&self, meta: &RuleMetadata) -> bool {
         let pred = &meta.capability_gate;
-        let has_py_orm_or = pred.requires.contains(&Capability::SqlAlchemy)
-            && pred.requires.contains(&Capability::Django);
-        let has_rust_ui_or = pred.requires.contains(&Capability::Leptos)
-            && pred.requires.contains(&Capability::Dioxus);
-        let has_rust_sql_or = pred.requires.contains(&Capability::Sqlx)
-            && pred.requires.contains(&Capability::Diesel);
-        let has_rust_cors_or = pred.requires.contains(&Capability::TowerHttp)
-            && pred.requires.contains(&Capability::ActixCors);
-        let has_rust_async_or = pred.requires.contains(&Capability::Tokio)
-            && pred.requires.contains(&Capability::Futures);
-        let has_any_rust_cap = self.capabilities.contains(&Capability::Rust)
-            || self.capabilities.iter().any(|c| {
-                matches!(
-                    c,
-                    Capability::Tokio
-                        | Capability::Axum
-                        | Capability::Sqlx
-                        | Capability::Serde
-                        | Capability::Tracing
-                        | Capability::Leptos
-                        | Capability::Dioxus
-                        | Capability::Reqwest
-                        | Capability::Diesel
-                        | Capability::SeaOrm
-                        | Capability::Rusqlite
-                        | Capability::Postgres
-                        | Capability::Futures
-                        | Capability::TowerHttp
-                        | Capability::ActixCors
-                        | Capability::Cookie
-                        | Capability::Jsonwebtoken
-                )
-            });
-        let requires_ok = pred.requires.iter().all(|req| {
-            if has_py_orm_or && matches!(req, Capability::SqlAlchemy | Capability::Django) {
-                self.capabilities.contains(&Capability::SqlAlchemy)
-                    || self.capabilities.contains(&Capability::Django)
-            } else if has_rust_ui_or && matches!(req, Capability::Leptos | Capability::Dioxus) {
-                self.capabilities.contains(&Capability::Leptos)
-                    || self.capabilities.contains(&Capability::Dioxus)
-            } else if has_rust_sql_or
-                && matches!(
-                    req,
-                    Capability::Sqlx
-                        | Capability::Diesel
-                        | Capability::SeaOrm
-                        | Capability::Rusqlite
-                        | Capability::Postgres
-                )
-            {
-                self.capabilities.contains(&Capability::Sqlx)
-                    || self.capabilities.contains(&Capability::Diesel)
-                    || self.capabilities.contains(&Capability::SeaOrm)
-                    || self.capabilities.contains(&Capability::Rusqlite)
-                    || self.capabilities.contains(&Capability::Postgres)
-            } else if has_rust_cors_or && matches!(req, Capability::TowerHttp | Capability::ActixCors)
-            {
-                self.capabilities.contains(&Capability::TowerHttp)
-                    || self.capabilities.contains(&Capability::ActixCors)
-            } else if has_rust_async_or && matches!(req, Capability::Tokio | Capability::Futures) {
-                self.capabilities.contains(&Capability::Tokio)
-                    || self.capabilities.contains(&Capability::Futures)
-            } else if *req == Capability::Rust {
-                has_any_rust_cap
-            } else {
-                self.capabilities.contains(req)
-            }
-        });
-        requires_ok
+        pred.requires
+            .iter()
+            .all(|&req| self.satisfies_required_capability(req, pred.requires))
             && (!meta.tags.contains(&RuleTag::ReactJsxOnly)
                 || self.capabilities.contains(&Capability::React))
             && pred
                 .disabled_when
                 .iter()
                 .all(|dis| !self.capabilities.contains(dis))
+    }
+
+    fn satisfies_required_capability(&self, req: Capability, all_reqs: &[Capability]) -> bool {
+        for &(trigger, pool) in CAPABILITY_OR_GROUPS {
+            if pool.contains(&req) && trigger.iter().all(|t| all_reqs.contains(t)) {
+                return pool.iter().any(|c| self.capabilities.contains(c));
+            }
+        }
+        if req == Capability::Rust {
+            return RUST_CAPABILITIES
+                .iter()
+                .any(|c| self.capabilities.contains(c));
+        }
+        self.capabilities.contains(&req)
     }
 
     /// Returns `true` if `file_path` is a library entrypoint in a `PackageRole::Library` package.
@@ -862,53 +847,34 @@ fn infer_capabilities_from_deps(deps: &HashMap<String, String>) -> HashSet<Capab
             caps.extend(mapped_caps.iter().copied());
         }
     }
-    if deps.keys().any(|k| k.starts_with("@angular/")) {
-        caps.insert(Capability::Angular);
-        caps.insert(Capability::TypeScript);
-    }
-    if deps.keys().any(|k| k.starts_with("@ngrx/")) {
-        caps.insert(Capability::NgRx);
-        caps.insert(Capability::Angular);
-        caps.insert(Capability::TypeScript);
+    for &(prefix, mapped_caps) in PREFIX_CAPABILITY_TABLE {
+        if deps.keys().any(|k| k.starts_with(prefix)) {
+            caps.extend(mapped_caps.iter().copied());
+        }
     }
     if deps.contains_key("preact") && !deps.contains_key("react") {
         caps.insert(Capability::PurePreact);
     }
-    if deps.keys().any(|k| {
-        k == "radix-ui" || (k.starts_with("@radix-ui/react-") && k != "@radix-ui/react-icons")
-    }) {
+    if deps
+        .keys()
+        .any(|k| k.starts_with("@radix-ui/react-") && k != "@radix-ui/react-icons")
+    {
         caps.insert(Capability::RadixUi);
     }
-    if deps.contains_key("shadcn")
-        || deps.contains_key("shadcn-ui")
-        || deps.contains_key("class-variance-authority")
-    {
-        caps.insert(Capability::Shadcn);
-    }
-    if deps
-        .keys()
-        .any(|k| k == "react-router" || k == "react-router-dom" || k.starts_with("@react-router/"))
-    {
-        caps.insert(Capability::React);
-        caps.insert(Capability::ReactRouter);
-    }
-    if deps
-        .keys()
-        .any(|k| k == "remotion" || k.starts_with("@remotion/"))
-    {
-        caps.insert(Capability::React);
-        caps.insert(Capability::Remotion);
-    }
     if let Some(tw_ver) = deps.get("tailwindcss") {
-        let parsed = parse_major_minor_spec(tw_ver);
-        if parsed.is_none_or(|(maj, min)| maj > 3 || (maj == 3 && min >= 4)) {
-            caps.insert(Capability::Tailwind34);
-        }
-        if parsed.is_some_and(|(maj, _)| maj >= 4) {
-            caps.insert(Capability::Tailwind4);
-        }
+        apply_tailwind_version_capabilities(tw_ver, &mut caps);
     }
     caps
+}
+
+fn apply_tailwind_version_capabilities(tw_ver: &str, caps: &mut HashSet<Capability>) {
+    let parsed = parse_major_minor_spec(tw_ver);
+    if parsed.is_none_or(|(maj, min)| maj > 3 || (maj == 3 && min >= 4)) {
+        caps.insert(Capability::Tailwind34);
+    }
+    if parsed.is_some_and(|(maj, _)| maj >= 4) {
+        caps.insert(Capability::Tailwind4);
+    }
 }
 
 fn parse_major_minor_spec(spec: &str) -> Option<(u32, u32)> {

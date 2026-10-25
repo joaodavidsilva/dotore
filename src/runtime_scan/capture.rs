@@ -360,6 +360,248 @@ fn collect_preexisting_page_targets(targets_res: &serde_json::Value) -> (Vec<Str
     (page_ids, page_urls)
 }
 
+struct ProbeScriptBundle {
+    binding_name: String,
+    relay_world_name: String,
+    token: String,
+    probe_source: String,
+    relay_source: String,
+}
+
+impl ProbeScriptBundle {
+    fn new() -> Self {
+        let snapshot_id = generate_unique_hex_id().replace('-', "");
+        let binding_name = format!("__DOTORE_RUNTIME_SCAN_CAPTURE__{snapshot_id}");
+        let attribute_name = format!("data-dotore-runtime-scan-snapshot-{snapshot_id}");
+        let relay_world_name = format!("dotore-runtime-scan-{snapshot_id}");
+        let token = generate_unique_hex_id();
+        let probe_source = build_browser_probe_source(&attribute_name, &token);
+        let relay_source = build_snapshot_relay_source(&attribute_name, &binding_name);
+        Self {
+            binding_name,
+            relay_world_name,
+            token,
+            probe_source,
+            relay_source,
+        }
+    }
+}
+
+fn open_and_configure_page_session(
+    client: &mut CdpWebSocketClient,
+    connection: RuntimeScanConnection,
+    scripts: &ProbeScriptBundle,
+) -> Result<(String, String), String> {
+    let targets_res = client.call("Target.getTargets", json!({}), None)?;
+    let (preexisting_page_ids, preexisting_page_urls) =
+        collect_preexisting_page_targets(&targets_res);
+
+    if connection == RuntimeScanConnection::Cdp {
+        let url_refs: Vec<&str> = preexisting_page_urls.iter().map(String::as_str).collect();
+        assert_cdp_profile_uncontaminated(&url_refs)?;
+    }
+
+    let create_res = client.call(
+        "Target.createTarget",
+        json!({
+            "url": "about:blank",
+            "width": 1440,
+            "height": 900,
+        }),
+        None,
+    )?;
+    let target_id = create_res
+        .get("targetId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Chrome did not return a targetId.".to_string())?
+        .to_string();
+
+    if connection == RuntimeScanConnection::Cdp {
+        for old_id in &preexisting_page_ids {
+            if old_id != &target_id {
+                let _ = client.call("Target.closeTarget", json!({ "targetId": old_id }), None);
+            }
+        }
+    }
+
+    let attach_res = client.call(
+        "Target.attachToTarget",
+        json!({
+            "targetId": target_id,
+            "flatten": true,
+        }),
+        None,
+    )?;
+    let session_id = attach_res
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Chrome did not return a sessionId.".to_string())?
+        .to_string();
+
+    client.call("Page.enable", json!({}), Some(&session_id))?;
+    client.call("Runtime.enable", json!({}), Some(&session_id))?;
+    client.call(
+        "Runtime.addBinding",
+        json!({
+            "name": scripts.binding_name,
+            "executionContextName": scripts.relay_world_name,
+        }),
+        Some(&session_id),
+    )?;
+    client.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": scripts.probe_source }),
+        Some(&session_id),
+    )?;
+    client.call(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({
+            "source": scripts.relay_source,
+            "worldName": scripts.relay_world_name,
+        }),
+        Some(&session_id),
+    )?;
+    Ok((target_id, session_id))
+}
+
+fn start_cdp_tracing_or_close(
+    client: &mut CdpWebSocketClient,
+    target_id: &str,
+) -> Result<(), String> {
+    if let Err(err) = client.call(
+        "Tracing.start",
+        json!({
+            "categories": RUNTIME_SCAN_TRACE_CATEGORIES.join(","),
+            "transferMode": "ReturnAsStream",
+        }),
+        None,
+    ) {
+        let lower = err.to_ascii_lowercase();
+        let _ = client.call("Target.closeTarget", json!({ "targetId": target_id }), None);
+        if lower.contains("tracing") && lower.contains("already") && lower.contains("started") {
+            return Err(
+                "Chrome is already recording a performance trace. Stop the existing DevTools recording and retry."
+                    .to_string(),
+            );
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn navigate_and_collect_snapshots(
+    client: &mut CdpWebSocketClient,
+    input: &RecordRuntimeTraceInput,
+    session_id: &str,
+    target_id: &str,
+    scripts: &ProbeScriptBundle,
+) -> Result<(f64, Vec<RuntimeScanProbeSnapshot>, DroppedEvidence), String> {
+    let start_instant = std::time::Instant::now();
+    let nav_res = client.call(
+        "Page.navigate",
+        json!({ "url": input.url }),
+        Some(session_id),
+    );
+    if nav_res.is_err()
+        || nav_res.as_ref().is_ok_and(|v| {
+            v.get("errorText")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        })
+    {
+        let _ = client.call("Tracing.end", json!({}), None);
+        let _ = client.call("Target.closeTarget", json!({ "targetId": target_id }), None);
+        return Err(
+            "Could not load the target URL. Confirm the app is running and reachable from Chrome."
+                .to_string(),
+        );
+    }
+    let _ = client.wait_for_event("Page.loadEventFired", 10_000);
+
+    let mut collected_snapshots: Vec<RuntimeScanProbeSnapshot> = Vec::new();
+    let mut discarded = DroppedEvidence::default();
+    client.drain_binding_events(
+        &scripts.binding_name,
+        &scripts.token,
+        &mut collected_snapshots,
+        &mut discarded,
+    );
+
+    let max_recording_ms = input
+        .max_recording_duration_ms
+        .unwrap_or(RUNTIME_SCAN_MAX_RECORDING_DURATION_MS);
+    wait_for_stop_or_timeout(max_recording_ms);
+    let duration_ms = start_instant.elapsed().as_secs_f64() * 1_000.0;
+
+    client.drain_binding_events(
+        &scripts.binding_name,
+        &scripts.token,
+        &mut collected_snapshots,
+        &mut discarded,
+    );
+    if let Ok(eval_res) = client.call(
+        "Runtime.evaluate",
+        json!({
+            "expression": "window.__DOTORE_RUNTIME_SCAN__ ? window.__DOTORE_RUNTIME_SCAN__.snapshot() : null",
+            "returnByValue": true,
+            "awaitPromise": false,
+        }),
+        Some(session_id),
+    ) {
+        client.drain_binding_events(
+            &scripts.binding_name,
+            &scripts.token,
+            &mut collected_snapshots,
+            &mut discarded,
+        );
+        let val = &eval_res["result"]["value"];
+        if is_runtime_scan_probe_snapshot(val)
+            && let Ok(snap) = serde_json::from_value::<RuntimeScanProbeSnapshot>(val.clone())
+        {
+            store_navigation_snapshot(&mut collected_snapshots, &mut discarded, snap);
+        }
+    }
+    Ok((duration_ms, collected_snapshots, discarded))
+}
+
+fn finalize_merged_snapshot(
+    sanitized_requested_url: String,
+    collected_snapshots: &[RuntimeScanProbeSnapshot],
+    discarded: &DroppedEvidence,
+) -> Result<RuntimeScanProbeSnapshot, String> {
+    let mut merged_snapshot = if collected_snapshots.is_empty() {
+        RuntimeScanProbeSnapshot {
+            time_origin: 1_000.0,
+            final_url: sanitized_requested_url,
+            support: RuntimeScanProbeSupport {
+                react_detected: false,
+                react_version: None,
+                react_build_type: None,
+                native_react_tracks: false,
+                bippy_component_tracks: false,
+                loaf: false,
+            },
+            long_animation_frames: Vec::new(),
+            component_events: Vec::new(),
+            interactions: Vec::new(),
+            cumulative_layout_shift: 0.0,
+            largest_contentful_paint_ms: None,
+            dropped_long_animation_frames: 0,
+            dropped_script_timings: 0,
+            dropped_component_events: 0,
+            dropped_interactions: 0,
+        }
+    } else {
+        merge_probe_snapshots(collected_snapshots)?
+    };
+
+    merged_snapshot.dropped_long_animation_frames += discarded.dropped_long_animation_frames;
+    merged_snapshot.dropped_script_timings += discarded.dropped_script_timings;
+    merged_snapshot.dropped_component_events += discarded.dropped_component_events;
+    merged_snapshot.dropped_interactions += discarded.dropped_interactions;
+    Ok(merged_snapshot)
+}
+
 /// Connects to Chrome over CDP WebSocket, injects the runtime probe and visual overlay,
 /// records a performance trace to `.json.gz`, and returns the merged snapshot.
 ///
@@ -375,16 +617,7 @@ pub fn record_runtime_trace(
         &captured_at,
     );
     let trace_path = trace_path_buf.to_string_lossy().to_string();
-
-    let snapshot_id = generate_unique_hex_id().replace('-', "");
-    let snapshot_binding_name = format!("__DOTORE_RUNTIME_SCAN_CAPTURE__{snapshot_id}");
-    let snapshot_attribute_name = format!("data-dotore-runtime-scan-snapshot-{snapshot_id}");
-    let snapshot_relay_world_name = format!("dotore-runtime-scan-{snapshot_id}");
-    let snapshot_token = generate_unique_hex_id();
-
-    let probe_source = build_browser_probe_source(&snapshot_attribute_name, &snapshot_token);
-    let relay_source =
-        build_snapshot_relay_source(&snapshot_attribute_name, &snapshot_binding_name);
+    let scripts = ProbeScriptBundle::new();
 
     let mut child_guard: Option<(std::process::Child, PathBuf)> = None;
     let (ws_url, connection) = if let Some(cdp_url) = &input.cdp_url {
@@ -409,161 +642,17 @@ pub fn record_runtime_trace(
             format!("Could not connect to Chrome. {guidance}")
         })?;
 
-        let targets_res = client.call("Target.getTargets", json!({}), None)?;
-        let (preexisting_page_ids, preexisting_page_urls) =
-            collect_preexisting_page_targets(&targets_res);
+        let (target_id, session_id) =
+            open_and_configure_page_session(&mut client, connection, &scripts)?;
+        start_cdp_tracing_or_close(&mut client, &target_id)?;
 
-        if connection == RuntimeScanConnection::Cdp {
-            let url_refs: Vec<&str> = preexisting_page_urls.iter().map(String::as_str).collect();
-            assert_cdp_profile_uncontaminated(&url_refs)?;
-        }
-
-        let create_res = client.call(
-            "Target.createTarget",
-            json!({
-                "url": "about:blank",
-                "width": 1440,
-                "height": 900,
-            }),
-            None,
+        let (duration_ms, collected_snapshots, discarded) = navigate_and_collect_snapshots(
+            &mut client,
+            input,
+            &session_id,
+            &target_id,
+            &scripts,
         )?;
-        let target_id = create_res
-            .get("targetId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Chrome did not return a targetId.".to_string())?
-            .to_string();
-
-        if connection == RuntimeScanConnection::Cdp {
-            for old_id in &preexisting_page_ids {
-                if old_id != &target_id {
-                    let _ = client.call("Target.closeTarget", json!({ "targetId": old_id }), None);
-                }
-            }
-        }
-
-        let attach_res = client.call(
-            "Target.attachToTarget",
-            json!({
-                "targetId": target_id,
-                "flatten": true,
-            }),
-            None,
-        )?;
-        let session_id = attach_res
-            .get("sessionId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Chrome did not return a sessionId.".to_string())?
-            .to_string();
-
-        client.call("Page.enable", json!({}), Some(&session_id))?;
-        client.call("Runtime.enable", json!({}), Some(&session_id))?;
-        client.call(
-            "Runtime.addBinding",
-            json!({
-                "name": snapshot_binding_name,
-                "executionContextName": snapshot_relay_world_name,
-            }),
-            Some(&session_id),
-        )?;
-        client.call(
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": probe_source }),
-            Some(&session_id),
-        )?;
-        client.call(
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({
-                "source": relay_source,
-                "worldName": snapshot_relay_world_name,
-            }),
-            Some(&session_id),
-        )?;
-
-        if let Err(err) = client.call(
-            "Tracing.start",
-            json!({
-                "categories": RUNTIME_SCAN_TRACE_CATEGORIES.join(","),
-                "transferMode": "ReturnAsStream",
-            }),
-            None,
-        ) {
-            let lower = err.to_ascii_lowercase();
-            if lower.contains("tracing") && lower.contains("already") && lower.contains("started") {
-                let _ = client.call("Target.closeTarget", json!({ "targetId": target_id }), None);
-                return Err(
-                    "Chrome is already recording a performance trace. Stop the existing DevTools recording and retry."
-                        .to_string(),
-                );
-            }
-            let _ = client.call("Target.closeTarget", json!({ "targetId": target_id }), None);
-            return Err(err);
-        }
-
-        let start_instant = std::time::Instant::now();
-        let nav_res = client.call(
-            "Page.navigate",
-            json!({ "url": input.url }),
-            Some(&session_id),
-        );
-        if nav_res.is_err()
-            || nav_res.as_ref().is_ok_and(|v| {
-                v.get("errorText")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some()
-            })
-        {
-            let _ = client.call("Tracing.end", json!({}), None);
-            let _ = client.call("Target.closeTarget", json!({ "targetId": target_id }), None);
-            return Err(
-                "Could not load the target URL. Confirm the app is running and reachable from Chrome."
-                    .to_string(),
-            );
-        }
-        let _ = client.wait_for_event("Page.loadEventFired", 10_000);
-
-        let mut collected_snapshots: Vec<RuntimeScanProbeSnapshot> = Vec::new();
-        let mut discarded = DroppedEvidence::default();
-        client.drain_binding_events(
-            &snapshot_binding_name,
-            &snapshot_token,
-            &mut collected_snapshots,
-            &mut discarded,
-        );
-
-        let max_recording_ms = input
-            .max_recording_duration_ms
-            .unwrap_or(RUNTIME_SCAN_MAX_RECORDING_DURATION_MS);
-        wait_for_stop_or_timeout(max_recording_ms);
-        let duration_ms = start_instant.elapsed().as_secs_f64() * 1_000.0;
-
-        client.drain_binding_events(
-            &snapshot_binding_name,
-            &snapshot_token,
-            &mut collected_snapshots,
-            &mut discarded,
-        );
-        if let Ok(eval_res) = client.call(
-            "Runtime.evaluate",
-            json!({
-                "expression": "window.__DOTORE_RUNTIME_SCAN__ ? window.__DOTORE_RUNTIME_SCAN__.snapshot() : null",
-                "returnByValue": true,
-                "awaitPromise": false,
-            }),
-            Some(&session_id),
-        ) {
-            client.drain_binding_events(
-                &snapshot_binding_name,
-                &snapshot_token,
-                &mut collected_snapshots,
-                &mut discarded,
-            );
-            let val = &eval_res["result"]["value"];
-            if is_runtime_scan_probe_snapshot(val)
-                && let Ok(snap) = serde_json::from_value::<RuntimeScanProbeSnapshot>(val.clone())
-            {
-                store_navigation_snapshot(&mut collected_snapshots, &mut discarded, snap);
-            }
-        }
 
         client.call("Tracing.end", json!({}), None)?;
         let complete_event = client
@@ -585,36 +674,11 @@ pub fn record_runtime_trace(
         let _ = client.call("Target.closeTarget", json!({ "targetId": target_id }), None);
         trace_write_res?;
 
-        let mut merged_snapshot = if collected_snapshots.is_empty() {
-            RuntimeScanProbeSnapshot {
-                time_origin: 1_000.0,
-                final_url: sanitized_requested_url,
-                support: RuntimeScanProbeSupport {
-                    react_detected: false,
-                    react_version: None,
-                    react_build_type: None,
-                    native_react_tracks: false,
-                    bippy_component_tracks: false,
-                    loaf: false,
-                },
-                long_animation_frames: Vec::new(),
-                component_events: Vec::new(),
-                interactions: Vec::new(),
-                cumulative_layout_shift: 0.0,
-                largest_contentful_paint_ms: None,
-                dropped_long_animation_frames: 0,
-                dropped_script_timings: 0,
-                dropped_component_events: 0,
-                dropped_interactions: 0,
-            }
-        } else {
-            merge_probe_snapshots(&collected_snapshots)?
-        };
-
-        merged_snapshot.dropped_long_animation_frames += discarded.dropped_long_animation_frames;
-        merged_snapshot.dropped_script_timings += discarded.dropped_script_timings;
-        merged_snapshot.dropped_component_events += discarded.dropped_component_events;
-        merged_snapshot.dropped_interactions += discarded.dropped_interactions;
+        let merged_snapshot = finalize_merged_snapshot(
+            sanitized_requested_url,
+            &collected_snapshots,
+            &discarded,
+        )?;
 
         Ok(RecordRuntimeTraceResult {
             trace_path,

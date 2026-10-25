@@ -640,34 +640,63 @@ pub(super) fn check_no_loading_flag_reset_outside_finally(
         return;
     }
 
-    // Check if the argument is `false`
-    let Some(Expression::BooleanLiteral(bool_lit)) = call
-        .arguments
-        .first()
-        .and_then(|a| a.as_expression())
-        .map(Expression::without_parentheses)
-    else {
-        return;
-    };
-    if bool_lit.value {
+    let is_false_arg = matches!(
+        call.arguments
+            .first()
+            .and_then(|a| a.as_expression())
+            .map(Expression::without_parentheses),
+        Some(Expression::BooleanLiteral(bool_lit)) if !bool_lit.value
+    );
+    if !is_false_arg {
         return;
     }
 
-    // Check if this call is inside a `finally` block or a `catch` block
+    let Some(async_body_span) = find_enclosing_unguarded_async_body_span(semantic, node_id, call)
+    else {
+        return;
+    };
+
+    let prefix = semantic
+        .source_text()
+        .get(async_body_span.start as usize..call.span.start as usize)
+        .unwrap_or_default();
+    let suffix = semantic
+        .source_text()
+        .get(call.span.end as usize..async_body_span.end as usize)
+        .unwrap_or_default();
+    if prefix.contains("await ") && !suffix.contains(&format!("{setter_name}(false)")) {
+        push_semantic_site(
+            sites,
+            RuleId::NoLoadingFlagResetOutsideFinally,
+            subj_name.clone(),
+            "noLoadingFlagResetOutsideFinally",
+            setter_name,
+            format!(
+                "`{setter_name}(false)` runs after `await` outside a `finally` block; if the awaited promise rejects, the loading flag remains stuck `true`."
+            ),
+            line_starts,
+            call.span,
+        );
+    }
+}
+
+fn find_enclosing_unguarded_async_body_span(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+) -> Option<Span> {
     for anc_id in semantic.nodes().ancestor_ids(node_id) {
         match semantic.nodes().kind(anc_id) {
             AstKind::TryStatement(try_stmt) => {
-                if let Some(finalizer) = &try_stmt.finalizer
-                    && call.span.start >= finalizer.span.start
-                    && call.span.end <= finalizer.span.end
+                if try_stmt
+                    .finalizer
+                    .as_ref()
+                    .is_some_and(|f| call.span.start >= f.span.start && call.span.end <= f.span.end)
+                    || try_stmt.handler.as_ref().is_some_and(|h| {
+                        call.span.start >= h.span.start && call.span.end <= h.span.end
+                    })
                 {
-                    return;
-                }
-                if let Some(handler) = &try_stmt.handler
-                    && call.span.start >= handler.span.start
-                    && call.span.end <= handler.span.end
-                {
-                    return;
+                    return None;
                 }
             }
             AstKind::CallExpression(outer_call) if outer_call.span != call.span => {
@@ -675,74 +704,22 @@ pub(super) fn check_no_loading_flag_reset_outside_finally(
                     outer_call.callee.without_parentheses()
                     && matches!(mem.property.name.as_str(), "finally" | "catch")
                 {
-                    return;
+                    return None;
                 }
             }
             AstKind::Function(func) => {
-                if !func.r#async {
-                    return;
-                }
-                if let Some(body) = &func.body {
-                    let prefix = semantic
-                        .source_text()
-                        .get(body.span.start as usize..call.span.start as usize)
-                        .unwrap_or_default();
-                    let suffix = semantic
-                        .source_text()
-                        .get(call.span.end as usize..body.span.end as usize)
-                        .unwrap_or_default();
-                    // If `await` precedes `setLoading(false)` and there is no `finally` resetting it
-                    if prefix.contains("await ")
-                        && !suffix.contains(&format!("{setter_name}(false)"))
-                    {
-                        push_semantic_site(
-                            sites,
-                            RuleId::NoLoadingFlagResetOutsideFinally,
-                            subj_name.clone(),
-                            "noLoadingFlagResetOutsideFinally",
-                            setter_name,
-                            format!(
-                                "`{setter_name}(false)` runs after `await` outside a `finally` block; if the awaited promise rejects, the loading flag remains stuck `true`."
-                            ),
-                            line_starts,
-                            call.span,
-                        );
-                    }
-                }
-                return;
+                return func
+                    .r#async
+                    .then(|| func.body.as_ref().map(|b| b.span))
+                    .flatten();
             }
             AstKind::ArrowFunctionExpression(arrow) => {
-                if !arrow.r#async {
-                    return;
-                }
-                let body_span = arrow.body.span();
-                let prefix = semantic
-                    .source_text()
-                    .get(body_span.start as usize..call.span.start as usize)
-                    .unwrap_or_default();
-                let suffix = semantic
-                    .source_text()
-                    .get(call.span.end as usize..body_span.end as usize)
-                    .unwrap_or_default();
-                if prefix.contains("await ") && !suffix.contains(&format!("{setter_name}(false)")) {
-                    push_semantic_site(
-                        sites,
-                        RuleId::NoLoadingFlagResetOutsideFinally,
-                        subj_name.clone(),
-                        "noLoadingFlagResetOutsideFinally",
-                        setter_name,
-                        format!(
-                            "`{setter_name}(false)` runs after `await` outside a `finally` block; if the awaited promise rejects, the loading flag remains stuck `true`."
-                        ),
-                        line_starts,
-                        call.span,
-                    );
-                }
-                return;
+                return arrow.r#async.then(|| arrow.body.span());
             }
             _ => {}
         }
     }
+    None
 }
 
 fn is_loading_like_setter(

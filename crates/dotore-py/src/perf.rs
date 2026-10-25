@@ -61,27 +61,11 @@ impl<'a> PerfRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Visitor inspects relevant statement variants and recurses into nested blocks"
+        reason = "Visitor inspects relevant statement variants and recurses into nested blocks (#50)"
     )]
     fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::ImportFrom(import_from) => {
-                let module = import_from
-                    .module
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default();
-                for alias in &import_from.names {
-                    let orig = alias.name.as_str();
-                    let bound = alias
-                        .asname
-                        .as_ref()
-                        .map_or_else(|| orig.to_string(), ToString::to_string);
-                    if matches!(module.as_str(), "re" | "regex") && orig == "compile" {
-                        self.re_compile_aliases.insert(bound);
-                    }
-                }
-            }
+            Stmt::ImportFrom(import_from) => self.visit_import_from(import_from),
             Stmt::ClassDef(class_def) => {
                 self.scope.enter_class(class_def.name.as_str());
                 self.visit_suite(&class_def.body);
@@ -113,34 +97,6 @@ impl<'a> PerfRuleVisitor<'a> {
                     self.visit_expr(val);
                 }
             }
-            Stmt::AugAssign(aug) => self.visit_expr(&aug.value),
-            Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
-            Stmt::Return(ret) => {
-                if let Some(val) = &ret.value {
-                    self.visit_expr(val);
-                }
-            }
-            Stmt::Raise(raise_stmt) => {
-                if let Some(exc) = &raise_stmt.exc {
-                    self.visit_expr(exc);
-                }
-            }
-            Stmt::Assert(assert_stmt) => {
-                self.visit_expr(&assert_stmt.test);
-                if let Some(msg) = &assert_stmt.msg {
-                    self.visit_expr(msg);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
-                self.visit_suite(&if_stmt.body);
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
-                    }
-                    self.visit_suite(&clause.body);
-                }
-            }
             Stmt::For(for_stmt) => {
                 self.visit_expr(&for_stmt.iter);
                 self.scope.enter_loop();
@@ -164,25 +120,31 @@ impl<'a> PerfRuleVisitor<'a> {
                 }
                 self.visit_suite(&with_stmt.body);
             }
-            Stmt::Try(try_stmt) => {
-                self.visit_suite(&try_stmt.body);
-                for handler in &try_stmt.handlers {
-                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    self.visit_suite(&h.body);
-                }
-                self.visit_suite(&try_stmt.orelse);
-                self.visit_suite(&try_stmt.finalbody);
+            _ => {
+                crate::matchers::walk_stmt_exprs(stmt, |e| self.visit_expr(e));
+                crate::matchers::walk_stmt_sub_stmts(stmt, |s| self.visit_stmt(s));
             }
-            Stmt::Match(match_stmt) => {
-                self.visit_expr(&match_stmt.subject);
-                for case in &match_stmt.cases {
-                    if let Some(guard) = &case.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_suite(&case.body);
-                }
+        }
+    }
+
+    fn visit_import_from(&mut self, import_from: &ruff_python_ast::StmtImportFrom) {
+        let module = import_from
+            .module
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        if !matches!(module.as_str(), "re" | "regex") {
+            return;
+        }
+        for alias in &import_from.names {
+            let orig = alias.name.as_str();
+            if orig == "compile" {
+                let bound = alias
+                    .asname
+                    .as_ref()
+                    .map_or_else(|| orig.to_string(), ToString::to_string);
+                self.re_compile_aliases.insert(bound);
             }
-            _ => {}
         }
     }
 
@@ -206,159 +168,64 @@ impl<'a> PerfRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses Python expression nodes to inspect regex compilation and membership checks"
+        reason = "Traverses Python expression nodes to inspect regex compilation and membership checks (#50)"
     )]
     fn visit_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Call(call) => {
                 let callee = callee_qualified_name(&call.func);
                 self.check_hoist_regex(call, &callee);
-                self.visit_expr(&call.func);
-                for arg in &call.arguments.args {
-                    self.visit_expr(arg);
-                }
-                for kw in &call.arguments.keywords {
-                    self.visit_expr(&kw.value);
-                }
-            }
-            Expr::Attribute(attr) => self.visit_expr(&attr.value),
-            Expr::Await(aw) => self.visit_expr(&aw.value),
-            Expr::Yield(y) => {
-                if let Some(val) = &y.value {
-                    self.visit_expr(val);
-                }
-            }
-            Expr::YieldFrom(yf) => self.visit_expr(&yf.value),
-            Expr::BinOp(bin) => {
-                self.visit_expr(&bin.left);
-                self.visit_expr(&bin.right);
-            }
-            Expr::UnaryOp(un) => self.visit_expr(&un.operand),
-            Expr::BoolOp(b) => {
-                for v in &b.values {
-                    self.visit_expr(v);
-                }
             }
             Expr::Compare(cmp) => {
                 self.check_linear_membership_in_loop(cmp);
-                for op_expr in &cmp.operands {
-                    self.visit_expr(op_expr);
-                }
-            }
-            Expr::Subscript(sub) => {
-                self.visit_expr(&sub.value);
-                self.visit_expr(&sub.slice);
-            }
-            Expr::If(if_expr) => {
-                self.visit_expr(&if_expr.test);
-                self.visit_expr(&if_expr.body);
-                self.visit_expr(&if_expr.orelse);
-            }
-            Expr::List(list) => {
-                for elt in &list.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            Expr::Tuple(tuple) => {
-                for elt in &tuple.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            Expr::Set(set) => {
-                for elt in &set.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            Expr::Dict(dict) => {
-                for item in &dict.items {
-                    if let Some(k) = &item.key {
-                        self.visit_expr(k);
-                    }
-                    self.visit_expr(&item.value);
-                }
             }
             Expr::ListComp(comp) => {
-                for (idx, generator) in comp.generators.iter().enumerate() {
-                    if idx > 0 {
-                        self.scope.enter_loop();
-                    }
-                    self.visit_expr(&generator.iter);
-                    if idx > 0 {
-                        self.scope.exit_loop();
-                    }
-                    self.scope.enter_loop();
-                    for if_clause in &generator.ifs {
-                        self.visit_expr(if_clause);
-                    }
-                    self.scope.exit_loop();
-                }
-                self.scope.enter_loop();
-                self.visit_expr(&comp.elt);
-                self.scope.exit_loop();
+                self.visit_comprehension(None, &comp.elt, &comp.generators);
+                return;
             }
             Expr::SetComp(comp) => {
-                for (idx, generator) in comp.generators.iter().enumerate() {
-                    if idx > 0 {
-                        self.scope.enter_loop();
-                    }
-                    self.visit_expr(&generator.iter);
-                    if idx > 0 {
-                        self.scope.exit_loop();
-                    }
-                    self.scope.enter_loop();
-                    for if_clause in &generator.ifs {
-                        self.visit_expr(if_clause);
-                    }
-                    self.scope.exit_loop();
-                }
-                self.scope.enter_loop();
-                self.visit_expr(&comp.elt);
-                self.scope.exit_loop();
+                self.visit_comprehension(None, &comp.elt, &comp.generators);
+                return;
             }
             Expr::DictComp(comp) => {
-                for (idx, generator) in comp.generators.iter().enumerate() {
-                    if idx > 0 {
-                        self.scope.enter_loop();
-                    }
-                    self.visit_expr(&generator.iter);
-                    if idx > 0 {
-                        self.scope.exit_loop();
-                    }
-                    self.scope.enter_loop();
-                    for if_clause in &generator.ifs {
-                        self.visit_expr(if_clause);
-                    }
-                    self.scope.exit_loop();
-                }
-                self.scope.enter_loop();
-                if let Some(k) = &comp.key {
-                    self.visit_expr(k);
-                }
-                self.visit_expr(&comp.value);
-                self.scope.exit_loop();
+                self.visit_comprehension(comp.key.as_deref(), &comp.value, &comp.generators);
+                return;
             }
             Expr::Generator(comp) => {
-                for (idx, generator) in comp.generators.iter().enumerate() {
-                    if idx > 0 {
-                        self.scope.enter_loop();
-                    }
-                    self.visit_expr(&generator.iter);
-                    if idx > 0 {
-                        self.scope.exit_loop();
-                    }
-                    self.scope.enter_loop();
-                    for if_clause in &generator.ifs {
-                        self.visit_expr(if_clause);
-                    }
-                    self.scope.exit_loop();
-                }
-                self.scope.enter_loop();
-                self.visit_expr(&comp.elt);
-                self.scope.exit_loop();
+                self.visit_comprehension(None, &comp.elt, &comp.generators);
+                return;
             }
-            Expr::Named(named) => self.visit_expr(&named.value),
             _ => {}
         }
+        crate::matchers::walk_expr_children(expr, |child| self.visit_expr(child));
+    }
+
+    fn visit_comprehension(
+        &mut self,
+        key: Option<&Expr>,
+        elt: &Expr,
+        generators: &[ruff_python_ast::Comprehension],
+    ) {
+        for (idx, generator) in generators.iter().enumerate() {
+            if idx > 0 {
+                self.scope.enter_loop();
+            }
+            self.visit_expr(&generator.iter);
+            if idx > 0 {
+                self.scope.exit_loop();
+            }
+            self.scope.enter_loop();
+            for if_clause in &generator.ifs {
+                self.visit_expr(if_clause);
+            }
+            self.scope.exit_loop();
+        }
+        self.scope.enter_loop();
+        if let Some(k) = key {
+            self.visit_expr(k);
+        }
+        self.visit_expr(elt);
+        self.scope.exit_loop();
     }
 
     fn check_hoist_regex(&mut self, call: &ExprCall, callee: &str) {

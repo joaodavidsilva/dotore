@@ -26,27 +26,88 @@ fn format_ms(duration_ms: f64) -> String {
     format!("{duration_ms:.1}ms")
 }
 
+fn format_react_support_label(report: &RuntimeScanReport) -> String {
+    if !report.support.react_detected {
+        return "not detected".to_string();
+    }
+    let version = report.support.react_version.as_deref().unwrap_or("unknown");
+    let build_type = match report.support.react_build_type {
+        Some(ReactBuildType::Development) => "development",
+        Some(ReactBuildType::Production) => "production",
+        None => "unknown",
+    };
+    format!(
+        "{} ({})",
+        sanitize_runtime_text(version),
+        sanitize_runtime_text(build_type)
+    )
+}
+
+fn append_script_hotspots_section(lines: &mut Vec<String>, report: &RuntimeScanReport) {
+    if report.script_hotspots.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("Script hotspots".to_string());
+    for (idx, hotspot) in report.script_hotspots.iter().enumerate() {
+        let prefix = if idx + 1 == report.script_hotspots.len() {
+            "└─"
+        } else {
+            "├─"
+        };
+        let source_url = sanitize_runtime_text(&hotspot.source_url);
+        let source_location = if hotspot.source_char_position > 0 {
+            format!("{source_url} @ char {}", hotspot.source_char_position)
+        } else {
+            source_url
+        };
+        let fn_name = sanitize_runtime_text(&hotspot.function_name);
+        let location = match (source_location.is_empty(), fn_name.is_empty()) {
+            (true, _) => fn_name,
+            (false, true) => source_location,
+            (false, false) => format!("{source_location} · {fn_name}"),
+        };
+        let frame_plural = if hotspot.frame_count == 1 { "" } else { "s" };
+        lines.push(format!(
+            "  {prefix} {} {location}",
+            format_ms(hotspot.total_duration_ms)
+        ));
+        lines.push(format!(
+            "     {} frame{frame_plural}, {} forced layout",
+            hotspot.frame_count,
+            format_ms(hotspot.forced_style_and_layout_duration_ms)
+        ));
+    }
+}
+
+fn append_component_hotspots_section(lines: &mut Vec<String>, report: &RuntimeScanReport) {
+    if report.component_hotspots.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("React component hotspots".to_string());
+    for (idx, hotspot) in report.component_hotspots.iter().enumerate() {
+        let prefix = if idx + 1 == report.component_hotspots.len() {
+            "└─"
+        } else {
+            "├─"
+        };
+        let render_plural = if hotspot.render_count == 1 { "" } else { "s" };
+        lines.push(format!(
+            "  {prefix} {} · {} across {} render{render_plural}",
+            sanitize_runtime_text(&hotspot.name),
+            format_ms(hotspot.total_duration_ms),
+            hotspot.render_count
+        ));
+    }
+}
+
 fn format_text_report(report: &RuntimeScanReport) -> String {
     let connection_str = match report.connection {
         RuntimeScanConnection::Cdp => "attached over CDP",
         RuntimeScanConnection::Isolated => "isolated profile",
     };
-    let react_str = if report.support.react_detected {
-        let version = report.support.react_version.as_deref().unwrap_or("unknown");
-        let build_type = match report.support.react_build_type {
-            Some(ReactBuildType::Development) => "development",
-            Some(ReactBuildType::Production) => "production",
-            None => "unknown",
-        };
-        format!(
-            "{} ({})",
-            sanitize_runtime_text(version),
-            sanitize_runtime_text(build_type)
-        )
-    } else {
-        "not detected".to_string()
-    };
-
+    let react_str = format_react_support_label(report);
     let loaf_plural = if report.summary.long_animation_frame_count == 1 {
         ""
     } else {
@@ -57,10 +118,10 @@ fn format_text_report(report: &RuntimeScanReport) -> String {
     } else {
         "s"
     };
-    let lcp_str = match report.summary.largest_contentful_paint_ms {
-        Some(lcp) => format_ms(lcp),
-        None => "unavailable".to_string(),
-    };
+    let lcp_str = report
+        .summary
+        .largest_contentful_paint_ms
+        .map_or_else(|| "unavailable".to_string(), format_ms);
 
     let mut lines = vec![
         "✔ Runtime trace captured".to_string(),
@@ -92,60 +153,8 @@ fn format_text_report(report: &RuntimeScanReport) -> String {
         format!("  └─ LCP {lcp_str}"),
     ];
 
-    if !report.script_hotspots.is_empty() {
-        lines.push(String::new());
-        lines.push("Script hotspots".to_string());
-        for (idx, hotspot) in report.script_hotspots.iter().enumerate() {
-            let prefix = if idx + 1 == report.script_hotspots.len() {
-                "└─"
-            } else {
-                "├─"
-            };
-            let source_url = sanitize_runtime_text(&hotspot.source_url);
-            let source_location = if hotspot.source_char_position > 0 {
-                format!("{source_url} @ char {}", hotspot.source_char_position)
-            } else {
-                source_url
-            };
-            let fn_name = sanitize_runtime_text(&hotspot.function_name);
-            let location = if source_location.is_empty() {
-                fn_name
-            } else if fn_name.is_empty() {
-                source_location
-            } else {
-                format!("{source_location} · {fn_name}")
-            };
-            let frame_plural = if hotspot.frame_count == 1 { "" } else { "s" };
-            lines.push(format!(
-                "  {prefix} {} {location}",
-                format_ms(hotspot.total_duration_ms)
-            ));
-            lines.push(format!(
-                "     {} frame{frame_plural}, {} forced layout",
-                hotspot.frame_count,
-                format_ms(hotspot.forced_style_and_layout_duration_ms)
-            ));
-        }
-    }
-
-    if !report.component_hotspots.is_empty() {
-        lines.push(String::new());
-        lines.push("React component hotspots".to_string());
-        for (idx, hotspot) in report.component_hotspots.iter().enumerate() {
-            let prefix = if idx + 1 == report.component_hotspots.len() {
-                "└─"
-            } else {
-                "├─"
-            };
-            let render_plural = if hotspot.render_count == 1 { "" } else { "s" };
-            lines.push(format!(
-                "  {prefix} {} · {} across {} render{render_plural}",
-                sanitize_runtime_text(&hotspot.name),
-                format_ms(hotspot.total_duration_ms),
-                hotspot.render_count
-            ));
-        }
-    }
+    append_script_hotspots_section(&mut lines, report);
+    append_component_hotspots_section(&mut lines, report);
 
     if !report.warnings.is_empty() {
         lines.push(String::new());

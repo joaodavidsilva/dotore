@@ -101,16 +101,17 @@ impl AxumSqlxVisitor<'_> {
     }
 
     fn check_sqlx_formatted_query_call(&mut self, node: &ExprCall) {
-        let ctx = self.ctx();
-        let Some((func_name, arg_pos, alias_req)) =
-            match_sql_query_call_function(&ctx, &node.func)
-        else {
-            return;
+        let matched = {
+            let ctx = self.ctx();
+            match_sql_query_call_functions(&ctx, &node.func)
+                .into_iter()
+                .filter_map(|(func_name, arg_pos, alias_req)| {
+                    let sql_arg = node.args.iter().nth(arg_pos)?;
+                    is_assembled_dynamic_sql(&ctx, sql_arg).then_some((func_name, alias_req))
+                })
+                .collect::<Vec<_>>()
         };
-        let Some(sql_arg) = node.args.iter().nth(arg_pos) else {
-            return;
-        };
-        if is_assembled_dynamic_sql(&ctx, sql_arg) {
+        for (func_name, alias_req) in matched {
             let span = self.span_to_bytes(node.span());
             let loc = self.loc_at(span.start);
             let mut finding = RsCandidateFinding::new(
@@ -191,41 +192,30 @@ impl AxumSqlxVisitor<'_> {
         let [krate, kind, _] = resolved.as_slice() else {
             return;
         };
-        let matched_crate = if is_sql_connection_method("rusqlite", kind, &method)
-            && (krate == "rusqlite" || maybe_renamed.is_some())
-        {
-            Some("rusqlite")
-        } else if is_sql_connection_method("postgres", kind, &method)
-            && (krate == "postgres" || maybe_renamed.is_some())
-        {
-            Some("postgres")
-        } else if is_sql_connection_method("tokio_postgres", kind, &method)
-            && (krate == "tokio_postgres" || maybe_renamed.is_some())
-        {
-            Some("tokio_postgres")
-        } else {
-            None
-        };
-        let Some(canonical_crate) = matched_crate else {
-            return;
-        };
         let span = self.span_to_bytes(first_arg.span());
         let loc = self.loc_at(span.start);
-        let mut finding = RsCandidateFinding::new(
-            RuleId::RsSqlxNoFormattedQueryString,
-            self.scope.subject_name(),
-            format!("{canonical_crate}::{kind}::{method}"),
-            "rsSqlxNoFormattedQueryString",
-            "SQL text is assembled from a runtime value instead of bound as a parameter.",
-            loc,
-            span,
-        );
-        if let Some(written) = maybe_renamed
-            && written != canonical_crate
-        {
-            finding = finding.with_required_crate_alias(written, canonical_crate);
+        for &(listed_crate, listed_kind, methods) in &SQL_CONNECTIONS {
+            if kind != listed_kind || !methods.contains(&method.as_str()) {
+                continue;
+            }
+            if krate == listed_crate || (maybe_renamed.is_some() && krate == maybe_renamed.as_deref().unwrap_or("")) {
+                let mut finding = RsCandidateFinding::new(
+                    RuleId::RsSqlxNoFormattedQueryString,
+                    self.scope.subject_name(),
+                    format!("{listed_crate}::{kind}::{method}"),
+                    "rsSqlxNoFormattedQueryString",
+                    "SQL text is assembled from a runtime value instead of bound as a parameter.",
+                    loc,
+                    span,
+                );
+                if let Some(written) = &maybe_renamed
+                    && written != listed_crate
+                {
+                    finding = finding.with_required_crate_alias(written.clone(), listed_crate);
+                }
+                self.findings.push(finding);
+            }
         }
-        self.findings.push(finding);
     }
     fn check_axum_contended_mutex_state(&mut self, sig: &Signature, body: Option<&syn::Block>) {
         if self.scope.in_test() {
@@ -551,15 +541,9 @@ const SQL_CONNECTIONS: [(&str, &str, &[&str]); 3] = [
     ),
 ];
 
-fn is_sql_connection_method(krate: &str, kind: &str, method: &str) -> bool {
-    SQL_CONNECTIONS
-        .iter()
-        .any(|(c, k, methods)| *c == krate && *k == kind && methods.contains(&method))
-}
-
 type SqlCallMatch = (String, usize, Option<(String, String)>);
 
-fn match_sql_query_call_function(ctx: &KernelContext<'_>, callee: &Expr) -> Option<SqlCallMatch> {
+fn match_sql_query_call_functions(ctx: &KernelContext<'_>, callee: &Expr) -> Vec<SqlCallMatch> {
     for (path, pos) in QUERY_FUNCTIONS {
         let Some((expected_crate, rest)) = path.split_first() else {
             continue;
@@ -570,28 +554,37 @@ fn match_sql_query_call_function(ctx: &KernelContext<'_>, callee: &Expr) -> Opti
         if let Some(alias_req) =
             ctx.matches_call_path(callee, expected_crate, expected_mid, expected_member)
         {
-            return Some((path.join("::"), pos, alias_req));
+            return vec![(path.join("::"), pos, alias_req)];
         }
     }
 
     let Expr::Path(ep) = strip_parens(callee) else {
-        return None;
+        return Vec::new();
     };
     if ep.qself.is_some() {
-        return None;
+        return Vec::new();
     }
-    let (resolved, maybe_renamed) = ctx.resolve_item_path(&ep.path)?;
+    let Some((resolved, maybe_renamed)) = ctx.resolve_item_path(&ep.path) else {
+        return Vec::new();
+    };
     if let [krate, kind, method] = resolved.as_slice() {
+        let mut matches = Vec::new();
         for &(listed_crate, listed_kind, methods) in &SQL_CONNECTIONS {
             if kind == listed_kind
                 && methods.contains(&method.as_str())
-                && (krate == listed_crate || maybe_renamed.is_some())
+                && (krate == listed_crate
+                    || (maybe_renamed.is_some()
+                        && krate == maybe_renamed.as_deref().unwrap_or("")))
             {
                 let req = maybe_renamed
-                    .filter(|w| w != listed_crate)
-                    .map(|w| (w, listed_crate.to_string()));
-                return Some((format!("{listed_crate}::{kind}::{method}"), 1, req));
+                    .as_ref()
+                    .filter(|w| w.as_str() != listed_crate)
+                    .map(|w| (w.clone(), listed_crate.to_string()));
+                matches.push((format!("{listed_crate}::{kind}::{method}"), 1, req));
             }
+        }
+        if !matches.is_empty() {
+            return matches;
         }
     }
 
@@ -601,9 +594,9 @@ fn match_sql_query_call_function(ctx: &KernelContext<'_>, callee: &Expr) -> Opti
             "query" | "query_as" | "query_scalar" | "raw_sql"
         )
     {
-        return Some((format!("sqlx::{single}"), 0, None));
+        return vec![(format!("sqlx::{single}"), 0, None)];
     }
-    None
+    Vec::new()
 }
 
 fn strip_transparent_sql_methods(expr: &Expr) -> Expr {

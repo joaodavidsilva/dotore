@@ -370,51 +370,10 @@ impl RsAliasMap {
                 self.record_use_tree(&use_path.tree, next, scope);
             }
             UseTree::Name(use_name) => {
-                let ident = use_name.ident.to_string();
-                if ident == "self" {
-                    let Some(name) = prefix.as_ref().and_then(|p| p.last().cloned()) else {
-                        return;
-                    };
-                    let binding = match prefix {
-                        Some(path) if !path.is_empty() => AliasBinding::Item(path),
-                        _ => AliasBinding::Opaque,
-                    };
-                    self.insert_binding(scope, name, binding);
-                } else if matches!(ident.as_str(), "crate" | "super") {
-                    self.insert_binding(scope, ident, AliasBinding::Opaque);
-                } else {
-                    let resolved = prefix.map(|mut p| {
-                        p.push(ident.clone());
-                        p
-                    });
-                    let binding = match resolved {
-                        Some(path) if !path.is_empty() => AliasBinding::Item(path),
-                        _ => AliasBinding::Opaque,
-                    };
-                    self.insert_binding(scope, ident, binding);
-                }
+                self.record_use_name(use_name.ident.to_string(), prefix, scope);
             }
             UseTree::Rename(use_rename) => {
-                let alias = use_rename.rename.to_string();
-                if alias == "_" {
-                    return;
-                }
-                let orig = use_rename.ident.to_string();
-                let resolved = if orig == "self" {
-                    prefix
-                } else if matches!(orig.as_str(), "crate" | "super") {
-                    None
-                } else {
-                    prefix.map(|mut p| {
-                        p.push(orig);
-                        p
-                    })
-                };
-                let binding = match resolved {
-                    Some(path) if !path.is_empty() => AliasBinding::Item(path),
-                    _ => AliasBinding::Opaque,
-                };
-                self.insert_binding(scope, alias, binding);
+                self.record_use_rename(use_rename, prefix, scope);
             }
             UseTree::Group(group) => {
                 for child in &group.items {
@@ -425,6 +384,56 @@ impl RsAliasMap {
                 let head = prefix.and_then(|p| p.first().cloned());
                 self.insert_glob(scope, head);
             }
+        }
+    }
+
+    fn record_use_name(&mut self, ident: String, prefix: Option<Vec<String>>, scope: ScopeKey) {
+        if ident == "self" {
+            let Some(name) = prefix.as_ref().and_then(|p| p.last().cloned()) else {
+                return;
+            };
+            self.insert_binding(scope, name, Self::binding_from_prefix(prefix));
+            return;
+        }
+        let resolved = if matches!(ident.as_str(), "crate" | "super") {
+            None
+        } else {
+            prefix.map(|mut p| {
+                p.push(ident.clone());
+                p
+            })
+        };
+        self.insert_binding(scope, ident, Self::binding_from_prefix(resolved));
+    }
+
+    fn record_use_rename(
+        &mut self,
+        use_rename: &syn::UseRename,
+        prefix: Option<Vec<String>>,
+        scope: ScopeKey,
+    ) {
+        let alias = use_rename.rename.to_string();
+        if alias == "_" {
+            return;
+        }
+        let orig = use_rename.ident.to_string();
+        let resolved = if orig == "self" {
+            prefix
+        } else if matches!(orig.as_str(), "crate" | "super") {
+            None
+        } else {
+            prefix.map(|mut p| {
+                p.push(orig);
+                p
+            })
+        };
+        self.insert_binding(scope, alias, Self::binding_from_prefix(resolved));
+    }
+
+    fn binding_from_prefix(prefix: Option<Vec<String>>) -> AliasBinding {
+        match prefix {
+            Some(path) if !path.is_empty() => AliasBinding::Item(path),
+            _ => AliasBinding::Opaque,
         }
     }
 
@@ -448,7 +457,9 @@ impl RsAliasMap {
         self.bindings_count += 1;
         true
     }
+}
 
+impl RsAliasMap {
     /// Returns visible scopes from `site` (innermost first), stopping at the nearest enclosing module.
     #[must_use]
     fn visible_scopes(&self, site: ByteSpan) -> Vec<ScopeKey> {
@@ -802,9 +813,17 @@ pub(crate) fn secret_fallback_message(
         _ => return None,
     };
     let text = extract_fallback_literal_text(ctx, &fallback_expr)?;
-    is_real_secret_fallback(&text).then_some(
-        "A secret environment variable falls back to a literal, which ships in the binary and runs the service without the secret.",
-    )
+    if text.is_empty() {
+        Some(
+            "A secret environment variable falls back to an empty value, so the service runs without the secret.",
+        )
+    } else if is_real_secret_fallback(&text) {
+        Some(
+            "A secret environment variable falls back to a literal, which ships in the binary and runs the service without the secret.",
+        )
+    } else {
+        None
+    }
 }
 
 pub(crate) fn reads_secret_env_var(ctx: &KernelContext<'_>, receiver: &Expr) -> bool {
@@ -839,7 +858,7 @@ pub(crate) fn reads_secret_env_var(ctx: &KernelContext<'_>, receiver: &Expr) -> 
 
 fn is_real_secret_fallback(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    value.chars().count() >= 8 && !PLACEHOLDERS.iter().any(|p| lower.contains(p))
+    !value.is_empty() && !PLACEHOLDERS.iter().any(|p| lower.contains(p))
 }
 
 fn extract_closure_tail_expr(body: &Expr) -> Option<Expr> {

@@ -134,31 +134,8 @@ fn explain_js_location(
     cwd: &Path,
 ) -> Result<WhyReport, String> {
     let resolved_file = resolved_file.to_path_buf();
-    let js_analyzer = JsLanguageAnalyzer;
-    let js_only: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
     let packages = discover_workspace_packages_with_analyzers(cwd, crate::default_analyzers());
-    let mut discovered_files =
-        collect_source_files_for_analyzers(&[cwd.to_path_buf()], true, js_only);
-    for style_path in collect_style_files(&[cwd.to_path_buf()]) {
-        if !discovered_files.contains(&style_path) {
-            discovered_files.push(style_path);
-        }
-    }
-    if !discovered_files.contains(&resolved_file) {
-        discovered_files.push(resolved_file.clone());
-    }
-
-    let mut sources: HashMap<PathBuf, String> = HashMap::new();
-    let mut extracted_files: Vec<ExtractedFile> = Vec::new();
-    for path in discovered_files {
-        if let Ok(src) = fs::read_to_string(&path) {
-            extracted_files.push(js_analyzer.extract_file(&path, &src));
-            sources.insert(path, src);
-        }
-    }
-
-    let manifests = load_disk_manifests(cwd, &packages, &sources);
-    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, manifests);
+    let (graph, sources) = load_js_workspace_graph(cwd, &resolved_file, &packages);
     let Some(target_file_ir) = graph.files.iter().find(|f| f.path == resolved_file) else {
         return Err(format!(
             "Failed to parse target file `{}`.",
@@ -181,9 +158,107 @@ fn explain_js_location(
         &default_pkg
     };
 
+    let active_diags = evaluate_active_js_file_diagnostics(
+        &graph,
+        target_file_ir,
+        &resolved_file,
+        pkg,
+        &packages,
+        &sources,
+    );
+    let probe_diags = evaluate_probe_js_file_diagnostics(
+        &graph,
+        target_file_ir,
+        &resolved_file,
+        pkg,
+        &sources,
+    );
+
+    let active_at_line: Vec<Diagnostic> = active_diags
+        .into_iter()
+        .filter(|d| diagnostic_matches_line(target_file_ir, d, &line_starts, parsed_loc.line))
+        .collect();
+
+    let entries = if !active_at_line.is_empty() {
+        build_active_js_why_entries(
+            &graph,
+            target_file_ir,
+            parsed_loc,
+            &target_source,
+            &active_at_line,
+            &sources,
+        )
+    } else {
+        let probe_at_line: Vec<Diagnostic> = probe_diags
+            .into_iter()
+            .filter(|d| diagnostic_matches_line(target_file_ir, d, &line_starts, parsed_loc.line))
+            .collect();
+        build_probe_js_why_entries(
+            &graph,
+            target_file_ir,
+            pkg,
+            &target_source,
+            &probe_at_line,
+            &sources,
+        )
+    };
+
+    let summary_note = format_js_why_summary_note(entries.len(), parsed_loc, target_file_ir);
+
+    Ok(WhyReport {
+        file: parsed_loc.file.clone(),
+        line: parsed_loc.line,
+        column: parsed_loc.column,
+        entries,
+        summary_note,
+    })
+}
+
+#[cfg(feature = "js")]
+fn load_js_workspace_graph(
+    cwd: &Path,
+    resolved_file: &PathBuf,
+    packages: &[WorkspacePackage],
+) -> (dotore_js::ProjectGraph, HashMap<PathBuf, String>) {
+    let js_analyzer = JsLanguageAnalyzer;
+    let js_only: &[&dyn LanguageAnalyzer] = &[&js_analyzer];
+    let mut discovered_files =
+        collect_source_files_for_analyzers(&[cwd.to_path_buf()], true, js_only);
+    for style_path in collect_style_files(&[cwd.to_path_buf()]) {
+        if !discovered_files.contains(&style_path) {
+            discovered_files.push(style_path);
+        }
+    }
+    if !discovered_files.contains(resolved_file) {
+        discovered_files.push(resolved_file.clone());
+    }
+
+    let mut sources: HashMap<PathBuf, String> = HashMap::new();
+    let mut extracted_files: Vec<ExtractedFile> = Vec::new();
+    for path in discovered_files {
+        if let Ok(src) = fs::read_to_string(&path) {
+            extracted_files.push(js_analyzer.extract_file(&path, &src));
+            sources.insert(path, src);
+        }
+    }
+
+    let manifests = load_disk_manifests(cwd, packages, &sources);
+    let graph = js_analyzer.build_graph_from_extracted(&extracted_files, manifests);
+    (graph, sources)
+}
+
+#[cfg(feature = "js")]
+fn evaluate_active_js_file_diagnostics(
+    graph: &dotore_js::ProjectGraph,
+    target_file_ir: &FileIr,
+    resolved_file: &Path,
+    pkg: &WorkspacePackage,
+    packages: &[WorkspacePackage],
+    sources: &HashMap<PathBuf, String>,
+) -> Vec<Diagnostic> {
     let mut active_diags = Vec::new();
     evaluate_file_in_package(
-        &graph,
+        graph,
         target_file_ir,
         &pkg.root_dir,
         &pkg.capability_gate,
@@ -194,18 +269,28 @@ fn explain_js_location(
     let active_pkgs = if packages.is_empty() {
         vec![pkg.clone()]
     } else {
-        packages.clone()
+        packages.to_vec()
     };
     let mut active_graph_diags = Vec::new();
-    evaluate_project_graph_rules(&graph, &active_pkgs, None, &mut active_graph_diags);
-    evaluate_project_reduced_motion(&graph, &active_pkgs, None, &mut active_graph_diags);
+    evaluate_project_graph_rules(graph, &active_pkgs, None, &mut active_graph_diags);
+    evaluate_project_reduced_motion(graph, &active_pkgs, None, &mut active_graph_diags);
     active_diags.extend(
         active_graph_diags
             .into_iter()
             .filter(|d| d.file == resolved_file),
     );
-    enrich_cross_file_autofixes(&graph, &mut active_diags, &sources);
+    enrich_cross_file_autofixes(graph, &mut active_diags, sources);
+    active_diags
+}
 
+#[cfg(feature = "js")]
+fn evaluate_probe_js_file_diagnostics(
+    graph: &dotore_js::ProjectGraph,
+    target_file_ir: &FileIr,
+    resolved_file: &Path,
+    pkg: &WorkspacePackage,
+    sources: &HashMap<PathBuf, String>,
+) -> Vec<Diagnostic> {
     let all_rules: Vec<RuleId> = rule_registry().iter().map(|m| m.id).collect();
     let mut permissive_cfg = pkg.config.clone();
     permissive_cfg.respect_inline_disables = false;
@@ -219,7 +304,7 @@ fn explain_js_location(
     permissive_gate.merge(&CapabilityGate::default_angular());
     let mut probe_diags = Vec::new();
     evaluate_file_in_package(
-        &graph,
+        graph,
         target_file_ir,
         &pkg.root_dir,
         &permissive_gate,
@@ -235,13 +320,13 @@ fn explain_js_location(
     };
     let mut probe_graph_diags = Vec::new();
     evaluate_project_graph_rules(
-        &graph,
+        graph,
         std::slice::from_ref(&permissive_pkg),
         Some(&all_rules),
         &mut probe_graph_diags,
     );
     evaluate_project_reduced_motion(
-        &graph,
+        graph,
         std::slice::from_ref(&permissive_pkg),
         Some(&all_rules),
         &mut probe_graph_diags,
@@ -251,128 +336,137 @@ fn explain_js_location(
             .into_iter()
             .filter(|d| d.file == resolved_file),
     );
-    enrich_cross_file_autofixes(&graph, &mut probe_diags, &sources);
+    enrich_cross_file_autofixes(graph, &mut probe_diags, sources);
+    probe_diags
+}
 
-    let active_at_line: Vec<Diagnostic> = active_diags
-        .into_iter()
-        .filter(|d| diagnostic_matches_line(target_file_ir, d, &line_starts, parsed_loc.line))
-        .collect();
-
+#[cfg(feature = "js")]
+fn build_active_js_why_entries(
+    graph: &dotore_js::ProjectGraph,
+    target_file_ir: &FileIr,
+    parsed_loc: &WhyLocation,
+    target_source: &str,
+    active_at_line: &[Diagnostic],
+    sources: &HashMap<PathBuf, String>,
+) -> Vec<WhyEntry> {
     let mut entries = Vec::new();
-    if !active_at_line.is_empty() {
-        let (groups, _) = build_root_cause_groups_and_capsules(&graph, &active_at_line, &sources);
-        for (idx, diag) in active_at_line.iter().enumerate() {
-            let Some(group) = groups
-                .iter()
-                .find(|g| g.diagnostic_indices.contains(&idx))
-                .or_else(|| groups.first())
-            else {
-                continue;
-            };
-            let capsule = build_fix_capsule(&graph, group, &active_at_line, &sources);
-            let mismatch_note = detect_mismatched_inline_suppression(target_file_ir, diag);
-            let mut explanation = if let Some(note) = mismatch_note {
-                format!(
-                    "Diagnostic `{}` fired at {}:{}. {note}",
-                    diag.rule.metadata().qualified_key,
-                    parsed_loc.file.display(),
-                    diag.loc.line
-                )
-            } else {
-                format!(
-                    "Diagnostic `{}` fired at {}:{} because `{}` triggered rule `{}`.",
-                    diag.rule.metadata().qualified_key,
-                    parsed_loc.file.display(),
-                    diag.loc.line,
-                    diag.target_name,
-                    diag.rule.as_str()
-                )
-            };
-            let mut cascade_steps = Vec::with_capacity(diag.cascade_steps.len());
-            cascade_steps.extend_from_slice(&diag.cascade_steps);
-            append_js_architecture_signals(
-                target_file_ir,
-                diag,
-                &mut explanation,
-                &mut cascade_steps,
-            );
-            entries.push(WhyEntry {
-                status: "active".to_string(),
-                rule: diag.rule.metadata().qualified_key.to_string(),
-                category: diag.category,
-                severity: diag.severity,
-                tier: diag.tier,
-                message: diag.message.clone(),
-                explanation,
-                code_frame: render_code_frame(&target_source, diag.loc.line),
-                cascade_steps,
-                blast_radius: group.blast_radius.clone(),
-                fix_capsule: capsule,
-            });
-        }
-    } else {
-        let probe_at_line: Vec<Diagnostic> = probe_diags
-            .into_iter()
-            .filter(|d| diagnostic_matches_line(target_file_ir, d, &line_starts, parsed_loc.line))
-            .collect();
-        if !probe_at_line.is_empty() {
-            let (groups, _) =
-                build_root_cause_groups_and_capsules(&graph, &probe_at_line, &sources);
-            for (idx, diag) in probe_at_line.iter().enumerate() {
-                let Some(group) = groups
-                    .iter()
-                    .find(|g| g.diagnostic_indices.contains(&idx))
-                    .or_else(|| groups.first())
-                else {
-                    continue;
-                };
-                let capsule = build_fix_capsule(&graph, group, &probe_at_line, &sources);
-                let is_suppressed = pkg.config.respect_inline_disables
-                    && target_file_ir.suppressions.is_suppressed(
-                        diag.rule,
-                        diag.loc.line,
-                        diag.span,
-                        &target_file_ir.jsx_elements,
-                        &target_file_ir.subjects,
-                    );
-                let (status, mut explanation) = diagnose_why_not_active_common(
-                    diag,
-                    &target_file_ir.path,
-                    target_file_ir.file_context,
-                    is_suppressed,
-                    &pkg.root_dir,
-                    &pkg.capability_gate,
-                    &pkg.config,
-                );
-                let mut cascade_steps = Vec::with_capacity(diag.cascade_steps.len());
-                cascade_steps.extend_from_slice(&diag.cascade_steps);
-                append_js_architecture_signals(
-                    target_file_ir,
-                    diag,
-                    &mut explanation,
-                    &mut cascade_steps,
-                );
-                entries.push(WhyEntry {
-                    status,
-                    rule: diag.rule.metadata().qualified_key.to_string(),
-                    category: diag.category,
-                    severity: diag.severity,
-                    tier: diag.tier,
-                    message: diag.message.clone(),
-                    explanation,
-                    code_frame: render_code_frame(&target_source, diag.loc.line),
-                    cascade_steps,
-                    blast_radius: group.blast_radius.clone(),
-                    fix_capsule: capsule,
-                });
-            }
-        }
+    let (groups, _) = build_root_cause_groups_and_capsules(graph, active_at_line, sources);
+    for (idx, diag) in active_at_line.iter().enumerate() {
+        let Some(group) = groups
+            .iter()
+            .find(|g| g.diagnostic_indices.contains(&idx))
+            .or_else(|| groups.first())
+        else {
+            continue;
+        };
+        let capsule = build_fix_capsule(graph, group, active_at_line, sources);
+        let mismatch_note = detect_mismatched_inline_suppression(target_file_ir, diag);
+        let mut explanation = if let Some(note) = mismatch_note {
+            format!(
+                "Diagnostic `{}` fired at {}:{}. {note}",
+                diag.rule.metadata().qualified_key,
+                parsed_loc.file.display(),
+                diag.loc.line
+            )
+        } else {
+            format!(
+                "Diagnostic `{}` fired at {}:{} because `{}` triggered rule `{}`.",
+                diag.rule.metadata().qualified_key,
+                parsed_loc.file.display(),
+                diag.loc.line,
+                diag.target_name,
+                diag.rule.as_str()
+            )
+        };
+        let mut cascade_steps = Vec::with_capacity(diag.cascade_steps.len());
+        cascade_steps.extend_from_slice(&diag.cascade_steps);
+        append_js_architecture_signals(target_file_ir, diag, &mut explanation, &mut cascade_steps);
+        entries.push(WhyEntry {
+            status: "active".to_string(),
+            rule: diag.rule.metadata().qualified_key.to_string(),
+            category: diag.category,
+            severity: diag.severity,
+            tier: diag.tier,
+            message: mask_credentials(&diag.message),
+            explanation: mask_credentials(&explanation),
+            code_frame: render_code_frame(target_source, diag.loc.line),
+            cascade_steps,
+            blast_radius: group.blast_radius.clone(),
+            fix_capsule: capsule,
+        });
     }
+    entries
+}
 
-    let summary_note = if !entries.is_empty() {
+#[cfg(feature = "js")]
+fn build_probe_js_why_entries(
+    graph: &dotore_js::ProjectGraph,
+    target_file_ir: &FileIr,
+    pkg: &WorkspacePackage,
+    target_source: &str,
+    probe_at_line: &[Diagnostic],
+    sources: &HashMap<PathBuf, String>,
+) -> Vec<WhyEntry> {
+    if probe_at_line.is_empty() {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    let (groups, _) = build_root_cause_groups_and_capsules(graph, probe_at_line, sources);
+    for (idx, diag) in probe_at_line.iter().enumerate() {
+        let Some(group) = groups
+            .iter()
+            .find(|g| g.diagnostic_indices.contains(&idx))
+            .or_else(|| groups.first())
+        else {
+            continue;
+        };
+        let capsule = build_fix_capsule(graph, group, probe_at_line, sources);
+        let is_suppressed = pkg.config.respect_inline_disables
+            && target_file_ir.suppressions.is_suppressed(
+                diag.rule,
+                diag.loc.line,
+                diag.span,
+                &target_file_ir.jsx_elements,
+                &target_file_ir.subjects,
+            );
+        let (status, mut explanation) = diagnose_why_not_active_common(
+            diag,
+            &target_file_ir.path,
+            target_file_ir.file_context,
+            is_suppressed,
+            &pkg.root_dir,
+            &pkg.capability_gate,
+            &pkg.config,
+        );
+        let mut cascade_steps = Vec::with_capacity(diag.cascade_steps.len());
+        cascade_steps.extend_from_slice(&diag.cascade_steps);
+        append_js_architecture_signals(target_file_ir, diag, &mut explanation, &mut cascade_steps);
+        entries.push(WhyEntry {
+            status,
+            rule: diag.rule.metadata().qualified_key.to_string(),
+            category: diag.category,
+            severity: diag.severity,
+            tier: diag.tier,
+            message: mask_credentials(&diag.message),
+            explanation: mask_credentials(&explanation),
+            code_frame: render_code_frame(target_source, diag.loc.line),
+            cascade_steps,
+            blast_radius: group.blast_radius.clone(),
+            fix_capsule: capsule,
+        });
+    }
+    entries
+}
+
+#[cfg(feature = "js")]
+fn format_js_why_summary_note(
+    entries_len: usize,
+    parsed_loc: &WhyLocation,
+    target_file_ir: &FileIr,
+) -> String {
+    if entries_len > 0 {
         format!(
-            "{} finding(s) explained at {}:{}.",
-            entries.len(),
+            "{entries_len} finding(s) explained at {}:{}.",
             parsed_loc.file.display(),
             parsed_loc.line
         )
@@ -394,15 +488,7 @@ fn explain_js_location(
             parsed_loc.file.display(),
             parsed_loc.line
         )
-    };
-
-    Ok(WhyReport {
-        file: parsed_loc.file.clone(),
-        line: parsed_loc.line,
-        column: parsed_loc.column,
-        entries,
-        summary_note,
-    })
+    }
 }
 
 #[cfg(feature = "js")]

@@ -8,16 +8,25 @@
 mod dom_and_timer_teardown;
 mod hook_and_state_correctness;
 mod jsx_and_lint_parity;
+mod jsx_element_parity;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
-use std::{collections::HashSet, path::Path};
-
-use oxc_ast::AstKind;
+use oxc_ast::{
+    AstKind,
+    ast::{CallExpression, Expression, UnaryOperator},
+};
 use oxc_semantic::{NodeId, Semantic};
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 
 use crate::{
-    ir::{SemanticRuleSite, SubjectIr, react_ast::find_enclosing_react_node},
-    matchers::{push_semantic_site, push_semantic_site_with_fix},
+    ir::{
+        SemanticRuleSite, SubjectIr,
+        react_ast::{find_enclosing_react_node, is_inside_use_effect},
+    },
+    matchers::{is_react_hook_callee, push_semantic_site, push_semantic_site_with_fix},
     rules::types::{AutofixPatch, RuleId},
 };
 
@@ -312,6 +321,371 @@ pub(super) fn is_at_module_scope(semantic: &Semantic<'_>, node_id: NodeId) -> bo
         }
     }
     true
+}
+
+pub(super) fn is_mutation_of_named_binding(kind: AstKind<'_>, var_name: &str) -> bool {
+    match kind {
+        AstKind::AssignmentExpression(assign) => {
+            let Some(mem) = assign.left.as_member_expression() else {
+                return false;
+            };
+            expr_roots_at_identifier(mem.object(), var_name)
+        }
+        AstKind::UpdateExpression(upd) => {
+            let Some(mem) = upd.argument.as_member_expression() else {
+                return false;
+            };
+            expr_roots_at_identifier(mem.object(), var_name)
+        }
+        AstKind::UnaryExpression(un) if un.operator == UnaryOperator::Delete => {
+            match un.argument.without_parentheses() {
+                Expression::StaticMemberExpression(m) => {
+                    expr_roots_at_identifier(&m.object, var_name)
+                }
+                Expression::ComputedMemberExpression(m) => {
+                    expr_roots_at_identifier(&m.object, var_name)
+                }
+                _ => false,
+            }
+        }
+        AstKind::CallExpression(call) => {
+            let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+                return false;
+            };
+            ARRAY_MUTATING_METHODS.contains(&mem.property.name.as_str())
+                && expr_roots_at_identifier(&mem.object, var_name)
+        }
+        _ => false,
+    }
+}
+
+fn expr_roots_at_identifier(expr: &Expression<'_>, var_name: &str) -> bool {
+    let mut curr = expr.without_parentheses();
+    loop {
+        match curr {
+            Expression::Identifier(id) => return id.name.as_str() == var_name,
+            Expression::StaticMemberExpression(m) => curr = m.object.without_parentheses(),
+            Expression::ComputedMemberExpression(m) => curr = m.object.without_parentheses(),
+            _ => return false,
+        }
+    }
+}
+
+pub(super) fn check_render_phase_call(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if is_inside_state_memo_or_ref_initializer(semantic, node_id) {
+        return;
+    }
+
+    let callee = call.callee.without_parentheses();
+    let callee_text = callee.span().source_text(semantic.source_text());
+
+    if matches!(
+        callee_text,
+        "URL.createObjectURL" | "webkitURL.createObjectURL" | "window.URL.createObjectURL"
+    ) {
+        push_site(
+            sites,
+            RuleId::NoCreateObjectUrlInRender,
+            subj_name.clone(),
+            "noCreateObjectUrlInRender",
+            callee_text,
+            "Creating an object URL during render leaks blob memory on every re-render; move `URL.createObjectURL` into `useEffect` or an event handler.".to_string(),
+            call.span,
+            line_starts,
+            None,
+        );
+    }
+
+    if is_store_factory_callee(callee) {
+        push_site(
+            sites,
+            RuleId::NoCreateStoreInRender,
+            subj_name.clone(),
+            "noCreateStoreInRender",
+            callee_text,
+            format!(
+                "Calling `{callee_text}` during render recreates the store on every render; hoist it to module scope."
+            ),
+            call.span,
+            line_starts,
+            None,
+        );
+    }
+
+    if is_nondeterministic_id_callee(callee, callee_text) && !is_inside_jsx_key_attr(semantic, node_id) {
+        push_site(
+            sites,
+            RuleId::NoNondeterministicIdValueInRenderBody,
+            subj_name.clone(),
+            "noNondeterministicIdValueInRenderBody",
+            callee_text,
+            format!(
+                "`{callee_text}()` in the render body produces a new ID on every render; use `useId()` instead."
+            ),
+            call.span,
+            line_starts,
+            None,
+        );
+    }
+
+    if let Expression::StaticMemberExpression(mem) = callee
+        && mem.property.name == "animate"
+        && !call.arguments.is_empty()
+        && !is_inside_use_effect(semantic, node_id)
+    {
+        push_site(
+            sites,
+            RuleId::WaapiAnimationInRender,
+            subj_name.clone(),
+            "waapiAnimationInRender",
+            "animate",
+            "Starting a Web Animation (`.animate(...)`) during render causes impure side effects; move it to `useEffect` or an event handler.".to_string(),
+            call.span,
+            line_starts,
+            None,
+        );
+    }
+}
+
+fn is_inside_state_memo_or_ref_initializer(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
+    semantic.nodes().ancestor_ids(node_id).any(|anc_id| {
+        if let AstKind::CallExpression(parent_call) = semantic.nodes().kind(anc_id) {
+            is_react_hook_callee(semantic, &parent_call.callee, "useState")
+                || is_react_hook_callee(semantic, &parent_call.callee, "useMemo")
+                || is_react_hook_callee(semantic, &parent_call.callee, "useRef")
+        } else {
+            false
+        }
+    })
+}
+
+fn is_store_factory_callee(callee: &Expression<'_>) -> bool {
+    match callee {
+        Expression::Identifier(id) => matches!(id.name.as_str(), "createStore" | "configureStore"),
+        Expression::StaticMemberExpression(mem) => {
+            matches!(mem.property.name.as_str(), "createStore" | "configureStore")
+        }
+        _ => false,
+    }
+}
+
+fn is_nondeterministic_id_callee(callee: &Expression<'_>, callee_text: &str) -> bool {
+    match callee {
+        Expression::Identifier(id) => NONDETERMINISTIC_ID_CALLEES.contains(&id.name.as_str()),
+        Expression::StaticMemberExpression(mem) => {
+            matches!(
+                callee_text,
+                "crypto.randomUUID" | "_.uniqueId" | "lodash.uniqueId"
+            ) || mem.property.name == "randomUUID"
+        }
+        _ => false,
+    }
+}
+
+fn is_inside_jsx_key_attr(semantic: &Semantic<'_>, node_id: NodeId) -> bool {
+    semantic.nodes().ancestor_ids(node_id).any(|anc_id| {
+        matches!(
+            semantic.nodes().kind(anc_id),
+            AstKind::JSXAttribute(attr) if attr.name.as_identifier().is_some_and(|i| i.name == "key")
+        )
+    })
+}
+
+pub(super) fn check_state_setter_call(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    setter_name: &str,
+    state_name: &str,
+    first_arg: &Expression<'_>,
+    subj_id: NodeId,
+    subj_name: &Option<String>,
+    setter_to_state: &HashMap<String, String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Expression::UnaryExpression(un) = first_arg
+        && un.operator == UnaryOperator::LogicalNot
+        && let Expression::Identifier(arg_id) = un.argument.without_parentheses()
+        && arg_id.name.as_str() == state_name
+    {
+        push_site(
+            sites,
+            RuleId::NoBooleanToggleWithoutFunctionalUpdate,
+            subj_name.clone(),
+            "noBooleanToggleWithoutFunctionalUpdate",
+            setter_name,
+            format!(
+                "Toggle `{state_name}` with `{setter_name}((prev) => !prev)` instead of `{setter_name}(!{state_name})`."
+            ),
+            call.span,
+            line_starts,
+            None,
+        );
+    }
+
+    if let Expression::Identifier(arg_id) = first_arg
+        && arg_id.name.as_str() == state_name
+        && is_mutated_before_setter_in_scope(semantic, node_id, subj_id, call.span.start, state_name)
+    {
+        push_site(
+            sites,
+            RuleId::NoMutateThenSetOrReturnSameReference,
+            subj_name.clone(),
+            "noMutateThenSetOrReturnSameReference",
+            state_name,
+            format!(
+                "`{state_name}` is mutated in place and then passed to `{setter_name}({state_name})`; React ignores updates with the same reference."
+            ),
+            call.span,
+            line_starts,
+            None,
+        );
+    }
+
+    check_state_updater_function_purity(
+        semantic,
+        first_arg,
+        setter_name,
+        subj_name,
+        setter_to_state,
+        line_starts,
+        sites,
+    );
+}
+
+fn is_mutated_before_setter_in_scope(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    subj_id: NodeId,
+    call_start: u32,
+    state_name: &str,
+) -> bool {
+    let scope_span = semantic
+        .nodes()
+        .ancestor_ids(node_id)
+        .find_map(|anc_id| match semantic.nodes().kind(anc_id) {
+            AstKind::FunctionBody(b) => Some(b.span),
+            AstKind::BlockStatement(b) => Some(b.span),
+            _ => None,
+        })
+        .unwrap_or_else(|| semantic.nodes().get_node(subj_id).span());
+
+    semantic.nodes().iter_enumerated().any(|(_, n)| {
+        scope_span.contains_inclusive(n.span())
+            && n.span().start < call_start
+            && is_mutation_of_named_binding(n.kind(), state_name)
+    })
+}
+
+fn check_state_updater_function_purity(
+    semantic: &Semantic<'_>,
+    first_arg: &Expression<'_>,
+    setter_name: &str,
+    subj_name: &Option<String>,
+    setter_to_state: &HashMap<String, String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let (u_span, updater_param) = match first_arg {
+        Expression::ArrowFunctionExpression(arr) => (
+            arr.span,
+            arr.params
+                .items
+                .first()
+                .and_then(|p| p.pattern.get_binding_identifier())
+                .map(|id| id.name.to_string()),
+        ),
+        Expression::FunctionExpression(f) => (
+            f.span,
+            f.params
+                .items
+                .first()
+                .and_then(|p| p.pattern.get_binding_identifier())
+                .map(|id| id.name.to_string()),
+        ),
+        _ => return,
+    };
+
+    let mut is_impure = false;
+    let mut mutates_param = false;
+    for (_, inner) in semantic.nodes().iter_enumerated() {
+        if !u_span.contains_inclusive(inner.span()) || inner.span() == u_span {
+            continue;
+        }
+        if let Some(param) = &updater_param
+            && is_mutation_of_named_binding(inner.kind(), param)
+        {
+            is_impure = true;
+            mutates_param = true;
+        }
+        if is_impure_updater_node(semantic, inner.kind(), setter_to_state) {
+            is_impure = true;
+        }
+    }
+    if is_impure {
+        push_site(
+            sites,
+            RuleId::NoImpureStateUpdater,
+            subj_name.clone(),
+            "noImpureStateUpdater",
+            setter_name,
+            format!(
+                "State updater passed to `{setter_name}` performs side effects or in-place mutations; keep state updaters pure."
+            ),
+            u_span,
+            line_starts,
+            None,
+        );
+    }
+    if mutates_param {
+        push_site(
+            sites,
+            RuleId::NoMutateThenSetOrReturnSameReference,
+            subj_name.clone(),
+            "noMutateThenSetOrReturnSameReference",
+            setter_name,
+            format!(
+                "State updater passed to `{setter_name}` mutates the previous state in place and returns the same reference."
+            ),
+            u_span,
+            line_starts,
+            None,
+        );
+    }
+}
+
+fn is_impure_updater_node(
+    semantic: &Semantic<'_>,
+    kind: AstKind<'_>,
+    setter_to_state: &HashMap<String, String>,
+) -> bool {
+    match kind {
+        AstKind::AssignmentExpression(_) | AstKind::UpdateExpression(_) => true,
+        AstKind::CallExpression(c) => {
+            let c_text = c
+                .callee
+                .without_parentheses()
+                .span()
+                .source_text(semantic.source_text());
+            setter_to_state.contains_key(c_text)
+                || c_text.starts_with("localStorage.")
+                || c_text.starts_with("sessionStorage.")
+                || c_text.starts_with("console.")
+                || matches!(
+                    c_text,
+                    "fetch" | "setTimeout" | "setInterval" | "dispatch" | "alert"
+                )
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

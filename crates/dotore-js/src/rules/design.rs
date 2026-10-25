@@ -8,23 +8,23 @@ mod page_composition;
 mod surfaces_and_interactions;
 mod tailwind_and_styles;
 mod typography_and_controls;
+mod typography_and_hero_patterns;
 
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
     AstKind,
-    ast::{JSXChild, JSXElement, Program, VariableDeclarationKind},
+    ast::{JSXChild, JSXElement, JSXOpeningElement, Program, VariableDeclarationKind},
 };
-use oxc_semantic::{Semantic, SymbolId};
+use oxc_semantic::{NodeId, Semantic, SymbolId};
 use oxc_span::GetSpan;
-
 use crate::{
     ir::{
         ByteSpan, SourceLoc,
         react_ast::{find_enclosing_react_node, get_subject_name},
         types::{SemanticRuleSite, loc_from_line_starts},
     },
-    matchers::eval_static_str,
+    matchers::{eval_static_str, get_class_name_str, get_style_prop_number, get_style_prop_str},
     rules::{AutofixPatch, RuleId},
 };
 
@@ -133,6 +133,23 @@ pub(super) const GENERIC_MARKETING_PHRASES: &[&str] = &[
     "built for modern teams",
 ];
 
+pub(super) struct JsxDesignElemCtx<'a, 'b> {
+    pub(super) semantic: &'a Semantic<'b>,
+    pub(super) node_id: NodeId,
+    pub(super) jsx_el: &'a JSXElement<'b>,
+    pub(super) opening: &'a JSXOpeningElement<'b>,
+    pub(super) tag: &'a str,
+    pub(super) tokens: &'a [&'a str],
+    pub(super) unvariant_tokens: &'a [&'a str],
+    pub(super) trimmed_text: &'a str,
+    pub(super) font_size: Option<f64>,
+    pub(super) subject_name: &'a Option<String>,
+    pub(super) const_strings: &'a HashMap<SymbolId, String>,
+    pub(super) loc: SourceLoc,
+    pub(super) span: ByteSpan,
+    pub(super) line_starts: &'a [u32],
+}
+
 /// Extracts all single-pass `design` and `react-ui` rule sites (including deterministic `Autofix` patches).
 #[must_use]
 pub(crate) fn extract_design_sites(
@@ -141,36 +158,9 @@ pub(crate) fn extract_design_sites(
     semantic: &Semantic<'_>,
     line_starts: &[u32],
 ) -> Vec<SemanticRuleSite> {
+    let _ = program;
     let mut sites = Vec::new();
-    let mut const_strings: HashMap<SymbolId, String> = HashMap::new();
-    let mut icon_families: HashSet<String> = HashSet::new();
-
-    for (_, node) in semantic.nodes().iter_enumerated() {
-        match node.kind() {
-            AstKind::ImportDeclaration(imp) if !imp.import_kind.is_type() => {
-                let src = imp.source.value.as_str().unwrap_or_default();
-                if let Some(fam) = classify_icon_library_family(src)
-                    && imp.specifiers.as_ref().is_some_and(|s| !s.is_empty())
-                {
-                    icon_families.insert(fam.to_string());
-                }
-            }
-            AstKind::VariableDeclaration(var_decl)
-                if var_decl.kind == VariableDeclarationKind::Const =>
-            {
-                for decl in &var_decl.declarations {
-                    if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id
-                        && let Some(sym_id) = id.symbol_id.get()
-                        && let Some(init) = &decl.init
-                        && let Some(val) = eval_static_str(semantic, init, &const_strings)
-                    {
-                        const_strings.insert(sym_id, val);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    let (const_strings, icon_families) = collect_design_module_bindings(semantic);
 
     if icon_families.len() >= 2 {
         push_design_site(
@@ -230,34 +220,15 @@ pub(crate) fn extract_design_sites(
                     &mut sites,
                 );
             }
-            AstKind::CallExpression(call)
-                if !did_report_z_index_9999
-                    && call
-                        .callee
-                        .span()
-                        .source_text(semantic.source_text())
-                        .contains("StyleSheet.create") =>
-            {
-                let call_src = call.span.source_text(semantic.source_text());
-                if call_src.contains("zIndex: 9999") || call_src.contains("zIndex: 1000") {
-                    did_report_z_index_9999 = true;
-                    let loc = loc_from_line_starts(line_starts, call.span.start);
-                    let span = ByteSpan {
-                        start: call.span.start,
-                        end: call.span.end,
-                    };
-                    push_design_site(
-                        &mut sites,
-                        RuleId::NoZIndex9999,
-                        subject_name.clone(),
-                        "noZIndex9999",
-                        "zIndex",
-                        "z-index is unusually high and can hide a layering bug instead of fixing it.".to_string(),
-                        loc,
-                        span,
-                        None,
-                    );
-                }
+            AstKind::CallExpression(call) if !did_report_z_index_9999 => {
+                check_stylesheet_create_z_index(
+                    semantic,
+                    call,
+                    &subject_name,
+                    &mut did_report_z_index_9999,
+                    line_starts,
+                    &mut sites,
+                );
             }
             _ => {}
         }
@@ -279,10 +250,80 @@ pub(crate) fn extract_design_sites(
         );
     }
 
-    let _ = program;
     sites
 }
 
+fn collect_design_module_bindings(
+    semantic: &Semantic<'_>,
+) -> (HashMap<SymbolId, String>, HashSet<String>) {
+    let mut const_strings = HashMap::new();
+    let mut icon_families = HashSet::new();
+
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        match node.kind() {
+            AstKind::ImportDeclaration(imp) if !imp.import_kind.is_type() => {
+                let src = imp.source.value.as_str().unwrap_or_default();
+                if let Some(fam) = classify_icon_library_family(src)
+                    && imp.specifiers.as_ref().is_some_and(|s| !s.is_empty())
+                {
+                    icon_families.insert(fam.to_string());
+                }
+            }
+            AstKind::VariableDeclaration(var_decl)
+                if var_decl.kind == VariableDeclarationKind::Const =>
+            {
+                for decl in &var_decl.declarations {
+                    if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id
+                        && let Some(sym_id) = id.symbol_id.get()
+                        && let Some(init) = &decl.init
+                        && let Some(val) = eval_static_str(semantic, init, &const_strings)
+                    {
+                        const_strings.insert(sym_id, val);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (const_strings, icon_families)
+}
+
+fn check_stylesheet_create_z_index(
+    semantic: &Semantic<'_>,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    subject_name: &Option<String>,
+    did_report_z_index_9999: &mut bool,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !call
+        .callee
+        .span()
+        .source_text(semantic.source_text())
+        .contains("StyleSheet.create")
+    {
+        return;
+    }
+    let call_src = call.span.source_text(semantic.source_text());
+    if call_src.contains("zIndex: 9999") || call_src.contains("zIndex: 1000") {
+        *did_report_z_index_9999 = true;
+        push_design_site(
+            sites,
+            RuleId::NoZIndex9999,
+            subject_name.clone(),
+            "noZIndex9999",
+            "zIndex",
+            "z-index is unusually high and can hide a layering bug instead of fixing it."
+                .to_string(),
+            loc_from_line_starts(line_starts, call.span.start),
+            ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            None,
+        );
+    }
+}
 #[expect(
     clippy::too_many_arguments,
     reason = "Constructs a SemanticRuleSite with optional AutofixPatch directly"
@@ -398,6 +439,171 @@ pub(super) fn is_tailwind_card_tokens(tokens: &[&str]) -> bool {
             || (t.starts_with("bg-") && *t != "bg-transparent")
     });
     has_round && has_edge_or_bg
+}
+
+pub(super) fn has_duration_over_1000ms(val: &str) -> bool {
+    for tok in val.split(|c: char| c.is_whitespace() || c == ',') {
+        if let Some(ms_str) = tok.strip_suffix("ms") {
+            if ms_str.parse::<f64>().is_ok_and(|ms| ms > 1000.0) {
+                return true;
+            }
+        } else if let Some(s_str) = tok.strip_suffix('s')
+            && s_str.parse::<f64>().is_ok_and(|s| s > 1.0)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn parse_hex_or_rgb_color(val: &str) -> Option<(f64, f64, f64)> {
+    let t = val.trim().to_ascii_lowercase();
+    if let Some(hex) = t.strip_prefix('#') {
+        if hex.len() == 3 {
+            let r = u8::from_str_radix(hex.get(0..1)?, 16).ok()? * 17;
+            let g = u8::from_str_radix(hex.get(1..2)?, 16).ok()? * 17;
+            let b = u8::from_str_radix(hex.get(2..3)?, 16).ok()? * 17;
+            return Some((f64::from(r), f64::from(g), f64::from(b)));
+        } else if hex.len() == 6 {
+            let r = u8::from_str_radix(hex.get(0..2)?, 16).ok()?;
+            let g = u8::from_str_radix(hex.get(2..4)?, 16).ok()?;
+            let b = u8::from_str_radix(hex.get(4..6)?, 16).ok()?;
+            return Some((f64::from(r), f64::from(g), f64::from(b)));
+        }
+    }
+    if let Some(inner) = t
+        .strip_prefix("rgb(")
+        .or_else(|| t.strip_prefix("rgba("))
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let nums: Vec<f64> = inner
+            .split([',', ' ', '/'])
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if let &[r, g, b, ..] = nums.as_slice() {
+            return Some((r, g, b));
+        }
+    }
+    None
+}
+
+pub(super) fn wcag_contrast_ratio(fg: (f64, f64, f64), bg: (f64, f64, f64)) -> f64 {
+    let lin = |c: f64| -> f64 {
+        let n = c / 255.0;
+        if n <= 0.03928 {
+            n / 12.92
+        } else {
+            ((n + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let lum = |(r, g, b): (f64, f64, f64)| 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+    let l1 = lum(fg);
+    let l2 = lum(bg);
+    (l1.max(l2) + 0.05) / (l1.min(l2) + 0.05)
+}
+
+pub(super) fn has_responsive_axis_prefix(tokens: &[&str], axis: &str) -> bool {
+    let suffix = format!(":{axis}-");
+    tokens.iter().any(|t| t.contains(&suffix))
+}
+
+pub(super) fn collect_matching_axis_values(
+    tokens: &[&str],
+    prefix_a: &str,
+    prefix_b: &str,
+) -> Vec<String> {
+    let mut a_vals: Vec<&str> = Vec::new();
+    for &t in tokens {
+        if let Some(val) = t.strip_prefix(prefix_a)
+            && !val.is_empty()
+        {
+            a_vals.push(val);
+        }
+    }
+    let mut matched = Vec::new();
+    for &t in tokens {
+        if let Some(val) = t.strip_prefix(prefix_b)
+            && a_vals.contains(&val)
+            && !matched.iter().any(|m: &String| m == val)
+        {
+            matched.push(val.to_string());
+        }
+    }
+    matched
+}
+
+const TAILWIND_FONT_SIZE_PX: &[(&str, f64)] = &[
+    ("text-xs", 12.0),
+    ("text-sm", 14.0),
+    ("text-base", 16.0),
+    ("text-lg", 18.0),
+    ("text-xl", 20.0),
+    ("text-2xl", 24.0),
+    ("text-3xl", 30.0),
+    ("text-4xl", 36.0),
+    ("text-5xl", 48.0),
+    ("text-6xl", 60.0),
+    ("text-7xl", 72.0),
+    ("text-8xl", 96.0),
+    ("text-9xl", 128.0),
+];
+
+pub(super) fn resolve_element_font_size_px(
+    opening: &JSXOpeningElement<'_>,
+    unvariant_tokens: &[&str],
+    semantic: &Semantic<'_>,
+    const_strings: &HashMap<SymbolId, String>,
+) -> Option<f64> {
+    if let Some(num) = get_style_prop_number(opening, "fontSize") {
+        return Some(num);
+    }
+    if let Some(s) = get_style_prop_str(opening, "fontSize", semantic, const_strings)
+        && let Some(px) = parse_px_or_rem(&s)
+    {
+        return Some(px);
+    }
+    for &u in unvariant_tokens.iter().rev() {
+        if let Some(px) = TAILWIND_FONT_SIZE_PX
+            .iter()
+            .find_map(|&(tok, px)| (tok == u).then_some(px))
+            .or_else(|| {
+                u.strip_prefix("text-[")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .and_then(parse_px_or_rem)
+            })
+        {
+            return Some(px);
+        }
+    }
+    None
+}
+
+pub(super) fn collect_subtree_font_sizes(
+    jsx_el: &JSXElement<'_>,
+    semantic: &Semantic<'_>,
+    const_strings: &HashMap<SymbolId, String>,
+    out: &mut Vec<f64>,
+) {
+    let class_str =
+        get_class_name_str(&jsx_el.opening_element, semantic, const_strings).unwrap_or_default();
+    let unvariants: Vec<&str> = class_str
+        .split_whitespace()
+        .map(|t| t.rsplit(':').next().unwrap_or(t).trim_start_matches('!'))
+        .collect();
+    if let Some(px) = resolve_element_font_size_px(
+        &jsx_el.opening_element,
+        &unvariants,
+        semantic,
+        const_strings,
+    ) {
+        out.push(px);
+    }
+    for child in &jsx_el.children {
+        if let JSXChild::Element(child_el) = child {
+            collect_subtree_font_sizes(child_el, semantic, const_strings, out);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -112,6 +112,40 @@ struct ReleaseProfileContext {
     has_bin_section: bool,
 }
 
+fn has_main_or_bin_source_file(package: &WorkspacePackage, files: &[ExtractedFile], is_virtual_only: bool) -> bool {
+    files.iter().any(|f| {
+        let s = f.path.to_string_lossy().replace('\\', "/");
+        s == "src/main.rs" || s.ends_with("/src/main.rs") || s == "main.rs" || s.contains("/src/bin/")
+    }) || (!is_virtual_only && package.root_dir.join("src/main.rs").is_file())
+}
+
+fn collect_all_manifest_dep_tables(root: &TomlMap) -> Vec<&TomlMap> {
+    let mut all_dep_tables: Vec<&TomlMap> = Vec::new();
+    for sec in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(t) = root.get(sec).and_then(Value::as_table) {
+            all_dep_tables.push(t);
+        }
+    }
+    if let Some(ws_deps) = root
+        .get("workspace")
+        .and_then(Value::as_table)
+        .and_then(|w| w.get("dependencies"))
+        .and_then(Value::as_table)
+    {
+        all_dep_tables.push(ws_deps);
+    }
+    if let Some(targets) = root.get("target").and_then(Value::as_table) {
+        for target_sec in targets.values().filter_map(Value::as_table) {
+            for sec in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(t) = target_sec.get(sec).and_then(Value::as_table) {
+                    all_dep_tables.push(t);
+                }
+            }
+        }
+    }
+    all_dep_tables
+}
+
 fn evaluate_manifest_rules(
     package: &WorkspacePackage,
     manifest_path: &Path,
@@ -144,11 +178,8 @@ fn evaluate_manifest_rules(
         .get("bin")
         .and_then(Value::as_array)
         .is_some_and(|b| !b.is_empty());
-    let has_main_rs_file = files.iter().any(|f| {
-        let s = f.path.to_string_lossy().replace('\\', "/");
-        s == "src/main.rs" || s.ends_with("/src/main.rs") || s == "main.rs" || s.contains("/src/bin/")
-    }) || (!is_virtual_only && package.root_dir.join("src/main.rs").is_file());
-    let produces_binary = has_bin_section || has_main_rs_file;
+    let produces_binary =
+        has_bin_section || has_main_or_bin_source_file(package, files, is_virtual_only);
     let explicit_missing_lock = enabled_rules
         .is_some_and(|l| l.contains(&RuleId::RsCargoMissingLockfile))
         || package
@@ -179,16 +210,17 @@ fn evaluate_manifest_rules(
         );
     }
 
-    if let Some(lints_tbl) = root.get("lints").and_then(Value::as_table) {
-        inspect_lints_table(package, manifest_path, cargo_toml_src, &starts, lints_tbl, enabled_rules, out);
-    }
-    if let Some(ws_lints_tbl) = root
-        .get("workspace")
-        .and_then(Value::as_table)
-        .and_then(|w| w.get("lints"))
-        .and_then(Value::as_table)
+    for lints_tbl in [
+        root.get("lints").and_then(Value::as_table),
+        root.get("workspace")
+            .and_then(Value::as_table)
+            .and_then(|w| w.get("lints"))
+            .and_then(Value::as_table),
+    ]
+    .into_iter()
+    .flatten()
     {
-        inspect_lints_table(package, manifest_path, cargo_toml_src, &starts, ws_lints_tbl, enabled_rules, out);
+        inspect_lints_table(package, manifest_path, cargo_toml_src, &starts, lints_tbl, enabled_rules, out);
     }
 
     inspect_release_profile_section(
@@ -206,31 +238,7 @@ fn evaluate_manifest_rules(
         out,
     );
 
-    let mut all_dep_tables: Vec<&TomlMap> = Vec::new();
-    for sec in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(t) = root.get(sec).and_then(Value::as_table) {
-            all_dep_tables.push(t);
-        }
-    }
-    if let Some(ws_deps) = root
-        .get("workspace")
-        .and_then(Value::as_table)
-        .and_then(|w| w.get("dependencies"))
-        .and_then(Value::as_table)
-    {
-        all_dep_tables.push(ws_deps);
-    }
-    if let Some(targets) = root.get("target").and_then(Value::as_table) {
-        for target_sec in targets.values().filter_map(Value::as_table) {
-            for sec in ["dependencies", "dev-dependencies", "build-dependencies"] {
-                if let Some(t) = target_sec.get(sec).and_then(Value::as_table) {
-                    all_dep_tables.push(t);
-                }
-            }
-        }
-    }
-
-    for table in all_dep_tables {
+    for table in collect_all_manifest_dep_tables(root) {
         for (key, val) in table {
             let (loc, span) = find_toml_key_span(cargo_toml_src, &starts, key);
             inspect_single_dep_declaration(
@@ -281,19 +289,9 @@ fn inspect_lints_table(
     enabled_rules: Option<&[RuleId]>,
     out: &mut Vec<Diagnostic>,
 ) {
-    let explicit_rule = enabled_rules
-        .is_some_and(|l| l.contains(&RuleId::RsCargoPermissiveLintTable))
-        || package
-            .config
-            .explicit_rule_override(RuleId::RsCargoPermissiveLintTable)
-            .is_some();
-
     if let Some(clippy_map) = lints_tbl.get("clippy").and_then(Value::as_table) {
         for (key, setting) in clippy_map {
             if extract_lint_level(setting) != Some("allow") {
-                continue;
-            }
-            if !explicit_rule && matches!(key.as_str(), "too_many_lines" | "cognitive_complexity") {
                 continue;
             }
             let qualified = format!("clippy::{key}");

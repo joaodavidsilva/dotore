@@ -7,7 +7,7 @@ use dotore_core::{
     AutofixPatch, ByteSpan, Capability, Diagnostic, ExtractedFile, FileContext, RuleId,
     RuleSeverity, RuleTag, WorkspacePackage, loc_from_line_starts,
 };
-use ruff_python_ast::{Expr, ParameterWithDefault, StmtFunctionDef};
+use ruff_python_ast::{ExceptHandler, Expr, ParameterWithDefault, Stmt, StmtFunctionDef};
 use ruff_text_size::{Ranged, TextRange};
 
 /// Saved outer scope state restored when exiting a `def` or `async def` function body.
@@ -230,12 +230,15 @@ pub(crate) fn annotation_is_classvar_or_final(expr: &Expr) -> bool {
     }
 }
 
-/// Computes the byte span of `func_def` starting at `def` / `async def` (after any decorators).
+/// Computes the byte span of a decorated declaration starting after its last decorator.
 #[must_use]
-pub(crate) fn function_def_header_span(source: &str, func_def: &StmtFunctionDef) -> ByteSpan {
-    let full_span = text_range_to_byte_span(func_def.range());
-    let search_start = func_def
-        .decorator_list
+pub(crate) fn decorated_def_header_span(
+    source: &str,
+    full_range: TextRange,
+    decorators: &[ruff_python_ast::Decorator],
+) -> ByteSpan {
+    let full_span = text_range_to_byte_span(full_range);
+    let search_start = decorators
         .last()
         .map_or(full_span.start as usize, |d| d.range().end().to_usize());
     let bytes = source.as_bytes();
@@ -248,6 +251,12 @@ pub(crate) fn function_def_header_span(source: &str, func_def: &StmtFunctionDef)
         start: start_u32,
         end: full_span.end.max(start_u32),
     }
+}
+
+/// Computes the byte span of `func_def` starting at `def` / `async def` (after any decorators).
+#[must_use]
+pub(crate) fn function_def_header_span(source: &str, func_def: &StmtFunctionDef) -> ByteSpan {
+    decorated_def_header_span(source, func_def.range(), &func_def.decorator_list)
 }
 
 /// Iterates over all positional-only, standard, and keyword-only parameters of `func_def`.
@@ -273,74 +282,197 @@ pub(crate) fn extract_target_var_name(expr: &Expr) -> Option<String> {
 }
 
 /// Collects all identifier names (`Expr::Name`) referenced inside `expr` into `out`.
+pub(crate) fn collect_expr_load_names(expr: &Expr, out: &mut HashSet<String>) {
+    if let Expr::Name(n) = expr {
+        out.insert(n.id.to_string());
+    } else {
+        walk_expr_children(expr, |child| collect_expr_load_names(child, out));
+    }
+}
+
+/// Walks direct child expressions of `stmt` (excluding nested statement bodies).
+pub(crate) fn walk_stmt_exprs(stmt: &Stmt, mut on_expr: impl FnMut(&Expr)) {
+    if !walk_simple_stmt_exprs(stmt, &mut on_expr) {
+        walk_compound_stmt_exprs(stmt, &mut on_expr);
+    }
+}
+
+/// Walks direct child statements inside compound `stmt` blocks (`if`, `for`, `while`, `with`, `try`, `match`).
 #[expect(
     clippy::wildcard_enum_match_arm,
-    reason = "Collects identifier names referenced inside an expression"
+    reason = "Walks child statements of compound Python statements (#50)"
 )]
-pub(crate) fn collect_expr_load_names(expr: &Expr, out: &mut HashSet<String>) {
+pub(crate) fn walk_stmt_sub_stmts(stmt: &Stmt, mut on_stmt: impl FnMut(&Stmt)) {
+    match stmt {
+        Stmt::If(if_stmt) => {
+            if_stmt.body.iter().for_each(&mut on_stmt);
+            for clause in &if_stmt.elif_else_clauses {
+                clause.body.iter().for_each(&mut on_stmt);
+            }
+        }
+        Stmt::For(for_stmt) => {
+            for_stmt.body.iter().for_each(&mut on_stmt);
+            for_stmt.orelse.iter().for_each(&mut on_stmt);
+        }
+        Stmt::While(while_stmt) => {
+            while_stmt.body.iter().for_each(&mut on_stmt);
+            while_stmt.orelse.iter().for_each(&mut on_stmt);
+        }
+        Stmt::With(with_stmt) => {
+            with_stmt.body.iter().for_each(&mut on_stmt);
+        }
+        Stmt::Try(try_stmt) => {
+            try_stmt.body.iter().for_each(&mut on_stmt);
+            for ExceptHandler::ExceptHandler(h) in &try_stmt.handlers {
+                h.body.iter().for_each(&mut on_stmt);
+            }
+            try_stmt.orelse.iter().for_each(&mut on_stmt);
+            try_stmt.finalbody.iter().for_each(&mut on_stmt);
+        }
+        Stmt::Match(match_stmt) => {
+            for case in &match_stmt.cases {
+                case.body.iter().for_each(&mut on_stmt);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Walks expression children of simple Python statements (#50)"
+)]
+fn walk_simple_stmt_exprs(stmt: &Stmt, on_expr: &mut impl FnMut(&Expr)) -> bool {
+    match stmt {
+        Stmt::Assign(assign) => on_expr(&assign.value),
+        Stmt::AnnAssign(ann) => {
+            on_expr(&ann.annotation);
+            if let Some(val) = &ann.value {
+                on_expr(val);
+            }
+        }
+        Stmt::AugAssign(aug) => on_expr(&aug.value),
+        Stmt::Expr(expr_stmt) => on_expr(&expr_stmt.value),
+        Stmt::Return(ret) => {
+            if let Some(val) = &ret.value {
+                on_expr(val);
+            }
+        }
+        Stmt::Raise(raise_stmt) => {
+            if let Some(exc) = &raise_stmt.exc {
+                on_expr(exc);
+            }
+        }
+        Stmt::Assert(assert_stmt) => {
+            on_expr(&assert_stmt.test);
+            if let Some(msg) = &assert_stmt.msg {
+                on_expr(msg);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Walks header/condition expressions of compound Python statements (#50)"
+)]
+fn walk_compound_stmt_exprs(stmt: &Stmt, on_expr: &mut impl FnMut(&Expr)) {
+    match stmt {
+        Stmt::If(if_stmt) => {
+            on_expr(&if_stmt.test);
+            for clause in &if_stmt.elif_else_clauses {
+                if let Some(test) = &clause.test {
+                    on_expr(test);
+                }
+            }
+        }
+        Stmt::For(for_stmt) => on_expr(&for_stmt.iter),
+        Stmt::While(while_stmt) => on_expr(&while_stmt.test),
+        Stmt::With(with_stmt) => {
+            for item in &with_stmt.items {
+                on_expr(&item.context_expr);
+            }
+        }
+        Stmt::Match(match_stmt) => {
+            on_expr(&match_stmt.subject);
+            for case in &match_stmt.cases {
+                if let Some(guard) = &case.guard {
+                    on_expr(guard);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walks direct child expressions of `expr`.
+pub(crate) fn walk_expr_children(expr: &Expr, mut on_expr: impl FnMut(&Expr)) {
+    if !walk_primary_expr_children(expr, &mut on_expr) {
+        walk_collection_expr_children(expr, &mut on_expr);
+    }
+}
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Walks child expressions of primary Python expression variants (#50)"
+)]
+fn walk_primary_expr_children(expr: &Expr, on_expr: &mut impl FnMut(&Expr)) -> bool {
     match expr {
-        Expr::Name(n) => {
-            out.insert(n.id.to_string());
-        }
-        Expr::Attribute(a) => {
-            collect_expr_load_names(&a.value, out);
-        }
-        Expr::Call(c) => {
-            collect_expr_load_names(&c.func, out);
-            for arg in &c.arguments.args {
-                collect_expr_load_names(arg, out);
-            }
-            for kw in &c.arguments.keywords {
-                collect_expr_load_names(&kw.value, out);
+        Expr::Call(call) => {
+            on_expr(&call.func);
+            call.arguments.args.iter().for_each(&mut *on_expr);
+            for kw in &call.arguments.keywords {
+                on_expr(&kw.value);
             }
         }
-        Expr::Await(aw) => collect_expr_load_names(&aw.value, out),
-        Expr::BinOp(b) => {
-            collect_expr_load_names(&b.left, out);
-            collect_expr_load_names(&b.right, out);
-        }
-        Expr::UnaryOp(u) => collect_expr_load_names(&u.operand, out),
-        Expr::BoolOp(b) => {
-            for v in &b.values {
-                collect_expr_load_names(v, out);
+        Expr::Attribute(attr) => on_expr(&attr.value),
+        Expr::Await(aw) => on_expr(&aw.value),
+        Expr::Yield(y) => {
+            if let Some(v) = &y.value {
+                on_expr(v);
             }
         }
-        Expr::Compare(cmp) => {
-            for op in &cmp.operands {
-                collect_expr_load_names(op, out);
-            }
+        Expr::YieldFrom(yf) => on_expr(&yf.value),
+        Expr::BinOp(bin) => {
+            on_expr(&bin.left);
+            on_expr(&bin.right);
         }
-        Expr::Subscript(s) => {
-            collect_expr_load_names(&s.value, out);
-            collect_expr_load_names(&s.slice, out);
+        Expr::UnaryOp(un) => on_expr(&un.operand),
+        Expr::Subscript(sub) => {
+            on_expr(&sub.value);
+            on_expr(&sub.slice);
         }
-        Expr::List(l) => {
-            for e in &l.elts {
-                collect_expr_load_names(e, out);
-            }
+        Expr::If(if_expr) => {
+            on_expr(&if_expr.test);
+            on_expr(&if_expr.body);
+            on_expr(&if_expr.orelse);
         }
-        Expr::Tuple(t) => {
-            for e in &t.elts {
-                collect_expr_load_names(e, out);
-            }
-        }
-        Expr::Set(s) => {
-            for e in &s.elts {
-                collect_expr_load_names(e, out);
-            }
-        }
+        Expr::Named(n) => on_expr(&n.value),
+        _ => return false,
+    }
+    true
+}
+
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "Walks child expressions of collection and comparison Python expression variants (#50)"
+)]
+fn walk_collection_expr_children(expr: &Expr, on_expr: &mut impl FnMut(&Expr)) {
+    match expr {
+        Expr::BoolOp(b) => b.values.iter().for_each(&mut *on_expr),
+        Expr::Compare(cmp) => cmp.operands.iter().for_each(&mut *on_expr),
+        Expr::List(l) => l.elts.iter().for_each(&mut *on_expr),
+        Expr::Tuple(t) => t.elts.iter().for_each(&mut *on_expr),
+        Expr::Set(s) => s.elts.iter().for_each(&mut *on_expr),
         Expr::Dict(d) => {
             for item in &d.items {
                 if let Some(k) = &item.key {
-                    collect_expr_load_names(k, out);
+                    on_expr(k);
                 }
-                collect_expr_load_names(&item.value, out);
+                on_expr(&item.value);
             }
-        }
-        Expr::If(i) => {
-            collect_expr_load_names(&i.test, out);
-            collect_expr_load_names(&i.body, out);
-            collect_expr_load_names(&i.orelse, out);
         }
         _ => {}
     }
@@ -555,7 +687,6 @@ pub(crate) fn build_py_diagnostic_with_autofix(
     message: impl Into<String>,
     autofix: Option<AutofixPatch>,
 ) -> Diagnostic {
-    let default_tier = rule.metadata().default_tier;
     build_py_diagnostic(
         path,
         line_starts,
@@ -567,7 +698,6 @@ pub(crate) fn build_py_diagnostic_with_autofix(
         message,
     )
     .with_autofix(autofix)
-    .with_tier(default_tier)
 }
 
 /// Builds a Python [`Diagnostic`] with a deterministic [`AutofixPatch`].

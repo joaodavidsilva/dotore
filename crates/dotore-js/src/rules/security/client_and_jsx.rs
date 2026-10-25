@@ -539,7 +539,9 @@ pub(super) fn check_iframe_missing_sandbox(file: &FileIr, out: &mut Vec<Diagnost
         let end = usize::try_from(jsx.span.end).unwrap_or(file.source.len());
         let snippet = file.source.get(start..end).unwrap_or("");
         let opener = snippet.split('>').next().unwrap_or(snippet);
-        if iframe_sandbox_allows_scripts_and_same_origin(opener) {
+        if iframe_sandbox_allows_scripts_and_same_origin(opener)
+            && !iframe_has_safe_static_relative_src(opener)
+        {
             push_sec_diag(
                 out,
                 file,
@@ -561,4 +563,40 @@ fn iframe_sandbox_allows_scripts_and_same_origin(opener: &str) -> bool {
     };
     let after = &lower[pos + "sandbox".len()..];
     after.contains("allow-scripts") && after.contains("allow-same-origin")
+}
+
+fn iframe_has_safe_static_relative_src(opener: &str) -> bool {
+    if opener.contains("srcDoc") || opener.contains("srcdoc") {
+        return false;
+    }
+    let Some(pos) = opener.find("src=") else {
+        return true;
+    };
+    let after = opener[pos + 4..].trim_start();
+    let val = if let Some(inner) = after.strip_prefix('{') {
+        let Some(end) = inner.find('}') else {
+            return false;
+        };
+        inner[..end].trim()
+    } else {
+        after.split_whitespace().next().unwrap_or(after)
+    };
+    let Some(lit) = super::unquote_js_string_literal(val) else {
+        return false;
+    };
+    let trimmed = lit.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("//")
+        || lower.starts_with("javascript:")
+        || lower.starts_with("data:")
+        || lower.starts_with("blob:")
+    {
+        return false;
+    }
+    trimmed.starts_with('/') || trimmed.starts_with("./") || trimmed.starts_with("../")
 }

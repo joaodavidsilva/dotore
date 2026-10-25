@@ -59,7 +59,7 @@ impl<'a> OrmRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses relevant Python statement variants for ORM N+1 query detection"
+        reason = "Traverses relevant Python statement variants for ORM N+1 query detection (#50)"
     )]
     fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
@@ -76,53 +76,7 @@ impl<'a> OrmRuleVisitor<'a> {
                 self.record_orm_query_binding_from_assign(assign);
                 self.visit_expr(&assign.value);
             }
-            Stmt::AugAssign(aug) => self.visit_expr(&aug.value),
-            Stmt::Expr(expr_stmt) => self.visit_expr(&expr_stmt.value),
-            Stmt::Return(ret) => {
-                if let Some(val) = &ret.value {
-                    self.visit_expr(val);
-                }
-            }
-            Stmt::Raise(raise_stmt) => {
-                if let Some(exc) = &raise_stmt.exc {
-                    self.visit_expr(exc);
-                }
-            }
-            Stmt::Assert(assert_stmt) => {
-                self.visit_expr(&assert_stmt.test);
-                if let Some(msg) = &assert_stmt.msg {
-                    self.visit_expr(msg);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
-                self.visit_suite(&if_stmt.body);
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
-                    }
-                    self.visit_suite(&clause.body);
-                }
-            }
-            Stmt::For(for_stmt) => {
-                self.visit_expr(&for_stmt.iter);
-                let pushed_orm_var = if let Expr::Name(target_name) = for_stmt.target.as_ref()
-                    && let Some(is_eager) = self.classify_orm_iterable(&for_stmt.iter)
-                {
-                    self.orm_loop_iter_vars
-                        .push((target_name.id.to_string(), is_eager));
-                    true
-                } else {
-                    false
-                };
-                self.scope.enter_loop();
-                self.visit_suite(&for_stmt.body);
-                self.visit_suite(&for_stmt.orelse);
-                self.scope.exit_loop();
-                if pushed_orm_var {
-                    self.orm_loop_iter_vars.pop();
-                }
-            }
+            Stmt::For(for_stmt) => self.visit_for_stmt(for_stmt),
             Stmt::While(while_stmt) => {
                 self.visit_expr(&while_stmt.test);
                 self.scope.enter_loop();
@@ -130,37 +84,38 @@ impl<'a> OrmRuleVisitor<'a> {
                 self.visit_suite(&while_stmt.orelse);
                 self.scope.exit_loop();
             }
-            Stmt::With(with_stmt) => {
-                for item in &with_stmt.items {
-                    self.visit_expr(&item.context_expr);
-                }
-                self.visit_suite(&with_stmt.body);
+            _ => {
+                crate::matchers::walk_stmt_exprs(stmt, |e| self.visit_expr(e));
+                crate::matchers::walk_stmt_sub_stmts(stmt, |s| self.visit_stmt(s));
             }
-            Stmt::Try(try_stmt) => {
-                self.visit_suite(&try_stmt.body);
-                for handler in &try_stmt.handlers {
-                    let ruff_python_ast::ExceptHandler::ExceptHandler(h) = handler;
-                    self.visit_suite(&h.body);
-                }
-                self.visit_suite(&try_stmt.orelse);
-                self.visit_suite(&try_stmt.finalbody);
-            }
-            Stmt::Match(match_stmt) => {
-                self.visit_expr(&match_stmt.subject);
-                for case in &match_stmt.cases {
-                    if let Some(guard) = &case.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_suite(&case.body);
-                }
-            }
-            _ => {}
+        }
+    }
+
+    fn visit_for_stmt(&mut self, for_stmt: &ruff_python_ast::StmtFor) {
+        self.visit_expr(&for_stmt.iter);
+        let pushed_orm_var = if let Expr::Name(target_name) = for_stmt.target.as_ref()
+            && let Some(is_eager) = self.classify_orm_iterable(&for_stmt.iter)
+        {
+            self.orm_loop_iter_vars
+                .push((target_name.id.to_string(), is_eager));
+            true
+        } else {
+            false
+        };
+        self.scope.enter_loop();
+        self.visit_suite(&for_stmt.body);
+        self.visit_suite(&for_stmt.orelse);
+        self.scope.exit_loop();
+        if pushed_orm_var {
+            self.orm_loop_iter_vars.pop();
         }
     }
 
     fn visit_class_def(&mut self, class_def: &StmtClassDef) {
-        self.scope.enter_class(class_def.name.as_str());
-        self.visit_suite(&class_def.body);
+        let _ = self.scope.enter_class(class_def.name.as_str());
+        for stmt in &class_def.body {
+            self.visit_stmt(stmt);
+        }
         self.scope.exit_class();
     }
 
@@ -187,7 +142,7 @@ impl<'a> OrmRuleVisitor<'a> {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Traverses Python expression nodes for ORM call and attribute inspection"
+        reason = "Traverses Python expression nodes for ORM call and attribute inspection (#50)"
     )]
     fn visit_expr(&mut self, expr: &Expr) {
         match expr {
@@ -195,75 +150,13 @@ impl<'a> OrmRuleVisitor<'a> {
                 let callee = callee_qualified_name(&call.func);
                 self.check_orm_query_in_loop(call, &callee);
                 self.check_orm_relationship_call_in_loop(call);
-                self.visit_expr(&call.func);
-                for arg in &call.arguments.args {
-                    self.visit_expr(arg);
-                }
-                for kw in &call.arguments.keywords {
-                    self.visit_expr(&kw.value);
-                }
             }
             Expr::Attribute(attr) => {
                 self.check_lazy_orm_relationship_attr_in_loop(attr);
-                self.visit_expr(&attr.value);
             }
-            Expr::Await(aw) => self.visit_expr(&aw.value),
-            Expr::Yield(y) => {
-                if let Some(v) = &y.value {
-                    self.visit_expr(v);
-                }
-            }
-            Expr::YieldFrom(yf) => self.visit_expr(&yf.value),
-            Expr::BinOp(bin) => {
-                self.visit_expr(&bin.left);
-                self.visit_expr(&bin.right);
-            }
-            Expr::UnaryOp(un) => self.visit_expr(&un.operand),
-            Expr::BoolOp(b) => {
-                for v in &b.values {
-                    self.visit_expr(v);
-                }
-            }
-            Expr::Compare(cmp) => {
-                for op_expr in &cmp.operands {
-                    self.visit_expr(op_expr);
-                }
-            }
-            Expr::Subscript(sub) => {
-                self.visit_expr(&sub.value);
-                self.visit_expr(&sub.slice);
-            }
-            Expr::If(if_expr) => {
-                self.visit_expr(&if_expr.test);
-                self.visit_expr(&if_expr.body);
-                self.visit_expr(&if_expr.orelse);
-            }
-            Expr::List(l) => {
-                for e in &l.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Tuple(t) => {
-                for e in &t.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Set(s) => {
-                for e in &s.elts {
-                    self.visit_expr(e);
-                }
-            }
-            Expr::Dict(d) => {
-                for item in &d.items {
-                    if let Some(k) = &item.key {
-                        self.visit_expr(k);
-                    }
-                    self.visit_expr(&item.value);
-                }
-            }
-            Expr::Named(n) => self.visit_expr(&n.value),
             _ => {}
         }
+        crate::matchers::walk_expr_children(expr, |child| self.visit_expr(child));
     }
 
     fn check_orm_query_in_loop(&mut self, call: &ExprCall, callee: &str) {

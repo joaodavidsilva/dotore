@@ -293,8 +293,11 @@ sqlx = "0.8"
 
 use std::sync::Mutex;
 use std::time::Duration;
+use axum::Router;
+use tokio::task;
 
 pub async fn process_order(lock: &Mutex<u64>, pool: &sqlx::PgPool, user_id: &str) {
+    let _ = (Router::<()>::new(), task::yield_now());
     let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     std::thread::sleep(Duration::from_millis(10));
     let sql = format!("SELECT * FROM orders WHERE user_id = '{}'", user_id);

@@ -39,7 +39,7 @@ const UNTRUSTED_GITHUB_EXPRESSIONS: &[&str] = &[
 
 /// Returns `true` if `path` is a GitHub Actions workflow YAML file (`.github/workflows/*.{yml,yaml}`).
 #[must_use]
-pub fn is_github_workflow_path(path: &Path) -> bool {
+pub(crate) fn is_github_workflow_path(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };

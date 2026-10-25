@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use oxc_ast::{
     AstKind,
-    ast::{Expression, JSXAttributeValue, JSXChild, JSXElement, JSXOpeningElement},
+    ast::{Expression, JSXAttributeValue, JSXChild, JSXElement},
 };
 use oxc_semantic::{NodeId, Semantic, SymbolId};
 
@@ -25,14 +25,15 @@ use crate::{
 };
 
 use super::{
-    BLOCK_DEFAULT_TAGS, EXCLUDED_TYPOGRAPHY_TAGS, INLINE_DEFAULT_TAGS, VAGUE_BUTTON_LABELS,
-    collect_all_static_text, is_tailwind_card_tokens, parse_px_or_rem, parse_tailwind_size_px,
-    push_design_site, starts_with_emoji, surfaces_and_interactions::check_extended_design_patterns,
+    BLOCK_DEFAULT_TAGS, EXCLUDED_TYPOGRAPHY_TAGS, INLINE_DEFAULT_TAGS, JsxDesignElemCtx,
+    VAGUE_BUTTON_LABELS, collect_all_static_text, collect_subtree_font_sizes,
+    is_tailwind_card_tokens, parse_tailwind_size_px, push_design_site, resolve_element_font_size_px,
+    starts_with_emoji, surfaces_and_interactions::check_extended_design_patterns,
 };
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Evaluates all element- and page-level UI design rules in one pass"
+    reason = "Evaluates all element- and page-level UI design rules in one pass (#50)"
 )]
 pub(super) fn check_jsx_element_design(
     _path: &std::path::Path,
@@ -58,97 +59,133 @@ pub(super) fn check_jsx_element_design(
         .iter()
         .map(|t| t.rsplit(':').next().unwrap_or(t).trim_start_matches('!'))
         .collect();
+    let text = collect_all_static_text(jsx_el);
+    let trimmed_text = text.trim();
+    let font_size =
+        resolve_element_font_size_px(opening, &unvariant_tokens, semantic, const_strings);
 
-    // 1. `design-no-vague-button-label` (with wizard `Continue` + `Back`/`Previous` form exemption!)
-    if matches!(tag.as_str(), "button" | "Button")
-        && let Some(label_text) = collect_direct_button_label_text(jsx_el)
+    let ctx = JsxDesignElemCtx {
+        semantic,
+        node_id,
+        jsx_el,
+        opening,
+        tag: &tag,
+        tokens: &tokens,
+        unvariant_tokens: &unvariant_tokens,
+        trimmed_text,
+        font_size,
+        subject_name,
+        const_strings,
+        loc,
+        span,
+        line_starts,
+    };
+
+    check_button_and_copy_punctuation_design(&ctx, sites);
+    check_icon_button_img_and_emoji_heading(&ctx, sites);
+    check_pulse_border_and_scroll_design(&ctx, sites);
+    check_container_text_scale_and_display_class(&ctx, sites);
+    check_text_size_viewport_and_padding_design(&ctx, sites);
+    check_hover_motion_table_and_media_design(&ctx, sites);
+    check_extended_design_patterns(&ctx, kicker_candidates, sites);
+}
+
+fn check_button_and_copy_punctuation_design(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if matches!(ctx.tag, "button" | "Button")
+        && let Some(label_text) = collect_direct_button_label_text(ctx.jsx_el)
     {
         let norm = normalize_button_label(&label_text);
-        if VAGUE_BUTTON_LABELS.contains(&norm.as_str()) {
-            let is_wizard_continue =
-                norm == "continue" && enclosing_form_has_previous_step_control(semantic, node_id);
-            if !is_wizard_continue {
-                push_design_site(
-                    sites,
-                    RuleId::DesignNoVagueButtonLabel,
-                    subject_name.clone(),
-                    "designNoVagueButtonLabel",
-                    &label_text,
-                    format!(
-                        "Screen reader users may not know what \"{label_text}\" does. Use a specific action label."
-                    ),
-                    loc,
-                    span,
-                    None,
-                );
-            }
+        if VAGUE_BUTTON_LABELS.contains(&norm.as_str())
+            && !(norm == "continue"
+                && enclosing_form_has_previous_step_control(ctx.semantic, ctx.node_id))
+        {
+            push_design_site(
+                sites,
+                RuleId::DesignNoVagueButtonLabel,
+                ctx.subject_name.clone(),
+                "designNoVagueButtonLabel",
+                &label_text,
+                format!(
+                    "Screen reader users may not know what \"{label_text}\" does. Use a specific action label."
+                ),
+                ctx.loc,
+                ctx.span,
+                None,
+            );
         }
     }
 
-    // 2. `design-no-three-period-ellipsis` & `design-no-em-dash-in-jsx-text` (with Autofix!)
-    if !is_inside_excluded_typography_element(semantic, node_id, const_strings) {
-        for child in &jsx_el.children {
-            if let JSXChild::Text(t) = child {
-                let raw = t.value.as_str();
-                if has_word_three_period_ellipsis(raw) {
-                    let tspan = ByteSpan {
-                        start: t.span.start,
-                        end: t.span.end,
-                    };
-                    let patch = AutofixPatch::replace(
-                        "Replace `...` with typographic ellipsis `…`",
-                        tspan,
-                        raw.replace("...", "…"),
-                    );
-                    push_design_site(
-                        sites,
-                        RuleId::DesignNoThreePeriodEllipsis,
-                        subject_name.clone(),
-                        "designNoThreePeriodEllipsis",
-                        "...",
-                        "Use the typographic ellipsis character `…` instead of three periods `...`.".to_string(),
-                        loc_from_line_starts(line_starts, t.span.start),
-                        tspan,
-                        Some(patch),
-                    );
-                }
-                if raw.contains('—') && raw.split_whitespace().count() >= 5 {
-                    let tspan = ByteSpan {
-                        start: t.span.start,
-                        end: t.span.end,
-                    };
-                    let patch = AutofixPatch::replace(
-                        "Replace em dash `—` with `--`",
-                        tspan,
-                        raw.replace('—', "--"),
-                    );
-                    push_design_site(
-                        sites,
-                        RuleId::DesignNoEmDashInJsxText,
-                        subject_name.clone(),
-                        "designNoEmDashInJsxText",
-                        "—",
-                        "Avoid em dashes in UI copy; use simpler punctuation.".to_string(),
-                        loc_from_line_starts(line_starts, t.span.start),
-                        tspan,
-                        Some(patch),
-                    );
-                }
-            }
+    if is_inside_excluded_typography_element(ctx.semantic, ctx.node_id, ctx.const_strings) {
+        return;
+    }
+    for child in &ctx.jsx_el.children {
+        let JSXChild::Text(t) = child else {
+            continue;
+        };
+        let raw = t.value.as_str();
+        let tspan = ByteSpan {
+            start: t.span.start,
+            end: t.span.end,
+        };
+        let tloc = loc_from_line_starts(ctx.line_starts, t.span.start);
+        if has_word_three_period_ellipsis(raw) {
+            let patch = AutofixPatch::replace(
+                "Replace `...` with typographic ellipsis `…`",
+                tspan,
+                raw.replace("...", "…"),
+            );
+            push_design_site(
+                sites,
+                RuleId::DesignNoThreePeriodEllipsis,
+                ctx.subject_name.clone(),
+                "designNoThreePeriodEllipsis",
+                "...",
+                "Use the typographic ellipsis character `…` instead of three periods `...`."
+                    .to_string(),
+                tloc,
+                tspan,
+                Some(patch),
+            );
+        }
+        if raw.contains('—') && raw.split_whitespace().count() >= 5 {
+            let patch = AutofixPatch::replace(
+                "Replace em dash `—` with `--`",
+                tspan,
+                raw.replace('—', "--"),
+            );
+            push_design_site(
+                sites,
+                RuleId::DesignNoEmDashInJsxText,
+                ctx.subject_name.clone(),
+                "designNoEmDashInJsxText",
+                "—",
+                "Avoid em dashes in UI copy; use simpler punctuation.".to_string(),
+                tloc,
+                tspan,
+                Some(patch),
+            );
         }
     }
+}
 
-    // 3. `no-undersized-icon-button`
-    if tag == "button"
-        && !has_direct_visible_text(jsx_el)
-        && jsx_el
+fn check_icon_button_img_and_emoji_heading(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.tag == "button"
+        && !has_direct_visible_text(ctx.jsx_el)
+        && ctx
+            .jsx_el
             .children
             .iter()
             .any(|c| matches!(c, JSXChild::Element(_)))
     {
-        let mut min_dim = get_style_prop_number(opening, "width")
-            .or_else(|| get_style_prop_number(opening, "height"));
-        for &u in &unvariant_tokens {
+        let mut min_dim = get_style_prop_number(ctx.opening, "width")
+            .or_else(|| get_style_prop_number(ctx.opening, "height"));
+        for &u in ctx.unvariant_tokens {
             if let Some(px) = parse_tailwind_size_px(u) {
                 min_dim = Some(min_dim.map_or(px, |cur| cur.min(px)));
             }
@@ -157,117 +194,158 @@ pub(super) fn check_jsx_element_design(
             push_design_site(
                 sites,
                 RuleId::NoUndersizedIconButton,
-                subject_name.clone(),
+                ctx.subject_name.clone(),
                 "noUndersizedIconButton",
                 "button",
                 "This icon button target is smaller than 24×24 CSS pixels (WCAG 2.5.8)."
                     .to_string(),
-                loc,
-                span,
+                ctx.loc,
+                ctx.span,
                 None,
             );
         }
     }
 
-    // 4. `no-img-without-dimensions`
-    if tag == "img" {
-        let has_attr_dims = find_jsx_attr_ignore_case(&opening.attributes, "width").is_some()
-            && find_jsx_attr_ignore_case(&opening.attributes, "height").is_some();
-        let has_tw_dims = unvariant_tokens.iter().any(|u| {
-            u.starts_with("size-")
-                || u.starts_with("aspect-")
-                || (unvariant_tokens.iter().any(|w| w.starts_with("w-"))
-                    && unvariant_tokens.iter().any(|h| h.starts_with("h-")))
-        });
-        let has_style_dims = get_style_prop_number(opening, "width").is_some()
-            && get_style_prop_number(opening, "height").is_some();
-        if !has_attr_dims && !has_tw_dims && !has_style_dims {
-            push_design_site(
-                sites,
-                RuleId::NoImgWithoutDimensions,
-                subject_name.clone(),
-                "noImgWithoutDimensions",
-                "img",
-                "This image reserves no dimensions or aspect ratio before loading, causing layout shift.".to_string(),
-                loc,
-                span,
-                None,
-            );
-        }
+    if ctx.tag == "img" && !has_img_dimensions(ctx) {
+        push_design_site(
+            sites,
+            RuleId::NoImgWithoutDimensions,
+            ctx.subject_name.clone(),
+            "noImgWithoutDimensions",
+            "img",
+            "This image reserves no dimensions or aspect ratio before loading, causing layout shift.".to_string(),
+            ctx.loc,
+            ctx.span,
+            None,
+        );
     }
 
-    // 5. `no-emoji-heading-decoration`
-    if matches!(tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
-        let text = collect_all_static_text(jsx_el);
-        if starts_with_emoji(text.trim_start()) {
-            push_design_site(
-                sites,
-                RuleId::NoEmojiHeadingDecoration,
-                subject_name.clone(),
-                "noEmojiHeadingDecoration",
-                &tag,
-                "This heading uses emoji as decoration. Keep the heading typographic and move icons into a consistent icon system.".to_string(),
-                loc,
-                span,
-                None,
-            );
-        }
+    if matches!(ctx.tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+        && starts_with_emoji(ctx.trimmed_text)
+    {
+        push_design_site(
+            sites,
+            RuleId::NoEmojiHeadingDecoration,
+            ctx.subject_name.clone(),
+            "noEmojiHeadingDecoration",
+            ctx.tag,
+            "This heading uses emoji as decoration. Keep the heading typographic and move icons into a consistent icon system.".to_string(),
+            ctx.loc,
+            ctx.span,
+            None,
+        );
     }
+}
 
-    // 6. `no-decorative-pulse` & `no-pulsing-status-dot`
-    if unvariant_tokens
+fn has_img_dimensions(ctx: &JsxDesignElemCtx<'_, '_>) -> bool {
+    let has_attr_dims = find_jsx_attr_ignore_case(&ctx.opening.attributes, "width").is_some()
+        && find_jsx_attr_ignore_case(&ctx.opening.attributes, "height").is_some();
+    let has_tw_dims = ctx.unvariant_tokens.iter().any(|u| {
+        u.starts_with("size-")
+            || u.starts_with("aspect-")
+            || (ctx.unvariant_tokens.iter().any(|w| w.starts_with("w-"))
+                && ctx.unvariant_tokens.iter().any(|h| h.starts_with("h-")))
+    });
+    let has_style_dims = get_style_prop_number(ctx.opening, "width").is_some()
+        && get_style_prop_number(ctx.opening, "height").is_some();
+    has_attr_dims || has_tw_dims || has_style_dims
+}
+
+fn check_pulse_border_and_scroll_design(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx
+        .unvariant_tokens
         .iter()
         .any(|u| matches!(*u, "animate-pulse" | "animate-ping"))
+        && !is_legitimate_live_status_pulse(ctx)
     {
-        let role_val = find_jsx_attr_ignore_case(&opening.attributes, "role")
-            .and_then(|a| get_attr_static_str(semantic, a, const_strings));
-        let is_live_status = matches!(
-            role_val.as_deref(),
-            Some("status" | "progressbar" | "alert")
-        ) || find_jsx_attr_ignore_case(&opening.attributes, "aria-busy")
-            .is_some();
-        let text = collect_all_static_text(jsx_el);
-        let lower_text = text.to_ascii_lowercase();
-        let is_busy_copy = lower_text.contains("loading")
-            || lower_text.contains("saving")
-            || lower_text.contains("processing");
-
-        if !is_live_status && !is_busy_copy {
-            if !text.trim().is_empty() {
-                push_design_site(
-                    sites,
-                    RuleId::NoDecorativePulse,
-                    subject_name.clone(),
-                    "noDecorativePulse",
-                    &tag,
-                    "Stable copy pulses continuously for attention; reserve pulsing motion for real in-progress feedback.".to_string(),
-                    loc,
-                    span,
-                    None,
-                );
-            } else if unvariant_tokens.contains(&"rounded-full")
-                && unvariant_tokens
-                    .iter()
-                    .any(|u| parse_tailwind_size_px(u).is_some_and(|px| (2.0..=16.0).contains(&px)))
-            {
-                push_design_site(
-                    sites,
-                    RuleId::NoPulsingStatusDot,
-                    subject_name.clone(),
-                    "noPulsingStatusDot",
-                    &tag,
-                    "Decorative status dot pulses continuously without live-region semantics."
-                        .to_string(),
-                    loc,
-                    span,
-                    None,
-                );
-            }
+        if !ctx.trimmed_text.is_empty() {
+            push_design_site(
+                sites,
+                RuleId::NoDecorativePulse,
+                ctx.subject_name.clone(),
+                "noDecorativePulse",
+                ctx.tag,
+                "Stable copy pulses continuously for attention; reserve pulsing motion for real in-progress feedback.".to_string(),
+                ctx.loc,
+                ctx.span,
+                None,
+            );
+        } else if ctx.unvariant_tokens.contains(&"rounded-full")
+            && ctx
+                .unvariant_tokens
+                .iter()
+                .any(|u| parse_tailwind_size_px(u).is_some_and(|px| (2.0..=16.0).contains(&px)))
+        {
+            push_design_site(
+                sites,
+                RuleId::NoPulsingStatusDot,
+                ctx.subject_name.clone(),
+                "noPulsingStatusDot",
+                ctx.tag,
+                "Decorative status dot pulses continuously without live-region semantics."
+                    .to_string(),
+                ctx.loc,
+                ctx.span,
+                None,
+            );
         }
     }
 
-    // 7. `no-side-tab-border`
-    if unvariant_tokens.iter().any(|u| {
+    if has_side_tab_border_tokens(ctx.unvariant_tokens) {
+        push_design_site(
+            sites,
+            RuleId::NoSideTabBorder,
+            ctx.subject_name.clone(),
+            "noSideTabBorder",
+            ctx.tag,
+            "Thick one-sided colored stripe border; prefer a subtler surface treatment."
+                .to_string(),
+            ctx.loc,
+            ctx.span,
+            None,
+        );
+    }
+
+    if ctx.tokens.contains(&"scroll-smooth")
+        && !ctx
+            .tokens
+            .iter()
+            .any(|t| t.starts_with("motion-safe:") || t.starts_with("motion-reduce:"))
+    {
+        push_design_site(
+            sites,
+            RuleId::NoSmoothScrollWithoutReducedMotion,
+            ctx.subject_name.clone(),
+            "noSmoothScrollWithoutReducedMotion",
+            ctx.tag,
+            "`scroll-smooth` ignores `prefers-reduced-motion`; use `motion-safe:scroll-smooth`."
+                .to_string(),
+            ctx.loc,
+            ctx.span,
+            None,
+        );
+    }
+}
+
+fn is_legitimate_live_status_pulse(ctx: &JsxDesignElemCtx<'_, '_>) -> bool {
+    let role_val = find_jsx_attr_ignore_case(&ctx.opening.attributes, "role")
+        .and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings));
+    if matches!(
+        role_val.as_deref(),
+        Some("status" | "progressbar" | "alert")
+    ) || find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-busy").is_some()
+    {
+        return true;
+    }
+    let lower = ctx.trimmed_text.to_ascii_lowercase();
+    lower.contains("loading") || lower.contains("saving") || lower.contains("processing")
+}
+
+fn has_side_tab_border_tokens(unvariant_tokens: &[&str]) -> bool {
+    unvariant_tokens.iter().any(|u| {
         matches!(
             *u,
             "border-l-4" | "border-l-8" | "border-r-4" | "border-r-8"
@@ -275,56 +353,31 @@ pub(super) fn check_jsx_element_design(
     }) && unvariant_tokens.iter().any(|u| {
         u.starts_with("border-[")
             || (u.starts_with("border-")
-                && !u.starts_with("border-gray-")
-                && !u.starts_with("border-slate-")
-                && !u.starts_with("border-zinc-")
-                && !u.starts_with("border-neutral-")
-                && !u.starts_with("border-stone-")
+                && ![
+                    "border-gray-",
+                    "border-slate-",
+                    "border-zinc-",
+                    "border-neutral-",
+                    "border-stone-",
+                ]
+                .iter()
+                .any(|p| u.starts_with(p))
                 && !matches!(
                     *u,
                     "border-l-4" | "border-l-8" | "border-r-4" | "border-r-8"
                 ))
-    }) {
-        push_design_site(
-            sites,
-            RuleId::NoSideTabBorder,
-            subject_name.clone(),
-            "noSideTabBorder",
-            &tag,
-            "Thick one-sided colored stripe border; prefer a subtler surface treatment."
-                .to_string(),
-            loc,
-            span,
-            None,
-        );
-    }
+    })
+}
 
-    // 8. `no-smooth-scroll-without-reduced-motion`
-    if tokens.contains(&"scroll-smooth")
-        && !tokens
-            .iter()
-            .any(|t| t.starts_with("motion-safe:") || t.starts_with("motion-reduce:"))
-    {
-        push_design_site(
-            sites,
-            RuleId::NoSmoothScrollWithoutReducedMotion,
-            subject_name.clone(),
-            "noSmoothScrollWithoutReducedMotion",
-            &tag,
-            "`scroll-smooth` ignores `prefers-reduced-motion`; use `motion-safe:scroll-smooth`."
-                .to_string(),
-            loc,
-            span,
-            None,
-        );
-    }
-
-    // 9. `no-repeated-container-text`
-    if matches!(tag.as_str(), "article" | "aside" | "div" | "section")
-        && is_tailwind_card_tokens(&unvariant_tokens)
+fn check_container_text_scale_and_display_class(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if matches!(ctx.tag, "article" | "aside" | "div" | "section")
+        && is_tailwind_card_tokens(ctx.unvariant_tokens)
     {
         let mut leaf_texts: HashMap<String, usize> = HashMap::new();
-        collect_leaf_element_texts(jsx_el, &mut leaf_texts);
+        collect_leaf_element_texts(ctx.jsx_el, &mut leaf_texts);
         if let Some((repeated_text, _)) = leaf_texts
             .into_iter()
             .find(|(txt, count)| *count >= 3 && (4..=48).contains(&txt.len()))
@@ -332,24 +385,23 @@ pub(super) fn check_jsx_element_design(
             push_design_site(
                 sites,
                 RuleId::NoRepeatedContainerText,
-                subject_name.clone(),
+                ctx.subject_name.clone(),
                 "noRepeatedContainerText",
                 &repeated_text,
                 format!(
                     "This card container repeats {:?} across multiple distinct slots.",
                     repeated_text
                 ),
-                loc,
-                span,
+                ctx.loc,
+                ctx.span,
                 None,
             );
         }
     }
 
-    // 10. `no-flat-page-type-scale`
-    if tag == "main" {
+    if ctx.tag == "main" {
         let mut font_sizes: Vec<f64> = Vec::new();
-        collect_subtree_font_sizes(jsx_el, semantic, const_strings, &mut font_sizes);
+        collect_subtree_font_sizes(ctx.jsx_el, ctx.semantic, ctx.const_strings, &mut font_sizes);
         font_sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         font_sizes.dedup_by(|a, b| (*a - *b).abs() < 0.01);
         if font_sizes.len() >= 3
@@ -360,133 +412,103 @@ pub(super) fn check_jsx_element_design(
             push_design_site(
                 sites,
                 RuleId::NoFlatPageTypeScale,
-                subject_name.clone(),
+                ctx.subject_name.clone(),
                 "noFlatPageTypeScale",
                 "main",
                 format!(
                     "This page declares {} text sizes within less than a 2× range. Increase the hierarchy between supporting and display text.",
                     font_sizes.len()
                 ),
-                loc,
-                span,
+                ctx.loc,
+                ctx.span,
                 None,
             );
         }
     }
 
-    // 11. `no-redundant-display-class` (with Autofix!)
-    if let Some(class_attr) = find_attr(&opening.attributes, "className")
+    if let Some(class_attr) = find_attr(&ctx.opening.attributes, "className")
         && let Some(JSXAttributeValue::StringLiteral(s_lit)) = &class_attr.value
+        && let Some(disp) = detect_redundant_display_class(ctx.tag, ctx.tokens)
     {
-        let redundant_disp = if BLOCK_DEFAULT_TAGS.contains(&tag.as_str())
-            && tokens.contains(&"block")
-            && !tokens.iter().any(|t| {
-                t.contains(":flex")
-                    || t.contains(":grid")
-                    || t.contains(":hidden")
-                    || t.contains(":inline")
-            }) {
-            Some("block")
-        } else if INLINE_DEFAULT_TAGS.contains(&tag.as_str())
-            && tokens.contains(&"inline")
-            && !tokens
-                .iter()
-                .any(|t| t.contains(":block") || t.contains(":flex") || t.contains(":hidden"))
-        {
-            Some("inline")
-        } else {
-            None
+        let new_tokens: Vec<&str> = ctx.tokens.iter().copied().filter(|&t| t != disp).collect();
+        let content_span = ByteSpan {
+            start: s_lit.span.start + 1,
+            end: s_lit.span.end.saturating_sub(1),
         };
-        if let Some(disp) = redundant_disp {
-            let new_tokens: Vec<&str> = tokens.iter().copied().filter(|&t| t != disp).collect();
-            let content_span = ByteSpan {
-                start: s_lit.span.start + 1,
-                end: s_lit.span.end.saturating_sub(1),
-            };
-            let patch = AutofixPatch::replace(
-                format!("Remove redundant `{disp}` class on `<{tag}>`"),
-                content_span,
-                new_tokens.join(" "),
-            );
-            push_design_site(
-                sites,
-                RuleId::NoRedundantDisplayClass,
-                subject_name.clone(),
-                "noRedundantDisplayClass",
-                disp,
-                format!("`{disp}` is already the default display of `<{tag}>`."),
-                loc,
-                span,
-                Some(patch),
-            );
-        }
+        let patch = AutofixPatch::replace(
+            format!("Remove redundant `{disp}` class on `<{}>`", ctx.tag),
+            content_span,
+            new_tokens.join(" "),
+        );
+        push_design_site(
+            sites,
+            RuleId::NoRedundantDisplayClass,
+            ctx.subject_name.clone(),
+            "noRedundantDisplayClass",
+            disp,
+            format!("`{disp}` is already the default display of `<{}>`.", ctx.tag),
+            ctx.loc,
+            ctx.span,
+            Some(patch),
+        );
     }
-
-    // 12. Remaining className / element design rules
-    check_remaining_element_design_rules(
-        semantic,
-        node_id,
-        jsx_el,
-        &tag,
-        &tokens,
-        &unvariant_tokens,
-        subject_name,
-        const_strings,
-        kicker_candidates,
-        loc,
-        span,
-        line_starts,
-        sites,
-    );
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates all remaining UI design rules on a JSXElement in a single pass"
-)]
-fn check_remaining_element_design_rules(
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    jsx_el: &JSXElement<'_>,
-    tag: &str,
-    tokens: &[&str],
-    unvariant_tokens: &[&str],
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
-    kicker_candidates: &mut Vec<(SourceLoc, ByteSpan)>,
-    loc: SourceLoc,
-    span: ByteSpan,
-    line_starts: &[u32],
+fn detect_redundant_display_class(tag: &str, tokens: &[&str]) -> Option<&'static str> {
+    if BLOCK_DEFAULT_TAGS.contains(&tag)
+        && tokens.contains(&"block")
+        && !tokens.iter().any(|t| {
+            t.contains(":flex")
+                || t.contains(":grid")
+                || t.contains(":hidden")
+                || t.contains(":inline")
+        })
+    {
+        return Some("block");
+    }
+    if INLINE_DEFAULT_TAGS.contains(&tag)
+        && tokens.contains(&"inline")
+        && !tokens
+            .iter()
+            .any(|t| t.contains(":block") || t.contains(":flex") || t.contains(":hidden"))
+    {
+        return Some("inline");
+    }
+    None
+}
+
+fn check_text_size_viewport_and_padding_design(
+    ctx: &JsxDesignElemCtx<'_, '_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let opening = &jsx_el.opening_element;
-    let text = collect_all_static_text(jsx_el);
-    let trimmed_text = text.trim();
-    let font_size =
-        resolve_element_font_size_px(opening, unvariant_tokens, semantic, const_strings);
+    check_tiny_and_gradient_text_design(ctx, sites);
+    check_viewport_and_padding_bounds_design(ctx, sites);
+}
 
-    // 1. `no-tiny-text`
-    if !trimmed_text.is_empty()
-        && font_size.is_some_and(|px| px > 0.0 && px < 12.0)
-        && !unvariant_tokens.contains(&"sr-only")
+fn check_tiny_and_gradient_text_design(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !ctx.trimmed_text.is_empty()
+        && ctx.font_size.is_some_and(|px| px > 0.0 && px < 12.0)
+        && !ctx.unvariant_tokens.contains(&"sr-only")
     {
         push_design_site(
             sites,
             RuleId::NoTinyText,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noTinyText",
-            tag,
+            ctx.tag,
             "Text is smaller than 12px and hard to read.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 2. `no-gradient-text`
-    if unvariant_tokens.contains(&"bg-clip-text")
-        && unvariant_tokens.contains(&"text-transparent")
-        && unvariant_tokens.iter().any(|u| {
+    if ctx.unvariant_tokens.contains(&"bg-clip-text")
+        && ctx.unvariant_tokens.contains(&"text-transparent")
+        && ctx.unvariant_tokens.iter().any(|u| {
             u.starts_with("bg-gradient-")
                 || u.starts_with("bg-linear-")
                 || u.starts_with("bg-radial")
@@ -495,18 +517,22 @@ fn check_remaining_element_design_rules(
         push_design_site(
             sites,
             RuleId::NoGradientText,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noGradientText",
-            tag,
+            ctx.tag,
             "Gradient text is harder to read; prefer solid text color.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
+}
 
-    // 3. `prefer-dvh-over-vh` & `no-full-viewport-width` (Tailwind classes)
-    if unvariant_tokens.iter().any(|u| {
+fn check_viewport_and_padding_bounds_design(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.unvariant_tokens.iter().any(|u| {
         matches!(
             *u,
             "h-screen" | "min-h-screen" | "h-[100vh]" | "min-h-[100vh]"
@@ -515,16 +541,17 @@ fn check_remaining_element_design_rules(
         push_design_site(
             sites,
             RuleId::PreferDvhOverVh,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "preferDvhOverVh",
-            tag,
+            ctx.tag,
             "`h-screen` / `100vh` overflows under mobile browser toolbars; use `h-dvh` / `min-h-dvh`.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
-    if unvariant_tokens.iter().any(|u| {
+
+    if ctx.unvariant_tokens.iter().any(|u| {
         matches!(
             *u,
             "w-screen" | "min-w-screen" | "w-[100vw]" | "min-w-[100vw]"
@@ -533,20 +560,19 @@ fn check_remaining_element_design_rules(
         push_design_site(
             sites,
             RuleId::NoFullViewportWidth,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noFullViewportWidth",
-            tag,
+            ctx.tag,
             "`w-screen` / `100vw` ignores the scrollbar gutter; use `w-full`.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 4. `no-cramped-container-padding`
-    if !trimmed_text.is_empty()
-        && unvariant_tokens.iter().any(|u| u.starts_with("border"))
-        && unvariant_tokens.iter().any(|u| {
+    if !ctx.trimmed_text.is_empty()
+        && ctx.unvariant_tokens.iter().any(|u| u.starts_with("border"))
+        && ctx.unvariant_tokens.iter().any(|u| {
             matches!(
                 *u,
                 "p-0.5" | "p-1" | "p-1.5" | "px-1" | "py-1" | "p-[2px]" | "p-[4px]"
@@ -556,58 +582,72 @@ fn check_remaining_element_design_rules(
         push_design_site(
             sites,
             RuleId::NoCrampedContainerPadding,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noCrampedContainerPadding",
-            tag,
+            ctx.tag,
             "Bounded text container has cramped padding (< 8px).".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 5. `no-small-form-control-text`
-    if matches!(tag, "input" | "select" | "textarea")
-        && font_size.is_some_and(|px| px > 0.0 && px < 16.0)
+    if matches!(ctx.tag, "input" | "select" | "textarea")
+        && ctx.font_size.is_some_and(|px| px > 0.0 && px < 16.0)
     {
         push_design_site(
             sites,
             RuleId::NoSmallFormControlText,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noSmallFormControlText",
-            tag,
+            ctx.tag,
             format!(
                 "Form control uses {}px text on mobile; use at least 16px to prevent auto-zoom.",
-                font_size.unwrap_or(14.0)
+                ctx.font_size.unwrap_or(14.0)
             ),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 6. `no-oversized-long-heading`
-    if tag == "h1" && trimmed_text.len() >= 40 && font_size.is_some_and(|px| px >= 64.0) {
+    if ctx.tag == "h1"
+        && ctx.trimmed_text.len() >= 40
+        && ctx.font_size.is_some_and(|px| px >= 64.0)
+    {
         push_design_site(
             sites,
             RuleId::NoOversizedLongHeading,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noOversizedLongHeading",
             "h1",
             "Long sentence-length headline uses an oversized hero display scale (>= 64px)."
                 .to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
+}
 
-    // 7. `no-hover-only-reveal`
-    if tokens.contains(&"opacity-0")
-        && tokens
+fn check_hover_motion_table_and_media_design(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    check_hover_reveal_and_mixed_animation(ctx, sites);
+    check_table_video_and_scale_origin(ctx, sites);
+}
+
+fn check_hover_reveal_and_mixed_animation(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.tokens.contains(&"opacity-0")
+        && ctx
+            .tokens
             .iter()
             .any(|t| *t == "hover:opacity-100" || *t == "group-hover:opacity-100")
-        && !tokens.iter().any(|t| {
+        && !ctx.tokens.iter().any(|t| {
             t.contains("focus:opacity-100")
                 || t.contains("focus-visible:opacity-100")
                 || t.contains("focus-within:opacity-100")
@@ -616,41 +656,47 @@ fn check_remaining_element_design_rules(
         push_design_site(
             sites,
             RuleId::NoHoverOnlyReveal,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noHoverOnlyReveal",
-            tag,
+            ctx.tag,
             "Content is revealed only on hover without a keyboard focus reveal.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 8. `no-mixed-animation-owners`
-    if (tag.starts_with("motion.") || tag.starts_with("m."))
-        && find_attr(&opening.attributes, "animate").is_some()
-        && unvariant_tokens.iter().any(|u| u.starts_with("transition"))
+    if (ctx.tag.starts_with("motion.") || ctx.tag.starts_with("m."))
+        && find_attr(&ctx.opening.attributes, "animate").is_some()
+        && ctx
+            .unvariant_tokens
+            .iter()
+            .any(|u| u.starts_with("transition"))
     {
         push_design_site(
             sites,
             RuleId::NoMixedAnimationOwners,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noMixedAnimationOwners",
-            tag,
+            ctx.tag,
             "CSS transition and Motion `animate` both control properties on the same element."
                 .to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
+}
 
-    // 9. `prefer-tabular-numeric-data`
-    if tag == "td"
-        && !has_tabular_nums_in_ancestry(semantic, node_id, const_strings)
-        && jsx_el.children.iter().any(|c| {
+fn check_table_video_and_scale_origin(
+    ctx: &JsxDesignElemCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.tag == "td"
+        && !has_tabular_nums_in_ancestry(ctx.semantic, ctx.node_id, ctx.const_strings)
+        && ctx.jsx_el.children.iter().any(|c| {
             if let JSXChild::ExpressionContainer(ec) = c {
-                let s = ec.span.source_text(semantic.source_text());
+                let s = ec.span.source_text(ctx.semantic.source_text());
                 s.contains(".toLocaleString(")
                     || s.contains(".toFixed(")
                     || s.contains("formatCurrency(")
@@ -662,74 +708,59 @@ fn check_remaining_element_design_rules(
         push_design_site(
             sites,
             RuleId::PreferTabularNumericData,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "preferTabularNumericData",
             "td",
             "Table cell renders a formatted number without `tabular-nums`.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 10. `require-autoplay-video-poster`
-    if tag == "video"
-        && find_jsx_attr_ignore_case(&opening.attributes, "autoPlay").is_some()
-        && find_jsx_attr_ignore_case(&opening.attributes, "poster").is_none()
+    if ctx.tag == "video"
+        && find_jsx_attr_ignore_case(&ctx.opening.attributes, "autoPlay").is_some()
+        && find_jsx_attr_ignore_case(&ctx.opening.attributes, "poster").is_none()
     {
         push_design_site(
             sites,
             RuleId::RequireAutoplayVideoPoster,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "requireAutoplayVideoPoster",
             "video",
             "Autoplaying `<video>` has no `poster` frame.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
 
-    // 11. `require-scale-reveal-transform-origin`
-    if find_jsx_attr_ignore_case(&opening.attributes, "role")
-        .and_then(|a| get_attr_static_str(semantic, a, const_strings))
+    if find_jsx_attr_ignore_case(&ctx.opening.attributes, "role")
+        .and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings))
         .is_some_and(|r| matches!(r.as_str(), "menu" | "listbox"))
-        && find_attr(&opening.attributes, "initial")
-            .is_some_and(|a| a.span.source_text(semantic.source_text()).contains("scale"))
-        && !unvariant_tokens.iter().any(|u| u.starts_with("origin-"))
-        && get_style_prop_str(opening, "transformOrigin", semantic, const_strings).is_none()
+        && find_attr(&ctx.opening.attributes, "initial")
+            .is_some_and(|a| a.span.source_text(ctx.semantic.source_text()).contains("scale"))
+        && !ctx.unvariant_tokens.iter().any(|u| u.starts_with("origin-"))
+        && get_style_prop_str(
+            ctx.opening,
+            "transformOrigin",
+            ctx.semantic,
+            ctx.const_strings,
+        )
+        .is_none()
     {
         push_design_site(
             sites,
             RuleId::RequireScaleRevealTransformOrigin,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "requireScaleRevealTransformOrigin",
-            tag,
+            ctx.tag,
             "Scaled menu/listbox omits an explicit `origin-*` or `transformOrigin`.".to_string(),
-            loc,
-            span,
+            ctx.loc,
+            ctx.span,
             None,
         );
     }
-
-    // 12. Additional single-element and page-level design checks
-    check_extended_design_patterns(
-        semantic,
-        node_id,
-        jsx_el,
-        tag,
-        tokens,
-        unvariant_tokens,
-        trimmed_text,
-        font_size,
-        subject_name,
-        const_strings,
-        kicker_candidates,
-        loc,
-        span,
-        line_starts,
-        sites,
-    );
 }
 
 fn collect_direct_button_label_text(jsx_el: &JSXElement<'_>) -> Option<String> {
@@ -862,74 +893,6 @@ fn collect_leaf_element_texts(jsx_el: &JSXElement<'_>, counts: &mut HashMap<Stri
     for child in &jsx_el.children {
         if let JSXChild::Element(child_el) = child {
             collect_leaf_element_texts(child_el, counts);
-        }
-    }
-}
-
-fn resolve_element_font_size_px(
-    opening: &JSXOpeningElement<'_>,
-    unvariant_tokens: &[&str],
-    semantic: &Semantic<'_>,
-    const_strings: &HashMap<SymbolId, String>,
-) -> Option<f64> {
-    if let Some(num) = get_style_prop_number(opening, "fontSize") {
-        return Some(num);
-    }
-    if let Some(s) = get_style_prop_str(opening, "fontSize", semantic, const_strings)
-        && let Some(px) = parse_px_or_rem(&s)
-    {
-        return Some(px);
-    }
-    for &u in unvariant_tokens.iter().rev() {
-        let px = match u {
-            "text-xs" => Some(12.0),
-            "text-sm" => Some(14.0),
-            "text-base" => Some(16.0),
-            "text-lg" => Some(18.0),
-            "text-xl" => Some(20.0),
-            "text-2xl" => Some(24.0),
-            "text-3xl" => Some(30.0),
-            "text-4xl" => Some(36.0),
-            "text-5xl" => Some(48.0),
-            "text-6xl" => Some(60.0),
-            "text-7xl" => Some(72.0),
-            "text-8xl" => Some(96.0),
-            "text-9xl" => Some(128.0),
-            _ => u
-                .strip_prefix("text-[")
-                .and_then(|s| s.strip_suffix(']'))
-                .and_then(parse_px_or_rem),
-        };
-        if px.is_some() {
-            return px;
-        }
-    }
-    None
-}
-
-fn collect_subtree_font_sizes(
-    jsx_el: &JSXElement<'_>,
-    semantic: &Semantic<'_>,
-    const_strings: &HashMap<SymbolId, String>,
-    out: &mut Vec<f64>,
-) {
-    let class_str =
-        get_class_name_str(&jsx_el.opening_element, semantic, const_strings).unwrap_or_default();
-    let unvariants: Vec<&str> = class_str
-        .split_whitespace()
-        .map(|t| t.rsplit(':').next().unwrap_or(t).trim_start_matches('!'))
-        .collect();
-    if let Some(px) = resolve_element_font_size_px(
-        &jsx_el.opening_element,
-        &unvariants,
-        semantic,
-        const_strings,
-    ) {
-        out.push(px);
-    }
-    for child in &jsx_el.children {
-        if let JSXChild::Element(child_el) = child {
-            collect_subtree_font_sizes(child_el, semantic, const_strings, out);
         }
     }
 }

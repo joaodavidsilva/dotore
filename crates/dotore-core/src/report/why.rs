@@ -140,19 +140,8 @@ pub fn explain_location_with_analyzers(
     analyzers: &[&dyn LanguageAnalyzer],
 ) -> Result<WhyReport, String> {
     let parsed_loc = parse_why_location(location_arg)?;
-    let resolved_file = if parsed_loc.file.is_absolute() {
-        parsed_loc.file.clone()
-    } else {
-        cwd.join(&parsed_loc.file)
-    };
-    if !resolved_file.is_file() {
-        return Err(format!(
-            "Target file `{}` does not exist.",
-            resolved_file.display()
-        ));
-    }
-
-    let Some(analyzer) = analyzers.iter().find(|a| a.supports_path(&resolved_file)) else {
+    let resolved_file = resolve_why_target_file(&parsed_loc.file, cwd)?;
+    let Some(&analyzer) = analyzers.iter().find(|a| a.supports_path(&resolved_file)) else {
         return Err(format!(
             "No registered LanguageAnalyzer supports `{}`.",
             resolved_file.display()
@@ -173,27 +162,8 @@ pub fn explain_location_with_analyzers(
         &default_pkg
     };
 
-    let mut discovered_files =
-        collect_source_files_for_analyzers(std::slice::from_ref(&pkg.root_dir), true, &[*analyzer]);
-    if !discovered_files.contains(&resolved_file) {
-        discovered_files.push(resolved_file.clone());
-    }
-
-    let mut sources: HashMap<PathBuf, String> = HashMap::new();
-    let mut extracted_files: Vec<ExtractedFile> = Vec::new();
-    for path in discovered_files {
-        if resolve_package_for_file(&path, &packages)
-            .is_some_and(|resolved| resolved.root_dir != pkg.root_dir)
-            && path != resolved_file
-        {
-            continue;
-        }
-        if let Ok(src) = fs::read_to_string(&path) {
-            extracted_files.push(analyzer.extract_file(&path, &src));
-            sources.insert(path, src);
-        }
-    }
-
+    let (extracted_files, sources) =
+        extract_package_files_for_why(analyzer, pkg, &packages, &resolved_file);
     let Some(target_extracted) = extracted_files.iter().find(|f| f.path == resolved_file) else {
         return Err(format!(
             "Failed to parse target file `{}`.",
@@ -203,14 +173,93 @@ pub fn explain_location_with_analyzers(
     let target_source = sources.get(&resolved_file).cloned().unwrap_or_default();
     let line_starts = compute_line_starts(&target_source);
 
-    let active_res = analyzer.analyze_package(pkg, &extracted_files, None);
-    let active_diags: Vec<Diagnostic> = active_res
-        .diagnostics
-        .into_iter()
-        .filter(|d| d.file == resolved_file)
-        .collect();
+    let active_at_line = collect_matching_diagnostics(
+        analyzer.analyze_package(pkg, &extracted_files, None).diagnostics,
+        &resolved_file,
+        &line_starts,
+        parsed_loc.line,
+    );
+    let entries = if !active_at_line.is_empty() {
+        build_active_why_entries(
+            &parsed_loc.file,
+            target_extracted,
+            &target_source,
+            &extracted_files,
+            &active_at_line,
+            &sources,
+        )
+    } else {
+        let all_rules: Vec<RuleId> = rule_registry().iter().map(|m| m.id).collect();
+        let permissive_pkg = build_permissive_probe_package(pkg);
+        let probe_at_line = collect_matching_diagnostics(
+            analyzer
+                .analyze_package(&permissive_pkg, &extracted_files, Some(&all_rules))
+                .diagnostics,
+            &resolved_file,
+            &line_starts,
+            parsed_loc.line,
+        );
+        build_inactive_why_entries(
+            pkg,
+            target_extracted,
+            &target_source,
+            &extracted_files,
+            &probe_at_line,
+            &sources,
+        )
+    };
+    let summary_note = build_why_summary_note(&parsed_loc, target_extracted, entries.len());
 
-    let all_rules: Vec<RuleId> = rule_registry().iter().map(|m| m.id).collect();
+    Ok(WhyReport {
+        file: parsed_loc.file,
+        line: parsed_loc.line,
+        column: parsed_loc.column,
+        entries,
+        summary_note,
+    })
+}
+
+fn resolve_why_target_file(file: &Path, cwd: &Path) -> Result<PathBuf, String> {
+    let resolved = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        cwd.join(file)
+    };
+    if !resolved.is_file() {
+        return Err(format!("Target file `{}` does not exist.", resolved.display()));
+    }
+    Ok(resolved)
+}
+
+fn extract_package_files_for_why(
+    analyzer: &dyn LanguageAnalyzer,
+    pkg: &WorkspacePackage,
+    packages: &[WorkspacePackage],
+    resolved_file: &Path,
+) -> (Vec<ExtractedFile>, HashMap<PathBuf, String>) {
+    let mut discovered =
+        collect_source_files_for_analyzers(std::slice::from_ref(&pkg.root_dir), true, &[analyzer]);
+    if !discovered.iter().any(|p| p == resolved_file) {
+        discovered.push(resolved_file.to_path_buf());
+    }
+    let mut sources = HashMap::new();
+    let mut extracted = Vec::new();
+    for path in discovered {
+        if path != resolved_file
+            && resolve_package_for_file(&path, packages)
+                .is_some_and(|resolved| resolved.root_dir != pkg.root_dir)
+        {
+            continue;
+        }
+        if let Ok(src) = fs::read_to_string(&path) {
+            extracted.push(analyzer.extract_file(&path, &src));
+            sources.insert(path, src);
+        }
+    }
+    (extracted, sources)
+}
+
+fn build_permissive_probe_package(pkg: &WorkspacePackage) -> WorkspacePackage {
     let mut permissive_cfg = pkg.config.clone();
     permissive_cfg.respect_inline_disables = false;
     permissive_cfg.custom_rules_only = false;
@@ -223,135 +272,159 @@ pub fn explain_location_with_analyzers(
     permissive_gate.merge(&CapabilityGate::default_angular());
     permissive_gate.merge(&CapabilityGate::default_python());
     permissive_gate.merge(&CapabilityGate::default_rust());
-    let permissive_pkg = WorkspacePackage {
+    WorkspacePackage {
         name: pkg.name.clone(),
         root_dir: pkg.root_dir.clone(),
         capability_gate: permissive_gate,
         config: permissive_cfg,
-    };
-    let probe_res = analyzer.analyze_package(&permissive_pkg, &extracted_files, Some(&all_rules));
-    let probe_diags: Vec<Diagnostic> = probe_res
-        .diagnostics
-        .into_iter()
-        .filter(|d| d.file == resolved_file)
-        .collect();
-
-    let active_at_line: Vec<Diagnostic> = active_diags
-        .into_iter()
-        .filter(|d| diagnostic_matches_extracted_line(d, &line_starts, parsed_loc.line))
-        .collect();
-
-    let mut entries = Vec::new();
-    if !active_at_line.is_empty() {
-        let (groups, _) =
-            build_root_cause_groups_and_capsules(&extracted_files, &active_at_line, &sources);
-        for (idx, diag) in active_at_line.iter().enumerate() {
-            let Some(group) = groups
-                .iter()
-                .find(|g| g.diagnostic_indices.contains(&idx))
-                .or_else(|| groups.first())
-            else {
-                continue;
-            };
-            let capsule = build_fix_capsule(&extracted_files, group, &active_at_line, &sources);
-            let mut explanation = format!(
-                "Diagnostic `{}` fired at {}:{} because `{}` triggered rule `{}`.",
-                diag.rule.metadata().qualified_key,
-                parsed_loc.file.display(),
-                diag.loc.line,
-                diag.target_name,
-                diag.rule.as_str()
-            );
-            if diag.rule.is_architecture_soc_or_reuse_rule()
-                && let Some(arch_exp) = format_architecture_signal_explanation(
-                    diag,
-                    Some(&target_extracted.architecture_facets),
-                )
-            {
-                let _ = write!(explanation, " Structural signals: {arch_exp}");
-            }
-            let cascade_steps = architecture_or_existing_cascade_steps(
-                diag,
-                Some(&target_extracted.architecture_facets),
-            );
-            entries.push(WhyEntry {
-                status: "active".to_string(),
-                rule: diag.rule.metadata().qualified_key.to_string(),
-                category: diag.category,
-                severity: diag.severity,
-                tier: diag.tier,
-                message: super::mask_credentials(&diag.message),
-                explanation,
-                code_frame: render_code_frame(&target_source, diag.loc.line),
-                cascade_steps,
-                blast_radius: group.blast_radius.clone(),
-                fix_capsule: capsule,
-            });
-        }
-    } else {
-        let probe_at_line: Vec<Diagnostic> = probe_diags
-            .into_iter()
-            .filter(|d| diagnostic_matches_extracted_line(d, &line_starts, parsed_loc.line))
-            .collect();
-        if !probe_at_line.is_empty() {
-            let (groups, _) =
-                build_root_cause_groups_and_capsules(&extracted_files, &probe_at_line, &sources);
-            for (idx, diag) in probe_at_line.iter().enumerate() {
-                let Some(group) = groups
-                    .iter()
-                    .find(|g| g.diagnostic_indices.contains(&idx))
-                    .or_else(|| groups.first())
-                else {
-                    continue;
-                };
-                let capsule = build_fix_capsule(&extracted_files, group, &probe_at_line, &sources);
-                let is_suppressed = pkg.config.respect_inline_disables
-                    && (target_extracted.is_suppressed(diag.rule, diag.loc.line, diag.span)
-                        || target_extracted
-                            .suppressions
-                            .matches_line_or_block(diag.rule, diag.loc.line));
-                let (status, mut explanation) = diagnose_why_not_active_common(
-                    diag,
-                    &target_extracted.path,
-                    target_extracted.file_context,
-                    is_suppressed,
-                    &pkg.root_dir,
-                    &pkg.capability_gate,
-                    &pkg.config,
-                );
-                if diag.rule.is_architecture_soc_or_reuse_rule()
-                    && let Some(arch_exp) = format_architecture_signal_explanation(
-                        diag,
-                        Some(&target_extracted.architecture_facets),
-                    )
-                {
-                    let _ = write!(explanation, " Structural signals: {arch_exp}");
-                }
-                let cascade_steps = architecture_or_existing_cascade_steps(
-                    diag,
-                    Some(&target_extracted.architecture_facets),
-                );
-                entries.push(WhyEntry {
-                    status,
-                    rule: diag.rule.metadata().qualified_key.to_string(),
-                    category: diag.category,
-                    severity: diag.severity,
-                    tier: diag.tier,
-                    message: super::mask_credentials(&diag.message),
-                    explanation,
-                    code_frame: render_code_frame(&target_source, diag.loc.line),
-                    cascade_steps,
-                    blast_radius: group.blast_radius.clone(),
-                    fix_capsule: capsule,
-                });
-            }
-        }
     }
+}
 
-    let summary_note = if !entries.is_empty() {
+fn collect_matching_diagnostics(
+    diags: Vec<Diagnostic>,
+    resolved_file: &Path,
+    line_starts: &[u32],
+    target_line: u32,
+) -> Vec<Diagnostic> {
+    diags
+        .into_iter()
+        .filter(|d| {
+            d.file == resolved_file && diagnostic_matches_extracted_line(d, line_starts, target_line)
+        })
+        .collect()
+}
+
+fn build_active_why_entries(
+    display_file: &Path,
+    target_extracted: &ExtractedFile,
+    target_source: &str,
+    extracted_files: &[ExtractedFile],
+    active_at_line: &[Diagnostic],
+    sources: &HashMap<PathBuf, String>,
+) -> Vec<WhyEntry> {
+    let (groups, _) =
+        build_root_cause_groups_and_capsules(extracted_files, active_at_line, sources);
+    let mut entries = Vec::new();
+    for (idx, diag) in active_at_line.iter().enumerate() {
+        let Some(group) = groups
+            .iter()
+            .find(|g| g.diagnostic_indices.contains(&idx))
+            .or_else(|| groups.first())
+        else {
+            continue;
+        };
+        let explanation = format!(
+            "Diagnostic `{}` fired at {}:{} because `{}` triggered rule `{}`.",
+            diag.rule.metadata().qualified_key,
+            display_file.display(),
+            diag.loc.line,
+            diag.target_name,
+            diag.rule.as_str()
+        );
+        entries.push(build_why_entry(
+            "active".to_string(),
+            explanation,
+            diag,
+            target_extracted,
+            target_source,
+            group,
+            build_fix_capsule(extracted_files, group, active_at_line, sources),
+        ));
+    }
+    entries
+}
+
+fn build_inactive_why_entries(
+    pkg: &WorkspacePackage,
+    target_extracted: &ExtractedFile,
+    target_source: &str,
+    extracted_files: &[ExtractedFile],
+    probe_at_line: &[Diagnostic],
+    sources: &HashMap<PathBuf, String>,
+) -> Vec<WhyEntry> {
+    if probe_at_line.is_empty() {
+        return Vec::new();
+    }
+    let (groups, _) = build_root_cause_groups_and_capsules(extracted_files, probe_at_line, sources);
+    let mut entries = Vec::new();
+    for (idx, diag) in probe_at_line.iter().enumerate() {
+        let Some(group) = groups
+            .iter()
+            .find(|g| g.diagnostic_indices.contains(&idx))
+            .or_else(|| groups.first())
+        else {
+            continue;
+        };
+        let is_suppressed = pkg.config.respect_inline_disables
+            && (target_extracted.is_suppressed(diag.rule, diag.loc.line, diag.span)
+                || target_extracted
+                    .suppressions
+                    .matches_line_or_block(diag.rule, diag.loc.line));
+        let (status, explanation) = diagnose_why_not_active_common(
+            diag,
+            &target_extracted.path,
+            target_extracted.file_context,
+            is_suppressed,
+            &pkg.root_dir,
+            &pkg.capability_gate,
+            &pkg.config,
+        );
+        entries.push(build_why_entry(
+            status,
+            explanation,
+            diag,
+            target_extracted,
+            target_source,
+            group,
+            build_fix_capsule(extracted_files, group, probe_at_line, sources),
+        ));
+    }
+    entries
+}
+
+fn build_why_entry(
+    status: String,
+    mut explanation: String,
+    diag: &Diagnostic,
+    target_extracted: &ExtractedFile,
+    target_source: &str,
+    group: &crate::rules::RootCauseGroup,
+    fix_capsule: crate::rules::FixCapsule,
+) -> WhyEntry {
+    if diag.rule.is_architecture_soc_or_reuse_rule()
+        && let Some(arch_exp) = format_architecture_signal_explanation(
+            diag,
+            Some(&target_extracted.architecture_facets),
+        )
+    {
+        let _ = write!(explanation, " Structural signals: {arch_exp}");
+    }
+    WhyEntry {
+        status,
+        rule: diag.rule.metadata().qualified_key.to_string(),
+        category: diag.category,
+        severity: diag.severity,
+        tier: diag.tier,
+        message: super::mask_credentials(&diag.message),
+        explanation,
+        code_frame: render_code_frame(target_source, diag.loc.line),
+        cascade_steps: architecture_or_existing_cascade_steps(
+            diag,
+            Some(&target_extracted.architecture_facets),
+        ),
+        blast_radius: group.blast_radius.clone(),
+        fix_capsule,
+    }
+}
+
+fn build_why_summary_note(
+    parsed_loc: &WhyLocation,
+    target_extracted: &ExtractedFile,
+    entry_count: usize,
+) -> String {
+    if entry_count > 0 {
         format!(
-            "{} finding(s) explained at {}:{}.",
-            entries.len(),
+            "{entry_count} finding(s) explained at {}:{}.",
             parsed_loc.file.display(),
             parsed_loc.line
         )
@@ -373,15 +446,7 @@ pub fn explain_location_with_analyzers(
             parsed_loc.file.display(),
             parsed_loc.line
         )
-    };
-
-    Ok(WhyReport {
-        file: parsed_loc.file,
-        line: parsed_loc.line,
-        column: parsed_loc.column,
-        entries,
-        summary_note,
-    })
+    }
 }
 
 /// Formats a [`WhyReport`] (`dotore why <file:line>`) for terminal output.
@@ -428,56 +493,54 @@ pub fn format_why_report_text(report: &WhyReport) -> String {
                 entry_box.add_open_row(format!("    {line}"));
             }
         }
-        entry_box.add_titled_divider(format!(
-            "Fix Capsule ({})",
-            entry.fix_capsule.root_cause_group_id
-        ));
-        entry_box.add_open_row(format!(
-            "    Subject Excerpt ({}:{}-{}):",
-            entry.fix_capsule.subject_excerpt.file.display(),
-            entry.fix_capsule.subject_excerpt.start_line,
-            entry.fix_capsule.subject_excerpt.end_line
-        ));
-        for line in entry.fix_capsule.subject_excerpt.source.lines() {
-            entry_box.add_open_row(format!("      {line}"));
-        }
-        if !entry.fix_capsule.caller_site_excerpts.is_empty() {
-            entry_box.add_open_row("    Caller Site Excerpts:");
-            for caller in &entry.fix_capsule.caller_site_excerpts {
-                entry_box.add_open_row(format!(
-                    "      {}:{}-{}: {}",
-                    caller.file.display(),
-                    caller.start_line,
-                    caller.end_line,
-                    caller.source.trim()
-                ));
-            }
-        }
-        entry_box.add_open_row("    Recipe:");
-        for line in entry.fix_capsule.recipe_markdown.lines() {
-            entry_box.add_open_row(format!("      {line}"));
-        }
-        if !entry.fix_capsule.invariants.is_empty() {
-            entry_box.add_open_row(format!(
-                "    Invariants: {}",
-                entry.fix_capsule.invariants.join("; ")
-            ));
-        }
-        if let Some(ex) = &entry.fix_capsule.exemplar {
-            entry_box.add_open_row(format!(
-                "    Repository Exemplar ({}:{}-{}):",
-                ex.file.display(),
-                ex.start_line,
-                ex.end_line
-            ));
-            for line in ex.source.lines() {
-                entry_box.add_open_row(format!("      {line}"));
-            }
-        }
+        append_fix_capsule_rows(&mut entry_box, &entry.fix_capsule);
         out.push_str(&entry_box.render(mode));
         let _ = writeln!(out);
     }
     out
+}
+
+fn append_fix_capsule_rows(entry_box: &mut AsciiBox, capsule: &crate::rules::FixCapsule) {
+    entry_box.add_titled_divider(format!("Fix Capsule ({})", capsule.root_cause_group_id));
+    entry_box.add_open_row(format!(
+        "    Subject Excerpt ({}:{}-{}):",
+        capsule.subject_excerpt.file.display(),
+        capsule.subject_excerpt.start_line,
+        capsule.subject_excerpt.end_line
+    ));
+    for line in capsule.subject_excerpt.source.lines() {
+        entry_box.add_open_row(format!("      {line}"));
+    }
+    if !capsule.caller_site_excerpts.is_empty() {
+        entry_box.add_open_row("    Caller Site Excerpts:");
+        for caller in &capsule.caller_site_excerpts {
+            entry_box.add_open_row(format!(
+                "      {}:{}-{}: {}",
+                caller.file.display(),
+                caller.start_line,
+                caller.end_line,
+                caller.source.trim()
+            ));
+        }
+    }
+    entry_box.add_open_row("    Recipe:");
+    for line in capsule.recipe_markdown.lines() {
+        entry_box.add_open_row(format!("      {line}"));
+    }
+    if !capsule.invariants.is_empty() {
+        entry_box.add_open_row(format!("    Invariants: {}", capsule.invariants.join("; ")));
+    }
+    if let Some(ex) = &capsule.exemplar {
+        entry_box.add_open_row(format!(
+            "    Repository Exemplar ({}:{}-{}):",
+            ex.file.display(),
+            ex.start_line,
+            ex.end_line
+        ));
+        for line in ex.source.lines() {
+            entry_box.add_open_row(format!("      {line}"));
+        }
+    }
 }
 
 fn diagnostic_matches_extracted_line(
@@ -589,6 +652,14 @@ pub fn diagnose_why_not_active_common(
         );
     }
 
+    diagnose_config_rule_disable(diag.rule, meta, config)
+}
+
+fn diagnose_config_rule_disable(
+    rule: RuleId,
+    meta: & crate::rules::RuleMetadata,
+    config: &DotoreConfig,
+) -> (String, String) {
     if let Some(&ignored_tag) = meta.tags.iter().find(|&&t| config.is_tag_ignored(t)) {
         return (
             "disabled".to_string(),
@@ -599,12 +670,11 @@ pub fn diagnose_why_not_active_common(
             ),
         );
     }
-
     if config
         .ignore
         .rules
         .iter()
-        .any(|r| RuleId::parse(r) == Some(diag.rule))
+        .any(|r| RuleId::parse(r) == Some(rule))
     {
         return (
             "disabled".to_string(),
@@ -614,8 +684,7 @@ pub fn diagnose_why_not_active_common(
             ),
         );
     }
-
-    if config.explicit_rule_override(diag.rule) == Some(RuleSeverityOverride::Off) {
+    if config.explicit_rule_override(rule) == Some(RuleSeverityOverride::Off) {
         return (
             "disabled".to_string(),
             format!(
@@ -624,7 +693,6 @@ pub fn diagnose_why_not_active_common(
             ),
         );
     }
-
     if config.category_override(meta.category) == Some(RuleSeverityOverride::Off) {
         return (
             "disabled".to_string(),
@@ -635,7 +703,6 @@ pub fn diagnose_why_not_active_common(
             ),
         );
     }
-
     if !meta.default_enabled {
         return (
             "disabled".to_string(),
@@ -645,7 +712,6 @@ pub fn diagnose_why_not_active_common(
             ),
         );
     }
-
     (
         "disabled".to_string(),
         format!(

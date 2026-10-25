@@ -11,26 +11,28 @@
     reason = "oxc_ast AST enums have 200+ variants; rule detectors match only relevant AST node kinds"
 )]
 
+mod effects_and_async;
+
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::{
     AstKind,
-    ast::{
-        ArrowFunctionBody, BindingPattern, CallExpression, Expression, ObjectPropertyKind,
-        Statement,
-    },
+    ast::{BindingPattern, CallExpression, Expression, ObjectPropertyKind, Statement},
 };
-use oxc_semantic::{NodeId, Semantic};
+use oxc_semantic::{NodeId, Semantic, SymbolId};
 use oxc_span::{GetSpan, Span};
 
+use self::effects_and_async::{
+    check_effect_hook_rules, check_no_stale_timer_ref, check_no_unowned_async_error_clear,
+    expression_reads_state_value,
+};
 use crate::{
     ir::{
         ByteSpan, SemanticRuleSite,
         dataflow::{is_prop, is_ref},
         react_ast::{
-            find_enclosing_react_node, get_effect_cleanup_span, get_effect_fn_node,
-            get_subject_body_statements, get_subject_name, is_functional_component,
-            is_react_hook_callee,
+            find_enclosing_react_node, get_subject_body_statements, get_subject_name,
+            is_functional_component, is_react_hook_callee,
         },
         types::loc_from_line_starts,
     },
@@ -72,9 +74,77 @@ fn check_subject_state_and_effects(
     let subj_name = get_subject_name(semantic, subject_node_id);
     let is_component = is_functional_component(semantic, subject_node_id);
 
-    // Collect `(state_name, setter_name)` bindings in this Subject
+    let (setter_to_state, setter_names, state_slot_count) = collect_subject_state_and_ref_slots(
+        semantic,
+        subject_node_id,
+        subj_span,
+        &subj_name,
+        line_starts,
+        sites,
+    );
+
+    if state_slot_count >= PREFER_USE_REDUCER_MIN_STATE_SLOTS {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::PreferUseReducer,
+            subject_name: subj_name.clone(),
+            message_id: "preferUseReducer",
+            target_name: subj_name.clone().unwrap_or_else(|| "Component".to_string()),
+            message: format!(
+                "This component manages {state_slot_count} separate `useState` slots; consolidate coupled state transitions into `useReducer`."
+            ),
+            loc: loc_from_line_starts(line_starts, subj_span.start),
+            span: ByteSpan {
+                start: subj_span.start,
+                end: subj_span.end,
+            },
+            autofix: None,
+        });
+    }
+
+    if is_component && !setter_names.is_empty() {
+        check_no_set_state_in_render(
+            semantic,
+            subject_node_id,
+            &setter_names,
+            &subj_name,
+            line_starts,
+            sites,
+        );
+    }
+
+    walk_subject_state_and_effect_nodes(
+        semantic,
+        subject_node_id,
+        subj_span,
+        is_component,
+        &setter_to_state,
+        &setter_names,
+        &subj_name,
+        line_starts,
+        sites,
+    );
+
+    if is_component {
+        check_rerender_state_only_in_handlers_and_defer_reads(
+            semantic,
+            subject_node_id,
+            subj_span,
+            &subj_name,
+            line_starts,
+            sites,
+        );
+    }
+}
+
+fn collect_subject_state_and_ref_slots(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+    subj_span: Span,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) -> (HashMap<String, String>, HashSet<String>, usize) {
     let mut setter_to_state: HashMap<String, String> = HashMap::new();
-    let mut state_names: HashSet<String> = HashSet::new();
     let mut setter_names: HashSet<String> = HashSet::new();
     let mut state_slot_count = 0_usize;
 
@@ -96,195 +166,105 @@ fn check_subject_state_and_effects(
 
         if is_react_hook_callee(semantic, &call.callee, "useState") {
             state_slot_count += 1;
-            check_lazy_state_init(semantic, call, &subj_name, line_starts, sites);
-
-            if let BindingPattern::ArrayPattern(arr) = &decl.id {
-                let state_opt = arr
-                    .elements
-                    .first()
-                    .and_then(Option::as_ref)
-                    .and_then(BindingPattern::get_binding_identifier)
-                    .map(|id| id.name.to_string());
-                let setter_opt = arr
-                    .elements
-                    .get(1)
-                    .and_then(Option::as_ref)
-                    .and_then(BindingPattern::get_binding_identifier)
-                    .map(|id| id.name.to_string());
-
-                if let Some(s_name) = &state_opt {
-                    state_names.insert(s_name.clone());
-                }
-                if let Some(set_name) = &setter_opt {
-                    setter_names.insert(set_name.clone());
-                    let associated_state = state_opt.unwrap_or_else(|| set_name.clone());
-                    setter_to_state.insert(set_name.clone(), associated_state);
-                }
-            }
+            check_lazy_state_init(semantic, call, subj_name, line_starts, sites);
+            record_use_state_binding_names(
+                &decl.id,
+                &mut setter_to_state,
+                &mut setter_names,
+            );
         } else if is_react_hook_callee(semantic, &call.callee, "useRef") {
-            check_lazy_ref_init(call, &subj_name, line_starts, sites);
+            check_lazy_ref_init(call, subj_name, line_starts, sites);
         }
     }
+    (setter_to_state, setter_names, state_slot_count)
+}
 
-    // `prefer-use-reducer`: >= 5 useState slots in the same Subject
-    if state_slot_count >= PREFER_USE_REDUCER_MIN_STATE_SLOTS {
-        sites.push(SemanticRuleSite {
-            rule: RuleId::PreferUseReducer,
-            subject_name: subj_name.clone(),
-            message_id: "preferUseReducer",
-            target_name: subj_name.clone().unwrap_or_else(|| "Component".to_string()),
-            message: format!(
-                "This component manages {state_slot_count} separate `useState` slots; consolidate coupled state transitions into `useReducer`."
-            ),
-            loc: loc_from_line_starts(line_starts, subj_span.start),
-            span: ByteSpan {
-                start: subj_span.start,
-                end: subj_span.end,
-            },
-            autofix: None,
-        });
+fn record_use_state_binding_names(
+    pat: &BindingPattern<'_>,
+    setter_to_state: &mut HashMap<String, String>,
+    setter_names: &mut HashSet<String>,
+) {
+    let BindingPattern::ArrayPattern(arr) = pat else {
+        return;
+    };
+    let state_opt = arr
+        .elements
+        .first()
+        .and_then(Option::as_ref)
+        .and_then(BindingPattern::get_binding_identifier)
+        .map(|id| id.name.to_string());
+    let setter_opt = arr
+        .elements
+        .get(1)
+        .and_then(Option::as_ref)
+        .and_then(BindingPattern::get_binding_identifier)
+        .map(|id| id.name.to_string());
+    if let Some(set_name) = setter_opt {
+        setter_names.insert(set_name.clone());
+        let associated_state = state_opt.unwrap_or_else(|| set_name.clone());
+        setter_to_state.insert(set_name, associated_state);
     }
+}
 
-    // Check top-level render statements in a functional component (`no-set-state-in-render`)
-    if is_component && !setter_names.is_empty() {
-        check_no_set_state_in_render(
-            semantic,
-            subject_node_id,
-            &setter_names,
-            &subj_name,
-            line_starts,
-            sites,
-        );
-    }
-
-    // Walk nodes in this Subject for effect rules, render ref/prop-callback rules, and updater side-effects
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Walks all AST nodes owned by a Subject for effect, setter, ref, and prop-callback rules (#50)"
+)]
+fn walk_subject_state_and_effect_nodes(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+    subj_span: Span,
+    is_component: bool,
+    setter_to_state: &HashMap<String, String>,
+    setter_names: &HashSet<String>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        if !subj_span.contains_inclusive(node.span()) {
+        if !subj_span.contains_inclusive(node.span())
+            || find_enclosing_react_node(semantic, node_id) != Some(subject_node_id)
+        {
             continue;
         }
-        if find_enclosing_react_node(semantic, node_id) != Some(subject_node_id) {
-            continue;
-        }
-
         match node.kind() {
             AstKind::CallExpression(call) => {
-                // 1. Effect hooks (`useEffect`, `useLayoutEffect`)
-                if is_react_hook_callee(semantic, &call.callee, "useEffect")
-                    || is_react_hook_callee(semantic, &call.callee, "useLayoutEffect")
-                {
-                    check_effect_hook_rules(
-                        semantic,
-                        node_id,
-                        call,
-                        &setter_to_state,
-                        &setter_names,
-                        &subj_name,
-                        line_starts,
-                        sites,
-                    );
-                }
-                // 1b. Hook dependency rules (`no-whole-object-dep-with-member-reads`, `rerender-dependencies`)
-                if is_react_hook_callee(semantic, &call.callee, "useEffect")
-                    || is_react_hook_callee(semantic, &call.callee, "useLayoutEffect")
-                    || is_react_hook_callee(semantic, &call.callee, "useMemo")
-                    || is_react_hook_callee(semantic, &call.callee, "useCallback")
-                {
-                    check_hook_dependency_granularity_and_stability(
-                        semantic,
-                        call,
-                        subj_span,
-                        &subj_name,
-                        line_starts,
-                        sites,
-                    );
-                }
-
-                // 2. Setter calls: `no-side-effect-in-state-updater-function` and `rerender-functional-setstate`
-                if let Expression::Identifier(callee_ident) = call.callee.without_parentheses()
-                    && let Some(state_name) = setter_to_state.get(callee_ident.name.as_str())
-                {
-                    check_setter_call_rules(
-                        semantic,
-                        node_id,
-                        call,
-                        callee_ident.name.as_str(),
-                        state_name,
-                        &setter_names,
-                        subject_node_id,
-                        &subj_name,
-                        line_starts,
-                        sites,
-                    );
-                }
-
-                // 3. `no-prop-callback-in-render`
-                if is_component
-                    && let Expression::Identifier(callee_ident) = call.callee.without_parentheses()
-                    && let Some(ref_id) = callee_ident.reference_id.get()
-                    && is_prop(semantic, ref_id)
-                    && (callee_ident.name.starts_with("on")
-                        || matches!(
-                            semantic.nodes().parent_kind(node_id),
-                            AstKind::ExpressionStatement(_)
-                        ))
-                    && is_in_render_execution_scope(semantic, node_id, subject_node_id)
-                {
-                    sites.push(SemanticRuleSite {
-                        rule: RuleId::NoPropCallbackInRender,
-                        subject_name: subj_name.clone(),
-                        message_id: "noPropCallbackInRender",
-                        target_name: callee_ident.name.to_string(),
-                        message: format!(
-                            "Prop callback `{}` is invoked directly during render; move it into an event handler or effect.",
-                            callee_ident.name
-                        ),
-                        loc: loc_from_line_starts(line_starts, call.span.start),
-                        span: ByteSpan {
-                            start: call.span.start,
-                            end: call.span.end,
-                        },
-                        autofix: None,
-                    });
-                }
-                // 4. `no-stale-timer-ref`: discarded `setTimeout` / `setInterval` return value
-                check_no_stale_timer_ref(semantic, node_id, call, &subj_name, line_starts, sites);
+                check_subject_call_node(
+                    semantic,
+                    node_id,
+                    call,
+                    subject_node_id,
+                    subj_span,
+                    is_component,
+                    setter_to_state,
+                    setter_names,
+                    subj_name,
+                    line_starts,
+                    sites,
+                );
             }
             AstKind::StaticMemberExpression(mem)
                 if is_component && mem.property.name == "current" =>
             {
-                if let Expression::Identifier(obj_ident) = mem.object.without_parentheses()
-                    && let Some(ref_id) = obj_ident.reference_id.get()
-                    && is_ref(semantic, ref_id)
-                    && is_in_render_execution_scope(semantic, node_id, subject_node_id)
-                    && !is_lazy_ref_init_guard(semantic, node_id, obj_ident.name.as_str())
-                {
-                    sites.push(SemanticRuleSite {
-                        rule: RuleId::NoRefCurrentInRender,
-                        subject_name: subj_name.clone(),
-                        message_id: "noRefCurrentInRender",
-                        target_name: format!("{}.current", obj_ident.name),
-                        message: format!(
-                            "Do not read or write `{}.current` during render; refs do not trigger re-renders and must be accessed in effects or event handlers.",
-                            obj_ident.name
-                        ),
-                        loc: loc_from_line_starts(line_starts, mem.span.start),
-                        span: ByteSpan {
-                            start: mem.span.start,
-                            end: mem.span.end,
-                        },
-                        autofix: None,
-                    });
-                }
+                check_ref_current_in_render(
+                    semantic,
+                    node_id,
+                    mem,
+                    subject_node_id,
+                    subj_name,
+                    line_starts,
+                    sites,
+                );
             }
             AstKind::ObjectExpression(obj) => {
-                check_spread_props_over_defaults(semantic, obj, &subj_name, line_starts, sites);
+                check_spread_props_over_defaults(semantic, obj, subj_name, line_starts, sites);
             }
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
                 check_no_unowned_async_error_clear(
                     semantic,
                     node_id,
-                    &setter_to_state,
-                    &subj_name,
+                    setter_to_state,
+                    subj_name,
                     line_starts,
                     sites,
                 );
@@ -292,15 +272,151 @@ fn check_subject_state_and_effects(
             _ => {}
         }
     }
-    if is_component {
-        check_rerender_state_only_in_handlers_and_defer_reads(
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Dispatches CallExpression checks inside a Subject (#50)"
+)]
+fn check_subject_call_node(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    subject_node_id: NodeId,
+    subj_span: Span,
+    is_component: bool,
+    setter_to_state: &HashMap<String, String>,
+    setter_names: &HashSet<String>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if is_react_hook_callee(semantic, &call.callee, "useEffect")
+        || is_react_hook_callee(semantic, &call.callee, "useLayoutEffect")
+    {
+        check_effect_hook_rules(
             semantic,
-            subject_node_id,
-            subj_span,
-            &subj_name,
+            node_id,
+            call,
+            setter_to_state,
+            setter_names,
+            subj_name,
             line_starts,
             sites,
         );
+    }
+    if ["useEffect", "useLayoutEffect", "useMemo", "useCallback"]
+        .iter()
+        .any(|h| is_react_hook_callee(semantic, &call.callee, h))
+    {
+        check_hook_dependency_granularity_and_stability(
+            semantic,
+            call,
+            subj_span,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
+    if let Expression::Identifier(callee_ident) = call.callee.without_parentheses()
+        && let Some(state_name) = setter_to_state.get(callee_ident.name.as_str())
+    {
+        check_setter_call_rules(
+            semantic,
+            node_id,
+            call,
+            callee_ident.name.as_str(),
+            state_name,
+            setter_names,
+            subject_node_id,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
+    if is_component {
+        check_prop_callback_in_render(
+            semantic,
+            node_id,
+            call,
+            subject_node_id,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
+    check_no_stale_timer_ref(semantic, node_id, call, subj_name, line_starts, sites);
+}
+
+fn check_prop_callback_in_render(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    call: &CallExpression<'_>,
+    subject_node_id: NodeId,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Expression::Identifier(callee_ident) = call.callee.without_parentheses()
+        && let Some(ref_id) = callee_ident.reference_id.get()
+        && is_prop(semantic, ref_id)
+        && (callee_ident.name.starts_with("on")
+            || matches!(
+                semantic.nodes().parent_kind(node_id),
+                AstKind::ExpressionStatement(_)
+            ))
+        && is_in_render_execution_scope(semantic, node_id, subject_node_id)
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoPropCallbackInRender,
+            subject_name: subj_name.clone(),
+            message_id: "noPropCallbackInRender",
+            target_name: callee_ident.name.to_string(),
+            message: format!(
+                "Prop callback `{}` is invoked directly during render; move it into an event handler or effect.",
+                callee_ident.name
+            ),
+            loc: loc_from_line_starts(line_starts, call.span.start),
+            span: ByteSpan {
+                start: call.span.start,
+                end: call.span.end,
+            },
+            autofix: None,
+        });
+    }
+}
+
+fn check_ref_current_in_render(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    mem: &oxc_ast::ast::StaticMemberExpression<'_>,
+    subject_node_id: NodeId,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Expression::Identifier(obj_ident) = mem.object.without_parentheses()
+        && let Some(ref_id) = obj_ident.reference_id.get()
+        && is_ref(semantic, ref_id)
+        && is_in_render_execution_scope(semantic, node_id, subject_node_id)
+        && !is_lazy_ref_init_guard(semantic, node_id, obj_ident.name.as_str())
+    {
+        sites.push(SemanticRuleSite {
+            rule: RuleId::NoRefCurrentInRender,
+            subject_name: subj_name.clone(),
+            message_id: "noRefCurrentInRender",
+            target_name: format!("{}.current", obj_ident.name),
+            message: format!(
+                "Do not read or write `{}.current` during render; refs do not trigger re-renders and must be accessed in effects or event handlers.",
+                obj_ident.name
+            ),
+            loc: loc_from_line_starts(line_starts, mem.span.start),
+            span: ByteSpan {
+                start: mem.span.start,
+                end: mem.span.end,
+            },
+            autofix: None,
+        });
     }
 }
 
@@ -425,465 +541,6 @@ fn check_no_set_state_in_render(
             });
         }
     }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Inspects an effect hook call against the enclosing Subject's state and setter tables"
-)]
-fn check_effect_hook_rules(
-    semantic: &Semantic<'_>,
-    effect_call_id: NodeId,
-    call: &CallExpression<'_>,
-    setter_to_state: &HashMap<String, String>,
-    setter_names: &HashSet<String>,
-    subj_name: &Option<String>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    let Some(effect_fn_id) = get_effect_fn_node(semantic, effect_call_id) else {
-        return;
-    };
-    let effect_fn_span = semantic.nodes().get_node(effect_fn_id).span();
-    let has_cleanup = get_effect_cleanup_span(semantic, effect_fn_id).is_some();
-
-    // 1. Collect dependency identifier names from 2nd argument `[...]`
-    let mut dep_names = HashSet::new();
-    if let Some(deps_arg) = call.arguments.get(1).and_then(|a| a.as_expression())
-        && let Expression::ArrayExpression(arr) = deps_arg.without_parentheses()
-    {
-        for elem in &arr.elements {
-            if let Some(Expression::Identifier(id)) =
-                elem.as_expression().map(Expression::without_parentheses)
-            {
-                dep_names.insert(id.name.to_string());
-            }
-        }
-    }
-
-    // 2. `no-self-updating-effect`
-    if !dep_names.is_empty() && !setter_to_state.is_empty() {
-        check_no_self_updating_effect_body(
-            semantic,
-            effect_fn_id,
-            &dep_names,
-            setter_to_state,
-            subj_name,
-            line_starts,
-            sites,
-        );
-    }
-
-    // 3. `no-set-state-after-await-in-effect`
-    if !setter_names.is_empty() {
-        check_set_state_after_await_in_effect(
-            semantic,
-            effect_fn_span,
-            setter_names,
-            subj_name,
-            line_starts,
-            sites,
-        );
-    }
-
-    // 4. `effect-needs-cleanup` & `no-prop-callback-in-effect`
-    for (node_id, node) in semantic.nodes().iter_enumerated() {
-        if !effect_fn_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        let AstKind::CallExpression(inner_call) = node.kind() else {
-            continue;
-        };
-        let callee_name = match inner_call.callee.without_parentheses() {
-            Expression::Identifier(id) => Some(id.name.as_str()),
-            Expression::StaticMemberExpression(mem) => Some(mem.property.name.as_str()),
-            _ => None,
-        };
-        if !has_cleanup
-            && matches!(
-                callee_name,
-                Some("addEventListener" | "setInterval" | "subscribe")
-            )
-        {
-            let name_str = callee_name.unwrap_or("addEventListener");
-            sites.push(SemanticRuleSite {
-                rule: RuleId::EffectNeedsCleanup,
-                subject_name: subj_name.clone(),
-                message_id: "effectNeedsCleanup",
-                target_name: name_str.to_string(),
-                message: format!(
-                    "`{name_str}` inside `useEffect` has no cleanup return; return a cleanup function to release the listener or timer."
-                ),
-                loc: loc_from_line_starts(line_starts, inner_call.span.start),
-                span: ByteSpan {
-                    start: inner_call.span.start,
-                    end: inner_call.span.end,
-                },
-                autofix: None,
-            });
-        }
-
-        if let Expression::Identifier(id) = inner_call.callee.without_parentheses()
-            && let Some(ref_id) = id.reference_id.get()
-            && is_prop(semantic, ref_id)
-            && id.name.starts_with("on")
-            && super::super::ir::dataflow::is_synchronous(semantic, node_id, effect_fn_id)
-        {
-            sites.push(SemanticRuleSite {
-                rule: RuleId::NoPropCallbackInEffect,
-                subject_name: subj_name.clone(),
-                message_id: "noPropCallbackInEffect",
-                target_name: id.name.to_string(),
-                message: format!(
-                    "Avoid invoking parent callback prop `{}` synchronously inside `useEffect`; call it directly from the originating event handler.",
-                    id.name
-                ),
-                loc: loc_from_line_starts(line_starts, inner_call.span.start),
-                span: ByteSpan {
-                    start: inner_call.span.start,
-                    end: inner_call.span.end,
-                },
-                autofix: None,
-            });
-        }
-        if let Expression::Identifier(id) = inner_call.callee.without_parentheses()
-            && dep_names.contains(id.name.as_str())
-            && (id.name.starts_with("on")
-                || id.name.starts_with("handle")
-                || id.name.starts_with("log")
-                || id.name.starts_with("track")
-                || id.reference_id.get().is_some_and(|r| is_prop(semantic, r)))
-        {
-            sites.push(SemanticRuleSite {
-                rule: RuleId::PreferUseEffectEvent,
-                subject_name: subj_name.clone(),
-                message_id: "preferUseEffectEvent",
-                target_name: id.name.to_string(),
-                message: format!(
-                    "Effect re-runs whenever `{}` changes; wrap non-reactive event notification logic in `useEffectEvent`.",
-                    id.name
-                ),
-                loc: loc_from_line_starts(line_starts, inner_call.span.start),
-                span: ByteSpan {
-                    start: inner_call.span.start,
-                    end: inner_call.span.end,
-                },
-                autofix: None,
-            });
-        }
-    }
-}
-
-fn check_no_self_updating_effect_body(
-    semantic: &Semantic<'_>,
-    effect_fn_id: NodeId,
-    dep_names: &HashSet<String>,
-    setter_to_state: &HashMap<String, String>,
-    subj_name: &Option<String>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    let mut top_calls: Vec<&CallExpression<'_>> = Vec::new();
-    let mut early_return_tests: Vec<&Expression<'_>> = Vec::new();
-
-    match semantic.nodes().kind(effect_fn_id) {
-        AstKind::ArrowFunctionExpression(arrow) => match &arrow.body {
-            ArrowFunctionBody::FunctionBody(body) => {
-                collect_effect_top_level_calls_and_guards(
-                    &body.statements,
-                    &mut top_calls,
-                    &mut early_return_tests,
-                );
-            }
-            _ => {
-                if let Some(expr) = arrow.body.as_expression()
-                    && let Expression::CallExpression(c) = expr.without_parentheses()
-                {
-                    top_calls.push(c);
-                }
-            }
-        },
-        AstKind::Function(func) => {
-            if let Some(body) = &func.body {
-                collect_effect_top_level_calls_and_guards(
-                    &body.statements,
-                    &mut top_calls,
-                    &mut early_return_tests,
-                );
-            }
-        }
-        _ => {}
-    }
-
-    for setter_call in top_calls {
-        let Expression::Identifier(callee_id) = setter_call.callee.without_parentheses() else {
-            continue;
-        };
-        let Some(state_name) = setter_to_state.get(callee_id.name.as_str()) else {
-            continue;
-        };
-        if !dep_names.contains(state_name) {
-            continue;
-        }
-        // Check if any early return guard converges on `state_name`
-        if early_return_tests
-            .iter()
-            .any(|test| guard_converges_on_state(test, state_name, semantic.source_text()))
-        {
-            continue;
-        }
-        if is_non_settling_setter_argument(setter_call, state_name) {
-            sites.push(SemanticRuleSite {
-                rule: RuleId::NoSelfUpdatingEffect,
-                subject_name: subj_name.clone(),
-                message_id: "noSelfUpdatingEffect",
-                target_name: state_name.clone(),
-                message: format!(
-                    "Effect unconditionally calls `{}` while tracking `{state_name}` in its dependency array, causing an infinite re-render loop.",
-                    callee_id.name
-                ),
-                loc: loc_from_line_starts(line_starts, setter_call.span.start),
-                span: ByteSpan {
-                    start: setter_call.span.start,
-                    end: setter_call.span.end,
-                },
-                autofix: None,
-            });
-        }
-    }
-}
-
-fn collect_effect_top_level_calls_and_guards<'a>(
-    stmts: &'a [Statement<'a>],
-    top_calls: &mut Vec<&'a CallExpression<'a>>,
-    early_return_tests: &mut Vec<&'a Expression<'a>>,
-) {
-    for stmt in stmts {
-        match stmt {
-            Statement::IfStatement(if_stmt) => {
-                let is_early_return = match &if_stmt.consequent {
-                    Statement::ReturnStatement(_) => true,
-                    Statement::BlockStatement(blk) => blk
-                        .body
-                        .iter()
-                        .any(|s| matches!(s, Statement::ReturnStatement(_))),
-                    _ => false,
-                };
-                if is_early_return {
-                    early_return_tests.push(&if_stmt.test);
-                }
-            }
-            Statement::ExpressionStatement(expr_stmt) => {
-                if let Expression::CallExpression(call) = expr_stmt.expression.without_parentheses()
-                {
-                    top_calls.push(call);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn guard_converges_on_state(test: &Expression<'_>, state_name: &str, source: &str) -> bool {
-    let text = test.span().source_text(source);
-    expression_reads_state_value(test, state_name)
-        && (text.contains(".length")
-            || text.contains("null")
-            || text.contains("undefined")
-            || text.starts_with('!')
-            || text.contains("<=")
-            || text.contains(">=")
-            || text.contains("==="))
-}
-
-fn is_non_settling_setter_argument(setter_call: &CallExpression<'_>, state_name: &str) -> bool {
-    let Some(first_arg) = setter_call
-        .arguments
-        .first()
-        .and_then(|a| a.as_expression())
-    else {
-        return false;
-    };
-    let arg = first_arg.without_parentheses();
-    if let Expression::Identifier(id) = arg
-        && id.name.as_str() == state_name
-    {
-        return false;
-    }
-    if matches!(
-        arg,
-        Expression::ArrowFunctionExpression(_)
-            | Expression::FunctionExpression(_)
-            | Expression::ArrayExpression(_)
-            | Expression::ObjectExpression(_)
-            | Expression::NewExpression(_)
-            | Expression::RegExpLiteral(_)
-    ) {
-        return true;
-    }
-    expression_reads_state_value(arg, state_name)
-}
-
-fn expression_reads_state_value(expr: &Expression<'_>, state_name: &str) -> bool {
-    match expr.without_parentheses() {
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
-        Expression::Identifier(id) => id.name.as_str() == state_name,
-        Expression::StaticMemberExpression(mem) => {
-            expression_reads_state_value(&mem.object, state_name)
-        }
-        Expression::ComputedMemberExpression(comp) => {
-            expression_reads_state_value(&comp.object, state_name)
-                || expression_reads_state_value(&comp.expression, state_name)
-        }
-        Expression::BinaryExpression(bin) => {
-            expression_reads_state_value(&bin.left, state_name)
-                || expression_reads_state_value(&bin.right, state_name)
-        }
-        Expression::LogicalExpression(log) => {
-            expression_reads_state_value(&log.left, state_name)
-                || expression_reads_state_value(&log.right, state_name)
-        }
-        Expression::ConditionalExpression(cond) => {
-            expression_reads_state_value(&cond.test, state_name)
-                || expression_reads_state_value(&cond.consequent, state_name)
-                || expression_reads_state_value(&cond.alternate, state_name)
-        }
-        Expression::UnaryExpression(un) => expression_reads_state_value(&un.argument, state_name),
-        Expression::CallExpression(call) => {
-            expression_reads_state_value(&call.callee, state_name)
-                || call
-                    .arguments
-                    .iter()
-                    .filter_map(|a| a.as_expression())
-                    .any(|a| expression_reads_state_value(a, state_name))
-        }
-        Expression::TemplateLiteral(tpl) => tpl
-            .expressions
-            .iter()
-            .any(|e| expression_reads_state_value(e, state_name)),
-        Expression::ObjectExpression(obj) => obj.properties.iter().any(|p| match p {
-            ObjectPropertyKind::ObjectProperty(prop) => {
-                (prop.computed
-                    && prop
-                        .key
-                        .as_expression()
-                        .is_some_and(|k| expression_reads_state_value(k, state_name)))
-                    || expression_reads_state_value(&prop.value, state_name)
-            }
-            ObjectPropertyKind::SpreadProperty(sp) => {
-                expression_reads_state_value(&sp.argument, state_name)
-            }
-        }),
-        Expression::ArrayExpression(arr) => arr
-            .elements
-            .iter()
-            .filter_map(|e| e.as_expression())
-            .any(|e| expression_reads_state_value(e, state_name)),
-        _ => false,
-    }
-}
-
-fn check_set_state_after_await_in_effect(
-    semantic: &Semantic<'_>,
-    effect_fn_span: Span,
-    setter_names: &HashSet<String>,
-    subj_name: &Option<String>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    // Find async functions inside `effect_fn_span`
-    for (fn_node_id, fn_node) in semantic.nodes().iter_enumerated() {
-        if !effect_fn_span.contains_inclusive(fn_node.span()) {
-            continue;
-        }
-        let is_async_fn = match fn_node.kind() {
-            AstKind::Function(f) => f.r#async,
-            AstKind::ArrowFunctionExpression(a) => a.r#async,
-            _ => false,
-        };
-        if !is_async_fn {
-            continue;
-        }
-        let async_span = fn_node.span();
-        let mut first_await_start: Option<u32> = None;
-        for (_, inner) in semantic.nodes().iter_enumerated() {
-            if !async_span.contains_inclusive(inner.span()) {
-                continue;
-            }
-            if let AstKind::AwaitExpression(aw) = inner.kind() {
-                first_await_start =
-                    Some(first_await_start.map_or(aw.span.start, |prev| prev.min(aw.span.start)));
-            }
-        }
-        let Some(await_start) = first_await_start else {
-            continue;
-        };
-
-        let async_text = async_span.source_text(semantic.source_text());
-        let has_early_cancel_return = async_text.contains("if (cancelled)")
-            || async_text.contains("if (canceled)")
-            || async_text.contains("if (ignore)")
-            || async_text.contains("if (signal.aborted)");
-
-        for (call_id, inner) in semantic.nodes().iter_enumerated() {
-            if !async_span.contains_inclusive(inner.span()) || inner.span().start <= await_start {
-                continue;
-            }
-            let AstKind::CallExpression(call) = inner.kind() else {
-                continue;
-            };
-            let Expression::Identifier(callee_id) = call.callee.without_parentheses() else {
-                continue;
-            };
-            if !setter_names.contains(callee_id.name.as_str()) {
-                continue;
-            }
-            if has_early_cancel_return || is_guarded_by_cancel_if(semantic, call_id, fn_node_id) {
-                continue;
-            }
-            sites.push(SemanticRuleSite {
-                rule: RuleId::NoSetStateAfterAwaitInEffect,
-                subject_name: subj_name.clone(),
-                message_id: "noSetStateAfterAwaitInEffect",
-                target_name: callee_id.name.to_string(),
-                message: format!(
-                    "`{}()` runs after `await` inside `useEffect` without a cancellation guard, which can overwrite newer state when effects resolve out of order.",
-                    callee_id.name
-                ),
-                loc: loc_from_line_starts(line_starts, call.span.start),
-                span: ByteSpan {
-                    start: call.span.start,
-                    end: call.span.end,
-                },
-                autofix: None,
-            });
-        }
-    }
-}
-
-fn is_guarded_by_cancel_if(semantic: &Semantic<'_>, call_id: NodeId, async_fn_id: NodeId) -> bool {
-    for anc_id in semantic.nodes().ancestor_ids(call_id) {
-        if anc_id == async_fn_id {
-            break;
-        }
-        if let AstKind::IfStatement(if_stmt) = semantic.nodes().kind(anc_id) {
-            let test_text = if_stmt
-                .test
-                .span()
-                .source_text(semantic.source_text())
-                .to_ascii_lowercase();
-            if test_text.contains("cancel")
-                || test_text.contains("abort")
-                || test_text.contains("ignore")
-                || test_text.contains("mount")
-                || test_text.contains("active")
-                || test_text.contains("current")
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 #[expect(
@@ -1184,67 +841,64 @@ fn check_rerender_state_only_in_handlers_and_defer_reads(
             && let BindingPattern::ArrayPattern(arr) = &decl.id
             && let Some(Some(BindingPattern::BindingIdentifier(state_id))) = arr.elements.first()
             && let Some(sym_id) = state_id.symbol_id.get()
+            && is_symbol_read_only_in_handlers(semantic, sym_id, subject_node_id)
         {
-            let mut handler_reads = 0_usize;
-            let mut render_reads = 0_usize;
-            for reference in semantic.scoping().get_resolved_references(sym_id) {
-                if is_in_render_execution_scope(semantic, reference.node_id(), subject_node_id) {
-                    render_reads += 1;
-                } else {
-                    handler_reads += 1;
-                }
-            }
-            if handler_reads > 0 && render_reads == 0 {
-                sites.push(SemanticRuleSite {
-                    rule: RuleId::RerenderStateOnlyInHandlers,
-                    subject_name: subj_name.clone(),
-                    message_id: "rerenderStateOnlyInHandlers",
-                    target_name: state_id.name.to_string(),
-                    message: format!(
-                        "State `{}` is only read inside callbacks/handlers and never affects rendered output; use `useRef` to avoid unnecessary re-renders.",
-                        state_id.name
-                    ),
-                    loc: loc_from_line_starts(line_starts, state_id.span.start),
-                    span: ByteSpan {
-                        start: decl.span.start,
-                        end: decl.span.end,
-                    },
-                    autofix: None,
-                });
-            }
+            sites.push(SemanticRuleSite {
+                rule: RuleId::RerenderStateOnlyInHandlers,
+                subject_name: subj_name.clone(),
+                message_id: "rerenderStateOnlyInHandlers",
+                target_name: state_id.name.to_string(),
+                message: format!(
+                    "State `{}` is only read inside callbacks/handlers and never affects rendered output; use `useRef` to avoid unnecessary re-renders.",
+                    state_id.name
+                ),
+                loc: loc_from_line_starts(line_starts, state_id.span.start),
+                span: ByteSpan {
+                    start: decl.span.start,
+                    end: decl.span.end,
+                },
+                autofix: None,
+            });
         } else if let BindingPattern::BindingIdentifier(val_id) = &decl.id
             && let Some(sym_id) = val_id.symbol_id.get()
             && is_reactive_custom_hook_call(semantic, call)
+            && is_symbol_read_only_in_handlers(semantic, sym_id, subject_node_id)
         {
-            let mut handler_reads = 0_usize;
-            let mut render_reads = 0_usize;
-            for reference in semantic.scoping().get_resolved_references(sym_id) {
-                if is_in_render_execution_scope(semantic, reference.node_id(), subject_node_id) {
-                    render_reads += 1;
-                } else {
-                    handler_reads += 1;
-                }
-            }
-            if handler_reads > 0 && render_reads == 0 {
-                sites.push(SemanticRuleSite {
-                    rule: RuleId::RerenderDeferReadsHook,
-                    subject_name: subj_name.clone(),
-                    message_id: "rerenderDeferReadsHook",
-                    target_name: val_id.name.to_string(),
-                    message: format!(
-                        "Reactive hook value `{}` is only read inside callbacks/handlers; defer the read into the callback to avoid unnecessary re-renders.",
-                        val_id.name
-                    ),
-                    loc: loc_from_line_starts(line_starts, val_id.span.start),
-                    span: ByteSpan {
-                        start: decl.span.start,
-                        end: decl.span.end,
-                    },
-                    autofix: None,
-                });
-            }
+            sites.push(SemanticRuleSite {
+                rule: RuleId::RerenderDeferReadsHook,
+                subject_name: subj_name.clone(),
+                message_id: "rerenderDeferReadsHook",
+                target_name: val_id.name.to_string(),
+                message: format!(
+                    "Reactive hook value `{}` is only read inside callbacks/handlers; defer the read into the callback to avoid unnecessary re-renders.",
+                    val_id.name
+                ),
+                loc: loc_from_line_starts(line_starts, val_id.span.start),
+                span: ByteSpan {
+                    start: decl.span.start,
+                    end: decl.span.end,
+                },
+                autofix: None,
+            });
         }
     }
+}
+
+fn is_symbol_read_only_in_handlers(
+    semantic: &Semantic<'_>,
+    sym_id: SymbolId,
+    subject_node_id: NodeId,
+) -> bool {
+    let mut handler_reads = 0_usize;
+    let mut render_reads = 0_usize;
+    for reference in semantic.scoping().get_resolved_references(sym_id) {
+        if is_in_render_execution_scope(semantic, reference.node_id(), subject_node_id) {
+            render_reads += 1;
+        } else {
+            handler_reads += 1;
+        }
+    }
+    handler_reads > 0 && render_reads == 0
 }
 
 fn is_reactive_custom_hook_call(semantic: &Semantic<'_>, call: &CallExpression<'_>) -> bool {
@@ -1274,135 +928,3 @@ fn is_reactive_custom_hook_call(semantic: &Semantic<'_>, call: &CallExpression<'
     }
 }
 
-fn check_no_stale_timer_ref(
-    semantic: &Semantic<'_>,
-    node_id: NodeId,
-    call: &CallExpression<'_>,
-    subj_name: &Option<String>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    let timer_name = match call.callee.without_parentheses() {
-        Expression::Identifier(id) if matches!(id.name.as_str(), "setTimeout" | "setInterval") => {
-            Some(id.name.as_str())
-        }
-        Expression::StaticMemberExpression(mem)
-            if matches!(mem.property.name.as_str(), "setTimeout" | "setInterval") =>
-        {
-            Some(mem.property.name.as_str())
-        }
-        _ => None,
-    };
-    let Some(t_name) = timer_name else {
-        return;
-    };
-    if matches!(
-        semantic.nodes().parent_kind(node_id),
-        AstKind::ExpressionStatement(_)
-    ) {
-        sites.push(SemanticRuleSite {
-            rule: RuleId::NoStaleTimerRef,
-            subject_name: subj_name.clone(),
-            message_id: "noStaleTimerRef",
-            target_name: t_name.to_string(),
-            message: format!(
-                "`{t_name}(...)` timer ID is discarded; store the timer handle in `timerRef.current` and clear it on cleanup or before scheduling a new timer."
-            ),
-            loc: loc_from_line_starts(line_starts, call.span.start),
-            span: ByteSpan {
-                start: call.span.start,
-                end: call.span.end,
-            },
-            autofix: None,
-        });
-    }
-}
-
-fn check_no_unowned_async_error_clear(
-    semantic: &Semantic<'_>,
-    fn_node_id: NodeId,
-    setter_to_state: &HashMap<String, String>,
-    subj_name: &Option<String>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    let is_async = match semantic.nodes().kind(fn_node_id) {
-        AstKind::Function(f) => f.r#async,
-        AstKind::ArrowFunctionExpression(a) => a.r#async,
-        _ => false,
-    };
-    if !is_async {
-        return;
-    }
-    let fn_span = semantic.nodes().get_node(fn_node_id).span();
-    let mut first_await_start: Option<u32> = None;
-    for (_, inner) in semantic.nodes().iter_enumerated() {
-        if !fn_span.contains_inclusive(inner.span()) {
-            continue;
-        }
-        if let AstKind::AwaitExpression(aw) = inner.kind() {
-            first_await_start =
-                Some(first_await_start.map_or(aw.span.start, |prev| prev.min(aw.span.start)));
-        }
-    }
-    let Some(await_start) = first_await_start else {
-        return;
-    };
-    let fn_text = fn_span.source_text(semantic.source_text());
-    if fn_text.contains(".current")
-        || fn_text.contains("AbortController")
-        || fn_text.contains("requestId")
-        || fn_text.contains("reqId")
-    {
-        return;
-    }
-
-    for (call_id, inner) in semantic.nodes().iter_enumerated() {
-        if !fn_span.contains_inclusive(inner.span()) || inner.span().end > await_start {
-            continue;
-        }
-        let AstKind::CallExpression(call) = inner.kind() else {
-            continue;
-        };
-        let Expression::Identifier(callee_id) = call.callee.without_parentheses() else {
-            continue;
-        };
-        let is_error_setter = setter_to_state
-            .get(callee_id.name.as_str())
-            .is_some_and(|s| s.to_ascii_lowercase().contains("err"))
-            || callee_id.name.to_ascii_lowercase().contains("err");
-        if !is_error_setter {
-            continue;
-        }
-        let clears_to_falsy = call
-            .arguments
-            .first()
-            .and_then(|a| a.as_expression())
-            .is_some_and(|e| match e.without_parentheses() {
-                Expression::NullLiteral(_) => true,
-                Expression::BooleanLiteral(b) => !b.value,
-                Expression::StringLiteral(s) => s.value.is_empty(),
-                Expression::Identifier(id) => id.name == "undefined",
-                _ => false,
-            });
-        if !clears_to_falsy || is_guarded_by_cancel_if(semantic, call_id, fn_node_id) {
-            continue;
-        }
-        sites.push(SemanticRuleSite {
-            rule: RuleId::NoUnownedAsyncErrorClear,
-            subject_name: subj_name.clone(),
-            message_id: "noUnownedAsyncErrorClear",
-            target_name: callee_id.name.to_string(),
-            message: format!(
-                "`{}(...)` clears error state before an async operation without a request ownership guard, so overlapping requests can clobber each other's error state.",
-                callee_id.name
-            ),
-            loc: loc_from_line_starts(line_starts, call.span.start),
-            span: ByteSpan {
-                start: call.span.start,
-                end: call.span.end,
-            },
-            autofix: None,
-        });
-    }
-}

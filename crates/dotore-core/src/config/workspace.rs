@@ -65,20 +65,7 @@ pub fn discover_workspace_packages_with_analyzers(
     root_dir: &Path,
     analyzers: &[&dyn LanguageAnalyzer],
 ) -> Vec<WorkspacePackage> {
-    let manifest_names: Vec<&str> = if analyzers.is_empty() {
-        vec!["package.json", "angular.json"]
-    } else {
-        let mut names = vec!["package.json", "angular.json"];
-        for analyzer in analyzers {
-            for &m in analyzer.manifest_filenames() {
-                if !names.contains(&m) {
-                    names.push(m);
-                }
-            }
-        }
-        names
-    };
-
+    let manifest_names = collect_manifest_filenames(analyzers);
     let (mut dirs, mut seen) = (Vec::new(), HashSet::new());
     if manifest_names.iter().any(|m| root_dir.join(m).is_file()) {
         seen.insert(normalize_path_buf(root_dir));
@@ -91,61 +78,87 @@ pub fn discover_workspace_packages_with_analyzers(
     let root_config = load_config_from_dir(root_dir);
     let mut packages: Vec<WorkspacePackage> = dirs
         .into_iter()
-        .map(|dir| {
-            let name = dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("root")
-                .to_string();
-            let mut capability_gate = if analyzers.is_empty()
-                || dir.join("package.json").is_file()
-                || dir.join("angular.json").is_file()
-            {
-                CapabilityGate::discover(&dir)
-            } else {
-                CapabilityGate::empty()
-            };
-            if !analyzers.is_empty() {
-                let mut manifest_sources = Vec::new();
-                for &m in &manifest_names {
-                    let m_path = dir.join(m);
-                    if let Ok(src) = fs::read_to_string(&m_path) {
-                        manifest_sources.push((m_path, src));
-                    }
-                }
-                let borrowed_refs: Vec<(PathBuf, &str)> = manifest_sources
-                    .iter()
-                    .map(|(p, s)| (p.clone(), s.as_str()))
-                    .collect();
-                for analyzer in analyzers {
-                    let has_matching_manifest = analyzer
-                        .manifest_filenames()
-                        .iter()
-                        .any(|m| dir.join(m).is_file());
-                    if has_matching_manifest {
-                        let inferred = analyzer.infer_capability_gate(&dir, &borrowed_refs);
-                        capability_gate.merge(&inferred);
-                    }
-                }
-                if capability_gate.capabilities.is_empty() {
-                    capability_gate = CapabilityGate::discover(&dir);
-                }
-            }
-            let config = if dir == root_dir {
-                root_config.clone()
-            } else {
-                load_local_config_in_dir(&dir).unwrap_or_else(|| root_config.clone())
-            };
-            WorkspacePackage {
-                name,
-                root_dir: dir,
-                capability_gate,
-                config,
-            }
-        })
+        .map(|dir| build_discovered_package(dir, root_dir, &root_config, &manifest_names, analyzers))
         .collect();
     expand_angular_projects_on_disk(root_dir, &mut packages);
     packages
+}
+
+fn collect_manifest_filenames(analyzers: &[&dyn LanguageAnalyzer]) -> Vec<&'static str> {
+    let mut names = vec!["package.json", "angular.json"];
+    for analyzer in analyzers {
+        for &m in analyzer.manifest_filenames() {
+            if !names.contains(&m) {
+                names.push(m);
+            }
+        }
+    }
+    names
+}
+
+fn build_discovered_package(
+    dir: PathBuf,
+    root_dir: &Path,
+    root_config: &DotoreConfig,
+    manifest_names: &[&str],
+    analyzers: &[&dyn LanguageAnalyzer],
+) -> WorkspacePackage {
+    let name = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("root")
+        .to_string();
+    let mut capability_gate = if analyzers.is_empty()
+        || dir.join("package.json").is_file()
+        || dir.join("angular.json").is_file()
+    {
+        CapabilityGate::discover(&dir)
+    } else {
+        CapabilityGate::empty()
+    };
+    if !analyzers.is_empty() {
+        merge_analyzer_capability_gates(&dir, manifest_names, analyzers, &mut capability_gate);
+    }
+    let config = if dir == root_dir {
+        root_config.clone()
+    } else {
+        load_local_config_in_dir(&dir).unwrap_or_else(|| root_config.clone())
+    };
+    WorkspacePackage {
+        name,
+        root_dir: dir,
+        capability_gate,
+        config,
+    }
+}
+
+fn merge_analyzer_capability_gates(
+    dir: &Path,
+    manifest_names: &[&str],
+    analyzers: &[&dyn LanguageAnalyzer],
+    capability_gate: &mut CapabilityGate,
+) {
+    let manifest_sources: Vec<(PathBuf, String)> = manifest_names
+        .iter()
+        .map(|m| dir.join(m))
+        .filter_map(|p| fs::read_to_string(&p).ok().map(|s| (p, s)))
+        .collect();
+    let borrowed_refs: Vec<(PathBuf, &str)> = manifest_sources
+        .iter()
+        .map(|(p, s)| (p.clone(), s.as_str()))
+        .collect();
+    for analyzer in analyzers {
+        if analyzer
+            .manifest_filenames()
+            .iter()
+            .any(|m| dir.join(m).is_file())
+        {
+            capability_gate.merge(&analyzer.infer_capability_gate(dir, &borrowed_refs));
+        }
+    }
+    if capability_gate.capabilities.is_empty() {
+        *capability_gate = CapabilityGate::discover(dir);
+    }
 }
 
 /// A parsed sub-project entry from `angular.json`'s `"projects"` map.
@@ -159,6 +172,33 @@ pub struct AngularWorkspaceProject {
     pub package_role: super::PackageRole,
     /// Relative entrypoint paths from `architect.build.options` / `targets.build.options`.
     pub entrypoints: Vec<PathBuf>,
+}
+
+impl AngularWorkspaceProject {
+    /// Resolves this project's directory relative to `ng_dir`.
+    #[must_use]
+    pub fn resolve_project_dir(&self, ng_dir: &Path) -> PathBuf {
+        if self.root_rel.is_empty() {
+            ng_dir.to_path_buf()
+        } else if ng_dir == Path::new(".") {
+            PathBuf::from(&self.root_rel)
+        } else {
+            ng_dir.join(&self.root_rel)
+        }
+    }
+
+    /// Applies this Angular project's capabilities, role, and entrypoints to `gate`.
+    pub fn apply_to_gate(&self, base_gate: &CapabilityGate, gate: &mut CapabilityGate) {
+        gate.merge(base_gate);
+        gate.package_role = self.package_role;
+        gate.entrypoints.extend(self.entrypoints.iter().cloned());
+    }
+
+    /// Updates `existing` with this Angular project's name, capabilities, role, and entrypoints.
+    pub fn apply_to_package(&self, base_gate: &CapabilityGate, existing: &mut WorkspacePackage) {
+        existing.name.clone_from(&self.name);
+        self.apply_to_gate(base_gate, &mut existing.capability_gate);
+    }
 }
 
 /// Parses the `"projects"` map of an `angular.json` manifest into [`AngularWorkspaceProject`] entries.
@@ -338,26 +378,15 @@ fn apply_angular_project_spec_on_disk(
     spec: AngularWorkspaceProject,
     packages: &mut Vec<WorkspacePackage>,
 ) {
-    let proj_dir = if spec.root_rel.is_empty() {
-        ng_dir.to_path_buf()
-    } else {
-        ng_dir.join(&spec.root_rel)
-    };
+    let proj_dir = spec.resolve_project_dir(ng_dir);
     if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == proj_dir) {
-        existing.name.clone_from(&spec.name);
-        existing.capability_gate.merge(base_gate);
-        existing.capability_gate.package_role = spec.package_role;
-        existing
-            .capability_gate
-            .entrypoints
-            .extend(spec.entrypoints);
+        spec.apply_to_package(base_gate, existing);
     } else {
         let mut gate = base_gate.clone();
         if proj_dir.join("package.json").is_file() {
             gate.merge(&CapabilityGate::discover(&proj_dir));
         }
-        gate.package_role = spec.package_role;
-        gate.entrypoints.extend(spec.entrypoints);
+        spec.apply_to_gate(base_gate, &mut gate);
         let config = if proj_dir == root_dir {
             base_config.clone()
         } else {
@@ -381,75 +410,79 @@ pub fn resolve_package_for_file<'a>(
     match packages {
         [] => None,
         [single] => Some(single),
-        _ => {
-            let file_is_abs = file_path.is_absolute();
-            if !has_parent_dir_segment(file_path)
-                && packages.iter().all(|pkg| {
-                    pkg.root_dir.is_absolute() == file_is_abs
-                        && !has_parent_dir_segment(&pkg.root_dir)
-                })
-            {
-                let stripped_file = strip_leading_dot(file_path);
-                if let Some((best, _)) = packages
-                    .iter()
-                    .filter_map(|pkg| {
-                        let stripped_pkg = strip_leading_dot(&pkg.root_dir);
-                        if stripped_pkg.as_os_str().is_empty()
-                            || stripped_file.starts_with(stripped_pkg)
-                            || file_path.starts_with(&pkg.root_dir)
-                        {
-                            Some((pkg, stripped_pkg.as_os_str().len()))
-                        } else {
-                            None
-                        }
-                    })
-                    .max_by_key(|&(_, len)| len)
-                {
-                    return Some(best);
-                }
-            }
-
-            if packages
-                .iter()
-                .all(|pkg| pkg.root_dir.is_absolute() == file_is_abs)
-            {
-                let clean_file = clean_lexical_components(file_path);
-                if let Some((best, _)) = packages
-                    .iter()
-                    .filter_map(|pkg| {
-                        let clean_pkg = clean_lexical_components(&pkg.root_dir);
-                        if clean_pkg.as_os_str().is_empty()
-                            || clean_file.starts_with(&clean_pkg)
-                            || file_path.starts_with(&pkg.root_dir)
-                        {
-                            Some((pkg, clean_pkg.components().count()))
-                        } else {
-                            None
-                        }
-                    })
-                    .max_by_key(|&(_, depth)| depth)
-                {
-                    return Some(best);
-                }
-            }
-
-            let cwd = std::env::current_dir().ok();
-            let norm_file = normalize_path_with_cwd(file_path, cwd.as_deref());
-            packages
-                .iter()
-                .filter_map(|pkg| {
-                    let norm_pkg = normalize_path_with_cwd(&pkg.root_dir, cwd.as_deref());
-                    if norm_file.starts_with(&norm_pkg) || file_path.starts_with(&pkg.root_dir) {
-                        Some((pkg, norm_pkg.components().count()))
-                    } else {
-                        None
-                    }
-                })
-                .max_by_key(|&(_, depth)| depth)
-                .map(|(pkg, _)| pkg)
-                .or_else(|| packages.first())
-        }
+        _ => resolve_package_fast_relative(file_path, packages)
+            .or_else(|| resolve_package_lexical(file_path, packages))
+            .or_else(|| resolve_package_normalized(file_path, packages))
+            .or_else(|| packages.first()),
     }
+}
+
+fn resolve_package_fast_relative<'a>(
+    file_path: &Path,
+    packages: &'a [WorkspacePackage],
+) -> Option<&'a WorkspacePackage> {
+    let file_is_abs = file_path.is_absolute();
+    if has_parent_dir_segment(file_path)
+        || !packages.iter().all(|pkg| {
+            pkg.root_dir.is_absolute() == file_is_abs && !has_parent_dir_segment(&pkg.root_dir)
+        })
+    {
+        return None;
+    }
+    let stripped_file = strip_leading_dot(file_path);
+    packages
+        .iter()
+        .filter_map(|pkg| {
+            let stripped_pkg = strip_leading_dot(&pkg.root_dir);
+            (stripped_pkg.as_os_str().is_empty()
+                || stripped_file.starts_with(stripped_pkg)
+                || file_path.starts_with(&pkg.root_dir))
+            .then_some((pkg, stripped_pkg.as_os_str().len()))
+        })
+        .max_by_key(|&(_, len)| len)
+        .map(|(pkg, _)| pkg)
+}
+
+fn resolve_package_lexical<'a>(
+    file_path: &Path,
+    packages: &'a [WorkspacePackage],
+) -> Option<&'a WorkspacePackage> {
+    let file_is_abs = file_path.is_absolute();
+    if !packages
+        .iter()
+        .all(|pkg| pkg.root_dir.is_absolute() == file_is_abs)
+    {
+        return None;
+    }
+    let clean_file = clean_lexical_components(file_path);
+    packages
+        .iter()
+        .filter_map(|pkg| {
+            let clean_pkg = clean_lexical_components(&pkg.root_dir);
+            (clean_pkg.as_os_str().is_empty()
+                || clean_file.starts_with(&clean_pkg)
+                || file_path.starts_with(&pkg.root_dir))
+            .then_some((pkg, clean_pkg.components().count()))
+        })
+        .max_by_key(|&(_, depth)| depth)
+        .map(|(pkg, _)| pkg)
+}
+
+fn resolve_package_normalized<'a>(
+    file_path: &Path,
+    packages: &'a [WorkspacePackage],
+) -> Option<&'a WorkspacePackage> {
+    let cwd = std::env::current_dir().ok();
+    let norm_file = normalize_path_with_cwd(file_path, cwd.as_deref());
+    packages
+        .iter()
+        .filter_map(|pkg| {
+            let norm_pkg = normalize_path_with_cwd(&pkg.root_dir, cwd.as_deref());
+            (norm_file.starts_with(&norm_pkg) || file_path.starts_with(&pkg.root_dir))
+                .then_some((pkg, norm_pkg.components().count()))
+        })
+        .max_by_key(|&(_, depth)| depth)
+        .map(|(pkg, _)| pkg)
 }
 
 fn strip_leading_dot(path: &Path) -> &Path {
@@ -688,58 +721,76 @@ fn walk_nested_package_dirs(
 /// Strips single-line `//`, block `/* ... */` comments, and trailing commas from JSONC text.
 #[must_use]
 pub fn strip_jsonc(input: &str) -> String {
-    let mut no_comments = String::with_capacity(input.len());
+    let no_comments = strip_jsonc_comments(input);
+    strip_jsonc_trailing_commas(&no_comments)
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut in_str = false;
     while let Some(c) = chars.next() {
         if in_str {
-            no_comments.push(c);
-            if c == '\\'
-                && let Some(next) = chars.next()
-            {
-                no_comments.push(next);
-            } else if c == '"' {
-                in_str = false;
-            }
+            push_string_char(c, &mut chars, &mut in_str, &mut out);
         } else if c == '"' {
             in_str = true;
-            no_comments.push(c);
+            out.push(c);
         } else if c == '/' && chars.peek() == Some(&'/') {
-            for ch in chars.by_ref() {
-                if ch == '\n' {
-                    no_comments.push('\n');
-                    break;
-                }
-            }
+            skip_line_comment(&mut chars, &mut out);
         } else if c == '/' && chars.peek() == Some(&'*') {
-            let _ = chars.next();
-            while let Some(ch) = chars.next() {
-                if ch == '*' && chars.peek() == Some(&'/') {
-                    let _ = chars.next();
-                    break;
-                }
-                if ch == '\n' {
-                    no_comments.push('\n');
-                }
-            }
+            skip_block_comment(&mut chars, &mut out);
         } else {
-            no_comments.push(c);
+            out.push(c);
         }
     }
+    out
+}
 
+fn skip_line_comment(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
+    for ch in chars.by_ref() {
+        if ch == '\n' {
+            out.push('\n');
+            break;
+        }
+    }
+}
+
+fn skip_block_comment(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
+    let _ = chars.next();
+    while let Some(ch) = chars.next() {
+        if ch == '*' && chars.peek() == Some(&'/') {
+            let _ = chars.next();
+            break;
+        }
+        if ch == '\n' {
+            out.push('\n');
+        }
+    }
+}
+
+fn push_string_char(
+    c: char,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    in_str: &mut bool,
+    out: &mut String,
+) {
+    out.push(c);
+    if c == '\\'
+        && let Some(next) = chars.next()
+    {
+        out.push(next);
+    } else if c == '"' {
+        *in_str = false;
+    }
+}
+
+fn strip_jsonc_trailing_commas(no_comments: &str) -> String {
     let mut out = String::with_capacity(no_comments.len());
     let mut it = no_comments.chars().peekable();
     let mut in_string = false;
     while let Some(c) = it.next() {
         if in_string {
-            out.push(c);
-            if c == '\\'
-                && let Some(n) = it.next()
-            {
-                out.push(n);
-            } else if c == '"' {
-                in_string = false;
-            }
+            push_string_char(c, &mut it, &mut in_string, &mut out);
         } else if c == '"' {
             in_string = true;
             out.push(c);

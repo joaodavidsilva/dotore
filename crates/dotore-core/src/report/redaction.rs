@@ -88,67 +88,66 @@ pub fn mask_credentials(text: &str) -> String {
         if line_idx > 0 {
             out.push('\n');
         }
-        if in_private_key {
+        if mask_private_key_line(line, &mut in_private_key, &mut out)
+            || mask_credential_ranges_on_line(line, &mut out)
+        {
             changed = true;
-            if let Some(end_pos) = find_private_key_end(line) {
-                in_private_key = false;
-                out.push_str(REDACTED);
-                out.push_str(line.get(end_pos..).unwrap_or_default());
-            } else {
-                out.push_str(REDACTED);
-            }
-            continue;
-        }
-
-        if let Some((start, header_end)) = find_private_key_header(line) {
-            changed = true;
-            out.push_str(line.get(..start).unwrap_or_default());
-            if let Some(end_pos) = find_private_key_end(line.get(header_end..).unwrap_or_default())
-            {
-                let full_end = header_end + end_pos;
-                out.push_str("----");
-                out.push_str(REDACTED);
-                out.push_str(line.get(full_end..).unwrap_or_default());
-            } else {
-                in_private_key = true;
-                out.push_str("----");
-                out.push_str(REDACTED);
-            }
-            continue;
-        }
-
-        let ranges = credential_ranges_on_line(line);
-        if ranges.is_empty() {
+        } else {
             out.push_str(line);
+        }
+    }
+
+    if changed { out } else { text.to_string() }
+}
+
+fn mask_private_key_line(line: &str, in_private_key: &mut bool, out: &mut String) -> bool {
+    if *in_private_key {
+        if let Some(end_pos) = find_private_key_end(line) {
+            *in_private_key = false;
+            out.push_str(REDACTED);
+            out.push_str(line.get(end_pos..).unwrap_or_default());
+        } else {
+            out.push_str(REDACTED);
+        }
+        return true;
+    }
+    let Some((start, header_end)) = find_private_key_header(line) else {
+        return false;
+    };
+    out.push_str(line.get(..start).unwrap_or_default());
+    out.push_str("----");
+    out.push_str(REDACTED);
+    if let Some(end_pos) = find_private_key_end(line.get(header_end..).unwrap_or_default()) {
+        out.push_str(line.get(header_end + end_pos..).unwrap_or_default());
+    } else {
+        *in_private_key = true;
+    }
+    true
+}
+
+fn mask_credential_ranges_on_line(line: &str, out: &mut String) -> bool {
+    let ranges = credential_ranges_on_line(line);
+    if ranges.is_empty() {
+        return false;
+    }
+    let mut copied = 0;
+    for (start, end, kind) in ranges {
+        let start = start.max(copied);
+        let (Some(before), Some(value)) = (line.get(copied..start), line.get(start..end)) else {
+            continue;
+        };
+        if end <= start {
             continue;
         }
-
-        changed = true;
-        let mut copied = 0;
-        for (start, end, kind) in ranges {
-            let start = start.max(copied);
-            if end <= start {
-                continue;
-            }
-            let (Some(before), Some(value)) = (line.get(copied..start), line.get(start..end))
-            else {
-                continue;
-            };
-            out.push_str(before);
-            match kind {
-                RedactionKind::Token => out.push_str(&masked_token(value)),
-                RedactionKind::DatabasePassword => out.push_str(REDACTED),
-            }
-            copied = end;
+        out.push_str(before);
+        match kind {
+            RedactionKind::Token => out.push_str(&masked_token(value)),
+            RedactionKind::DatabasePassword => out.push_str(REDACTED),
         }
-        out.push_str(line.get(copied..).unwrap_or_default());
+        copied = end;
     }
-
-    if changed {
-        out
-    } else {
-        text.to_string()
-    }
+    out.push_str(line.get(copied..).unwrap_or_default());
+    true
 }
 
 fn might_contain_credential(text: &str) -> bool {

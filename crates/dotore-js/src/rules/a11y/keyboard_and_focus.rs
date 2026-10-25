@@ -36,180 +36,152 @@ pub(super) fn check_element_keyboard_and_focus_rules(
     ctx: &JsxElementA11yCtx<'_, '_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let JsxElementA11yCtx {
-        is_testlike,
-        semantic,
-        node_id,
-        jsx_el,
-        opening,
-        tag,
-        is_html,
-        has_spread,
-        subject_name,
-        const_strings,
-        loc,
-        span,
-        line_starts,
-    } = *ctx;
-    // 8. `click-events-have-key-events`
-    if is_html
-        && !is_hidden_from_screen_reader(opening, semantic, const_strings)
-        && !has_spread
+    check_click_and_mouse_key_events(ctx, sites);
+    check_static_and_noninteractive_interactions(ctx, sites);
+    check_noninteractive_tabindex_and_focus_support(ctx, sites);
+    check_autofocus_tabindex_and_access_key(ctx, sites);
+}
+
+fn check_click_and_mouse_key_events(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !ctx.is_html {
+        return;
+    }
+    let opening = ctx.opening;
+    if !is_hidden_from_screen_reader(opening, ctx.semantic, ctx.const_strings)
+        && !ctx.has_spread
         && let Some(click_attr) = find_jsx_attr_ignore_case(&opening.attributes, "onClick")
             .or_else(|| find_jsx_attr_ignore_case(&opening.attributes, "onClickCapture"))
         && !is_attr_undefined(click_attr)
+        && is_click_without_key_violation(ctx, click_attr)
     {
-        let is_focusless_container = matches!(tag, "tr" | "td" | "th" | "canvas");
-        let is_interactive = !is_focusless_container
-            && is_interactive_element(tag, opening, semantic, const_strings);
-        let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
-            .and_then(|a| get_attr_static_str(semantic, a, const_strings));
-        let is_composite_or_pres = role_str.as_deref().is_some_and(|r| {
-            matches!(
-                r.split_whitespace().next().unwrap_or(""),
-                "presentation"
-                    | "none"
-                    | "option"
-                    | "menuitem"
-                    | "menuitemcheckbox"
-                    | "menuitemradio"
-                    | "tab"
-                    | "treeitem"
-                    | "gridcell"
-                    | "row"
-            )
-        });
-        let has_key_event = ["onKeyDown", "onKeyUp", "onKeyPress"]
-            .iter()
-            .any(|k| find_jsx_attr_ignore_case(&opening.attributes, k).is_some());
-        let is_backdrop_dismiss = is_backdrop_dismiss_handler(click_attr, semantic);
-        let is_hover_li = tag == "li"
-            && (find_jsx_attr_ignore_case(&opening.attributes, "onMouseEnter").is_some()
-                || find_jsx_attr_ignore_case(&opening.attributes, "onMouseOver").is_some());
+        push_site(
+            sites,
+            RuleId::ClickEventsHaveKeyEvents,
+            ctx.subject_name.clone(),
+            "clickEventsHaveKeyEvents",
+            ctx.tag,
+            "Keyboard users can't trigger this click handler because there's no keyboard one, so add `onKeyUp`, `onKeyDown`, or `onKeyPress`.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
+    }
 
-        if !is_interactive
-            && !is_composite_or_pres
-            && !has_key_event
-            && !is_backdrop_dismiss
-            && !is_hover_li
+    for (mouse_prop, focus_prop, msg) in [
+        (
+            "onMouseOver",
+            "onFocus",
+            "Keyboard users miss this `onMouseOver` because it only fires with a mouse, so add an `onFocus` handler too.",
+        ),
+        (
+            "onMouseOut",
+            "onBlur",
+            "Keyboard users miss this `onMouseOut` because it only fires with a mouse, so add an `onBlur` handler too.",
+        ),
+    ] {
+        if let Some(mouse_attr) = find_attr(&opening.attributes, mouse_prop)
+            && mouse_attr.value.is_some()
+            && !is_attr_undefined(mouse_attr)
+            && !find_attr(&opening.attributes, focus_prop).is_some_and(|a| !is_attr_undefined(a))
         {
             push_site(
                 sites,
-                RuleId::ClickEventsHaveKeyEvents,
-                subject_name.clone(),
-                "clickEventsHaveKeyEvents",
-                tag,
-                "Keyboard users can't trigger this click handler because there's no keyboard one, so add `onKeyUp`, `onKeyDown`, or `onKeyPress`.".to_string(),
-                loc,
-                span,
+                RuleId::MouseEventsHaveKeyEvents,
+                ctx.subject_name.clone(),
+                "mouseEventsHaveKeyEvents",
+                mouse_prop,
+                msg.to_string(),
+                loc_from_line_starts(ctx.line_starts, mouse_attr.span.start),
+                ByteSpan {
+                    start: mouse_attr.span.start,
+                    end: mouse_attr.span.end,
+                },
             );
         }
     }
+}
 
-    // 9. `mouse-events-have-key-events`
-    if is_html {
-        if let Some(over_attr) = find_attr(&opening.attributes, "onMouseOver")
-            && over_attr.value.is_some()
-            && !is_attr_undefined(over_attr)
-        {
-            let has_focus =
-                find_attr(&opening.attributes, "onFocus").is_some_and(|a| !is_attr_undefined(a));
-            if !has_focus {
-                push_site(
-                    sites,
-                    RuleId::MouseEventsHaveKeyEvents,
-                    subject_name.clone(),
-                    "mouseEventsHaveKeyEvents",
-                    "onMouseOver",
-                    "Keyboard users miss this `onMouseOver` because it only fires with a mouse, so add an `onFocus` handler too.".to_string(),
-                    loc_from_line_starts(line_starts, over_attr.span.start),
-                    ByteSpan {
-                        start: over_attr.span.start,
-                        end: over_attr.span.end,
-                    },
-                );
-            }
-        }
-        if let Some(out_attr) = find_attr(&opening.attributes, "onMouseOut")
-            && out_attr.value.is_some()
-            && !is_attr_undefined(out_attr)
-        {
-            let has_blur =
-                find_attr(&opening.attributes, "onBlur").is_some_and(|a| !is_attr_undefined(a));
-            if !has_blur {
-                push_site(
-                    sites,
-                    RuleId::MouseEventsHaveKeyEvents,
-                    subject_name.clone(),
-                    "mouseEventsHaveKeyEvents",
-                    "onMouseOut",
-                    "Keyboard users miss this `onMouseOut` because it only fires with a mouse, so add an `onBlur` handler too.".to_string(),
-                    loc_from_line_starts(line_starts, out_attr.span.start),
-                    ByteSpan {
-                        start: out_attr.span.start,
-                        end: out_attr.span.end,
-                    },
-                );
-            }
-        }
-    }
-
-    // 10. `no-static-element-interactions`
-    if is_html
-        && !is_hidden_from_screen_reader(opening, semantic, const_strings)
-        && !has_spread
-        && !is_interactive_element(tag, opening, semantic, const_strings)
-        && !NON_INTERACTIVE_ELEMENTS.contains(&tag)
+fn is_click_without_key_violation(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    click_attr: &JSXAttribute<'_>,
+) -> bool {
+    let opening = ctx.opening;
+    let is_focusless_container = matches!(ctx.tag, "tr" | "td" | "th" | "canvas");
+    if !is_focusless_container
+        && is_interactive_element(ctx.tag, opening, ctx.semantic, ctx.const_strings)
     {
-        let role_attr = find_jsx_attr_ignore_case(&opening.attributes, "role");
-        let role_val = role_attr.and_then(|a| get_attr_static_str(semantic, a, const_strings));
-        let has_valid_role = match (role_attr, role_val.as_deref()) {
-            (None, _) => false,
-            (Some(_), Some(r)) => r
-                .split_whitespace()
-                .next()
-                .is_some_and(|tok| VALID_ARIA_ROLES.contains(&tok)),
-            (Some(attr), None) => !is_attr_null_or_undefined(attr),
-        };
-        let has_pointer_handler = ["onClick", "onDblClick", "onMouseDown", "onMouseUp"]
-            .iter()
-            .any(|h| {
-                find_jsx_attr_ignore_case(&opening.attributes, h)
-                    .is_some_and(|a| !is_attr_null_or_undefined(a))
-            });
-        let has_key_handler = ["onKeyDown", "onKeyUp", "onKeyPress"].iter().any(|h| {
-            find_jsx_attr_ignore_case(&opening.attributes, h)
-                .is_some_and(|a| !is_attr_null_or_undefined(a))
-        }) && find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
-            .is_some();
+        return false;
+    }
+    let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
+        .and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings));
+    if role_str.as_deref().is_some_and(|r| {
+        matches!(
+            r.split_whitespace().next().unwrap_or(""),
+            "presentation"
+                | "none"
+                | "option"
+                | "menuitem"
+                | "menuitemcheckbox"
+                | "menuitemradio"
+                | "tab"
+                | "treeitem"
+                | "gridcell"
+                | "row"
+        )
+    }) {
+        return false;
+    }
+    let has_key_event = ["onKeyDown", "onKeyUp", "onKeyPress"]
+        .iter()
+        .any(|k| find_jsx_attr_ignore_case(&opening.attributes, k).is_some());
+    let is_hover_li = ctx.tag == "li"
+        && (find_jsx_attr_ignore_case(&opening.attributes, "onMouseEnter").is_some()
+            || find_jsx_attr_ignore_case(&opening.attributes, "onMouseOver").is_some());
+    !has_key_event && !is_backdrop_dismiss_handler(click_attr, ctx.semantic) && !is_hover_li
+}
 
-        if !has_valid_role && (has_pointer_handler || has_key_handler) {
-            push_site(
-                sites,
-                RuleId::NoStaticElementInteractions,
-                subject_name.clone(),
-                "noStaticElementInteractions",
-                tag,
-                "Screen reader users can't tell this click handler is interactive because it has no `role`, so add a `role` or use a button or link.".to_string(),
-                loc,
-                span,
-            );
-        }
+fn check_static_and_noninteractive_interactions(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !ctx.is_html {
+        return;
+    }
+    let opening = ctx.opening;
+    let is_sr_hidden = is_hidden_from_screen_reader(opening, ctx.semantic, ctx.const_strings);
+    let is_interactive = is_interactive_element(ctx.tag, opening, ctx.semantic, ctx.const_strings);
+
+    if !is_sr_hidden
+        && !ctx.has_spread
+        && !is_interactive
+        && !NON_INTERACTIVE_ELEMENTS.contains(&ctx.tag)
+        && is_static_element_interaction_violation(ctx)
+    {
+        push_site(
+            sites,
+            RuleId::NoStaticElementInteractions,
+            ctx.subject_name.clone(),
+            "noStaticElementInteractions",
+            ctx.tag,
+            "Screen reader users can't tell this click handler is interactive because it has no `role`, so add a `role` or use a button or link.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
     }
 
-    // 13. `no-noninteractive-element-interactions`
-    if !is_testlike
-        && is_html
-        && NON_INTERACTIVE_ELEMENTS.contains(&tag)
-        && !is_interactive_element(tag, opening, semantic, const_strings)
-        && !is_hidden_from_screen_reader(opening, semantic, const_strings)
-        && !is_content_editable_tabbable(opening, semantic, const_strings)
+    if !ctx.is_testlike
+        && NON_INTERACTIVE_ELEMENTS.contains(&ctx.tag)
+        && !is_interactive
+        && !is_sr_hidden
+        && !is_content_editable_tabbable(opening, ctx.semantic, ctx.const_strings)
     {
         let has_mouse_handler = ["onClick", "onMouseDown", "onMouseUp"]
             .iter()
             .any(|h| find_jsx_attr_ignore_case(&opening.attributes, h).is_some());
         let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
-            .and_then(|a| get_attr_static_str(semantic, a, const_strings));
+            .and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings));
         let has_interactive_or_pres_role = role_str.as_deref().is_some_and(|r| {
             let first = r.split_whitespace().next().unwrap_or("");
             INTERACTIVE_ROLES.contains(&first) || matches!(first, "presentation" | "none")
@@ -218,84 +190,136 @@ pub(super) fn check_element_keyboard_and_focus_rules(
             push_site(
                 sites,
                 RuleId::NoNoninteractiveElementInteractions,
-                subject_name.clone(),
+                ctx.subject_name.clone(),
                 "noNoninteractiveElementInteractions",
-                tag,
+                ctx.tag,
                 format!(
-                    "Keyboard & screen reader users can't trigger this `<{tag}>` because it isn't interactive, so use a button or link or add an interactive role."
+                    "Keyboard & screen reader users can't trigger this `<{}>` because it isn't interactive, so use a button or link or add an interactive role.",
+                    ctx.tag
                 ),
-                loc,
-                span,
+                ctx.loc,
+                ctx.span,
             );
         }
     }
+}
 
-    // 14. `no-noninteractive-tabindex`
-    if is_html
-        && !is_interactive_element(tag, opening, semantic, const_strings)
-        && let Some(tab_attr) = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
-        && let Some(tab_val) = parse_attr_number(tab_attr)
-        && tab_val >= 0.0
-    {
-        let role_str = find_jsx_attr_ignore_case(&opening.attributes, "role")
-            .and_then(|a| get_attr_static_str(semantic, a, const_strings));
-        let is_interactive_role = role_str
-            .as_deref()
-            .and_then(|r| r.split_whitespace().next())
-            .is_some_and(|r| INTERACTIVE_ROLES.contains(&r) || r == "tabpanel");
-        let has_key_or_focus = ["onKeyDown", "onKeyUp", "onKeyPress", "onFocus", "onBlur"]
-            .iter()
-            .any(|h| find_jsx_attr_ignore_case(&opening.attributes, h).is_some());
-        let has_a11y_name = ["aria-label", "aria-labelledby"]
-            .iter()
-            .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some());
-        let class_str = get_class_name_str(opening, semantic, const_strings).unwrap_or_default();
-        let is_scrollable = class_str.split_whitespace().any(|t| {
-            matches!(
-                t,
-                "overflow-auto"
-                    | "overflow-scroll"
-                    | "overflow-x-auto"
-                    | "overflow-y-auto"
-                    | "overflow-x-scroll"
-                    | "overflow-y-scroll"
-            )
+fn is_static_element_interaction_violation(ctx: &JsxElementA11yCtx<'_, '_>) -> bool {
+    let opening = ctx.opening;
+    let role_attr = find_jsx_attr_ignore_case(&opening.attributes, "role");
+    let role_val = role_attr.and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings));
+    let has_valid_role = match (role_attr, role_val.as_deref()) {
+        (None, _) => false,
+        (Some(_), Some(r)) => r
+            .split_whitespace()
+            .next()
+            .is_some_and(|tok| VALID_ARIA_ROLES.contains(&tok)),
+        (Some(attr), None) => !is_attr_null_or_undefined(attr),
+    };
+    if has_valid_role {
+        return false;
+    }
+    let has_pointer_handler = ["onClick", "onDblClick", "onMouseDown", "onMouseUp"]
+        .iter()
+        .any(|h| {
+            find_jsx_attr_ignore_case(&opening.attributes, h)
+                .is_some_and(|a| !is_attr_null_or_undefined(a))
         });
-        let is_empty_sentinel = jsx_el.children.is_empty();
+    let has_key_handler = ["onKeyDown", "onKeyUp", "onKeyPress"].iter().any(|h| {
+        find_jsx_attr_ignore_case(&opening.attributes, h)
+            .is_some_and(|a| !is_attr_null_or_undefined(a))
+    }) && find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_some();
+    has_pointer_handler || has_key_handler
+}
 
-        if !is_interactive_role
-            && !has_key_or_focus
-            && !has_a11y_name
-            && !is_scrollable
-            && !is_empty_sentinel
-        {
-            push_site(
-                sites,
-                RuleId::NoNoninteractiveTabindex,
-                subject_name.clone(),
-                "noNoninteractiveTabindex",
-                tag,
-                "Keyboard users get stuck focusing this element they can't act on because `tabIndex` makes it tabbable, so remove it.".to_string(),
-                loc_from_line_starts(line_starts, tab_attr.span.start),
-                ByteSpan {
-                    start: tab_attr.span.start,
-                    end: tab_attr.span.end,
-                },
-            );
-        }
+fn check_noninteractive_tabindex_and_focus_support(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !ctx.is_html
+        || is_interactive_element(ctx.tag, ctx.opening, ctx.semantic, ctx.const_strings)
+    {
+        return;
     }
+    check_noninteractive_tabindex(ctx, sites);
+    check_interactive_supports_focus(ctx, sites);
+}
 
-    // 15. `interactive-supports-focus`
-    if is_html
-        && !has_spread
-        && !is_interactive_element(tag, opening, semantic, const_strings)
-        && !is_hidden_from_screen_reader(opening, semantic, const_strings)
-        && !is_disabled_element(opening, semantic, const_strings)
-        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
-        && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
-        && let Some(first_role) = role_str.split_whitespace().next()
-        && INTERACTIVE_ROLES.contains(&first_role)
-        && !matches!(
+fn check_noninteractive_tabindex(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let opening = ctx.opening;
+    let Some(tab_attr) = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex") else {
+        return;
+    };
+    if !parse_attr_number(tab_attr).is_some_and(|v| v >= 0.0) || ctx.jsx_el.children.is_empty() {
+        return;
+    }
+    let is_interactive_role = find_jsx_attr_ignore_case(&opening.attributes, "role")
+        .and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings))
+        .as_deref()
+        .and_then(|r| r.split_whitespace().next())
+        .is_some_and(|r| INTERACTIVE_ROLES.contains(&r) || r == "tabpanel");
+    let has_key_or_focus = ["onKeyDown", "onKeyUp", "onKeyPress", "onFocus", "onBlur"]
+        .iter()
+        .any(|h| find_jsx_attr_ignore_case(&opening.attributes, h).is_some());
+    let has_a11y_name = ["aria-label", "aria-labelledby"]
+        .iter()
+        .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some());
+    let class_str =
+        get_class_name_str(opening, ctx.semantic, ctx.const_strings).unwrap_or_default();
+    let is_scrollable = class_str.split_whitespace().any(|t| {
+        matches!(
+            t,
+            "overflow-auto"
+                | "overflow-scroll"
+                | "overflow-x-auto"
+                | "overflow-y-auto"
+                | "overflow-x-scroll"
+                | "overflow-y-scroll"
+        )
+    });
+
+    if !is_interactive_role && !has_key_or_focus && !has_a11y_name && !is_scrollable {
+        push_site(
+            sites,
+            RuleId::NoNoninteractiveTabindex,
+            ctx.subject_name.clone(),
+            "noNoninteractiveTabindex",
+            ctx.tag,
+            "Keyboard users get stuck focusing this element they can't act on because `tabIndex` makes it tabbable, so remove it.".to_string(),
+            loc_from_line_starts(ctx.line_starts, tab_attr.span.start),
+            ByteSpan {
+                start: tab_attr.span.start,
+                end: tab_attr.span.end,
+            },
+        );
+    }
+}
+
+fn check_interactive_supports_focus(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let opening = ctx.opening;
+    if ctx.has_spread
+        || is_hidden_from_screen_reader(opening, ctx.semantic, ctx.const_strings)
+        || is_disabled_element(opening, ctx.semantic, ctx.const_strings)
+    {
+        return;
+    }
+    let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role") else {
+        return;
+    };
+    let Some(role_str) = get_attr_static_str(ctx.semantic, role_attr, ctx.const_strings) else {
+        return;
+    };
+    let Some(first_role) = role_str.split_whitespace().next() else {
+        return;
+    };
+    if !INTERACTIVE_ROLES.contains(&first_role)
+        || matches!(
             first_role,
             "grid"
                 | "listbox"
@@ -309,55 +333,60 @@ pub(super) fn check_element_keyboard_and_focus_rules(
                 | "treegrid"
         )
     {
-        let has_event = opening.attributes.iter().any(|item| {
-            item.as_attribute()
-                .and_then(|a| a.name.as_identifier())
-                .is_some_and(|id| id.name.starts_with("on") && id.name.len() > 2)
-        });
-        let has_tabindex = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_some();
-        let is_composite_item_with_id = matches!(
-            first_role,
-            "option"
-                | "menuitem"
-                | "menuitemcheckbox"
-                | "menuitemradio"
-                | "tab"
-                | "treeitem"
-                | "gridcell"
-        ) && find_jsx_attr_ignore_case(&opening.attributes, "id")
-            .is_some();
-
-        if has_event && !has_tabindex && !is_composite_item_with_id {
-            push_site(
-                sites,
-                RuleId::InteractiveSupportsFocus,
-                subject_name.clone(),
-                "interactiveSupportsFocus",
-                first_role,
-                format!(
-                    "Keyboard users can't tab to this '{first_role}' because it isn't focusable, so add `tabIndex={{0}}`."
-                ),
-                loc,
-                span,
-            );
-        }
+        return;
     }
+    let has_event = opening.attributes.iter().any(|item| {
+        item.as_attribute()
+            .and_then(|a| a.name.as_identifier())
+            .is_some_and(|id| id.name.starts_with("on") && id.name.len() > 2)
+    });
+    let has_tabindex = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_some();
+    let is_composite_item_with_id = matches!(
+        first_role,
+        "option"
+            | "menuitem"
+            | "menuitemcheckbox"
+            | "menuitemradio"
+            | "tab"
+            | "treeitem"
+            | "gridcell"
+    ) && find_jsx_attr_ignore_case(&opening.attributes, "id").is_some();
 
-    // 16. `no-autofocus`
-    if is_html
+    if has_event && !has_tabindex && !is_composite_item_with_id {
+        push_site(
+            sites,
+            RuleId::InteractiveSupportsFocus,
+            ctx.subject_name.clone(),
+            "interactiveSupportsFocus",
+            first_role,
+            format!(
+                "Keyboard users can't tab to this '{first_role}' because it isn't focusable, so add `tabIndex={{0}}`."
+            ),
+            ctx.loc,
+            ctx.span,
+        );
+    }
+}
+
+fn check_autofocus_tabindex_and_access_key(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let opening = ctx.opening;
+    if ctx.is_html
         && let Some(af_attr) = find_attr(&opening.attributes, "autoFocus")
         && !is_attr_statically_false(af_attr)
         && !is_attr_dynamic_non_undefined(af_attr)
-        && !is_inside_modal_or_conditional(semantic, node_id, const_strings)
+        && !is_inside_modal_or_conditional(ctx.semantic, ctx.node_id, ctx.const_strings)
     {
         push_site(
             sites,
             RuleId::NoAutofocus,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noAutofocus",
             "autoFocus",
             "`autoFocus` moves focus on load, which can disrupt screen reader and keyboard users. Remove it and let users choose where to focus.".to_string(),
-            loc_from_line_starts(line_starts, af_attr.span.start),
+            loc_from_line_starts(ctx.line_starts, af_attr.span.start),
             ByteSpan {
                 start: af_attr.span.start,
                 end: af_attr.span.end,
@@ -365,20 +394,18 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         );
     }
 
-    // 28. `tabindex-no-positive`
-    if !is_testlike
+    if !ctx.is_testlike
         && let Some(tab_attr) = find_jsx_attr_ignore_case(&opening.attributes, "tabIndex")
-        && let Some(val) = parse_attr_number(tab_attr)
-        && val > 0.0
+        && parse_attr_number(tab_attr).is_some_and(|val| val > 0.0)
     {
         push_site(
             sites,
             RuleId::TabindexNoPositive,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "tabindexNoPositive",
             "tabIndex",
             "Keyboard users get jumped out of the normal order by a positive `tabIndex`, so use `0` or `-1`.".to_string(),
-            loc_from_line_starts(line_starts, tab_attr.span.start),
+            loc_from_line_starts(ctx.line_starts, tab_attr.span.start),
             ByteSpan {
                 start: tab_attr.span.start,
                 end: tab_attr.span.end,
@@ -386,8 +413,7 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         );
     }
 
-    // 29. `no-access-key`
-    if !is_testlike
+    if !ctx.is_testlike
         && let Some(ak_attr) = find_jsx_attr_ignore_case(&opening.attributes, "accessKey")
         && ak_attr.value.is_some()
         && !is_attr_undefined(ak_attr)
@@ -395,11 +421,11 @@ pub(super) fn check_element_keyboard_and_focus_rules(
         push_site(
             sites,
             RuleId::NoAccessKey,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noAccessKey",
             "accessKey",
             "Screen reader users can lose their shortcuts because `accessKey` clashes with them, so remove it.".to_string(),
-            loc_from_line_starts(line_starts, ak_attr.span.start),
+            loc_from_line_starts(ctx.line_starts, ak_attr.span.start),
             ByteSpan {
                 start: ak_attr.span.start,
                 end: ak_attr.span.end,

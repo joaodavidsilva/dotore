@@ -148,30 +148,8 @@ fn analyze_context_provider_value_expr(
     subj_span: Option<Span>,
     subj_ir: Option<&SubjectIr>,
 ) -> (bool, Vec<String>, Vec<String>) {
-    let unwrapped = val_expr.without_parentheses();
-
-    // Resolve the underlying expression if `val_expr` is a local variable inside `subj_span`
-    let (target_expr, is_local_binding) = match unwrapped {
-        Expression::Identifier(ident) => {
-            if let Some(s_span) = subj_span
-                && let Some(sym_id) = resolve_ident_symbol(semantic, ident)
-            {
-                let decl_id = semantic.scoping().symbol_declaration(sym_id);
-                let decl_node = semantic.nodes().get_node(decl_id);
-                if s_span.contains_inclusive(decl_node.span())
-                    && let AstKind::VariableDeclarator(decl) = decl_node.kind()
-                    && let Some(init) = &decl.init
-                {
-                    (init.without_parentheses(), true)
-                } else {
-                    (unwrapped, false)
-                }
-            } else {
-                (unwrapped, false)
-            }
-        }
-        _ => (unwrapped, true),
-    };
+    let (target_expr, is_local_binding) =
+        resolve_provider_value_target_expr(semantic, val_expr.without_parentheses(), subj_span);
 
     let is_unmemoized = is_local_binding
         && matches!(
@@ -182,67 +160,98 @@ fn analyze_context_provider_value_expr(
                 | Expression::FunctionExpression(_)
         );
 
-    // Also inspect `useMemo(() => ({ ... }), [...])` or direct `ObjectExpression` for state_slot_fields vs static_fields
-    let obj_expr_opt = match target_expr {
+    let (state_slot_fields, static_fields) =
+        match (extract_provider_value_object_expr(semantic, target_expr), subj_ir) {
+            (Some(obj), Some(subj)) => classify_provider_object_fields(obj, subj),
+            _ => (Vec::new(), Vec::new()),
+        };
+
+    (is_unmemoized, state_slot_fields, static_fields)
+}
+
+fn resolve_provider_value_target_expr<'a>(
+    semantic: &Semantic<'a>,
+    unwrapped: &'a Expression<'a>,
+    subj_span: Option<Span>,
+) -> (&'a Expression<'a>, bool) {
+    let Expression::Identifier(ident) = unwrapped else {
+        return (unwrapped, true);
+    };
+    let Some(s_span) = subj_span else {
+        return (unwrapped, false);
+    };
+    let Some(sym_id) = resolve_ident_symbol(semantic, ident) else {
+        return (unwrapped, false);
+    };
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    let decl_node = semantic.nodes().get_node(decl_id);
+    if s_span.contains_inclusive(decl_node.span())
+        && let AstKind::VariableDeclarator(decl) = decl_node.kind()
+        && let Some(init) = &decl.init
+    {
+        (init.without_parentheses(), true)
+    } else {
+        (unwrapped, false)
+    }
+}
+
+fn extract_provider_value_object_expr<'a>(
+    semantic: &Semantic<'a>,
+    target_expr: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::ObjectExpression<'a>> {
+    match target_expr {
         Expression::ObjectExpression(obj) => Some(obj),
         Expression::CallExpression(call)
             if is_react_hook_callee(semantic, &call.callee, "useMemo") =>
         {
-            call.arguments
-                .first()
-                .and_then(|a| a.as_expression())
-                .and_then(|cb| match cb.without_parentheses() {
-                    Expression::ArrowFunctionExpression(arrow) => arrow
-                        .body
-                        .as_expression()
-                        .and_then(|e| match e.without_parentheses() {
-                            Expression::ObjectExpression(o) => Some(o),
-                            _ => None,
-                        }),
-                    _ => None,
-                })
+            let cb = call.arguments.first()?.as_expression()?.without_parentheses();
+            let Expression::ArrowFunctionExpression(arrow) = cb else {
+                return None;
+            };
+            match arrow.body.as_expression()?.without_parentheses() {
+                Expression::ObjectExpression(o) => Some(o),
+                _ => None,
+            }
         }
         _ => None,
-    };
+    }
+}
+
+fn classify_provider_object_fields(
+    obj: &oxc_ast::ast::ObjectExpression<'_>,
+    subj: &SubjectIr,
+) -> (Vec<String>, Vec<String>) {
+    let active_state_names: HashSet<&str> = subj
+        .state_slots
+        .iter()
+        .filter(|s| {
+            s.setter_calls_outside_effects > 0
+                || s.setter_calls_in_effects > 0
+                || s.setter_escaped
+        })
+        .filter_map(|s| s.state_name.as_deref())
+        .collect();
 
     let mut state_slot_fields = Vec::new();
     let mut static_fields = Vec::new();
-
-    if let (Some(obj), Some(subj)) = (obj_expr_opt, subj_ir) {
-        let active_state_names: HashSet<&str> = subj
-            .state_slots
-            .iter()
-            .filter(|s| {
-                s.setter_calls_outside_effects > 0
-                    || s.setter_calls_in_effects > 0
-                    || s.setter_escaped
-            })
-            .filter_map(|s| s.state_name.as_deref())
-            .collect();
-
-        for prop_kind in &obj.properties {
-            let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                continue;
-            };
-            let Some(key_name) = prop.key.static_name() else {
-                continue;
-            };
-            let Some(key_str) = key_name.as_str() else {
-                continue;
-            };
-            let val_ident_name = match prop.value.without_parentheses() {
-                Expression::Identifier(id) => Some(id.name.as_str()),
-                _ => None,
-            };
-            if val_ident_name.is_some_and(|v| active_state_names.contains(v)) {
-                state_slot_fields.push(key_str.to_string());
-            } else {
-                static_fields.push(key_str.to_string());
-            }
+    for prop_kind in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let Some(key_str) = prop.key.static_name().and_then(|k| k.as_str().map(str::to_string)) else {
+            continue;
+        };
+        let is_active_state = matches!(
+            prop.value.without_parentheses(),
+            Expression::Identifier(id) if active_state_names.contains(id.name.as_str())
+        );
+        if is_active_state {
+            state_slot_fields.push(key_str);
+        } else {
+            static_fields.push(key_str);
         }
     }
-
-    (is_unmemoized, state_slot_fields, static_fields)
+    (state_slot_fields, static_fields)
 }
 
 fn extract_use_context_read_fields(semantic: &Semantic<'_>, call_node_id: NodeId) -> Vec<String> {
@@ -386,7 +395,33 @@ pub(crate) fn evaluate_architecture_project_graph_rules<F>(
         Option<&[RuleId]>,
     ) -> Option<RuleSeverity>,
 {
-    // 1 & 2: Context.Provider unstable value & Overloaded provider analysis
+    evaluate_context_provider_graph_rules(graph, packages, enabled_rules, resolve_activation, out);
+    evaluate_missing_boundary_graph_rules(graph, packages, enabled_rules, resolve_activation, out);
+    super::soc_rules::evaluate_reuse_architecture_rules(
+        graph,
+        packages,
+        enabled_rules,
+        resolve_activation,
+        out,
+    );
+}
+
+fn evaluate_context_provider_graph_rules<F>(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    resolve_activation: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(
+        RuleId,
+        &FileIr,
+        &Path,
+        &crate::config::CapabilityGate,
+        &crate::config::DotoreConfig,
+        Option<&[RuleId]>,
+    ) -> Option<RuleSeverity>,
+{
     for file in &graph.files {
         if file.context_providers.is_empty() {
             continue;
@@ -398,97 +433,128 @@ pub(crate) fn evaluate_architecture_project_graph_rules<F>(
             continue;
         }
         for provider in &file.context_providers {
-            let (all_consumer_sites, static_only_consumers) =
-                collect_consumers_for_provider(graph, file, provider);
-            if provider.is_unmemoized_value
-                && let Some(sev) = resolve_activation(
-                    RuleId::ContextProviderValueFromUnmemoizedLocalLiteral,
-                    file,
-                    &pkg.root_dir,
-                    &pkg.capability_gate,
-                    &pkg.config,
-                    enabled_rules,
-                )
-                && !(pkg.config.respect_inline_disables
-                    && file.suppressions.is_suppressed(
-                        RuleId::ContextProviderValueFromUnmemoizedLocalLiteral,
-                        provider.loc.line,
-                        provider.span,
-                        &file.jsx_elements,
-                        &file.subjects,
-                    ))
-            {
-                out.push(
-                    make_diag_for_subject(
-                        RuleId::ContextProviderValueFromUnmemoizedLocalLiteral,
-                        file.path.clone(),
-                        provider.subject_name.clone(),
-                        "contextProviderValueFromUnmemoizedLocalLiteral",
-                        provider.provider_tag_name.clone(),
-                        format!(
-                            "Every consumer of `<{}>` redraws on each render because its `value` is a fresh object/array/function rebuilt each render; wrap it in `useMemo` or hoist it outside the component.",
-                            provider.provider_tag_name
-                        ),
-                        provider.loc,
-                        provider.span,
-                    )
-                    .with_severity(sev)
-                    .with_caller_sites(all_consumer_sites),
-                );
-            }
-
-            if !provider.state_slot_fields.is_empty()
-                && !provider.static_fields.is_empty()
-                && !static_only_consumers.is_empty()
-                && let Some(sev) = resolve_activation(
-                    RuleId::OverloadedContextProvider,
-                    file,
-                    &pkg.root_dir,
-                    &pkg.capability_gate,
-                    &pkg.config,
-                    enabled_rules,
-                )
-                && !(pkg.config.respect_inline_disables
-                    && file.suppressions.is_suppressed(
-                        RuleId::OverloadedContextProvider,
-                        provider.loc.line,
-                        provider.span,
-                        &file.jsx_elements,
-                        &file.subjects,
-                    ))
-            {
-                let state_list = provider.state_slot_fields.join(", ");
-                let consumer_names: Vec<String> = static_only_consumers
-                    .iter()
-                    .map(|(n, _)| n.clone())
-                    .collect();
-                let consumer_sites: Vec<ResolvedCallerSite> = static_only_consumers
-                    .into_iter()
-                    .map(|(_, site)| site)
-                    .collect();
-                out.push(
-                    make_diag_for_subject(
-                        RuleId::OverloadedContextProvider,
-                        file.path.clone(),
-                        provider.subject_name.clone(),
-                        "overloadedContextProvider",
-                        provider.context_name.clone(),
-                        format!(
-                            "`<{}>` bundles frequently mutated State Slot(s) (`{state_list}`) with static properties, forcing unnecessary re-renders on static-only consumer(s): `{}`.",
-                            provider.provider_tag_name,
-                            consumer_names.join("`, `")
-                        ),
-                        provider.loc,
-                        provider.span,
-                    )
-                    .with_severity(sev)
-                    .with_caller_sites(consumer_sites),
-                );
-            }
+            evaluate_single_context_provider(
+                graph,
+                file,
+                pkg,
+                provider,
+                enabled_rules,
+                resolve_activation,
+                out,
+            );
         }
     }
+}
 
-    // 3: Ancestral `<Suspense>` and `<ErrorBoundary>` verification across Caller Sites
+fn evaluate_single_context_provider<F>(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    pkg: &WorkspacePackage,
+    provider: &ContextProviderSiteIr,
+    enabled_rules: Option<&[RuleId]>,
+    resolve_activation: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(
+        RuleId,
+        &FileIr,
+        &Path,
+        &crate::config::CapabilityGate,
+        &crate::config::DotoreConfig,
+        Option<&[RuleId]>,
+    ) -> Option<RuleSeverity>,
+{
+    let (all_consumer_sites, static_only_consumers) =
+        collect_consumers_for_provider(graph, file, provider);
+    if provider.is_unmemoized_value
+        && let Some(sev) = resolve_unsuppressed_rule_severity(
+            RuleId::ContextProviderValueFromUnmemoizedLocalLiteral,
+            file,
+            pkg,
+            provider.loc.line,
+            provider.span,
+            enabled_rules,
+            resolve_activation,
+        )
+    {
+        out.push(
+            make_diag_for_subject(
+                RuleId::ContextProviderValueFromUnmemoizedLocalLiteral,
+                file.path.clone(),
+                provider.subject_name.clone(),
+                "contextProviderValueFromUnmemoizedLocalLiteral",
+                provider.provider_tag_name.clone(),
+                format!(
+                    "Every consumer of `<{}>` redraws on each render because its `value` is a fresh object/array/function rebuilt each render; wrap it in `useMemo` or hoist it outside the component.",
+                    provider.provider_tag_name
+                ),
+                provider.loc,
+                provider.span,
+            )
+            .with_severity(sev)
+            .with_caller_sites(all_consumer_sites),
+        );
+    }
+
+    if !provider.state_slot_fields.is_empty()
+        && !provider.static_fields.is_empty()
+        && !static_only_consumers.is_empty()
+        && let Some(sev) = resolve_unsuppressed_rule_severity(
+            RuleId::OverloadedContextProvider,
+            file,
+            pkg,
+            provider.loc.line,
+            provider.span,
+            enabled_rules,
+            resolve_activation,
+        )
+    {
+        let state_list = provider.state_slot_fields.join(", ");
+        let consumer_names: Vec<String> = static_only_consumers
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        let consumer_sites: Vec<ResolvedCallerSite> = static_only_consumers
+            .into_iter()
+            .map(|(_, site)| site)
+            .collect();
+        out.push(
+            make_diag_for_subject(
+                RuleId::OverloadedContextProvider,
+                file.path.clone(),
+                provider.subject_name.clone(),
+                "overloadedContextProvider",
+                provider.context_name.clone(),
+                format!(
+                    "`<{}>` bundles frequently mutated State Slot(s) (`{state_list}`) with static properties, forcing unnecessary re-renders on static-only consumer(s): `{}`.",
+                    provider.provider_tag_name,
+                    consumer_names.join("`, `")
+                ),
+                provider.loc,
+                provider.span,
+            )
+            .with_severity(sev)
+            .with_caller_sites(consumer_sites),
+        );
+    }
+}
+
+fn evaluate_missing_boundary_graph_rules<F>(
+    graph: &ProjectGraph,
+    packages: &[WorkspacePackage],
+    enabled_rules: Option<&[RuleId]>,
+    resolve_activation: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(
+        RuleId,
+        &FileIr,
+        &Path,
+        &crate::config::CapabilityGate,
+        &crate::config::DotoreConfig,
+        Option<&[RuleId]>,
+    ) -> Option<RuleSeverity>,
+{
     for file in &graph.files {
         if !file
             .subjects
@@ -515,75 +581,110 @@ pub(crate) fn evaluate_architecture_project_graph_rules<F>(
         };
 
         for subject in &file.subjects {
-            if !subject.suspends && !subject.throws_in_render {
-                continue;
-            }
-            let Some(subj_name) = &subject.name else {
-                continue;
-            };
-            let callers = graph.callers_of(&file.path, subj_name);
-            if callers.is_empty() {
-                continue;
-            }
-
-            let mut uncovered_callers = Vec::new();
-            for caller in callers {
-                let mut visited = HashSet::new();
-                let is_covered = caller_site_has_ancestral_boundary(
-                    graph,
-                    &caller,
-                    subject.suspends,
-                    subject.throws_in_render,
-                    &mut visited,
-                );
-                if !is_covered {
-                    uncovered_callers.push(caller);
-                }
-            }
-
-            if !uncovered_callers.is_empty()
-                && !(pkg.config.respect_inline_disables
-                    && file.suppressions.is_suppressed(
-                        RuleId::MissingSuspenseOrErrorBoundary,
-                        subject.loc.line,
-                        subject.span,
-                        &file.jsx_elements,
-                        &file.subjects,
-                    ))
-            {
-                let boundary_label = match (subject.suspends, subject.throws_in_render) {
-                    (true, true) => "`<Suspense>` and `<ErrorBoundary>`",
-                    (true, false) => "`<Suspense>`",
-                    (false, true) => "`<ErrorBoundary>`",
-                    (false, false) => "`<Suspense>`",
-                };
-                out.push(
-                    make_diag_for_subject(
-                        RuleId::MissingSuspenseOrErrorBoundary,
-                        file.path.clone(),
-                        Some(subj_name.clone()),
-                        "missingSuspenseOrErrorBoundary",
-                        subj_name.clone(),
-                        format!(
-                            "Subject `{subj_name}` suspends or throws during render but lacks an ancestral {boundary_label} wrapper across {} Caller Site(s).",
-                            uncovered_callers.len()
-                        ),
-                        subject.loc,
-                        subject.span,
-                    )
-                    .with_severity(sev)
-                    .with_caller_sites(uncovered_callers),
-                );
-            }
+            evaluate_subject_missing_boundary(graph, file, pkg, subject, sev, out);
         }
     }
-    super::soc_rules::evaluate_reuse_architecture_rules(
-        graph,
-        packages,
-        enabled_rules,
-        resolve_activation,
-        out,
+}
+
+fn evaluate_subject_missing_boundary(
+    graph: &ProjectGraph,
+    file: &FileIr,
+    pkg: &WorkspacePackage,
+    subject: &SubjectIr,
+    sev: RuleSeverity,
+    out: &mut Vec<Diagnostic>,
+) {
+    if !subject.suspends && !subject.throws_in_render {
+        return;
+    }
+    let Some(subj_name) = &subject.name else {
+        return;
+    };
+    let uncovered_callers: Vec<ResolvedCallerSite> = graph
+        .callers_of(&file.path, subj_name)
+        .into_iter()
+        .filter(|caller| {
+            !caller_site_has_ancestral_boundary(
+                graph,
+                caller,
+                subject.suspends,
+                subject.throws_in_render,
+                &mut HashSet::new(),
+            )
+        })
+        .collect();
+
+    if uncovered_callers.is_empty()
+        || (pkg.config.respect_inline_disables
+            && file.suppressions.is_suppressed(
+                RuleId::MissingSuspenseOrErrorBoundary,
+                subject.loc.line,
+                subject.span,
+                &file.jsx_elements,
+                &file.subjects,
+            ))
+    {
+        return;
+    }
+    let boundary_label = match (subject.suspends, subject.throws_in_render) {
+        (true, true) => "`<Suspense>` and `<ErrorBoundary>`",
+        (true, false) | (false, false) => "`<Suspense>`",
+        (false, true) => "`<ErrorBoundary>`",
+    };
+    out.push(
+        make_diag_for_subject(
+            RuleId::MissingSuspenseOrErrorBoundary,
+            file.path.clone(),
+            Some(subj_name.clone()),
+            "missingSuspenseOrErrorBoundary",
+            subj_name.clone(),
+            format!(
+                "Subject `{subj_name}` suspends or throws during render but lacks an ancestral {boundary_label} wrapper across {} Caller Site(s).",
+                uncovered_callers.len()
+            ),
+            subject.loc,
+            subject.span,
+        )
+        .with_severity(sev)
+        .with_caller_sites(uncovered_callers),
     );
+}
+
+fn resolve_unsuppressed_rule_severity<F>(
+    rule: RuleId,
+    file: &FileIr,
+    pkg: &WorkspacePackage,
+    line: u32,
+    span: ByteSpan,
+    enabled_rules: Option<&[RuleId]>,
+    resolve_activation: &F,
+) -> Option<RuleSeverity>
+where
+    F: Fn(
+        RuleId,
+        &FileIr,
+        &Path,
+        &crate::config::CapabilityGate,
+        &crate::config::DotoreConfig,
+        Option<&[RuleId]>,
+    ) -> Option<RuleSeverity>,
+{
+    let sev = resolve_activation(
+        rule,
+        file,
+        &pkg.root_dir,
+        &pkg.capability_gate,
+        &pkg.config,
+        enabled_rules,
+    )?;
+    if pkg.config.respect_inline_disables
+        && file
+            .suppressions
+            .is_suppressed(rule, line, span, &file.jsx_elements, &file.subjects)
+    {
+        return None;
+    }
+    Some(sev)
 }
 
 fn caller_site_has_ancestral_boundary(

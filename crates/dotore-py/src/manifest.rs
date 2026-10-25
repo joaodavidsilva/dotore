@@ -7,7 +7,8 @@ use std::{
 };
 
 use dotore_core::{
-    Capability, CapabilityGate, PackageRole, config::infer_python_profile_from_pyproject_doc,
+    Capability, CapabilityGate, PackageRole,
+    config::{infer_python_profile_from_pyproject_doc, normalize_python_dep_name},
 };
 
 /// Infers a Python [`CapabilityGate`] for `package_dir` from `pyproject.toml` and `requirements.txt` manifests.
@@ -57,88 +58,96 @@ fn infer_from_pyproject_toml(content: &str, gate: &mut CapabilityGate) {
     let Ok(doc) = toml::from_str::<toml::Value>(content) else {
         return;
     };
-    match infer_python_profile_from_pyproject_doc(&doc) {
-        Some("library") => gate.package_role = PackageRole::Library,
-        Some("web" | "cli" | "script") => gate.package_role = PackageRole::Application,
-        _ => {}
+    if let Some(profile) = infer_python_profile_from_pyproject_doc(&doc) {
+        gate.dependencies
+            .insert("__python_profile".to_string(), profile.to_string());
+        match profile {
+            "library" => gate.package_role = PackageRole::Library,
+            "web" | "cli" | "script" => gate.package_role = PackageRole::Application,
+            _ => {}
+        }
     }
+    infer_pyproject_pep621_and_groups(&doc, gate);
+    if let Some(tool) = doc.get("tool").and_then(toml::Value::as_table) {
+        infer_pyproject_tool_table(tool, gate);
+    }
+}
 
-    // [project]
+fn infer_pyproject_pep621_and_groups(doc: &toml::Value, gate: &mut CapabilityGate) {
     if let Some(project) = doc.get("project").and_then(toml::Value::as_table) {
         if let Some(deps) = project.get("dependencies").and_then(toml::Value::as_array) {
-            for dep in deps.iter().filter_map(toml::Value::as_str) {
-                record_pep508_dependency(dep, gate);
-            }
+            record_pep508_array(deps, gate);
         }
         if let Some(opt_deps) = project
             .get("optional-dependencies")
             .and_then(toml::Value::as_table)
         {
-            for group_deps in opt_deps.values().filter_map(toml::Value::as_array) {
-                for dep in group_deps.iter().filter_map(toml::Value::as_str) {
-                    record_pep508_dependency(dep, gate);
-                }
-            }
+            record_pep508_table_of_arrays(opt_deps, gate);
         }
     }
-
-    // [dependency-groups] (PEP 735)
     if let Some(dep_groups) = doc.get("dependency-groups").and_then(toml::Value::as_table) {
-        for group_deps in dep_groups.values().filter_map(toml::Value::as_array) {
-            for item in group_deps {
-                if let Some(dep_str) = item.as_str() {
-                    record_pep508_dependency(dep_str, gate);
-                }
-            }
-        }
+        record_pep508_table_of_arrays(dep_groups, gate);
     }
-
-    // [build-system.requires]
     if let Some(requires) = doc
         .get("build-system")
         .and_then(toml::Value::as_table)
         .and_then(|bs| bs.get("requires"))
         .and_then(toml::Value::as_array)
     {
-        for dep in requires.iter().filter_map(toml::Value::as_str) {
-            record_pep508_dependency(dep, gate);
+        record_pep508_array(requires, gate);
+    }
+}
+
+fn infer_pyproject_tool_table(
+    tool: &toml::map::Map<String, toml::Value>,
+    gate: &mut CapabilityGate,
+) {
+    if let Some(pytest_tbl) = tool.get("pytest").and_then(toml::Value::as_table) {
+        gate.capabilities.insert(Capability::Pytest);
+        if pytest_tbl
+            .get("ini_options")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|ini| ini.contains_key("asyncio_mode"))
+        {
+            gate.capabilities.insert(Capability::Asyncio);
         }
     }
+    if tool.contains_key("django") {
+        gate.capabilities.insert(Capability::Django);
+    }
+    if let Some(poetry) = tool.get("poetry").and_then(toml::Value::as_table) {
+        infer_from_poetry_table(poetry, gate);
+    }
+    if let Some(dev_deps) = tool
+        .get("uv")
+        .and_then(toml::Value::as_table)
+        .and_then(|uv| uv.get("dev-dependencies"))
+        .and_then(toml::Value::as_array)
+    {
+        record_pep508_array(dev_deps, gate);
+    }
+    if let Some(dev_deps) = tool
+        .get("pdm")
+        .and_then(toml::Value::as_table)
+        .and_then(|pdm| pdm.get("dev-dependencies"))
+        .and_then(toml::Value::as_table)
+    {
+        record_pep508_table_of_arrays(dev_deps, gate);
+    }
+}
 
-    // [tool.*]
-    if let Some(tool) = doc.get("tool").and_then(toml::Value::as_table) {
-        if let Some(pytest_tbl) = tool.get("pytest").and_then(toml::Value::as_table) {
-            gate.capabilities.insert(Capability::Pytest);
-            if pytest_tbl
-                .get("ini_options")
-                .and_then(toml::Value::as_table)
-                .is_some_and(|ini| ini.contains_key("asyncio_mode"))
-            {
-                gate.capabilities.insert(Capability::Asyncio);
-            }
-        }
-        if tool.contains_key("django") {
-            gate.capabilities.insert(Capability::Django);
-        }
-        if let Some(poetry) = tool.get("poetry").and_then(toml::Value::as_table) {
-            infer_from_poetry_table(poetry, gate);
-        }
-        if let Some(uv) = tool.get("uv").and_then(toml::Value::as_table)
-            && let Some(dev_deps) = uv.get("dev-dependencies").and_then(toml::Value::as_array)
-        {
-            for dep in dev_deps.iter().filter_map(toml::Value::as_str) {
-                record_pep508_dependency(dep, gate);
-            }
-        }
-        if let Some(pdm) = tool.get("pdm").and_then(toml::Value::as_table)
-            && let Some(dev_deps) = pdm.get("dev-dependencies").and_then(toml::Value::as_table)
-        {
-            for group_deps in dev_deps.values().filter_map(toml::Value::as_array) {
-                for dep in group_deps.iter().filter_map(toml::Value::as_str) {
-                    record_pep508_dependency(dep, gate);
-                }
-            }
-        }
+fn record_pep508_array(arr: &[toml::Value], gate: &mut CapabilityGate) {
+    for dep in arr.iter().filter_map(toml::Value::as_str) {
+        record_pep508_dependency(dep, gate);
+    }
+}
+
+fn record_pep508_table_of_arrays(
+    tbl: &toml::map::Map<String, toml::Value>,
+    gate: &mut CapabilityGate,
+) {
+    for group_deps in tbl.values().filter_map(toml::Value::as_array) {
+        record_pep508_array(group_deps, gate);
     }
 }
 
@@ -321,23 +330,7 @@ fn split_pep508_name_and_version(spec: &str) -> (&str, &str) {
 }
 
 fn normalize_python_pkg_name(name: &str) -> String {
-    let mut normalized = String::with_capacity(name.len());
-    let mut prev_dash = false;
-    for ch in name.trim().chars() {
-        if ch == '_' || ch == '-' || ch == '.' {
-            if !prev_dash && !normalized.is_empty() {
-                normalized.push('-');
-                prev_dash = true;
-            }
-        } else {
-            normalized.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        }
-    }
-    while normalized.ends_with('-') {
-        normalized.pop();
-    }
-    normalized
+    normalize_python_dep_name(name)
 }
 
 fn apply_python_dependency_capabilities(

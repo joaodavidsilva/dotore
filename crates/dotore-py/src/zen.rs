@@ -16,8 +16,8 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 
 use crate::matchers::{
-    PyScopeTracker, build_py_diagnostic, build_py_diagnostic_with_autofix, function_def_header_span,
-    slice_source, text_range_to_byte_span,
+    PyScopeTracker, build_py_diagnostic, build_py_diagnostic_with_autofix,
+    decorated_def_header_span, function_def_header_span, slice_source, text_range_to_byte_span,
 };
 
 /// Maximum allowed cyclomatic complexity per function before `py-zen-complex-function` fires.
@@ -394,21 +394,7 @@ fn build_dense_semicolon_autofix(
 }
 
 fn class_def_header_span(source: &str, class_def: &StmtClassDef) -> ByteSpan {
-    let full_span = text_range_to_byte_span(class_def.range());
-    let search_start = class_def
-        .decorator_list
-        .last()
-        .map_or(full_span.start as usize, |d| d.range().end().to_usize());
-    let bytes = source.as_bytes();
-    let mut start = search_start.min(bytes.len());
-    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    let start_u32 = u32::try_from(start).unwrap_or(full_span.start);
-    ByteSpan {
-        start: start_u32,
-        end: full_span.end.max(start_u32),
-    }
+    decorated_def_header_span(source, class_def.range(), &class_def.decorator_list)
 }
 
 fn compute_function_body_lines(line_starts: &[u32], body: &[Stmt]) -> u32 {
@@ -523,27 +509,12 @@ impl ComplexityAccumulator {
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Complexity visitor walks branching statements and expressions while skipping nested def/class bodies"
+        reason = "Complexity visitor walks branching statements and expressions while skipping nested def/class bodies (#50)"
     )]
     fn walk_stmt(&mut self, stmt: &Stmt, nesting: usize) {
         match stmt {
             Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
-            Stmt::If(if_stmt) => {
-                self.cyclomatic += 1;
-                self.cognitive += 1 + nesting;
-                self.walk_expr(&if_stmt.test, nesting);
-                self.walk_suite(&if_stmt.body, nesting + 1);
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.cyclomatic += 1;
-                        self.cognitive += 1;
-                        self.walk_expr(test, nesting);
-                    } else {
-                        self.cognitive += 1;
-                    }
-                    self.walk_suite(&clause.body, nesting + 1);
-                }
-            }
+            Stmt::If(if_stmt) => self.walk_if_stmt(if_stmt, nesting),
             Stmt::For(for_stmt) => {
                 self.cyclomatic += 1;
                 self.cognitive += 1 + nesting;
@@ -565,17 +536,7 @@ impl ComplexityAccumulator {
                 }
                 self.walk_suite(&with_stmt.body, nesting);
             }
-            Stmt::Try(try_stmt) => {
-                self.walk_suite(&try_stmt.body, nesting);
-                for handler in &try_stmt.handlers {
-                    let ExceptHandler::ExceptHandler(h) = handler;
-                    self.cyclomatic += 1;
-                    self.cognitive += 1 + nesting;
-                    self.walk_suite(&h.body, nesting + 1);
-                }
-                self.walk_suite(&try_stmt.orelse, nesting);
-                self.walk_suite(&try_stmt.finalbody, nesting);
-            }
+            Stmt::Try(try_stmt) => self.walk_try_stmt(try_stmt, nesting),
             Stmt::Assert(assert_stmt) => {
                 self.cyclomatic += 1;
                 self.walk_expr(&assert_stmt.test, nesting);
@@ -583,54 +544,73 @@ impl ComplexityAccumulator {
                     self.walk_expr(msg, nesting);
                 }
             }
-            Stmt::Match(match_stmt) => {
-                self.cognitive += 1 + nesting;
-                self.walk_expr(&match_stmt.subject, nesting);
-                for case in &match_stmt.cases {
-                    let is_wildcard = matches!(
-                        &case.pattern,
-                        Pattern::MatchAs(m) if m.pattern.is_none()
-                    );
-                    if !is_wildcard || case.guard.is_some() {
-                        self.cyclomatic += 1;
-                    }
-                    if let Some(guard) = &case.guard {
-                        self.walk_expr(guard, nesting + 1);
-                    }
-                    self.walk_suite(&case.body, nesting + 1);
-                }
-            }
-            Stmt::Assign(assign) => self.walk_expr(&assign.value, nesting),
+            Stmt::Match(match_stmt) => self.walk_match_stmt(match_stmt, nesting),
             Stmt::AnnAssign(ann) => {
                 if let Some(val) = &ann.value {
                     self.walk_expr(val, nesting);
                 }
             }
-            Stmt::AugAssign(aug) => self.walk_expr(&aug.value, nesting),
-            Stmt::Expr(expr_stmt) => self.walk_expr(&expr_stmt.value, nesting),
-            Stmt::Return(ret) => {
-                if let Some(val) = &ret.value {
-                    self.walk_expr(val, nesting);
-                }
+            _ => {
+                crate::matchers::walk_stmt_exprs(stmt, |e| self.walk_expr(e, nesting));
+                crate::matchers::walk_stmt_sub_stmts(stmt, |s| self.walk_stmt(s, nesting));
             }
-            Stmt::Raise(raise_stmt) => {
-                if let Some(exc) = &raise_stmt.exc {
-                    self.walk_expr(exc, nesting);
-                }
+        }
+    }
+
+    fn walk_if_stmt(&mut self, if_stmt: &ruff_python_ast::StmtIf, nesting: usize) {
+        self.cyclomatic += 1;
+        self.cognitive += 1 + nesting;
+        self.walk_expr(&if_stmt.test, nesting);
+        self.walk_suite(&if_stmt.body, nesting + 1);
+        for clause in &if_stmt.elif_else_clauses {
+            if let Some(test) = &clause.test {
+                self.cyclomatic += 1;
+                self.cognitive += 1;
+                self.walk_expr(test, nesting);
+            } else {
+                self.cognitive += 1;
             }
-            _ => {}
+            self.walk_suite(&clause.body, nesting + 1);
+        }
+    }
+
+    fn walk_try_stmt(&mut self, try_stmt: &ruff_python_ast::StmtTry, nesting: usize) {
+        self.walk_suite(&try_stmt.body, nesting);
+        for ExceptHandler::ExceptHandler(h) in &try_stmt.handlers {
+            self.cyclomatic += 1;
+            self.cognitive += 1 + nesting;
+            self.walk_suite(&h.body, nesting + 1);
+        }
+        self.walk_suite(&try_stmt.orelse, nesting);
+        self.walk_suite(&try_stmt.finalbody, nesting);
+    }
+
+    fn walk_match_stmt(&mut self, match_stmt: &ruff_python_ast::StmtMatch, nesting: usize) {
+        self.cognitive += 1 + nesting;
+        self.walk_expr(&match_stmt.subject, nesting);
+        for case in &match_stmt.cases {
+            let is_wildcard = matches!(
+                &case.pattern,
+                Pattern::MatchAs(m) if m.pattern.is_none()
+            );
+            if !is_wildcard || case.guard.is_some() {
+                self.cyclomatic += 1;
+            }
+            if let Some(guard) = &case.guard {
+                self.walk_expr(guard, nesting + 1);
+            }
+            self.walk_suite(&case.body, nesting + 1);
         }
     }
 
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "Complexity visitor inspects boolean operators, ternaries, comprehensions, and container expressions"
+        reason = "Complexity visitor inspects boolean operators, ternaries, comprehensions, and container expressions (#50)"
     )]
     fn walk_expr(&mut self, expr: &Expr, nesting: usize) {
         match expr {
             Expr::BoolOp(bool_op) => {
-                let extra = bool_op.values.len().saturating_sub(1);
-                self.cyclomatic += extra;
+                self.cyclomatic += bool_op.values.len().saturating_sub(1);
                 self.cognitive += 1;
                 for val in &bool_op.values {
                     self.walk_expr(val, nesting);
@@ -662,57 +642,7 @@ impl ComplexityAccumulator {
                 self.walk_expr(&comp.value, nesting);
                 self.walk_comprehensions(&comp.generators, nesting);
             }
-            Expr::Call(call) => {
-                self.walk_expr(&call.func, nesting);
-                for arg in &call.arguments.args {
-                    self.walk_expr(arg, nesting);
-                }
-                for kw in &call.arguments.keywords {
-                    self.walk_expr(&kw.value, nesting);
-                }
-            }
-            Expr::BinOp(bin) => {
-                self.walk_expr(&bin.left, nesting);
-                self.walk_expr(&bin.right, nesting);
-            }
-            Expr::UnaryOp(un) => self.walk_expr(&un.operand, nesting),
-            Expr::Compare(cmp) => {
-                for op in &cmp.operands {
-                    self.walk_expr(op, nesting);
-                }
-            }
-            Expr::Await(aw) => self.walk_expr(&aw.value, nesting),
-            Expr::Yield(y) => {
-                if let Some(val) = &y.value {
-                    self.walk_expr(val, nesting);
-                }
-            }
-            Expr::YieldFrom(yf) => self.walk_expr(&yf.value, nesting),
-            Expr::Named(named) => self.walk_expr(&named.value, nesting),
-            Expr::List(l) => {
-                for e in &l.elts {
-                    self.walk_expr(e, nesting);
-                }
-            }
-            Expr::Tuple(t) => {
-                for e in &t.elts {
-                    self.walk_expr(e, nesting);
-                }
-            }
-            Expr::Set(s) => {
-                for e in &s.elts {
-                    self.walk_expr(e, nesting);
-                }
-            }
-            Expr::Dict(d) => {
-                for item in &d.items {
-                    if let Some(k) = &item.key {
-                        self.walk_expr(k, nesting);
-                    }
-                    self.walk_expr(&item.value, nesting);
-                }
-            }
-            _ => {}
+            _ => crate::matchers::walk_expr_children(expr, |child| self.walk_expr(child, nesting)),
         }
     }
 

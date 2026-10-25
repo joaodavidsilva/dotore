@@ -387,7 +387,9 @@ impl ClippyAstVisitor<'_> {
             );
         }
     }
+}
 
+impl ClippyAstVisitor<'_> {
     // 5. `rs-no-zombie-child-process`
     fn is_command_spawn_expr(&self, expr: &Expr) -> Option<ByteSpan> {
         #[expect(

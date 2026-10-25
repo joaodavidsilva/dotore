@@ -20,120 +20,29 @@ use super::{
 };
 
 const ROUTE_CONVENTION_EXPORTS: &[&str] = &[
-    "metadata",
-    "generateMetadata",
-    "generateStaticParams",
-    "viewport",
-    "generateViewport",
-    "dynamic",
-    "dynamicParams",
-    "revalidate",
-    "fetchCache",
-    "runtime",
-    "preferredRegion",
-    "maxDuration",
-    "GET",
-    "POST",
-    "PUT",
-    "DELETE",
-    "PATCH",
-    "HEAD",
-    "OPTIONS",
-    "loader",
-    "clientLoader",
-    "action",
-    "clientAction",
-    "ErrorBoundary",
-    "HydrateFallback",
-    "headers",
-    "links",
-    "meta",
-    "handle",
-    "shouldRevalidate",
-    "middleware",
-    "config",
-    "getStaticProps",
-    "getStaticPaths",
-    "getServerSideProps",
-    "Route",
+    "metadata", "generateMetadata", "generateStaticParams", "viewport", "generateViewport",
+    "dynamic", "dynamicParams", "revalidate", "fetchCache", "runtime", "preferredRegion",
+    "maxDuration", "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "loader",
+    "clientLoader", "action", "clientAction", "ErrorBoundary", "HydrateFallback", "headers",
+    "links", "meta", "handle", "shouldRevalidate", "middleware", "config", "getStaticProps",
+    "getStaticPaths", "getServerSideProps", "Route",
 ];
 
 pub(super) const IMPLICIT_DEPENDENCIES: &[&str] = &[
-    "typescript",
-    "@types/node",
-    "@types/react",
-    "@types/react-dom",
-    "@types/jest",
-    "react",
-    "react-dom",
-    "react-native",
-    "expo",
-    "next",
-    "vite",
-    "vitest",
-    "jest",
-    "eslint",
-    "prettier",
-    "husky",
-    "lint-staged",
-    "tslib",
-    "@babel/core",
-    "@babel/runtime",
-    "@babel/preset-env",
-    "@babel/preset-react",
-    "@babel/preset-typescript",
-    "babel-core",
-    "babel-jest",
-    "babel-loader",
-    "babel-plugin-react-compiler",
-    "postcss",
-    "cross-env",
-    "node-sass",
-    "sass",
-    "less",
-    "patch-package",
-    "simple-git-hooks",
-    "lefthook",
-    "ts-node",
-    "ts-jest",
-    "tsx",
-    "jsdom",
-    "happy-dom",
-    "rimraf",
-    "concurrently",
-    "npm-run-all",
-    "npm-run-all2",
-    "dotenv-cli",
-    "webpack",
-    "rollup",
-    "terser",
-    "autoprefixer",
-    "tailwindcss",
-    "@tailwindcss/postcss",
-    "@tailwindcss/vite",
-    "react-test-renderer",
-    "esbuild",
-    "typedoc",
-    "commitizen",
-    "cz-conventional-changelog",
-    "dotore",
-    "@angular/animations",
-    "@angular/common",
-    "@angular/compiler",
-    "@angular/compiler-cli",
-    "@angular/cli",
-    "@angular/core",
-    "@angular/forms",
-    "@angular/language-service",
-    "@angular/platform-browser",
-    "@angular/platform-browser-dynamic",
-    "@angular/platform-server",
-    "@angular/router",
-    "@angular/build",
-    "@angular-devkit/build-angular",
-    "@angular-devkit/core",
-    "@angular-devkit/schematics",
-    "rxjs",
+    "typescript", "@types/node", "@types/react", "@types/react-dom", "@types/jest", "react",
+    "react-dom", "react-native", "expo", "next", "vite", "vitest", "jest", "eslint", "prettier",
+    "husky", "lint-staged", "tslib", "@babel/core", "@babel/runtime", "@babel/preset-env",
+    "@babel/preset-react", "@babel/preset-typescript", "babel-core", "babel-jest", "babel-loader",
+    "babel-plugin-react-compiler", "postcss", "cross-env", "node-sass", "sass", "less",
+    "patch-package", "simple-git-hooks", "lefthook", "ts-node", "ts-jest", "tsx", "jsdom",
+    "happy-dom", "rimraf", "concurrently", "npm-run-all", "npm-run-all2", "dotenv-cli", "webpack",
+    "rollup", "terser", "autoprefixer", "tailwindcss", "@tailwindcss/postcss", "@tailwindcss/vite",
+    "react-test-renderer", "esbuild", "typedoc", "commitizen", "cz-conventional-changelog",
+    "dotore", "@angular/animations", "@angular/common", "@angular/compiler",
+    "@angular/compiler-cli", "@angular/cli", "@angular/core", "@angular/forms",
+    "@angular/language-service", "@angular/platform-browser", "@angular/platform-browser-dynamic",
+    "@angular/platform-server", "@angular/router", "@angular/build",
+    "@angular-devkit/build-angular", "@angular-devkit/core", "@angular-devkit/schematics", "rxjs",
     "zone.js",
 ];
 pub(super) fn discover_entrypoints_and_roots(
@@ -148,6 +57,49 @@ pub(super) fn discover_entrypoints_and_roots(
     let mut is_root_or_excluded = vec![false; n];
     let mut packages_with_entrypoints = HashSet::new();
 
+    mark_package_and_script_entrypoints(
+        pkg_manifests,
+        targets,
+        &mut is_entry_point,
+        &mut packages_with_entrypoints,
+    );
+    mark_expo_plugin_entrypoints(
+        expo_plugin_specs,
+        targets,
+        pkg_manifests,
+        &mut is_entry_point,
+        &mut packages_with_entrypoints,
+    );
+    mark_route_module_entrypoints(
+        files,
+        targets,
+        ts_mappings,
+        pkg_manifests,
+        &mut is_entry_point,
+        &mut packages_with_entrypoints,
+    );
+    classify_files_entrypoints_and_exclusions(
+        files,
+        targets,
+        pkg_manifests,
+        &mut is_entry_point,
+        &mut is_root_or_excluded,
+        &mut packages_with_entrypoints,
+    );
+
+    (
+        is_entry_point,
+        is_root_or_excluded,
+        packages_with_entrypoints,
+    )
+}
+
+fn mark_package_and_script_entrypoints(
+    pkg_manifests: &[PackageManifestInfo],
+    targets: &[IndexedTargetFile],
+    is_entry_point: &mut [bool],
+    packages_with_entrypoints: &mut HashSet<String>,
+) {
     for pkg in pkg_manifests {
         for idx in resolve_package_entry_indices(pkg, targets) {
             if let Some(slot) = is_entry_point.get_mut(idx) {
@@ -155,11 +107,11 @@ pub(super) fn discover_entrypoints_and_roots(
                 packages_with_entrypoints.insert(pkg.norm_root.clone());
             }
         }
-        for token in pkg
+        let script_tokens = pkg
             .script_commands
             .iter()
-            .flat_map(|cmd| extract_script_file_tokens(cmd))
-        {
+            .flat_map(|cmd| extract_script_file_tokens(cmd));
+        for token in script_tokens {
             let stem = normalize_module_stem(&pkg.root_dir.join(&token));
             for idx in match_stem_against_targets(&stem, targets) {
                 if let Some(slot) = is_entry_point.get_mut(idx) {
@@ -169,22 +121,40 @@ pub(super) fn discover_entrypoints_and_roots(
             }
         }
     }
+}
 
+fn mark_expo_plugin_entrypoints(
+    expo_plugin_specs: &[(PathBuf, String)],
+    targets: &[IndexedTargetFile],
+    pkg_manifests: &[PackageManifestInfo],
+    is_entry_point: &mut [bool],
+    packages_with_entrypoints: &mut HashSet<String>,
+) {
     for (dir, spec) in expo_plugin_specs {
-        if spec.starts_with('.') || spec.starts_with('/') {
-            let stem = normalize_module_stem(&dir.join(spec));
-            for idx in match_stem_against_targets(&stem, targets) {
-                if let Some(slot) = is_entry_point.get_mut(idx) {
-                    *slot = true;
-                }
-                if let Some(target) = targets.get(idx) {
-                    let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
-                    packages_with_entrypoints.insert(pkg_root);
-                }
-            }
+        if !(spec.starts_with('.') || spec.starts_with('/')) {
+            continue;
+        }
+        let stem = normalize_module_stem(&dir.join(spec));
+        for idx in match_stem_against_targets(&stem, targets) {
+            mark_target_as_entrypoint(
+                idx,
+                targets,
+                pkg_manifests,
+                is_entry_point,
+                packages_with_entrypoints,
+            );
         }
     }
+}
 
+fn mark_route_module_entrypoints(
+    files: &[FileIr],
+    targets: &[IndexedTargetFile],
+    ts_mappings: &[CompiledPathMapping],
+    pkg_manifests: &[PackageManifestInfo],
+    is_entry_point: &mut [bool],
+    packages_with_entrypoints: &mut HashSet<String>,
+) {
     for file in files {
         for route_mod in &file.module.route_module_entries {
             let rel_spec: Cow<'_, str> = if route_mod.starts_with('.') {
@@ -199,17 +169,42 @@ pub(super) fn discover_entrypoints_and_roots(
                 ts_mappings,
                 pkg_manifests,
             ) {
-                if let Some(slot) = is_entry_point.get_mut(idx) {
-                    *slot = true;
-                }
-                if let Some(target) = targets.get(idx) {
-                    let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
-                    packages_with_entrypoints.insert(pkg_root);
-                }
+                mark_target_as_entrypoint(
+                    idx,
+                    targets,
+                    pkg_manifests,
+                    is_entry_point,
+                    packages_with_entrypoints,
+                );
             }
         }
     }
+}
 
+fn mark_target_as_entrypoint(
+    idx: usize,
+    targets: &[IndexedTargetFile],
+    pkg_manifests: &[PackageManifestInfo],
+    is_entry_point: &mut [bool],
+    packages_with_entrypoints: &mut HashSet<String>,
+) {
+    if let Some(slot) = is_entry_point.get_mut(idx) {
+        *slot = true;
+    }
+    if let Some(target) = targets.get(idx) {
+        let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
+        packages_with_entrypoints.insert(pkg_root);
+    }
+}
+
+fn classify_files_entrypoints_and_exclusions(
+    files: &[FileIr],
+    targets: &[IndexedTargetFile],
+    pkg_manifests: &[PackageManifestInfo],
+    is_entry_point: &mut [bool],
+    is_root_or_excluded: &mut [bool],
+    packages_with_entrypoints: &mut HashSet<String>,
+) {
     for (idx, file) in files.iter().enumerate() {
         let Some(target) = targets.get(idx) else {
             continue;
@@ -219,21 +214,19 @@ pub(super) fn discover_entrypoints_and_roots(
         let rel_stem = strip_source_extension(&rel_path);
         let (base_rel_stem, _) = strip_platform_suffix(&rel_stem);
 
-        if is_framework_or_default_entrypoint(&base_rel_stem) {
-            is_entry_point[idx] = true;
-            packages_with_entrypoints.insert(pkg_root.clone());
+        if is_framework_or_default_entrypoint(&base_rel_stem)
+            && let Some(slot) = is_entry_point.get_mut(idx)
+        {
+            *slot = true;
+            packages_with_entrypoints.insert(pkg_root);
         }
 
-        if file.file_context != FileContext::Production || is_excluded_support_file(&rel_path) {
-            is_root_or_excluded[idx] = true;
+        if (file.file_context != FileContext::Production || is_excluded_support_file(&rel_path))
+            && let Some(slot) = is_root_or_excluded.get_mut(idx)
+        {
+            *slot = true;
         }
     }
-
-    (
-        is_entry_point,
-        is_root_or_excluded,
-        packages_with_entrypoints,
-    )
 }
 
 fn find_enclosing_package_root(norm_file: &str, pkg_manifests: &[PackageManifestInfo]) -> String {
@@ -260,49 +253,24 @@ fn strip_package_root_prefix(norm_file: &str, pkg_root: &str) -> String {
         .to_string()
 }
 
+const DEFAULT_ENTRYPOINT_STEMS: &[&str] = &[
+    "index", "main", "app", "App", "server", "client", "middleware", "instrumentation",
+    "src/index", "src/main", "src/app", "src/App", "src/server", "src/client", "src/middleware",
+    "src/instrumentation", "src/router", "src/routeTree.gen", "src/entry-client",
+    "src/entry-server", "src/entry.client", "src/entry.server", "app/root", "app/routes",
+    "app/entry.client", "app/entry.server", "main.server", "src/main.server", "polyfills",
+    "src/polyfills", "public-api", "src/public-api", "app.component", "src/app/app.component",
+];
+
+const APP_ROUTE_LEAF_STEMS: &[&str] = &[
+    "page", "layout", "route", "default", "loading", "error", "not-found", "template",
+    "global-error", "opengraph-image", "twitter-image", "icon", "apple-icon", "manifest",
+    "sitemap", "robots", "_layout", "_sitemap", "+html", "+not-found", "index",
+];
+
 fn is_framework_or_default_entrypoint(base_rel_stem: &str) -> bool {
-    if matches!(
-        base_rel_stem,
-        "index"
-            | "main"
-            | "app"
-            | "App"
-            | "server"
-            | "client"
-            | "middleware"
-            | "instrumentation"
-            | "src/index"
-            | "src/main"
-            | "src/app"
-            | "src/App"
-            | "src/server"
-            | "src/client"
-            | "src/middleware"
-            | "src/instrumentation"
-            | "src/router"
-            | "src/routeTree.gen"
-            | "src/entry-client"
-            | "src/entry-server"
-            | "src/entry.client"
-            | "src/entry.server"
-            | "app/root"
-            | "app/routes"
-            | "app/entry.client"
-            | "app/entry.server"
-    ) {
-        return true;
-    }
-    if matches!(
-        base_rel_stem,
-        "main.server"
-            | "src/main.server"
-            | "polyfills"
-            | "src/polyfills"
-            | "public-api"
-            | "src/public-api"
-            | "app.component"
-            | "src/app/app.component"
-    ) || base_rel_stem.ends_with(".module")
+    if DEFAULT_ENTRYPOINT_STEMS.contains(&base_rel_stem)
+        || base_rel_stem.ends_with(".module")
         || base_rel_stem.ends_with(".routes")
         || base_rel_stem.ends_with(".config")
         || base_rel_stem.ends_with("/public-api")
@@ -327,30 +295,7 @@ fn is_framework_or_default_entrypoint(base_rel_stem: &str) -> bool {
     for app_prefix in ["app/", "src/app/"] {
         if let Some(after) = base_rel_stem.strip_prefix(app_prefix) {
             let leaf = after.rsplit('/').next().unwrap_or(after);
-            if matches!(
-                leaf,
-                "page"
-                    | "layout"
-                    | "route"
-                    | "default"
-                    | "loading"
-                    | "error"
-                    | "not-found"
-                    | "template"
-                    | "global-error"
-                    | "opengraph-image"
-                    | "twitter-image"
-                    | "icon"
-                    | "apple-icon"
-                    | "manifest"
-                    | "sitemap"
-                    | "robots"
-                    | "_layout"
-                    | "_sitemap"
-                    | "+html"
-                    | "+not-found"
-                    | "index"
-            ) {
+            if APP_ROUTE_LEAF_STEMS.contains(&leaf) {
                 return true;
             }
         }
@@ -359,50 +304,34 @@ fn is_framework_or_default_entrypoint(base_rel_stem: &str) -> bool {
     false
 }
 
+const EXCLUDED_SUPPORT_SUFFIXES: &[&str] = &[
+    ".d.ts", ".d.mts", ".d.cts", ".html", ".htm", ".css", ".scss", ".yml", ".yaml",
+];
+
+const EXCLUDED_SUPPORT_SUBSTRINGS: &[&str] = &[
+    ".config.", ".setup.", ".stories.", ".story.", ".test.", ".spec.", ".test-d.", ".cy.",
+];
+
+const EXCLUDED_SUPPORT_SEGMENTS: &[&str] = &[
+    "__tests__", "__test__", "tests", "test", "__mocks__", "__fixtures__", "__snapshots__", "e2e",
+    "cypress", "playwright", "scripts", ".storybook",
+];
 fn is_excluded_support_file(rel_path: &str) -> bool {
     let file_name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    if file_name.ends_with(".d.ts")
-        || file_name.ends_with(".d.mts")
-        || file_name.ends_with(".d.cts")
-        || file_name.ends_with(".html")
-        || file_name.ends_with(".htm")
-        || file_name.ends_with(".css")
-        || file_name.ends_with(".scss")
-        || file_name.ends_with(".yml")
-        || file_name.ends_with(".yaml")
-        || file_name.contains(".config.")
-        || file_name.contains(".setup.")
-        || file_name.starts_with("setupTests.")
-        || file_name.contains(".stories.")
-        || file_name.contains(".story.")
-        || file_name.contains(".test.")
-        || file_name.contains(".spec.")
-        || file_name.contains(".test-d.")
-        || file_name.contains(".cy.")
+    if file_name.starts_with("setupTests.")
+        || EXCLUDED_SUPPORT_SUFFIXES
+            .iter()
+            .any(|s| file_name.ends_with(s))
+        || EXCLUDED_SUPPORT_SUBSTRINGS
+            .iter()
+            .any(|s| file_name.contains(s))
     {
         return true;
     }
 
-    for seg in rel_path.split('/') {
-        if matches!(
-            seg,
-            "__tests__"
-                | "__test__"
-                | "tests"
-                | "test"
-                | "__mocks__"
-                | "__fixtures__"
-                | "__snapshots__"
-                | "e2e"
-                | "cypress"
-                | "playwright"
-                | "scripts"
-                | ".storybook"
-        ) {
-            return true;
-        }
-    }
-    false
+    rel_path
+        .split('/')
+        .any(|seg| EXCLUDED_SUPPORT_SEGMENTS.contains(&seg))
 }
 
 fn extract_script_file_tokens(cmd: &str) -> Vec<String> {
@@ -433,6 +362,31 @@ pub(super) fn trace_reachability(
     is_entry_point: &[bool],
     is_root_or_excluded: &[bool],
 ) -> Vec<bool> {
+    let adj = build_forward_adjacency(total_modules, edges);
+    let mut visited = vec![false; total_modules];
+    let mut queue = VecDeque::new();
+
+    for idx in 0..total_modules {
+        let is_entry = is_entry_point.get(idx).copied().unwrap_or(false);
+        let is_root = is_root_or_excluded.get(idx).copied().unwrap_or(false);
+        if is_entry || is_root {
+            enqueue_unvisited(&[idx], &mut visited, &mut queue);
+        }
+    }
+
+    while let Some(curr) = queue.pop_front() {
+        if let Some(neighbors) = adj.get(curr) {
+            enqueue_unvisited(neighbors, &mut visited, &mut queue);
+        }
+        if let Some(sibs) = platform_siblings.get(&curr) {
+            enqueue_unvisited(sibs, &mut visited, &mut queue);
+        }
+    }
+
+    visited
+}
+
+fn build_forward_adjacency(total_modules: usize, edges: &[ModuleEdge]) -> Vec<Vec<usize>> {
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); total_modules];
     for edge in edges {
         if edge.target < total_modules
@@ -441,45 +395,18 @@ pub(super) fn trace_reachability(
             edges_out.push(edge.target);
         }
     }
+    adj
+}
 
-    let mut visited = vec![false; total_modules];
-    let mut queue = VecDeque::new();
-
-    for idx in 0..total_modules {
-        let is_entry = is_entry_point.get(idx).copied().unwrap_or(false);
-        let is_root = is_root_or_excluded.get(idx).copied().unwrap_or(false);
-        if (is_entry || is_root)
-            && let Some(slot) = visited.get_mut(idx)
+fn enqueue_unvisited(nodes: &[usize], visited: &mut [bool], queue: &mut VecDeque<usize>) {
+    for &node in nodes {
+        if let Some(slot) = visited.get_mut(node)
+            && !*slot
         {
             *slot = true;
-            queue.push_back(idx);
+            queue.push_back(node);
         }
     }
-
-    while let Some(curr) = queue.pop_front() {
-        if let Some(neighbors) = adj.get(curr) {
-            for &next in neighbors {
-                if let Some(slot) = visited.get_mut(next)
-                    && !*slot
-                {
-                    *slot = true;
-                    queue.push_back(next);
-                }
-            }
-        }
-        if let Some(sibs) = platform_siblings.get(&curr) {
-            for &sib in sibs {
-                if let Some(slot) = visited.get_mut(sib)
-                    && !*slot
-                {
-                    *slot = true;
-                    queue.push_back(sib);
-                }
-            }
-        }
-    }
-
-    visited
 }
 
 #[expect(
@@ -540,6 +467,37 @@ pub(super) fn detect_dead_exports(
         return Vec::new();
     }
 
+    let used_exports = collect_used_exports(files, edges, platform_siblings, is_entry_point);
+    let mut findings = Vec::new();
+
+    for (idx, file) in files.iter().enumerate() {
+        if !is_candidate_for_dead_exports(
+            idx,
+            targets,
+            pkg_manifests,
+            packages_with_entrypoints,
+            is_entry_point,
+            is_root_or_excluded,
+            is_reachable,
+        ) {
+            continue;
+        }
+        let file_used_exports = used_exports.get(&idx);
+        if file_used_exports.is_some_and(|s| s.contains("*")) {
+            continue;
+        }
+        collect_unused_exports_in_file(idx, file, file_used_exports, &mut findings);
+    }
+
+    findings
+}
+
+fn collect_used_exports(
+    files: &[FileIr],
+    edges: &[ModuleEdge],
+    platform_siblings: &HashMap<usize, Vec<usize>>,
+    is_entry_point: &[bool],
+) -> HashMap<usize, HashSet<String>> {
     let mut re_export_edges_by_source: HashMap<usize, Vec<&ModuleEdge>> = HashMap::new();
     for edge in edges {
         if edge.is_re_export {
@@ -555,18 +513,17 @@ pub(super) fn detect_dead_exports(
         if !is_entry {
             continue;
         }
-        let Some(re_edges) = re_export_edges_by_source.get(&idx) else {
-            continue;
-        };
-        for edge in re_edges {
-            propagate_re_export_edge(
-                edge,
-                files,
-                &re_export_edges_by_source,
-                platform_siblings,
-                &mut used_exports,
-                &mut HashSet::new(),
-            );
+        if let Some(re_edges) = re_export_edges_by_source.get(&idx) {
+            for edge in re_edges {
+                propagate_re_export_edge(
+                    edge,
+                    files,
+                    &re_export_edges_by_source,
+                    platform_siblings,
+                    &mut used_exports,
+                    &mut HashSet::new(),
+                );
+            }
         }
     }
 
@@ -577,7 +534,6 @@ pub(super) fn detect_dead_exports(
         let Some(source_file) = files.get(edge.source) else {
             continue;
         };
-
         if edge.is_dynamic || edge.is_side_effect || edge.imported_symbols.is_empty() {
             mark_all_exports_used_recursive(
                 edge.target,
@@ -589,7 +545,6 @@ pub(super) fn detect_dead_exports(
             );
             continue;
         }
-
         for sym in &edge.imported_symbols {
             mark_imported_symbol_used(
                 sym,
@@ -602,82 +557,93 @@ pub(super) fn detect_dead_exports(
             );
         }
     }
+    used_exports
+}
 
-    let mut findings = Vec::new();
-    for (idx, file) in files.iter().enumerate() {
-        if !is_reachable.get(idx).copied().unwrap_or(false)
-            || is_entry_point.get(idx).copied().unwrap_or(false)
-            || is_root_or_excluded.get(idx).copied().unwrap_or(false)
-        {
-            continue;
+fn is_candidate_for_dead_exports(
+    idx: usize,
+    targets: &[IndexedTargetFile],
+    pkg_manifests: &[PackageManifestInfo],
+    packages_with_entrypoints: &HashSet<String>,
+    is_entry_point: &[bool],
+    is_root_or_excluded: &[bool],
+    is_reachable: &[bool],
+) -> bool {
+    if !is_reachable.get(idx).copied().unwrap_or(false)
+        || is_entry_point.get(idx).copied().unwrap_or(false)
+        || is_root_or_excluded.get(idx).copied().unwrap_or(false)
+    {
+        return false;
+    }
+    if !pkg_manifests.is_empty()
+        && let Some(target) = targets.get(idx)
+    {
+        let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
+        if !packages_with_entrypoints.contains(&pkg_root) {
+            return false;
         }
-        if !pkg_manifests.is_empty()
-            && let Some(target) = targets.get(idx)
-        {
-            let pkg_root = find_enclosing_package_root(&target.norm_path, pkg_manifests);
-            if !packages_with_entrypoints.contains(&pkg_root) {
-                continue;
-            }
-        }
-        let file_used_exports = used_exports.get(&idx);
-        if file_used_exports.is_some_and(|s| s.contains("*")) {
-            continue;
-        }
+    }
+    true
+}
 
-        let default_is_used = file_used_exports.is_some_and(|s| s.contains("default"));
-        let mut default_linked_locals: HashSet<&str> = HashSet::new();
-        if default_is_used {
-            for exp in &file.module.exports {
-                if exp.name == "default"
-                    && let Some(local) = &exp.local_name
-                {
-                    default_linked_locals.insert(local.as_str());
-                }
-            }
-        }
-
+fn collect_unused_exports_in_file(
+    file_index: usize,
+    file: &FileIr,
+    file_used_exports: Option<&HashSet<String>>,
+    findings: &mut Vec<UnusedExportFinding>,
+) {
+    let default_is_used = file_used_exports.is_some_and(|s| s.contains("default"));
+    let mut default_linked_locals: HashSet<&str> = HashSet::new();
+    if default_is_used {
         for exp in &file.module.exports {
-            if exp.is_namespace_re_export && exp.name == "*" {
-                continue;
-            }
-            if exp.from_source.is_some() {
-                continue;
-            }
-            if ROUTE_CONVENTION_EXPORTS.contains(&exp.name.as_str()) {
-                continue;
-            }
-            if file_used_exports.is_some_and(|s| s.contains(exp.name.as_str())) {
-                continue;
-            }
-            if file
-                .module
-                .local_references
-                .binary_search(&exp.name)
-                .is_ok()
-            {
-                continue;
-            }
-            if exp.name != "default" && default_linked_locals.contains(exp.name.as_str()) {
-                continue;
-            }
             if exp.name == "default"
                 && let Some(local) = &exp.local_name
-                && (file_used_exports.is_some_and(|s| s.contains(local.as_str()))
-                    || file.module.local_references.binary_search(local).is_ok())
             {
-                continue;
+                default_linked_locals.insert(local.as_str());
             }
-            findings.push(UnusedExportFinding {
-                file_index: idx,
-                name: exp.name.clone(),
-                is_type_only: exp.is_type_only,
-                loc: exp.loc,
-                span: exp.span,
-            });
         }
     }
 
-    findings
+    for exp in &file.module.exports {
+        if is_export_used_or_exempt(exp, file, file_used_exports, &default_linked_locals) {
+            continue;
+        }
+        findings.push(UnusedExportFinding {
+            file_index,
+            name: exp.name.clone(),
+            is_type_only: exp.is_type_only,
+            loc: exp.loc,
+            span: exp.span,
+        });
+    }
+}
+
+fn is_export_used_or_exempt(
+    exp: &crate::ir::types::ExportDeclIr,
+    file: &FileIr,
+    file_used_exports: Option<&HashSet<String>>,
+    default_linked_locals: &HashSet<&str>,
+) -> bool {
+    if (exp.is_namespace_re_export && exp.name == "*")
+        || exp.from_source.is_some()
+        || ROUTE_CONVENTION_EXPORTS.contains(&exp.name.as_str())
+        || file_used_exports.is_some_and(|s| s.contains(exp.name.as_str()))
+        || file
+            .module
+            .local_references
+            .binary_search(&exp.name)
+            .is_ok()
+    {
+        return true;
+    }
+    if exp.name != "default" && default_linked_locals.contains(exp.name.as_str()) {
+        return true;
+    }
+    exp.name == "default"
+        && exp.local_name.as_ref().is_some_and(|local| {
+            file_used_exports.is_some_and(|s| s.contains(local.as_str()))
+                || file.module.local_references.binary_search(local).is_ok()
+        })
 }
 
 fn mark_all_exports_used_recursive(

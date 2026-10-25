@@ -95,7 +95,7 @@ impl RsCandidateFinding {
     }
     /// Attaches a `Cargo.toml` crate-alias requirement `(written_root, canonical_crate)` to this finding.
     #[must_use]
-    pub fn with_required_crate_alias(
+    pub(crate) fn with_required_crate_alias(
         mut self,
         written_root: impl Into<String>,
         canonical_crate: impl Into<String>,
@@ -410,11 +410,11 @@ pub(crate) const fn is_pub(vis: &Visibility) -> bool {
     matches!(vis, Visibility::Public(_))
 }
 
-/// Returns `true` if `vis` is `pub(crate)` or `pub(super)`.
+/// Returns `true` if `vis` is `pub(crate)`.
 #[must_use]
 pub(crate) fn is_pub_crate_visibility(vis: &Visibility) -> bool {
     if let Visibility::Restricted(restr) = vis {
-        restr.path.is_ident("crate") || restr.path.is_ident("super")
+        restr.path.is_ident("crate")
     } else {
         false
     }

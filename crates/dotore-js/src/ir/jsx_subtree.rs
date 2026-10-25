@@ -326,30 +326,11 @@ fn normalize_ast_expr(
     source: &str,
     fingerprint_by_span: &HashMap<(u32, u32), String>,
 ) -> String {
-    match expr.without_parentheses() {
-        Expression::JSXElement(el) => fingerprint_by_span
-            .get(&(el.span.start, el.span.end))
-            .cloned()
-            .unwrap_or_else(|| "jsx-el".to_string()),
-        Expression::JSXFragment(frag) => fingerprint_by_span
-            .get(&(frag.span.start, frag.span.end))
-            .cloned()
-            .unwrap_or_else(|| "jsx-frag".to_string()),
-        Expression::Identifier(_) => "identifier".to_string(),
-        Expression::StringLiteral(_) => "StringLiteral".to_string(),
-        Expression::NumericLiteral(_) => "NumericLiteral".to_string(),
-        Expression::BooleanLiteral(b) => {
-            if b.value {
-                "TrueKeyword".to_string()
-            } else {
-                "FalseKeyword".to_string()
-            }
-        }
-        Expression::NullLiteral(_) => "NullKeyword".to_string(),
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
-            "NoSubstitutionTemplateLiteral".to_string()
-        }
-        Expression::RegExpLiteral(_) => "RegularExpressionLiteral".to_string(),
+    let inner = expr.without_parentheses();
+    if let Some(leaf) = normalize_leaf_ast_expr(inner, fingerprint_by_span) {
+        return leaf;
+    }
+    match inner {
         Expression::StaticMemberExpression(mem) => {
             let obj_hash = normalize_ast_expr(&mem.object, source, fingerprint_by_span);
             let opt = if mem.optional { "optional" } else { "required" };
@@ -361,23 +342,7 @@ fn normalize_ast_expr(
             ])
         }
         Expression::ComputedMemberExpression(comp) => {
-            let obj_hash = normalize_ast_expr(&comp.object, source, fingerprint_by_span);
-            let opt = if comp.optional {
-                "optional"
-            } else {
-                "required"
-            };
-            let arg_inner = comp.expression.without_parentheses();
-            let arg_hash = match arg_inner {
-                Expression::StringLiteral(s) => {
-                    format!("StringLiteral:{}", s.value.as_str().unwrap_or_default())
-                }
-                Expression::NumericLiteral(n) => {
-                    format!("NumericLiteral:{}", n.span.source_text(source).trim())
-                }
-                _ => normalize_ast_expr(arg_inner, source, fingerprint_by_span),
-            };
-            hash_framed_parts(&["element-access", opt, &obj_hash, &arg_hash])
+            normalize_computed_member_expr(comp, source, fingerprint_by_span)
         }
         Expression::BinaryExpression(bin) => {
             let left = normalize_ast_expr(&bin.left, source, fingerprint_by_span);
@@ -399,63 +364,154 @@ fn normalize_ast_expr(
             let alt = normalize_ast_expr(&cond.alternate, source, fingerprint_by_span);
             hash_framed_parts(&["ConditionalExpression", &test, &cons, &alt])
         }
-        Expression::CallExpression(call) => {
-            let mut parts = vec![
-                "CallExpression".to_string(),
-                normalize_ast_expr(&call.callee, source, fingerprint_by_span),
-            ];
-            for arg in &call.arguments {
-                if let Some(e) = arg.as_expression() {
-                    parts.push(normalize_ast_expr(e, source, fingerprint_by_span));
-                }
-            }
-            let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-            hash_framed_parts(&refs)
-        }
+        Expression::CallExpression(call) => normalize_call_expr(call, source, fingerprint_by_span),
         Expression::ArrowFunctionExpression(arrow) => {
-            let body_hash = if let Some(e) = arrow.body.as_expression() {
-                normalize_ast_expr(e, source, fingerprint_by_span)
-            } else if let ArrowFunctionBody::FunctionBody(b) = &arrow.body {
-                format!("block:{}", b.statements.len())
-            } else {
-                "body".to_string()
-            };
-            hash_framed_parts(&["ArrowFunction", &body_hash])
+            normalize_arrow_expr(arrow, source, fingerprint_by_span)
         }
-        Expression::ObjectExpression(obj) => {
-            let mut parts = vec!["ObjectLiteralExpression".to_string()];
-            for prop in &obj.properties {
-                match prop {
-                    oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
-                        let key = p.key.span().source_text(source).trim();
-                        if p.shorthand {
-                            parts.push(hash_framed_parts(&["shorthand-property", key]));
-                        } else {
-                            let val = normalize_ast_expr(&p.value, source, fingerprint_by_span);
-                            parts.push(hash_framed_parts(&["property-assignment", key, &val]));
-                        }
-                    }
-                    oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
-                        let val = normalize_ast_expr(&s.argument, source, fingerprint_by_span);
-                        parts.push(hash_framed_parts(&["spread", &val]));
-                    }
-                }
-            }
-            let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-            hash_framed_parts(&refs)
-        }
-        Expression::ArrayExpression(arr) => {
-            let mut parts = vec!["ArrayLiteralExpression".to_string()];
-            for elem in &arr.elements {
-                if let Some(e) = elem.as_expression() {
-                    parts.push(normalize_ast_expr(e, source, fingerprint_by_span));
-                }
-            }
-            let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-            hash_framed_parts(&refs)
-        }
+        Expression::ObjectExpression(obj) => normalize_object_expr(obj, source, fingerprint_by_span),
+        Expression::ArrayExpression(arr) => normalize_array_expr(arr, source, fingerprint_by_span),
         _ => "expr".to_string(),
     }
+}
+
+fn normalize_leaf_ast_expr(
+    expr: &Expression<'_>,
+    fingerprint_by_span: &HashMap<(u32, u32), String>,
+) -> Option<String> {
+    match expr {
+        Expression::JSXElement(el) => Some(
+            fingerprint_by_span
+                .get(&(el.span.start, el.span.end))
+                .cloned()
+                .unwrap_or_else(|| "jsx-el".to_string()),
+        ),
+        Expression::JSXFragment(frag) => Some(
+            fingerprint_by_span
+                .get(&(frag.span.start, frag.span.end))
+                .cloned()
+                .unwrap_or_else(|| "jsx-frag".to_string()),
+        ),
+        Expression::Identifier(_) => Some("identifier".to_string()),
+        Expression::StringLiteral(_) => Some("StringLiteral".to_string()),
+        Expression::NumericLiteral(_) => Some("NumericLiteral".to_string()),
+        Expression::BooleanLiteral(b) => Some(
+            if b.value {
+                "TrueKeyword"
+            } else {
+                "FalseKeyword"
+            }
+            .to_string(),
+        ),
+        Expression::NullLiteral(_) => Some("NullKeyword".to_string()),
+        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
+            Some("NoSubstitutionTemplateLiteral".to_string())
+        }
+        Expression::RegExpLiteral(_) => Some("RegularExpressionLiteral".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_computed_member_expr(
+    comp: &oxc_ast::ast::ComputedMemberExpression<'_>,
+    source: &str,
+    fingerprint_by_span: &HashMap<(u32, u32), String>,
+) -> String {
+    let obj_hash = normalize_ast_expr(&comp.object, source, fingerprint_by_span);
+    let opt = if comp.optional {
+        "optional"
+    } else {
+        "required"
+    };
+    let arg_inner = comp.expression.without_parentheses();
+    let arg_hash = match arg_inner {
+        Expression::StringLiteral(s) => {
+            format!("StringLiteral:{}", s.value.as_str().unwrap_or_default())
+        }
+        Expression::NumericLiteral(n) => {
+            format!("NumericLiteral:{}", n.span.source_text(source).trim())
+        }
+        _ => normalize_ast_expr(arg_inner, source, fingerprint_by_span),
+    };
+    hash_framed_parts(&["element-access", opt, &obj_hash, &arg_hash])
+}
+
+fn normalize_call_expr(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    source: &str,
+    fingerprint_by_span: &HashMap<(u32, u32), String>,
+) -> String {
+    let mut parts = vec![
+        "CallExpression".to_string(),
+        normalize_ast_expr(&call.callee, source, fingerprint_by_span),
+    ];
+    for arg in &call.arguments {
+        if let Some(e) = arg.as_expression() {
+            parts.push(normalize_ast_expr(e, source, fingerprint_by_span));
+        }
+    }
+    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    hash_framed_parts(&refs)
+}
+
+fn normalize_arrow_expr(
+    arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>,
+    source: &str,
+    fingerprint_by_span: &HashMap<(u32, u32), String>,
+) -> String {
+    let body_hash = if let Some(e) = arrow.body.as_expression() {
+        normalize_ast_expr(e, source, fingerprint_by_span)
+    } else if let ArrowFunctionBody::FunctionBody(b) = &arrow.body {
+        format!("block:{}", b.statements.len())
+    } else {
+        "body".to_string()
+    };
+    hash_framed_parts(&["ArrowFunction", &body_hash])
+}
+
+fn normalize_object_expr(
+    obj: &oxc_ast::ast::ObjectExpression<'_>,
+    source: &str,
+    fingerprint_by_span: &HashMap<(u32, u32), String>,
+) -> String {
+    let mut parts = vec!["ObjectLiteralExpression".to_string()];
+    for prop in &obj.properties {
+        match prop {
+            oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
+                let key = p.key.span().source_text(source).trim();
+                if p.shorthand {
+                    parts.push(hash_framed_parts(&["shorthand-property", key]));
+                } else {
+                    let val = normalize_ast_expr(&p.value, source, fingerprint_by_span);
+                    parts.push(hash_framed_parts(&["property-assignment", key, &val]));
+                }
+            }
+            oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
+                let val = normalize_ast_expr(&s.argument, source, fingerprint_by_span);
+                parts.push(hash_framed_parts(&["spread", &val]));
+            }
+        }
+    }
+    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    hash_framed_parts(&refs)
+}
+
+fn normalize_array_expr(
+    arr: &oxc_ast::ast::ArrayExpression<'_>,
+    source: &str,
+    fingerprint_by_span: &HashMap<(u32, u32), String>,
+) -> String {
+    let elem_hashes: Vec<String> = arr
+        .elements
+        .iter()
+        .filter_map(|elem| {
+            elem.as_expression()
+                .map(|e| normalize_ast_expr(e, source, fingerprint_by_span))
+        })
+        .collect();
+    let mut refs = Vec::with_capacity(1 + elem_hashes.len());
+    refs.push("ArrayLiteralExpression");
+    refs.extend(elem_hashes.iter().map(String::as_str));
+    hash_framed_parts(&refs)
 }
 
 fn hash_framed_parts(parts: &[&str]) -> String {

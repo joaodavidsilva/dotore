@@ -91,38 +91,68 @@ fn check_rn_package_configs<F>(
         .map(|(p, _)| p)
         .unwrap_or_else(|| pkg.root_dir.join("package.json"));
 
-    // 1. `rn-library-react-in-dependencies`
-    if let Some(sev) = is_rule_enabled(RuleId::RnLibraryReactInDependencies)
-        && let Some(val) = &pkg_json_val
-        && val
-            .get("react-native-builder-bob")
-            .is_some_and(Value::is_object)
-        && let Some(deps) = val.get("dependencies").and_then(Value::as_object)
-    {
-        let mut misplaced = Vec::new();
-        for name in ["react", "react-native"] {
-            if deps.contains_key(name) {
-                misplaced.push(format!("\"{name}\""));
-            }
-        }
-        if !misplaced.is_empty() {
-            push_project_diagnostic(
-                out,
-                pkg_json_path.clone(),
-                RuleId::RnLibraryReactInDependencies,
-                sev,
-                "rnLibraryReactInDependencies",
-                "dependencies",
-                format!(
-                    "This react-native-builder-bob library lists {} in `dependencies` — move them to `peerDependencies` so a second copy is not bundled into consumer apps.",
-                    misplaced.join(" and ")
-                ),
-            );
-        }
-    }
+    check_rn_library_react_in_dependencies(
+        pkg_json_val.as_ref(),
+        &pkg_json_path,
+        is_rule_enabled,
+        out,
+    );
+    check_rn_babel_configs(graph, pkg, is_rule_enabled, out);
+    check_rn_android_gradle_configs(graph, pkg, is_rule_enabled, out);
+}
 
-    // 2. Babel config checks (`rn-no-metro-babel-preset`, `rn-no-metro-babel-runtime-version`,
-    //    `rn-react-compiler-plugin-first`, `rn-reanimated-worklets-plugin-last`)
+fn check_rn_library_react_in_dependencies<F>(
+    pkg_json_val: Option<&Value>,
+    pkg_json_path: &Path,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let Some(sev) = is_rule_enabled(RuleId::RnLibraryReactInDependencies) else {
+        return;
+    };
+    let Some(val) = pkg_json_val else {
+        return;
+    };
+    if !val
+        .get("react-native-builder-bob")
+        .is_some_and(Value::is_object)
+    {
+        return;
+    }
+    let Some(deps) = val.get("dependencies").and_then(Value::as_object) else {
+        return;
+    };
+    let misplaced: Vec<String> = ["react", "react-native"]
+        .into_iter()
+        .filter(|name| deps.contains_key(*name))
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    if !misplaced.is_empty() {
+        push_project_diagnostic(
+            out,
+            pkg_json_path.to_path_buf(),
+            RuleId::RnLibraryReactInDependencies,
+            sev,
+            "rnLibraryReactInDependencies",
+            "dependencies",
+            format!(
+                "This react-native-builder-bob library lists {} in `dependencies` — move them to `peerDependencies` so a second copy is not bundled into consumer apps.",
+                misplaced.join(" and ")
+            ),
+        );
+    }
+}
+
+fn check_rn_babel_configs<F>(
+    graph: &ProjectGraph,
+    pkg: &WorkspacePackage,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     let babel_files = [
         "babel.config.js",
         "babel.config.cjs",
@@ -138,113 +168,143 @@ fn check_rn_package_configs<F>(
         else {
             continue;
         };
-
-        let rn_minor = pkg
-            .capability_gate
-            .dependencies
-            .get("react-native")
-            .and_then(|v| parse_rn_minor_version(v));
-        let has_legacy_preset_dep = pkg
-            .capability_gate
-            .dependencies
-            .contains_key("metro-react-native-babel-preset");
-
-        if rn_minor.is_some_and(|m| m >= 73)
-            && !has_legacy_preset_dep
-            && (babel_src.contains("'module:metro-react-native-babel-preset'")
-                || babel_src.contains("\"module:metro-react-native-babel-preset\""))
-            && let Some(sev) = is_rule_enabled(RuleId::RnNoMetroBabelPreset)
-        {
-            push_project_diagnostic(
-                out,
-                babel_path.clone(),
-                RuleId::RnNoMetroBabelPreset,
-                sev,
-                "rnNoMetroBabelPreset",
-                "module:metro-react-native-babel-preset",
-                "`module:metro-react-native-babel-preset` was renamed to `@react-native/babel-preset` and is no longer installed by React Native 0.73+.".to_string(),
-            );
-        }
-
-        if (babel_src.contains("'module:@react-native/babel-preset'")
-            || babel_src.contains("\"module:@react-native/babel-preset\""))
-            && !has_enable_babel_runtime_version(babel_src)
-            && let Some(sev) = is_rule_enabled(RuleId::RnNoMetroBabelRuntimeVersion)
-        {
-            push_project_diagnostic(
-                out,
-                babel_path.clone(),
-                RuleId::RnNoMetroBabelRuntimeVersion,
-                sev,
-                "rnNoMetroBabelRuntimeVersion",
-                "enableBabelRuntime",
-                "`module:@react-native/babel-preset` has no `enableBabelRuntime` version, so Babel runtime helpers can be duplicated across files.".to_string(),
-            );
-        }
-
-        // Static plugin order check
-        if let Some(plugins) = extract_static_babel_plugins(babel_src) {
-            if let Some(compiler_idx) = plugins
-                .iter()
-                .position(|p| p == "babel-plugin-react-compiler" || p == "react-compiler")
-                && compiler_idx > 0
-                && let Some(sev) = is_rule_enabled(RuleId::RnReactCompilerPluginFirst)
-            {
-                push_project_diagnostic(
-                    out,
-                    babel_path.clone(),
-                    RuleId::RnReactCompilerPluginFirst,
-                    sev,
-                    "rnReactCompilerPluginFirst",
-                    "babel-plugin-react-compiler",
-                    "The React Compiler Babel plugin is not first in `plugins`, so an earlier transform can alter component code before the compiler analyzes it.".to_string(),
-                );
-            }
-
-            let reanimated_major = pkg
-                .capability_gate
-                .dependencies
-                .get("react-native-reanimated")
-                .and_then(|v| parse_major_version(v));
-            if reanimated_major.is_some_and(|m| m >= 4)
-                && let Some(sev) = is_rule_enabled(RuleId::RnReanimatedWorkletsPluginLast)
-            {
-                if plugins
-                    .iter()
-                    .any(|p| p == "react-native-reanimated/plugin")
-                {
-                    push_project_diagnostic(
-                        out,
-                        babel_path.clone(),
-                        RuleId::RnReanimatedWorkletsPluginLast,
-                        sev,
-                        "rnReanimatedWorkletsPluginLast",
-                        "react-native-reanimated/plugin",
-                        "This Reanimated 4 project still uses `react-native-reanimated/plugin`, which was renamed to `react-native-worklets/plugin`.".to_string(),
-                    );
-                }
-                if let Some(worklets_idx) = plugins
-                    .iter()
-                    .rposition(|p| p == "react-native-worklets/plugin")
-                    && worklets_idx + 1 != plugins.len()
-                {
-                    push_project_diagnostic(
-                        out,
-                        babel_path.clone(),
-                        RuleId::RnReanimatedWorkletsPluginLast,
-                        sev,
-                        "rnReanimatedWorkletsPluginLast",
-                        "react-native-worklets/plugin",
-                        "`react-native-worklets/plugin` is not last in the Babel `plugins` array."
-                            .to_string(),
-                    );
-                }
-            }
-        }
+        check_single_rn_babel_config(pkg, &babel_path, babel_src, is_rule_enabled, out);
         break;
     }
+}
 
-    // 3. `rn-android-release-shrinking-disabled`
+fn check_single_rn_babel_config<F>(
+    pkg: &WorkspacePackage,
+    babel_path: &Path,
+    babel_src: &str,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let rn_minor = pkg
+        .capability_gate
+        .dependencies
+        .get("react-native")
+        .and_then(|v| parse_rn_minor_version(v));
+    let has_legacy_preset_dep = pkg
+        .capability_gate
+        .dependencies
+        .contains_key("metro-react-native-babel-preset");
+
+    if rn_minor.is_some_and(|m| m >= 73)
+        && !has_legacy_preset_dep
+        && (babel_src.contains("'module:metro-react-native-babel-preset'")
+            || babel_src.contains("\"module:metro-react-native-babel-preset\""))
+        && let Some(sev) = is_rule_enabled(RuleId::RnNoMetroBabelPreset)
+    {
+        push_project_diagnostic(
+            out,
+            babel_path.to_path_buf(),
+            RuleId::RnNoMetroBabelPreset,
+            sev,
+            "rnNoMetroBabelPreset",
+            "module:metro-react-native-babel-preset",
+            "`module:metro-react-native-babel-preset` was renamed to `@react-native/babel-preset` and is no longer installed by React Native 0.73+.".to_string(),
+        );
+    }
+
+    if (babel_src.contains("'module:@react-native/babel-preset'")
+        || babel_src.contains("\"module:@react-native/babel-preset\""))
+        && !has_enable_babel_runtime_version(babel_src)
+        && let Some(sev) = is_rule_enabled(RuleId::RnNoMetroBabelRuntimeVersion)
+    {
+        push_project_diagnostic(
+            out,
+            babel_path.to_path_buf(),
+            RuleId::RnNoMetroBabelRuntimeVersion,
+            sev,
+            "rnNoMetroBabelRuntimeVersion",
+            "enableBabelRuntime",
+            "`module:@react-native/babel-preset` has no `enableBabelRuntime` version, so Babel runtime helpers can be duplicated across files.".to_string(),
+        );
+    }
+
+    if let Some(plugins) = extract_static_babel_plugins(babel_src) {
+        check_rn_babel_plugin_order(pkg, babel_path, &plugins, is_rule_enabled, out);
+    }
+}
+
+fn check_rn_babel_plugin_order<F>(
+    pkg: &WorkspacePackage,
+    babel_path: &Path,
+    plugins: &[String],
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    if let Some(compiler_idx) = plugins
+        .iter()
+        .position(|p| p == "babel-plugin-react-compiler" || p == "react-compiler")
+        && compiler_idx > 0
+        && let Some(sev) = is_rule_enabled(RuleId::RnReactCompilerPluginFirst)
+    {
+        push_project_diagnostic(
+            out,
+            babel_path.to_path_buf(),
+            RuleId::RnReactCompilerPluginFirst,
+            sev,
+            "rnReactCompilerPluginFirst",
+            "babel-plugin-react-compiler",
+            "The React Compiler Babel plugin is not first in `plugins`, so an earlier transform can alter component code before the compiler analyzes it.".to_string(),
+        );
+    }
+
+    let reanimated_major = pkg
+        .capability_gate
+        .dependencies
+        .get("react-native-reanimated")
+        .and_then(|v| parse_major_version(v));
+    if reanimated_major.is_some_and(|m| m >= 4)
+        && let Some(sev) = is_rule_enabled(RuleId::RnReanimatedWorkletsPluginLast)
+    {
+        if plugins
+            .iter()
+            .any(|p| p == "react-native-reanimated/plugin")
+        {
+            push_project_diagnostic(
+                out,
+                babel_path.to_path_buf(),
+                RuleId::RnReanimatedWorkletsPluginLast,
+                sev,
+                "rnReanimatedWorkletsPluginLast",
+                "react-native-reanimated/plugin",
+                "This Reanimated 4 project still uses `react-native-reanimated/plugin`, which was renamed to `react-native-worklets/plugin`.".to_string(),
+            );
+        }
+        if let Some(worklets_idx) = plugins
+            .iter()
+            .rposition(|p| p == "react-native-worklets/plugin")
+            && worklets_idx + 1 != plugins.len()
+        {
+            push_project_diagnostic(
+                out,
+                babel_path.to_path_buf(),
+                RuleId::RnReanimatedWorkletsPluginLast,
+                sev,
+                "rnReanimatedWorkletsPluginLast",
+                "react-native-worklets/plugin",
+                "`react-native-worklets/plugin` is not last in the Babel `plugins` array."
+                    .to_string(),
+            );
+        }
+    }
+}
+
+fn check_rn_android_gradle_configs<F>(
+    graph: &ProjectGraph,
+    pkg: &WorkspacePackage,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     for gradle_rel in ["android/app/build.gradle", "android/app/build.gradle.kts"] {
         let Some((gradle_path, gradle_src)) =
             find_manifest_in_pkg(graph, &pkg.root_dir, gradle_rel)
@@ -294,11 +354,36 @@ fn check_expo_package_configs<F>(
     let pkg_json_path = pkg_json_entry
         .map(|(p, _)| p)
         .unwrap_or_else(|| pkg.root_dir.join("package.json"));
+    let expo_sdk_major = pkg
+        .capability_gate
+        .dependencies
+        .get("expo")
+        .and_then(|v| parse_major_version(v));
 
+    check_expo_dependency_tables(pkg, &pkg_json_path, expo_sdk_major, is_rule_enabled, out);
+    check_expo_package_json_conflicts_and_overrides(
+        pkg,
+        pkg_json_val.as_ref(),
+        &pkg_json_path,
+        expo_sdk_major,
+        is_rule_enabled,
+        out,
+    );
+    check_expo_lockfile_and_metro(graph, pkg, &pkg_json_path, is_rule_enabled, out);
+    check_expo_app_json_configs(graph, pkg, is_rule_enabled, out);
+    check_expo_gitignore_and_env_local(graph, pkg, &pkg_json_path, is_rule_enabled, out);
+}
+
+fn check_expo_dependency_tables<F>(
+    pkg: &WorkspacePackage,
+    pkg_json_path: &Path,
+    expo_sdk_major: Option<u32>,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     let deps = &pkg.capability_gate.dependencies;
-    let expo_sdk_major = deps.get("expo").and_then(|v| parse_major_version(v));
-
-    // 1. `expo-no-unimodules-packages`
     if let Some(sev) = is_rule_enabled(RuleId::ExpoNoUnimodulesPackages) {
         for unimod in [
             "@unimodules/core",
@@ -306,39 +391,20 @@ fn check_expo_package_configs<F>(
             "react-native-unimodules",
         ] {
             if deps.contains_key(unimod) {
-                push_project_diagnostic(
-                    out,
-                    pkg_json_path.clone(),
-                    RuleId::ExpoNoUnimodulesPackages,
-                    sev,
-                    "expoNoUnimodulesPackages",
-                    unimod,
-                    format!(
-                        "\"{unimod}\" is a legacy unimodules package that is incompatible with Expo SDK 44+ and will break native builds."
-                    ),
-                );
+                let msg = format!("\"{unimod}\" is a legacy unimodules package that is incompatible with Expo SDK 44+ and will break native builds.");
+                push_project_diagnostic(out, pkg_json_path.to_path_buf(), RuleId::ExpoNoUnimodulesPackages, sev, "expoNoUnimodulesPackages", unimod, msg);
             }
         }
     }
-
-    // 2. `expo-no-cli-dependencies`
     if let Some(sev) = is_rule_enabled(RuleId::ExpoNoCliDependencies) {
         for cli_pkg in ["expo-cli", "eas-cli"] {
             if deps.contains_key(cli_pkg) {
-                push_project_diagnostic(
-                    out,
-                    pkg_json_path.clone(),
-                    RuleId::ExpoNoCliDependencies,
-                    sev,
-                    "expoNoCliDependencies",
-                    cli_pkg,
-                    format!("`{cli_pkg}` should not be installed as a project dependency."),
-                );
+                let msg = format!("`{cli_pkg}` should not be installed as a project dependency.");
+                push_project_diagnostic(out, pkg_json_path.to_path_buf(), RuleId::ExpoNoCliDependencies, sev, "expoNoCliDependencies", cli_pkg, msg);
             }
         }
     }
 
-    // 3. `expo-no-redundant-dependency`
     if let Some(sev) = is_rule_enabled(RuleId::ExpoNoRedundantDependency) {
         let redundant_table: &[(&str, Option<u32>)] = &[
             ("expo-modules-autolinking", None),
@@ -356,60 +422,36 @@ fn check_expo_package_configs<F>(
             ("expo-firebase-core", Some(48)),
         ];
         for &(pkg_name, min_sdk) in redundant_table {
-            if !deps.contains_key(pkg_name) {
-                continue;
-            }
-            if let Some(min) = min_sdk
-                && expo_sdk_major.is_none_or(|sdk| sdk < min)
+            if deps.contains_key(pkg_name)
+                && min_sdk.is_none_or(|min| expo_sdk_major.is_some_and(|sdk| sdk >= min))
             {
-                continue;
+                let msg = format!("\"{pkg_name}\" should not be a direct dependency in this Expo project.");
+                push_project_diagnostic(out, pkg_json_path.to_path_buf(), RuleId::ExpoNoRedundantDependency, sev, "expoNoRedundantDependency", pkg_name, msg);
             }
-            push_project_diagnostic(
-                out,
-                pkg_json_path.clone(),
-                RuleId::ExpoNoRedundantDependency,
-                sev,
-                "expoNoRedundantDependency",
-                pkg_name,
-                format!("\"{pkg_name}\" should not be a direct dependency in this Expo project."),
-            );
         }
     }
+}
 
-    // 4. `expo-no-conflicting-dependency-override`
+fn check_expo_package_json_conflicts_and_overrides<F>(
+    pkg: &WorkspacePackage,
+    pkg_json_val: Option<&Value>,
+    pkg_json_path: &Path,
+    expo_sdk_major: Option<u32>,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
+    let deps = &pkg.capability_gate.dependencies;
+
     if let Some(sev) = is_rule_enabled(RuleId::ExpoNoConflictingDependencyOverride)
-        && let Some(val) = &pkg_json_val
+        && let Some(val) = pkg_json_val
     {
-        let mut overridden = Vec::new();
-        for obj_opt in [
-            val.get("overrides").and_then(Value::as_object),
-            val.get("resolutions").and_then(Value::as_object),
-            val.pointer("/pnpm/overrides").and_then(Value::as_object),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for k in obj_opt.keys() {
-                if matches!(
-                    k.as_str(),
-                    "@expo/cli"
-                        | "@expo/config"
-                        | "@expo/metro-config"
-                        | "@expo/metro-runtime"
-                        | "@expo/metro"
-                        | "metro"
-                ) || k.starts_with("metro-")
-                {
-                    overridden.push(format!("\"{k}\""));
-                }
-            }
-        }
-        overridden.sort();
-        overridden.dedup();
+        let overridden = collect_overridden_sdk_packages(val);
         if !overridden.is_empty() {
             push_project_diagnostic(
                 out,
-                pkg_json_path.clone(),
+                pkg_json_path.to_path_buf(),
                 RuleId::ExpoNoConflictingDependencyOverride,
                 sev,
                 "expoNoConflictingDependencyOverride",
@@ -422,7 +464,6 @@ fn check_expo_package_configs<F>(
         }
     }
 
-    // 5. `expo-router-no-react-navigation` (SDK 56)
     if expo_sdk_major == Some(56)
         && deps.contains_key("expo-router")
         && deps.keys().any(|k| k.starts_with("@react-navigation/"))
@@ -430,7 +471,7 @@ fn check_expo_package_configs<F>(
     {
         push_project_diagnostic(
             out,
-            pkg_json_path.clone(),
+            pkg_json_path.to_path_buf(),
             RuleId::ExpoRouterNoReactNavigation,
             sev,
             "expoRouterNoReactNavigation",
@@ -439,7 +480,6 @@ fn check_expo_package_configs<F>(
         );
     }
 
-    // 6. `expo-vector-icons-conflict` (SDK 56+)
     if expo_sdk_major.is_some_and(|sdk| sdk >= 56)
         && deps
             .keys()
@@ -450,7 +490,7 @@ fn check_expo_package_configs<F>(
     {
         push_project_diagnostic(
             out,
-            pkg_json_path.clone(),
+            pkg_json_path.to_path_buf(),
             RuleId::ExpoVectorIconsConflict,
             sev,
             "expoVectorIconsConflict",
@@ -459,41 +499,89 @@ fn check_expo_package_configs<F>(
         );
     }
 
-    // 7. `expo-package-json-conflict`
     if let Some(sev) = is_rule_enabled(RuleId::ExpoPackageJsonConflict)
-        && let Some(val) = &pkg_json_val
+        && let Some(val) = pkg_json_val
     {
-        if let Some(scripts) = val.get("scripts").and_then(Value::as_object)
-            && (scripts.contains_key("expo") || scripts.contains_key("react-native"))
-        {
-            push_project_diagnostic(
-                out,
-                pkg_json_path.clone(),
-                RuleId::ExpoPackageJsonConflict,
-                sev,
-                "expoPackageJsonConflict",
-                "scripts",
-                "package.json defines a script named \"expo\" or \"react-native\" that shadows the CLI binary in node_modules/.bin.".to_string(),
-            );
-        }
-        if let Some(pkg_name) = val.get("name").and_then(Value::as_str)
-            && deps.contains_key(pkg_name)
-        {
-            push_project_diagnostic(
-                out,
-                pkg_json_path.clone(),
-                RuleId::ExpoPackageJsonConflict,
-                sev,
-                "expoPackageJsonConflict",
-                pkg_name,
-                format!(
-                    "package.json \"name\" is \"{pkg_name}\", which collides with a dependency of the same name."
-                ),
-            );
+        check_expo_package_json_script_and_name_conflict(val, deps, pkg_json_path, sev, out);
+    }
+}
+
+fn check_expo_package_json_script_and_name_conflict(
+    val: &Value,
+    deps: &std::collections::HashMap<String, String>,
+    pkg_json_path: &Path,
+    sev: RuleSeverity,
+    out: &mut Vec<Diagnostic>,
+) {
+    if let Some(scripts) = val.get("scripts").and_then(Value::as_object)
+        && (scripts.contains_key("expo") || scripts.contains_key("react-native"))
+    {
+        push_project_diagnostic(
+            out,
+            pkg_json_path.to_path_buf(),
+            RuleId::ExpoPackageJsonConflict,
+            sev,
+            "expoPackageJsonConflict",
+            "scripts",
+            "package.json defines a script named \"expo\" or \"react-native\" that shadows the CLI binary in node_modules/.bin.".to_string(),
+        );
+    }
+    if let Some(pkg_name) = val.get("name").and_then(Value::as_str)
+        && deps.contains_key(pkg_name)
+    {
+        push_project_diagnostic(
+            out,
+            pkg_json_path.to_path_buf(),
+            RuleId::ExpoPackageJsonConflict,
+            sev,
+            "expoPackageJsonConflict",
+            pkg_name,
+            format!(
+                "package.json \"name\" is \"{pkg_name}\", which collides with a dependency of the same name."
+            ),
+        );
+    }
+}
+
+fn collect_overridden_sdk_packages(val: &Value) -> Vec<String> {
+    let mut overridden = Vec::new();
+    for obj_opt in [
+        val.get("overrides").and_then(Value::as_object),
+        val.get("resolutions").and_then(Value::as_object),
+        val.pointer("/pnpm/overrides").and_then(Value::as_object),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for k in obj_opt.keys() {
+            if matches!(
+                k.as_str(),
+                "@expo/cli"
+                    | "@expo/config"
+                    | "@expo/metro-config"
+                    | "@expo/metro-runtime"
+                    | "@expo/metro"
+                    | "metro"
+            ) || k.starts_with("metro-")
+            {
+                overridden.push(format!("\"{k}\""));
+            }
         }
     }
+    overridden.sort();
+    overridden.dedup();
+    overridden
+}
 
-    // 8. `expo-lockfile`
+fn check_expo_lockfile_and_metro<F>(
+    graph: &ProjectGraph,
+    pkg: &WorkspacePackage,
+    pkg_json_path: &Path,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     if let Some(sev) = is_rule_enabled(RuleId::ExpoLockfile) {
         let lockfile_names = [
             "pnpm-lock.yaml",
@@ -517,7 +605,7 @@ fn check_expo_package_configs<F>(
             };
             push_project_diagnostic(
                 out,
-                pkg_json_path.clone(),
+                pkg_json_path.to_path_buf(),
                 RuleId::ExpoLockfile,
                 sev,
                 "expoLockfile",
@@ -527,7 +615,6 @@ fn check_expo_package_configs<F>(
         }
     }
 
-    // 9. `expo-metro-config`
     if let Some(sev) = is_rule_enabled(RuleId::ExpoMetroConfig) {
         for metro_name in [
             "metro.config.js",
@@ -535,35 +622,44 @@ fn check_expo_package_configs<F>(
             "metro.config.mjs",
             "metro.config.ts",
         ] {
-            if let Some((metro_path, metro_src)) =
+            let Some((metro_path, metro_src)) =
                 find_manifest_in_pkg(graph, &pkg.root_dir, metro_name)
-            {
-                let has_expo_signal = [
-                    "expo/metro-config",
-                    "@sentry/react-native/metro",
-                    "getSentryExpoConfig",
-                    "posthog-react-native/metro",
-                    "getPostHogExpoConfig",
-                ]
-                .iter()
-                .any(|sig| metro_src.contains(sig));
-                if !has_expo_signal {
-                    push_project_diagnostic(
-                        out,
-                        metro_path,
-                        RuleId::ExpoMetroConfig,
-                        sev,
-                        "expoMetroConfig",
-                        metro_name,
-                        "Your metro.config does not extend `expo/metro-config`.".to_string(),
-                    );
-                }
-                break;
+            else {
+                continue;
+            };
+            let has_expo_signal = [
+                "expo/metro-config",
+                "@sentry/react-native/metro",
+                "getSentryExpoConfig",
+                "posthog-react-native/metro",
+                "getPostHogExpoConfig",
+            ]
+            .iter()
+            .any(|sig| metro_src.contains(sig));
+            if !has_expo_signal {
+                push_project_diagnostic(
+                    out,
+                    metro_path,
+                    RuleId::ExpoMetroConfig,
+                    sev,
+                    "expoMetroConfig",
+                    metro_name,
+                    "Your metro.config does not extend `expo/metro-config`.".to_string(),
+                );
             }
+            break;
         }
     }
+}
 
-    // 10. `app.json` / `app.config.json` checks (`expo-reanimated-v4-requires-new-arch`, `expo-updates-no-unsafe-production-config`)
+fn check_expo_app_json_configs<F>(
+    graph: &ProjectGraph,
+    pkg: &WorkspacePackage,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     let has_dynamic_app_config = [
         "app.config.ts",
         "app.config.js",
@@ -572,65 +668,75 @@ fn check_expo_package_configs<F>(
     ]
     .iter()
     .any(|n| find_manifest_in_pkg(graph, &pkg.root_dir, n).is_some());
-
-    if !has_dynamic_app_config {
-        for app_cfg_name in ["app.config.json", "app.json"] {
-            let Some((app_path, app_src)) =
-                find_manifest_in_pkg(graph, &pkg.root_dir, app_cfg_name)
-            else {
-                continue;
-            };
-            let Ok(app_val) = serde_json::from_str::<Value>(&strip_jsonc(app_src)) else {
-                continue;
-            };
-            let Some(expo_obj) = app_val.get("expo").and_then(Value::as_object) else {
-                continue;
-            };
-
-            let is_reanimated_v4 = deps
-                .get("react-native-reanimated")
-                .and_then(|v| parse_major_version(v))
-                .is_some_and(|m| m >= 4)
-                || deps.contains_key("react-native-worklets");
-
-            if is_reanimated_v4
-                && expo_obj.get("newArchEnabled").and_then(Value::as_bool) == Some(false)
-                && let Some(sev) = is_rule_enabled(RuleId::ExpoReanimatedV4RequiresNewArch)
-            {
-                push_project_diagnostic(
-                    out,
-                    app_path.clone(),
-                    RuleId::ExpoReanimatedV4RequiresNewArch,
-                    sev,
-                    "expoReanimatedV4RequiresNewArch",
-                    "newArchEnabled",
-                    "react-native-reanimated v4 supports only the New Architecture, but `newArchEnabled: false` is set in your app config.".to_string(),
-                );
-            }
-
-            if expo_obj
-                .get("updates")
-                .and_then(Value::as_object)
-                .and_then(|u| u.get("disableAntiBrickingMeasures"))
-                .and_then(Value::as_bool)
-                == Some(true)
-                && let Some(sev) = is_rule_enabled(RuleId::ExpoUpdatesNoUnsafeProductionConfig)
-            {
-                push_project_diagnostic(
-                    out,
-                    app_path,
-                    RuleId::ExpoUpdatesNoUnsafeProductionConfig,
-                    sev,
-                    "expoUpdatesNoUnsafeProductionConfig",
-                    "disableAntiBrickingMeasures",
-                    "`updates.disableAntiBrickingMeasures: true` disables expo-updates' recovery safeguards and can permanently brick installed apps.".to_string(),
-                );
-            }
-            break;
-        }
+    if has_dynamic_app_config {
+        return;
     }
 
-    // 11. `expo-env-local-not-gitignored` & `expo-gitignore`
+    let deps = &pkg.capability_gate.dependencies;
+    let is_reanimated_v4 = deps
+        .get("react-native-reanimated")
+        .and_then(|v| parse_major_version(v))
+        .is_some_and(|m| m >= 4)
+        || deps.contains_key("react-native-worklets");
+
+    for app_cfg_name in ["app.config.json", "app.json"] {
+        let Some((app_path, app_src)) = find_manifest_in_pkg(graph, &pkg.root_dir, app_cfg_name)
+        else {
+            continue;
+        };
+        let Ok(app_val) = serde_json::from_str::<Value>(&strip_jsonc(app_src)) else {
+            continue;
+        };
+        let Some(expo_obj) = app_val.get("expo").and_then(Value::as_object) else {
+            continue;
+        };
+
+        if is_reanimated_v4
+            && expo_obj.get("newArchEnabled").and_then(Value::as_bool) == Some(false)
+            && let Some(sev) = is_rule_enabled(RuleId::ExpoReanimatedV4RequiresNewArch)
+        {
+            push_project_diagnostic(
+                out,
+                app_path.clone(),
+                RuleId::ExpoReanimatedV4RequiresNewArch,
+                sev,
+                "expoReanimatedV4RequiresNewArch",
+                "newArchEnabled",
+                "react-native-reanimated v4 supports only the New Architecture, but `newArchEnabled: false` is set in your app config.".to_string(),
+            );
+        }
+
+        if expo_obj
+            .get("updates")
+            .and_then(Value::as_object)
+            .and_then(|u| u.get("disableAntiBrickingMeasures"))
+            .and_then(Value::as_bool)
+            == Some(true)
+            && let Some(sev) = is_rule_enabled(RuleId::ExpoUpdatesNoUnsafeProductionConfig)
+        {
+            push_project_diagnostic(
+                out,
+                app_path,
+                RuleId::ExpoUpdatesNoUnsafeProductionConfig,
+                sev,
+                "expoUpdatesNoUnsafeProductionConfig",
+                "disableAntiBrickingMeasures",
+                "`updates.disableAntiBrickingMeasures: true` disables expo-updates' recovery safeguards and can permanently brick installed apps.".to_string(),
+            );
+        }
+        break;
+    }
+}
+
+fn check_expo_gitignore_and_env_local<F>(
+    graph: &ProjectGraph,
+    pkg: &WorkspacePackage,
+    pkg_json_path: &Path,
+    is_rule_enabled: &F,
+    out: &mut Vec<Diagnostic>,
+) where
+    F: Fn(RuleId) -> Option<RuleSeverity>,
+{
     let gitignore_src = find_manifest_in_pkg(graph, &pkg.root_dir, ".gitignore")
         .map(|(_, s)| s)
         .unwrap_or("");
@@ -649,7 +755,7 @@ fn check_expo_package_configs<F>(
         {
             push_project_diagnostic(
                 out,
-                pkg_json_path.clone(),
+                pkg_json_path.to_path_buf(),
                 RuleId::ExpoEnvLocalNotGitignored,
                 sev,
                 "expoEnvLocalNotGitignored",
@@ -808,34 +914,36 @@ fn check_gradle_release_shrinking(gradle_src: &str) -> (bool, bool) {
         if line.contains("println(") {
             continue;
         }
-        if line.starts_with("release")
-            || line.contains("release {")
-            || line.contains("getByName(\"release\")")
-            || line.contains("named(\"release\")")
-        {
+        if is_gradle_release_block_opener(line) {
             in_release = true;
         }
-        if in_release {
-            if line.contains("minifyEnabled") || line.contains("isMinifyEnabled") {
-                if line.ends_with("false") {
-                    minify = Some(false);
-                } else if line.ends_with("true") {
-                    minify = Some(true);
-                } else {
-                    minify = None;
-                }
-            }
-            if line.contains("shrinkResources") || line.contains("isShrinkResources") {
-                if line.ends_with("false") {
-                    shrink = Some(false);
-                } else if line.ends_with("true") {
-                    shrink = Some(true);
-                } else {
-                    shrink = None;
-                }
-            }
+        if !in_release {
+            continue;
+        }
+        if line.contains("minifyEnabled") || line.contains("isMinifyEnabled") {
+            minify = parse_trailing_gradle_bool(line);
+        }
+        if line.contains("shrinkResources") || line.contains("isShrinkResources") {
+            shrink = parse_trailing_gradle_bool(line);
         }
     }
 
     (minify == Some(false), shrink == Some(false))
+}
+
+fn is_gradle_release_block_opener(line: &str) -> bool {
+    line.starts_with("release")
+        || line.contains("release {")
+        || line.contains("getByName(\"release\")")
+        || line.contains("named(\"release\")")
+}
+
+fn parse_trailing_gradle_bool(line: &str) -> Option<bool> {
+    if line.ends_with("false") {
+        Some(false)
+    } else if line.ends_with("true") {
+        Some(true)
+    } else {
+        None
+    }
 }

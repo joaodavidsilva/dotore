@@ -5,19 +5,25 @@ use std::path::Path;
 
 use oxc_ast::{
     AstKind,
-    ast::{BindingPattern, CallExpression, Expression, JSXAttributeValue},
+    ast::{
+        BindingPattern, CallExpression, Expression, JSXAttributeValue, JSXElement,
+        JSXOpeningElement,
+    },
 };
 use oxc_semantic::{NodeId, Semantic};
 use oxc_span::{GetSpan, Span};
 
-use super::{hooks::check_hook_use_state_symmetry, strip_ts_and_parens};
+use super::{MAX_JSX_DEPTH, hooks::check_hook_use_state_symmetry, strip_ts_and_parens};
 use crate::{
     ir::{
-        SemanticRuleSite,
+        ByteSpan, SemanticRuleSite,
         react_ast::{find_enclosing_react_node, get_subject_name, is_react_component_class},
     },
-    matchers::{callee_name, is_component_name, is_custom_hook_name, push_semantic_site},
-    rules::types::RuleId,
+    matchers::{
+        callee_name, is_component_name, is_custom_hook_name, push_semantic_site,
+        push_semantic_site_with_fix,
+    },
+    rules::types::{AutofixPatch, RuleId},
 };
 
 pub(super) fn check_only_export_components_in_file(
@@ -585,5 +591,258 @@ fn check_lifecycle_set_state_calls(
             line_starts,
             call.span,
         );
+    }
+}
+
+fn build_useless_fragment_autofix(
+    semantic: &Semantic<'_>,
+    frag_node_id: NodeId,
+    frag_span: Span,
+    meaningful: &[&oxc_ast::ast::JSXChild<'_>],
+    description: String,
+) -> Option<AutofixPatch> {
+    let in_jsx_parent = matches!(
+        semantic.nodes().parent_kind(frag_node_id),
+        AstKind::JSXElement(_) | AstKind::JSXFragment(_)
+    );
+    let replacement = if meaningful.is_empty() {
+        if in_jsx_parent {
+            Some(String::new())
+        } else {
+            None
+        }
+    } else if meaningful.len() == 1 {
+        match meaningful[0] {
+            oxc_ast::ast::JSXChild::Element(child_el) => Some(
+                child_el
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            oxc_ast::ast::JSXChild::Fragment(child_frag) => Some(
+                child_frag
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            oxc_ast::ast::JSXChild::Text(child_text) if in_jsx_parent => Some(
+                child_text
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            oxc_ast::ast::JSXChild::ExpressionContainer(child_expr) if in_jsx_parent => Some(
+                child_expr
+                    .span
+                    .source_text(semantic.source_text())
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    replacement.map(|rep| {
+        AutofixPatch::replace(
+            description,
+            ByteSpan {
+                start: frag_span.start,
+                end: frag_span.end,
+            },
+            rep,
+        )
+    })
+}
+
+pub(super) fn check_jsx_no_useless_fragment_short(
+    frag_node_id: NodeId,
+    jsx_frag: &oxc_ast::ast::JSXFragment<'_>,
+    subj_name: &Option<String>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let meaningful = collect_meaningful_jsx_children(&jsx_frag.children);
+    if meaningful.len() > 1 {
+        return;
+    }
+    let autofix = build_useless_fragment_autofix(
+        semantic,
+        frag_node_id,
+        jsx_frag.span,
+        &meaningful,
+        "Remove redundant `<>...</>` fragment wrapper".to_string(),
+    );
+    push_semantic_site_with_fix(
+        sites,
+        RuleId::JsxNoUselessFragment,
+        subj_name.clone(),
+        "jsxNoUselessFragment",
+        "Fragment",
+        "Fragments with a single child or empty content are redundant.".to_string(),
+        line_starts,
+        jsx_frag.span,
+        autofix,
+    );
+}
+
+pub(super) fn check_jsx_fragments_and_useless_fragment_element(
+    frag_node_id: NodeId,
+    jsx_el: &JSXElement<'_>,
+    tag_name: &str,
+    subj_name: &Option<String>,
+    semantic: &Semantic<'_>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !matches!(tag_name, "Fragment" | "React.Fragment") {
+        return;
+    }
+    let opening = &jsx_el.opening_element;
+    if !opening.attributes.is_empty() {
+        return;
+    }
+
+    let frag_autofix = jsx_el.closing_element.as_ref().map(|closing| {
+        AutofixPatch::new(format!("Replace `<{tag_name}>` with shorthand `<>...</>`"))
+            .with_edit(
+                ByteSpan {
+                    start: opening.span.start,
+                    end: opening.span.end,
+                },
+                "<>",
+            )
+            .with_edit(
+                ByteSpan {
+                    start: closing.span.start,
+                    end: closing.span.end,
+                },
+                "</>",
+            )
+    });
+    push_semantic_site_with_fix(
+        sites,
+        RuleId::JsxFragments,
+        subj_name.clone(),
+        "jsxFragments",
+        tag_name,
+        format!("Prefer shorthand `<>...</>` over `<{tag_name}>` when no `key` is needed."),
+        line_starts,
+        jsx_el.span,
+        frag_autofix,
+    );
+
+    let meaningful = collect_meaningful_jsx_children(&jsx_el.children);
+    if meaningful.len() <= 1 {
+        let autofix = build_useless_fragment_autofix(
+            semantic,
+            frag_node_id,
+            jsx_el.span,
+            &meaningful,
+            format!("Remove redundant `<{tag_name}>` wrapper"),
+        );
+        push_semantic_site_with_fix(
+            sites,
+            RuleId::JsxNoUselessFragment,
+            subj_name.clone(),
+            "jsxNoUselessFragment",
+            tag_name,
+            "Fragments with a single child or empty content are redundant.".to_string(),
+            line_starts,
+            jsx_el.span,
+            autofix,
+        );
+    }
+}
+
+fn collect_meaningful_jsx_children<'a, 'b>(
+    children: &'a [oxc_ast::ast::JSXChild<'b>],
+) -> Vec<&'a oxc_ast::ast::JSXChild<'b>> {
+    children
+        .iter()
+        .filter(|c| match c {
+            oxc_ast::ast::JSXChild::Text(t) => !t.value.trim().is_empty(),
+            oxc_ast::ast::JSXChild::ExpressionContainer(ec) => !matches!(
+                ec.expression,
+                oxc_ast::ast::JSXExpression::EmptyExpression(_)
+            ),
+            _ => true,
+        })
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Evaluates both jsx-pascal-case and jsx-max-depth on a JSXElement node (#50)"
+)]
+pub(super) fn check_jsx_pascal_case_and_max_depth(
+    semantic: &Semantic<'_>,
+    jsx_node_id: NodeId,
+    opening: &JSXOpeningElement<'_>,
+    tag_name: &str,
+    is_comp: bool,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let check_seg = tag_name.rsplit('.').next().unwrap_or(tag_name);
+    let is_bad_pascal = if is_comp {
+        check_seg.contains('_')
+            || (check_seg.len() > 1
+                && check_seg
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+    } else {
+        check_seg.starts_with('_')
+            && check_seg
+                .chars()
+                .nth(1)
+                .is_some_and(|c| c.is_ascii_uppercase())
+    };
+    if is_bad_pascal {
+        push_semantic_site(
+            sites,
+            RuleId::JsxPascalCase,
+            subj_name.clone(),
+            "jsxPascalCase",
+            tag_name,
+            format!("Component `<{tag_name}>` must use PascalCase naming."),
+            line_starts,
+            opening.name.span(),
+        );
+    }
+
+    let has_jsx_el_children = if let AstKind::JSXElement(el) = semantic.nodes().kind(jsx_node_id) {
+        el.children
+            .iter()
+            .any(|c| matches!(c, oxc_ast::ast::JSXChild::Element(_)))
+    } else {
+        false
+    };
+    if !has_jsx_el_children {
+        let mut depth = 0_usize;
+        for anc_id in semantic.nodes().ancestor_ids(jsx_node_id) {
+            match semantic.nodes().kind(anc_id) {
+                AstKind::JSXElement(_) | AstKind::JSXFragment(_) => {
+                    depth += 1;
+                }
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => break,
+                _ => {}
+            }
+        }
+        if depth > MAX_JSX_DEPTH {
+            push_semantic_site(
+                sites,
+                RuleId::JsxMaxDepth,
+                subj_name.clone(),
+                "jsxMaxDepth",
+                tag_name,
+                format!(
+                    "JSX nesting depth of {depth} exceeds the maximum depth of {MAX_JSX_DEPTH}; extract a child component."
+                ),
+                line_starts,
+                opening.span,
+            );
+        }
     }
 }

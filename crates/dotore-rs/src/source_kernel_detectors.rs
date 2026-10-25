@@ -456,14 +456,27 @@ impl SourceKernelDetectorsVisitor<'_> {
             return;
         }
         let span = self.span_to_bytes(arg.span());
-        self.push_finding(
+        let loc = self.loc_at(span.start);
+        let mut finding = RsCandidateFinding::new(
             RuleId::RsSecurityNoInsecureAuthCookie,
-            method_name,
+            self.scope.subject_name(),
+            method_name.clone(),
             "rsSecurityNoInsecureAuthCookie",
             "An auth cookie is readable by page scripts.",
+            loc,
             span,
-            alias_req,
         );
+        if matches!(arg, syn::Expr::Lit(_)) {
+            finding = finding.with_patch(dotore_core::AutofixPatch::replace(
+                format!("Set `.{method_name}(true)` on authentication cookie"),
+                span,
+                "true",
+            ));
+        }
+        if let Some((written, canonical)) = alias_req {
+            finding = finding.with_required_crate_alias(written, canonical);
+        }
+        self.findings.push(finding);
     }
 
     // 7a. `rs-security-no-disabled-jwt-validation` (method `.insecure_disable_signature_validation()`)

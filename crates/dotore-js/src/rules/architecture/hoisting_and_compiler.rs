@@ -87,7 +87,41 @@ pub(super) fn check_subject_architecture_rules(
         sites,
     );
 
-    // Collect rendered PascalCase JSX elements or attribute references inside `subj_span`
+    let rendered_pascal_names = collect_subject_rendered_pascal_and_call_sites(
+        semantic,
+        subject_node_id,
+        subj_span,
+        &subj_name,
+        line_starts,
+        sites,
+    );
+
+    let Some(stmts) = get_subject_body_statements(semantic, subject_node_id) else {
+        return;
+    };
+
+    for stmt in stmts {
+        check_subject_body_statement(
+            semantic,
+            stmt,
+            subj_span,
+            &subj_name,
+            &rendered_pascal_names,
+            top_insert_offset,
+            line_starts,
+            sites,
+        );
+    }
+}
+
+fn collect_subject_rendered_pascal_and_call_sites(
+    semantic: &Semantic<'_>,
+    subject_node_id: NodeId,
+    subj_span: Span,
+    subj_name: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) -> HashSet<String> {
     let mut rendered_pascal_names: HashSet<String> = HashSet::new();
     for (inner_node_id, node) in semantic.nodes().iter_enumerated() {
         if !subj_span.contains_inclusive(node.span()) {
@@ -108,7 +142,7 @@ pub(super) fn check_subject_architecture_rules(
                 {
                     rendered_pascal_names.insert(id.name.to_string());
                 }
-                check_generic_handler_name_attr(attr, &subj_name, line_starts, sites);
+                check_generic_handler_name_attr(attr, subj_name, line_starts, sites);
             }
             AstKind::CallExpression(call)
                 if is_react_hook_callee(semantic, &call.callee, "useMemo")
@@ -117,9 +151,9 @@ pub(super) fn check_subject_architecture_rules(
                 push_semantic_site(
                     sites,
                     RuleId::ReactCompilerNoManualMemoization,
-                    Some(subj_name.clone()),
+                    Some(subj_name.to_string()),
                     "reactCompilerNoManualMemoization",
-                    &subj_name,
+                    subj_name,
                     "Manual `useMemo`/`useCallback` memoization can be simplified when React Compiler is enabled.".to_string(),
                     line_starts,
                     call.span,
@@ -131,7 +165,7 @@ pub(super) fn check_subject_architecture_rules(
                     subject_node_id,
                     inner_node_id,
                     call,
-                    &subj_name,
+                    subj_name,
                     line_starts,
                     sites,
                 );
@@ -139,136 +173,163 @@ pub(super) fn check_subject_architecture_rules(
             _ => {}
         }
     }
+    rendered_pascal_names
+}
 
-    // Inspect direct statements inside the Subject body
-    let Some(stmts) = get_subject_body_statements(semantic, subject_node_id) else {
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Evaluates a single direct Subject statement for nested component and module-scope hoisting rules (#50)"
+)]
+fn check_subject_body_statement(
+    semantic: &Semantic<'_>,
+    stmt: &Statement<'_>,
+    subj_span: Span,
+    subj_name: &str,
+    rendered_pascal_names: &HashSet<String>,
+    top_insert_offset: u32,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    match stmt {
+        Statement::FunctionDeclaration(func) => {
+            let Some(id) = &func.id else {
+                return;
+            };
+            let fn_name = id.name.as_str();
+            if is_component_name(fn_name) {
+                if rendered_pascal_names.contains(fn_name) {
+                    emit_nested_component_site(fn_name, subj_name, id.span.start, func.span, line_starts, sites);
+                }
+            } else if !has_local_captures_in_span(semantic, func.span, subj_span) {
+                emit_pure_function_hoist(
+                    semantic,
+                    fn_name,
+                    subj_name,
+                    func.span,
+                    stmt.span(),
+                    top_insert_offset,
+                    line_starts,
+                    sites,
+                );
+            }
+        }
+        Statement::VariableDeclaration(vd)
+            if vd.kind == VariableDeclarationKind::Const && vd.declarations.len() == 1 =>
+        {
+            check_subject_const_declarator(
+                semantic,
+                stmt,
+                &vd.declarations[0],
+                subj_span,
+                subj_name,
+                rendered_pascal_names,
+                top_insert_offset,
+                line_starts,
+                sites,
+            );
+        }
+        _ => {}
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Checks a single const declarator inside a Subject for nested component, pure function, or static value hoisting (#50)"
+)]
+fn check_subject_const_declarator(
+    semantic: &Semantic<'_>,
+    stmt: &Statement<'_>,
+    decl: &oxc_ast::ast::VariableDeclarator<'_>,
+    subj_span: Span,
+    subj_name: &str,
+    rendered_pascal_names: &HashSet<String>,
+    top_insert_offset: u32,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let BindingPattern::BindingIdentifier(id) = &decl.id else {
         return;
     };
+    let Some(init) = &decl.init else {
+        return;
+    };
+    let var_name = id.name.as_str();
+    let unwrapped = init.without_parentheses();
+    let is_fn_expr = matches!(
+        unwrapped,
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    );
 
-    for stmt in stmts {
-        match stmt {
-            Statement::FunctionDeclaration(func) => {
-                let Some(id) = &func.id else {
-                    continue;
-                };
-                let fn_name = id.name.as_str();
-                if is_component_name(fn_name) {
-                    if rendered_pascal_names.contains(fn_name) {
-                        sites.push(SemanticRuleSite {
-                            rule: RuleId::NoNestedComponentDefinition,
-                            subject_name: Some(subj_name.clone()),
-                            message_id: "noNestedComponentDefinition",
-                            target_name: fn_name.to_string(),
-                            message: format!(
-                                "Your users lose all state in \"{fn_name}\" on every render because it's defined inside \"{subj_name}\", so move it out to the top of the file."
-                            ),
-                            loc: loc_from_line_starts(line_starts, id.span.start),
-                            span: ByteSpan {
-                                start: func.span.start,
-                                end: func.span.end,
-                            },
-                            autofix: None,
-                        });
-                    }
-                } else if !has_local_captures_in_span(semantic, func.span, subj_span) {
-                    emit_pure_function_hoist(
-                        semantic,
-                        fn_name,
-                        &subj_name,
-                        func.span,
-                        stmt.span(),
-                        top_insert_offset,
-                        line_starts,
-                        sites,
-                    );
-                }
-            }
-            Statement::VariableDeclaration(vd)
-                if vd.kind == VariableDeclarationKind::Const && vd.declarations.len() == 1 =>
-            {
-                let decl = &vd.declarations[0];
-                let BindingPattern::BindingIdentifier(id) = &decl.id else {
-                    continue;
-                };
-                let Some(init) = &decl.init else {
-                    continue;
-                };
-                let var_name = id.name.as_str();
-                let unwrapped = init.without_parentheses();
-
-                if is_component_name(var_name)
-                    && matches!(
-                        unwrapped,
-                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-                    )
-                {
-                    if rendered_pascal_names.contains(var_name) {
-                        sites.push(SemanticRuleSite {
-                            rule: RuleId::NoNestedComponentDefinition,
-                            subject_name: Some(subj_name.clone()),
-                            message_id: "noNestedComponentDefinition",
-                            target_name: var_name.to_string(),
-                            message: format!(
-                                "Your users lose all state in \"{var_name}\" on every render because it's defined inside \"{subj_name}\", so move it out to the top of the file."
-                            ),
-                            loc: loc_from_line_starts(line_starts, id.span.start),
-                            span: ByteSpan {
-                                start: decl.span.start,
-                                end: decl.span.end,
-                            },
-                            autofix: None,
-                        });
-                    }
-                } else if !is_component_name(var_name)
-                    && matches!(
-                        unwrapped,
-                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-                    )
-                {
-                    if !has_local_captures_in_span(semantic, unwrapped.span(), subj_span) {
-                        emit_pure_function_hoist(
-                            semantic,
-                            var_name,
-                            &subj_name,
-                            unwrapped.span(),
-                            stmt.span(),
-                            top_insert_offset,
-                            line_starts,
-                            sites,
-                        );
-                    }
-                } else if matches!(
-                    unwrapped,
-                    Expression::ArrayExpression(_) | Expression::ObjectExpression(_)
-                ) && let Some(sym_id) = id.symbol_id.get()
-                    && is_hoistable_static_value(semantic, sym_id, unwrapped, subj_span)
-                {
-                    let stmt_span = stmt.span();
-                    let stmt_text = stmt_span.source_text(semantic.source_text()).trim();
-                    let patch = AutofixPatch::insert(
-                        format!("Hoist static `{var_name}` to module scope"),
-                        top_insert_offset,
-                        format!("{stmt_text}\n\n"),
-                    )
-                    .with_byte_edit(ByteEdit::delete(span_to_byte_span(stmt_span)));
-                    push_semantic_site_with_fix(
-                        sites,
-                        RuleId::PreferModuleScopeStaticValue,
-                        Some(subj_name.clone()),
-                        "preferModuleScopeStaticValue",
-                        var_name,
-                        format!(
-                            "`{var_name}` inside `{subj_name}` is a static value rebuilt on every render; hoist it to module scope."
-                        ),
-                        line_starts,
-                        decl.span,
-                        Some(patch),
-                    );
-                }
-            }
-            _ => {}
+    if is_component_name(var_name) && is_fn_expr {
+        if rendered_pascal_names.contains(var_name) {
+            emit_nested_component_site(var_name, subj_name, id.span.start, decl.span, line_starts, sites);
         }
+    } else if !is_component_name(var_name) && is_fn_expr {
+        if !has_local_captures_in_span(semantic, unwrapped.span(), subj_span) {
+            emit_pure_function_hoist(
+                semantic,
+                var_name,
+                subj_name,
+                unwrapped.span(),
+                stmt.span(),
+                top_insert_offset,
+                line_starts,
+                sites,
+            );
+        }
+    } else if matches!(
+        unwrapped,
+        Expression::ArrayExpression(_) | Expression::ObjectExpression(_)
+    ) && let Some(sym_id) = id.symbol_id.get()
+        && is_hoistable_static_value(semantic, sym_id, unwrapped, subj_span)
+    {
+        let stmt_span = stmt.span();
+        let stmt_text = stmt_span.source_text(semantic.source_text()).trim();
+        let patch = AutofixPatch::insert(
+            format!("Hoist static `{var_name}` to module scope"),
+            top_insert_offset,
+            format!("{stmt_text}\n\n"),
+        )
+        .with_byte_edit(ByteEdit::delete(span_to_byte_span(stmt_span)));
+        push_semantic_site_with_fix(
+            sites,
+            RuleId::PreferModuleScopeStaticValue,
+            Some(subj_name.to_string()),
+            "preferModuleScopeStaticValue",
+            var_name,
+            format!(
+                "`{var_name}` inside `{subj_name}` is a static value rebuilt on every render; hoist it to module scope."
+            ),
+            line_starts,
+            decl.span,
+            Some(patch),
+        );
     }
+}
+
+fn emit_nested_component_site(
+    comp_name: &str,
+    subj_name: &str,
+    id_start: u32,
+    decl_span: Span,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    sites.push(SemanticRuleSite {
+        rule: RuleId::NoNestedComponentDefinition,
+        subject_name: Some(subj_name.to_string()),
+        message_id: "noNestedComponentDefinition",
+        target_name: comp_name.to_string(),
+        message: format!(
+            "Your users lose all state in \"{comp_name}\" on every render because it's defined inside \"{subj_name}\", so move it out to the top of the file."
+        ),
+        loc: loc_from_line_starts(line_starts, id_start),
+        span: ByteSpan {
+            start: decl_span.start,
+            end: decl_span.end,
+        },
+        autofix: None,
+    });
 }
 
 #[expect(
@@ -347,44 +408,10 @@ fn is_hoistable_static_value(
     init_expr: &Expression<'_>,
     subj_span: Span,
 ) -> bool {
-    let init_span = init_expr.span();
-
-    // 1. Check that `init_expr` contains no local captures, no inner functions, and no impure calls
-    for (_, node) in semantic.nodes().iter_enumerated() {
-        if !init_span.contains_inclusive(node.span()) {
-            continue;
-        }
-        match node.kind() {
-            AstKind::ArrowFunctionExpression(_) | AstKind::Function(_) => return false,
-            AstKind::NewExpression(new_expr) => {
-                if matches!(
-                    new_expr.callee.without_parentheses(),
-                    Expression::Identifier(id) if id.name == "Date"
-                ) {
-                    return false;
-                }
-            }
-            AstKind::CallExpression(call) => {
-                if is_impure_initializer_call(call) {
-                    return false;
-                }
-            }
-            AstKind::IdentifierReference(ident) => {
-                if let Some(target_sym) = resolve_ident_symbol(semantic, ident) {
-                    let decl_span = semantic
-                        .nodes()
-                        .get_node(semantic.scoping().symbol_declaration(target_sym))
-                        .span();
-                    if subj_span.contains_inclusive(decl_span) {
-                        return false;
-                    }
-                }
-            }
-            _ => {}
-        }
+    if !is_pure_static_initializer(semantic, init_expr.span(), subj_span) {
+        return false;
     }
 
-    // 2. Inspect all references to `sym_id`: must not be mutated, and must not be used ONLY for scalar lookups
     let mut ref_count = 0_usize;
     let mut all_scalar_lookups = true;
     let mut used_in_jsx_or_render = false;
@@ -404,6 +431,43 @@ fn is_hoistable_static_value(
     }
 
     ref_count > 0 && !all_scalar_lookups && used_in_jsx_or_render
+}
+
+fn is_pure_static_initializer(
+    semantic: &Semantic<'_>,
+    init_span: Span,
+    subj_span: Span,
+) -> bool {
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !init_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        match node.kind() {
+            AstKind::ArrowFunctionExpression(_) | AstKind::Function(_) => return false,
+            AstKind::NewExpression(new_expr)
+                if matches!(
+                    new_expr.callee.without_parentheses(),
+                    Expression::Identifier(id) if id.name == "Date"
+                ) =>
+            {
+                return false;
+            }
+            AstKind::CallExpression(call) if is_impure_initializer_call(call) => return false,
+            AstKind::IdentifierReference(ident) => {
+                if let Some(target_sym) = resolve_ident_symbol(semantic, ident) {
+                    let decl_span = semantic
+                        .nodes()
+                        .get_node(semantic.scoping().symbol_declaration(target_sym))
+                        .span();
+                    if subj_span.contains_inclusive(decl_span) {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 fn is_impure_initializer_call(call: &CallExpression<'_>) -> bool {

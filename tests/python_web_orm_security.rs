@@ -743,6 +743,18 @@ def sync_catalog(url: str, payload: dict):
         .is_empty()
     );
 
+    // Trailing comma in call arguments produces valid syntax after autofix (`requests.get(url,)` -> `requests.get(url, timeout=10.0)`)
+    let trailing_comma_src = "import requests\ndef fetch(url: str):\n    return requests.get(url,)\n";
+    let tc_diags = analyze_source(
+        Path::new("app/tc.py"),
+        trailing_comma_src,
+        Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+    );
+    assert_eq!(tc_diags.len(), 1);
+    let (tc_patched, tc_applied) = apply_patches_to_source(trailing_comma_src, &tc_diags);
+    assert_eq!(tc_applied.len(), 1);
+    assert!(tc_patched.contains("requests.get(url, timeout=10.0)"));
+
     // Valid: explicit timeout, dict.get, inline # noqa: B113 / # dotore-disable, and test/example files
     let valid_src = r#"import httpx
 import requests
@@ -946,6 +958,33 @@ def unpack_and_parse_safe(tar_path: str, zip_path: str, raw_xml: str, safe_membe
             Some(&[RuleId::PySecurityNoXxeOrUnsafeArchive]),
         )
         .is_empty()
+    );
+
+    // Generic archive variable with `filter="data"` is recognized as safe tarfile extraction,
+    // and calls nested inside f-strings / dict comprehensions are traversed.
+    let archive_and_comp_src = r#"import requests
+def safe_archive_and_nested_calls(archive, urls: list[str]):
+    archive.extractall("/var/data/out", filter="data")
+    msg = f"{requests.get(urls[0])}"
+    mapping = {u: requests.get(u) for u in urls}
+    return msg, mapping
+"#;
+    assert!(
+        analyze_source(
+            Path::new("app/archive_safe.py"),
+            archive_and_comp_src,
+            Some(&[RuleId::PySecurityNoXxeOrUnsafeArchive]),
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        analyze_source(
+            Path::new("app/archive_safe.py"),
+            archive_and_comp_src,
+            Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+        )
+        .len(),
+        2
     );
     assert!(
         analyze_source(

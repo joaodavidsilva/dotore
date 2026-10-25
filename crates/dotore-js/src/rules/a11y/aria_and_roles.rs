@@ -142,44 +142,12 @@ pub(super) fn check_jsx_element_a11y(
         span,
         line_starts,
     };
-    // 1. `alt-text`
     check_alt_text(jsx_el, &tag, subject_name, loc, span, sites);
-
-    // 2–6. Core ARIA element rules
-    check_element_core_aria_rules(
-        semantic,
-        jsx_el,
-        opening,
-        &tag,
-        is_html,
-        has_spread,
-        subject_name,
-        const_strings,
-        loc,
-        span,
-        line_starts,
-        sites,
-    );
-
-    // 7, 17–21, 23–25, 27. Autocomplete, lang, headings, iframes, anchors, distracting, viewport, redundant alt, media, scope
+    check_element_core_aria_rules(&elem_ctx, sites);
     check_element_content_media_and_form_rules(&elem_ctx, sites);
-
-    // 8–10, 13–16, 28–29. Keyboard events, static/noninteractive interactions, tabindex, focus, accessKey
     check_element_keyboard_and_focus_rules(&elem_ctx, sites);
+    check_element_role_transition_rules(&elem_ctx, sites);
 
-    // 11–12. Interactive/noninteractive role transitions
-    check_element_role_transition_rules(
-        semantic,
-        opening,
-        &tag,
-        is_html,
-        subject_name,
-        const_strings,
-        line_starts,
-        sites,
-    );
-
-    // 20. `anchor-is-valid`, `anchor-has-content`, `anchor-ambiguous-text`
     if tag == "a" {
         check_anchor_rules(
             is_testlike,
@@ -195,7 +163,6 @@ pub(super) fn check_jsx_element_a11y(
         );
     }
 
-    // 22. `no-outline-none`
     check_no_outline_none(
         semantic,
         opening,
@@ -205,8 +172,6 @@ pub(super) fn check_jsx_element_a11y(
         span,
         sites,
     );
-
-    // 26. `role-has-required-aria-props` & `role-supports-aria-props`
     check_role_aria_props(
         semantic,
         opening,
@@ -217,8 +182,6 @@ pub(super) fn check_jsx_element_a11y(
         line_starts,
         sites,
     );
-
-    // 30–31. `no-aria-hidden-on-focusable`, `no-aria-hidden-on-body`, `prefer-tag-over-role`
     check_aria_hidden_and_prefer_tag(
         semantic,
         opening,
@@ -229,7 +192,6 @@ pub(super) fn check_jsx_element_a11y(
         sites,
     );
 
-    // 32. `control-has-associated-label` & `label-has-associated-control`
     if !is_testlike {
         check_control_and_label_association(
             semantic,
@@ -247,7 +209,6 @@ pub(super) fn check_jsx_element_a11y(
         );
     }
 
-    // 33. Remaining custom a11y rules
     check_custom_a11y_rules(
         &elem_ctx,
         imported_sources,
@@ -257,239 +218,254 @@ pub(super) fn check_jsx_element_a11y(
     );
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates core ARIA element rules in a single pass over the JSXOpeningElement"
-)]
 fn check_element_core_aria_rules(
-    semantic: &Semantic<'_>,
-    jsx_el: &JSXElement<'_>,
-    opening: &JSXOpeningElement<'_>,
-    tag: &str,
-    is_html: bool,
-    has_spread: bool,
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
-    loc: SourceLoc,
-    span: ByteSpan,
-    line_starts: &[u32],
+    ctx: &JsxElementA11yCtx<'_, '_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    // 2. `aria-unsupported-elements`
-    if RESERVED_HTML_TAGS.contains(&tag) {
-        for item in &opening.attributes {
-            if let Some(attr) = item.as_attribute()
-                && let Some(id) = attr.name.as_identifier()
-            {
-                let aname = id.name.as_str();
-                if aname == "role" || aname.starts_with("aria-") {
-                    let aloc = loc_from_line_starts(line_starts, attr.span.start);
-                    let aspan = ByteSpan {
-                        start: attr.span.start,
-                        end: attr.span.end,
-                    };
-                    push_site(
-                        sites,
-                        RuleId::AriaUnsupportedElements,
-                        subject_name.clone(),
-                        "ariaUnsupportedElements",
-                        aname,
-                        format!(
-                            "Screen reader users get no help from `{aname}` because `<{tag}>` doesn't accept it, so remove it from this element."
-                        ),
-                        aloc,
-                        aspan,
-                    );
-                }
-            }
-        }
+    if RESERVED_HTML_TAGS.contains(&ctx.tag) {
+        check_aria_unsupported_elements(ctx, sites);
     }
-
-    // 3. `aria-role`
-    if is_html
-        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
-        && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
-    {
-        let roles: Vec<&str> = role_str.split_whitespace().collect();
-        if roles.is_empty() || roles.iter().any(|r| !VALID_ARIA_ROLES.contains(r)) {
-            push_site(
-                sites,
-                RuleId::AriaRole,
-                subject_name.clone(),
-                "ariaRole",
-                &role_str,
-                "This `role` is not a valid ARIA role, so assistive tech cannot expose it correctly. Use a real, non-abstract role.".to_string(),
-                loc_from_line_starts(line_starts, role_attr.span.start),
-                ByteSpan {
-                    start: role_attr.span.start,
-                    end: role_attr.span.end,
-                },
-            );
-        }
+    check_aria_role_and_redundant_roles(ctx, sites);
+    check_aria_activedescendant_tabindex(ctx, sites);
+    check_aria_braille_equivalent(ctx, sites);
+}
+fn check_aria_unsupported_elements(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !RESERVED_HTML_TAGS.contains(&ctx.tag) {
+        return;
     }
-
-    // 4. `no-redundant-roles`
-    if is_html
-        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
-        && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
-        && let Some(first_role) = role_str.split_whitespace().next()
-        && !matches!((tag, first_role), ("ul" | "ol", "list"))
-        && let Some(implicit) = get_implicit_role(tag, opening, semantic, const_strings)
-        && implicit == first_role
-    {
-        push_site(
-            sites,
-            RuleId::NoRedundantRoles,
-            subject_name.clone(),
-            "noRedundantRoles",
-            first_role,
-            format!(
-                "Screen reader users gain nothing from this `role` because `<{tag}>` already acts as a `{first_role}`, so remove it."
-            ),
-            loc_from_line_starts(line_starts, role_attr.span.start),
-            ByteSpan {
-                start: role_attr.span.start,
-                end: role_attr.span.end,
-            },
-        );
-    }
-
-    // 5. `aria-activedescendant-has-tabindex`
-    if is_html && find_jsx_attr_ignore_case(&opening.attributes, "aria-activedescendant").is_some()
-    {
-        let tab_idx =
-            find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").and_then(parse_attr_number);
-        let tab_ok = match find_jsx_attr_ignore_case(&opening.attributes, "tabIndex") {
-            Some(_) => tab_idx.is_none_or(|v| v >= -1.0),
-            None => {
-                is_interactive_element(tag, opening, semantic, const_strings)
-                    || is_content_editable_tabbable(opening, semantic, const_strings)
-            }
+    for item in &ctx.opening.attributes {
+        let Some(attr) = item.as_attribute() else {
+            continue;
         };
-        if !tab_ok {
+        let Some(id) = attr.name.as_identifier() else {
+            continue;
+        };
+        let aname = id.name.as_str();
+        if aname == "role" || aname.starts_with("aria-") {
             push_site(
                 sites,
-                RuleId::AriaActivedescendantHasTabindex,
-                subject_name.clone(),
-                "ariaActivedescendantHasTabindex",
-                tag,
-                "Keyboard users can't focus this element with `aria-activedescendant` because it isn't tabbable, so add `tabIndex={0}`.".to_string(),
-                loc,
-                span,
-            );
-        }
-    }
-
-    // 6. `aria-braille-equivalent`
-    if !has_spread {
-        if has_nonempty_literal_attr(
-            opening,
-            "aria-brailleroledescription",
-            semantic,
-            const_strings,
-        ) && !has_nonempty_literal_attr(opening, "aria-roledescription", semantic, const_strings)
-        {
-            push_site(
-                sites,
-                RuleId::AriaBrailleEquivalent,
-                subject_name.clone(),
-                "ariaBrailleEquivalent",
-                "aria-brailleroledescription",
-                "This braille role description has no non-braille equivalent. Add a nonempty aria-roledescription for other assistive technologies.".to_string(),
-                loc,
-                span,
-            );
-        }
-        if has_nonempty_literal_attr(opening, "aria-braillelabel", semantic, const_strings)
-            && !has_accessible_child(jsx_el)
-            && !["aria-label", "aria-labelledby", "alt", "title"]
-                .iter()
-                .any(|a| find_jsx_attr_ignore_case(&opening.attributes, a).is_some())
-        {
-            push_site(
-                sites,
-                RuleId::AriaBrailleEquivalent,
-                subject_name.clone(),
-                "ariaBrailleEquivalent",
-                "aria-braillelabel",
-                "This braille label is the element's only accessible name. Add visible text, aria-label, aria-labelledby, alt, or title for non-braille assistive technology.".to_string(),
-                loc,
-                span,
+                RuleId::AriaUnsupportedElements,
+                ctx.subject_name.clone(),
+                "ariaUnsupportedElements",
+                aname,
+                format!(
+                    "Screen reader users get no help from `{aname}` because `<{}>` doesn't accept it, so remove it from this element.",
+                    ctx.tag
+                ),
+                loc_from_line_starts(ctx.line_starts, attr.span.start),
+                ByteSpan {
+                    start: attr.span.start,
+                    end: attr.span.end,
+                },
             );
         }
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates role transition rules on the same JSXOpeningElement"
-)]
-fn check_element_role_transition_rules(
-    semantic: &Semantic<'_>,
-    opening: &JSXOpeningElement<'_>,
-    tag: &str,
-    is_html: bool,
-    subject_name: &Option<String>,
-    const_strings: &HashMap<SymbolId, String>,
-    line_starts: &[u32],
+fn check_aria_role_and_redundant_roles(
+    ctx: &JsxElementA11yCtx<'_, '_>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    // 11. `no-noninteractive-element-to-interactive-role`
-    if is_html
-        && NON_INTERACTIVE_ELEMENTS.contains(&tag)
-        && !is_interactive_element(tag, opening, semantic, const_strings)
-        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
-        && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
-        && let Some(first_role) = role_str.split_whitespace().next()
+    if !ctx.is_html {
+        return;
+    }
+    let Some(role_attr) = find_jsx_attr_ignore_case(&ctx.opening.attributes, "role") else {
+        return;
+    };
+    let Some(role_str) = get_attr_static_str(ctx.semantic, role_attr, ctx.const_strings) else {
+        return;
+    };
+    let roles: Vec<&str> = role_str.split_whitespace().collect();
+    let role_loc = loc_from_line_starts(ctx.line_starts, role_attr.span.start);
+    let role_span = ByteSpan {
+        start: role_attr.span.start,
+        end: role_attr.span.end,
+    };
+    if roles.is_empty() || roles.iter().any(|r| !VALID_ARIA_ROLES.contains(r)) {
+        push_site(
+            sites,
+            RuleId::AriaRole,
+            ctx.subject_name.clone(),
+            "ariaRole",
+            &role_str,
+            "This `role` is not a valid ARIA role, so assistive tech cannot expose it correctly. Use a real, non-abstract role.".to_string(),
+            role_loc,
+            role_span,
+        );
+    }
+    if let Some(&first_role) = roles.first()
+        && !matches!((ctx.tag, first_role), ("ul" | "ol", "list"))
+        && get_implicit_role(ctx.tag, ctx.opening, ctx.semantic, ctx.const_strings)
+            == Some(first_role)
+    {
+        push_site(
+            sites,
+            RuleId::NoRedundantRoles,
+            ctx.subject_name.clone(),
+            "noRedundantRoles",
+            first_role,
+            format!(
+                "Screen reader users gain nothing from this `role` because `<{}>` already acts as a `{first_role}`, so remove it.",
+                ctx.tag
+            ),
+            role_loc,
+            role_span,
+        );
+    }
+}
+
+fn check_aria_activedescendant_tabindex(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !ctx.is_html
+        || find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-activedescendant").is_none()
+    {
+        return;
+    }
+    let tab_attr = find_jsx_attr_ignore_case(&ctx.opening.attributes, "tabIndex");
+    let tab_ok = match tab_attr {
+        Some(attr) => parse_attr_number(attr).is_none_or(|v| v >= -1.0),
+        None => {
+            is_interactive_element(ctx.tag, ctx.opening, ctx.semantic, ctx.const_strings)
+                || is_content_editable_tabbable(ctx.opening, ctx.semantic, ctx.const_strings)
+        }
+    };
+    if !tab_ok {
+        push_site(
+            sites,
+            RuleId::AriaActivedescendantHasTabindex,
+            ctx.subject_name.clone(),
+            "ariaActivedescendantHasTabindex",
+            ctx.tag,
+            "Keyboard users can't focus this element with `aria-activedescendant` because it isn't tabbable, so add `tabIndex={0}`.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
+    }
+}
+
+fn check_aria_braille_equivalent(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.has_spread {
+        return;
+    }
+    if has_nonempty_literal_attr(
+        ctx.opening,
+        "aria-brailleroledescription",
+        ctx.semantic,
+        ctx.const_strings,
+    ) && !has_nonempty_literal_attr(
+        ctx.opening,
+        "aria-roledescription",
+        ctx.semantic,
+        ctx.const_strings,
+    ) {
+        push_site(
+            sites,
+            RuleId::AriaBrailleEquivalent,
+            ctx.subject_name.clone(),
+            "ariaBrailleEquivalent",
+            "aria-brailleroledescription",
+            "This braille role description has no non-braille equivalent. Add a nonempty aria-roledescription for other assistive technologies.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
+    }
+    if has_nonempty_literal_attr(
+        ctx.opening,
+        "aria-braillelabel",
+        ctx.semantic,
+        ctx.const_strings,
+    ) && !has_accessible_child(ctx.jsx_el)
+        && !["aria-label", "aria-labelledby", "alt", "title"]
+            .iter()
+            .any(|a| find_jsx_attr_ignore_case(&ctx.opening.attributes, a).is_some())
+    {
+        push_site(
+            sites,
+            RuleId::AriaBrailleEquivalent,
+            ctx.subject_name.clone(),
+            "ariaBrailleEquivalent",
+            "aria-braillelabel",
+            "This braille label is the element's only accessible name. Add visible text, aria-label, aria-labelledby, alt, or title for non-braille assistive technology.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
+    }
+}
+
+fn check_element_role_transition_rules(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if !ctx.is_html {
+        return;
+    }
+    let Some(role_attr) = find_jsx_attr_ignore_case(&ctx.opening.attributes, "role") else {
+        return;
+    };
+    let Some(role_str) = get_attr_static_str(ctx.semantic, role_attr, ctx.const_strings) else {
+        return;
+    };
+    let Some(first_role) = role_str.split_whitespace().next() else {
+        return;
+    };
+    let role_loc = loc_from_line_starts(ctx.line_starts, role_attr.span.start);
+    let role_span = ByteSpan {
+        start: role_attr.span.start,
+        end: role_attr.span.end,
+    };
+    let is_interactive =
+        is_interactive_element(ctx.tag, ctx.opening, ctx.semantic, ctx.const_strings);
+
+    if NON_INTERACTIVE_ELEMENTS.contains(&ctx.tag)
+        && !is_interactive
         && INTERACTIVE_ROLES.contains(&first_role)
-        && !is_allowed_interactive_role_on_noninteractive(tag, first_role)
+        && !is_allowed_interactive_role_on_noninteractive(ctx.tag, first_role)
         && !(first_role == "separator"
-            && find_jsx_attr_ignore_case(&opening.attributes, "tabIndex").is_none())
+            && find_jsx_attr_ignore_case(&ctx.opening.attributes, "tabIndex").is_none())
     {
         push_site(
             sites,
             RuleId::NoNoninteractiveElementToInteractiveRole,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noNoninteractiveElementToInteractiveRole",
             first_role,
             format!(
-                "Role `{first_role}` gives `<{tag}>` interactive semantics even though the element is noninteractive, so screen reader users get the wrong controls."
+                "Role `{first_role}` gives `<{}>` interactive semantics even though the element is noninteractive, so screen reader users get the wrong controls.",
+                ctx.tag
             ),
-            loc_from_line_starts(line_starts, role_attr.span.start),
-            ByteSpan {
-                start: role_attr.span.start,
-                end: role_attr.span.end,
-            },
+            role_loc,
+            role_span,
         );
     }
 
-    // 12. `no-interactive-element-to-noninteractive-role`
-    if is_html
-        && (tag == "input" || is_interactive_element(tag, opening, semantic, const_strings))
-        && let Some(role_attr) = find_jsx_attr_ignore_case(&opening.attributes, "role")
-        && let Some(role_str) = get_attr_static_str(semantic, role_attr, const_strings)
-        && let Some(first_role) = role_str.split_whitespace().next()
+    if (ctx.tag == "input" || is_interactive)
         && (NON_INTERACTIVE_ROLES.contains(&first_role)
             || matches!(first_role, "presentation" | "none"))
         && !matches!(
-            (tag, first_role),
+            (ctx.tag, first_role),
             ("tr", "none" | "presentation") | ("canvas", "img")
         )
     {
         push_site(
             sites,
             RuleId::NoInteractiveElementToNoninteractiveRole,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noInteractiveElementToNoninteractiveRole",
             first_role,
             format!(
-                "Screen reader users can't operate this interactive `<{tag}>` because role `{first_role}` says it isn't, so remove the role or use a different element."
+                "Screen reader users can't operate this interactive `<{}>` because role `{first_role}` says it isn't, so remove the role or use a different element.",
+                ctx.tag
             ),
-            loc_from_line_starts(line_starts, role_attr.span.start),
-            ByteSpan {
-                start: role_attr.span.start,
-                end: role_attr.span.end,
-            },
+            role_loc,
+            role_span,
         );
     }
 }
@@ -670,67 +646,84 @@ pub(super) fn check_custom_aria_and_role_rules(
     unlabeled_navs_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let JsxElementA11yCtx {
-        is_testlike,
-        semantic,
-        node_id,
-        opening,
-        tag,
-        is_html,
-        has_spread,
-        subject_name,
-        const_strings,
-        loc,
-        span,
-        line_starts,
-        ..
-    } = *ctx;
+    check_dialog_and_label_aria_rules(ctx, first_role, has_a11y_name, sites);
+    check_progress_range_rules(ctx, first_role, sites);
+    check_landmarks_and_presentation_conflict(
+        ctx,
+        first_role,
+        has_a11y_name,
+        main_landmarks_by_root,
+        unlabeled_navs_by_root,
+        sites,
+    );
+}
 
-    // 1. `dialog-has-accessible-name` & `prefer-html-dialog`
-    if !is_testlike && is_html && !has_spread {
-        let is_dialog_role = matches!(first_role, Some("dialog" | "alertdialog"));
-        if (tag == "dialog" || is_dialog_role) && !has_a11y_name {
-            push_site(
-                sites,
-                RuleId::DialogHasAccessibleName,
-                subject_name.clone(),
-                "dialogHasAccessibleName",
-                tag,
-                "This dialog has no accessible name. Add `aria-label` or point `aria-labelledby` at its heading.".to_string(),
-                loc,
-                span,
-            );
-        }
-        let is_aria_modal = find_jsx_attr_ignore_case(&opening.attributes, "aria-modal")
-            .is_some_and(is_attr_statically_true_or_true_str);
-        if tag != "dialog" && (is_dialog_role || is_aria_modal) {
-            push_site(
-                sites,
-                RuleId::PreferHtmlDialog,
-                subject_name.clone(),
-                "preferHtmlDialog",
-                tag,
-                "Use the native HTML `<dialog>` element instead of a custom `role=\"dialog\"` or `aria-modal` container.".to_string(),
-                loc,
-                span,
-            );
-        }
+fn check_dialog_and_label_aria_rules(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    first_role: Option<&str>,
+    has_a11y_name: bool,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    check_dialog_name_and_prefer_native_dialog(ctx, first_role, has_a11y_name, sites);
+    check_label_live_and_invalid_aria_rules(ctx, first_role, sites);
+}
+
+fn check_dialog_name_and_prefer_native_dialog(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    first_role: Option<&str>,
+    has_a11y_name: bool,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.is_testlike || !ctx.is_html || ctx.has_spread {
+        return;
     }
+    let is_dialog_role = matches!(first_role, Some("dialog" | "alertdialog"));
+    if (ctx.tag == "dialog" || is_dialog_role) && !has_a11y_name {
+        push_site(
+            sites,
+            RuleId::DialogHasAccessibleName,
+            ctx.subject_name.clone(),
+            "dialogHasAccessibleName",
+            ctx.tag,
+            "This dialog has no accessible name. Add `aria-label` or point `aria-labelledby` at its heading.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
+    }
+    let is_aria_modal = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-modal")
+        .is_some_and(is_attr_statically_true_or_true_str);
+    if ctx.tag != "dialog" && (is_dialog_role || is_aria_modal) {
+        push_site(
+            sites,
+            RuleId::PreferHtmlDialog,
+            ctx.subject_name.clone(),
+            "preferHtmlDialog",
+            ctx.tag,
+            "Use the native HTML `<dialog>` element instead of a custom `role=\"dialog\"` or `aria-modal` container.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
+    }
+}
 
-    // 6. `no-uninformative-aria-label`
-    if let Some(al_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-label")
-        && let Some(al_val) = get_attr_static_str(semantic, al_attr, const_strings)
+fn check_label_live_and_invalid_aria_rules(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    first_role: Option<&str>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Some(al_attr) = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-label")
+        && let Some(al_val) = get_attr_static_str(ctx.semantic, al_attr, ctx.const_strings)
         && UNINFORMATIVE_ARIA_LABELS.contains(&al_val.trim().to_ascii_lowercase().as_str())
     {
         push_site(
             sites,
             RuleId::NoUninformativeAriaLabel,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noUninformativeAriaLabel",
             &al_val,
             "An `aria-label` should name the action or destination, not the element type."
                 .to_string(),
-            loc_from_line_starts(line_starts, al_attr.span.start),
+            loc_from_line_starts(ctx.line_starts, al_attr.span.start),
             ByteSpan {
                 start: al_attr.span.start,
                 end: al_attr.span.end,
@@ -738,21 +731,20 @@ pub(super) fn check_custom_aria_and_role_rules(
         );
     }
 
-    // 10. `no-assertive-status`
-    if is_html
+    if ctx.is_html
         && first_role == Some("status")
-        && let Some(live_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-live")
-        && get_attr_static_str(semantic, live_attr, const_strings)
+        && let Some(live_attr) = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-live")
+        && get_attr_static_str(ctx.semantic, live_attr, ctx.const_strings)
             .is_some_and(|v| v.eq_ignore_ascii_case("assertive"))
     {
         push_site(
             sites,
             RuleId::NoAssertiveStatus,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noAssertiveStatus",
             "aria-live",
             "A status is advisory and implicitly polite, but `aria-live=\"assertive\"` interrupts queued speech.".to_string(),
-            loc_from_line_starts(line_starts, live_attr.span.start),
+            loc_from_line_starts(ctx.line_starts, live_attr.span.start),
             ByteSpan {
                 start: live_attr.span.start,
                 end: live_attr.span.end,
@@ -760,116 +752,131 @@ pub(super) fn check_custom_aria_and_role_rules(
         );
     }
 
-    // 11. `no-aria-invalid-without-description`
-    if matches!(tag, "input" | "select" | "textarea")
-        && !has_spread
-        && let Some(inv_attr) = find_jsx_attr_ignore_case(&opening.attributes, "aria-invalid")
+    if matches!(ctx.tag, "input" | "select" | "textarea")
+        && !ctx.has_spread
+        && let Some(inv_attr) = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-invalid")
         && !is_attr_statically_false(inv_attr)
-        && find_jsx_attr_ignore_case(&opening.attributes, "aria-describedby").is_none()
-        && find_jsx_attr_ignore_case(&opening.attributes, "aria-errormessage").is_none()
+        && find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-describedby").is_none()
+        && find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-errormessage").is_none()
     {
         push_site(
             sites,
             RuleId::NoAriaInvalidWithoutDescription,
-            subject_name.clone(),
+            ctx.subject_name.clone(),
             "noAriaInvalidWithoutDescription",
             "aria-invalid",
             "This control is marked invalid but is not connected to error text via `aria-describedby` or `aria-errormessage`.".to_string(),
-            loc_from_line_starts(line_starts, inv_attr.span.start),
+            loc_from_line_starts(ctx.line_starts, inv_attr.span.start),
             ByteSpan {
                 start: inv_attr.span.start,
                 end: inv_attr.span.end,
             },
         );
     }
+}
 
-    // 12. `no-invalid-progress-range`
-    if !has_spread {
-        if tag == "progress" {
-            let max_val = find_jsx_attr_ignore_case(&opening.attributes, "max")
-                .and_then(parse_attr_number)
-                .unwrap_or(1.0);
-            let val_opt =
-                find_jsx_attr_ignore_case(&opening.attributes, "value").and_then(parse_attr_number);
-            if max_val <= 0.0 || val_opt.is_some_and(|v| v < 0.0 || v > max_val) {
-                push_site(
-                    sites,
-                    RuleId::NoInvalidProgressRange,
-                    subject_name.clone(),
-                    "noInvalidProgressRange",
-                    "progress",
-                    "This progress element has an impossible value range.".to_string(),
-                    loc,
-                    span,
-                );
-            }
-        } else if first_role == Some("progressbar") {
-            let min_val = find_jsx_attr_ignore_case(&opening.attributes, "aria-valuemin")
-                .and_then(parse_attr_number)
-                .unwrap_or(0.0);
-            let max_val = find_jsx_attr_ignore_case(&opening.attributes, "aria-valuemax")
-                .and_then(parse_attr_number)
-                .unwrap_or(100.0);
-            let now_opt = find_jsx_attr_ignore_case(&opening.attributes, "aria-valuenow")
-                .and_then(parse_attr_number);
-            if min_val >= max_val || now_opt.is_some_and(|v| v < min_val || v > max_val) {
-                push_site(
-                    sites,
-                    RuleId::NoInvalidProgressRange,
-                    subject_name.clone(),
-                    "noInvalidProgressRange",
-                    "progressbar",
-                    "This progressbar exposes an impossible ARIA range.".to_string(),
-                    loc,
-                    span,
-                );
-            }
+fn check_progress_range_rules(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    first_role: Option<&str>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.has_spread {
+        return;
+    }
+    if ctx.tag == "progress" {
+        let max_val = find_jsx_attr_ignore_case(&ctx.opening.attributes, "max")
+            .and_then(parse_attr_number)
+            .unwrap_or(1.0);
+        let val_opt = find_jsx_attr_ignore_case(&ctx.opening.attributes, "value")
+            .and_then(parse_attr_number);
+        if max_val <= 0.0 || val_opt.is_some_and(|v| v < 0.0 || v > max_val) {
+            push_site(
+                sites,
+                RuleId::NoInvalidProgressRange,
+                ctx.subject_name.clone(),
+                "noInvalidProgressRange",
+                "progress",
+                "This progress element has an impossible value range.".to_string(),
+                ctx.loc,
+                ctx.span,
+            );
+        }
+    } else if first_role == Some("progressbar") {
+        let min_val = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-valuemin")
+            .and_then(parse_attr_number)
+            .unwrap_or(0.0);
+        let max_val = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-valuemax")
+            .and_then(parse_attr_number)
+            .unwrap_or(100.0);
+        let now_opt = find_jsx_attr_ignore_case(&ctx.opening.attributes, "aria-valuenow")
+            .and_then(parse_attr_number);
+        if min_val >= max_val || now_opt.is_some_and(|v| v < min_val || v > max_val) {
+            push_site(
+                sites,
+                RuleId::NoInvalidProgressRange,
+                ctx.subject_name.clone(),
+                "noInvalidProgressRange",
+                "progressbar",
+                "This progressbar exposes an impossible ARIA range.".to_string(),
+                ctx.loc,
+                ctx.span,
+            );
         }
     }
+}
 
-    // 15. `no-multiple-main-landmarks` & `no-multiple-unlabeled-navigation-landmarks`
-    if tag == "main" {
-        let root_id = find_topmost_jsx_root(semantic, node_id);
+fn check_landmarks_and_presentation_conflict(
+    ctx: &JsxElementA11yCtx<'_, '_>,
+    first_role: Option<&str>,
+    has_a11y_name: bool,
+    main_landmarks_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
+    unlabeled_navs_by_root: &mut HashMap<NodeId, Vec<(SourceLoc, ByteSpan)>>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if ctx.tag == "main" {
+        let root_id = find_topmost_jsx_root(ctx.semantic, ctx.node_id);
         main_landmarks_by_root
             .entry(root_id)
             .or_default()
-            .push((loc, span));
-    } else if tag == "nav" && !has_spread && !has_a11y_name {
-        let root_id = find_topmost_jsx_root(semantic, node_id);
+            .push((ctx.loc, ctx.span));
+    } else if ctx.tag == "nav" && !ctx.has_spread && !has_a11y_name {
+        let root_id = find_topmost_jsx_root(ctx.semantic, ctx.node_id);
         unlabeled_navs_by_root
             .entry(root_id)
             .or_default()
-            .push((loc, span));
+            .push((ctx.loc, ctx.span));
     }
 
-    // 17. `no-presentation-role-conflict`
-    if is_html {
-        let is_pres = matches!(first_role, Some("none" | "presentation"))
-            || (tag == "img"
-                && find_jsx_attr_ignore_case(&opening.attributes, "alt")
-                    .and_then(|a| get_attr_static_str(semantic, a, const_strings))
-                    .as_deref()
-                    == Some(""));
-        if is_pres {
-            let is_focusable = is_focusable_element(tag, opening, semantic, const_strings, true);
-            let has_global_aria = opening.attributes.iter().any(|item| {
-                item.as_attribute()
-                    .and_then(|a| a.name.as_identifier())
-                    .is_some_and(|id| GLOBAL_ARIA_PROPERTIES.contains(&id.name.as_str()))
-            });
-            if is_focusable || has_global_aria {
-                push_site(
-                    sites,
-                    RuleId::NoPresentationRoleConflict,
-                    subject_name.clone(),
-                    "noPresentationRoleConflict",
-                    tag,
-                    "This element is marked presentational but is also focusable or carries global ARIA state.".to_string(),
-                    loc,
-                    span,
-                );
-            }
-        }
+    if !ctx.is_html {
+        return;
+    }
+    let is_pres = matches!(first_role, Some("none" | "presentation"))
+        || (ctx.tag == "img"
+            && find_jsx_attr_ignore_case(&ctx.opening.attributes, "alt")
+                .and_then(|a| get_attr_static_str(ctx.semantic, a, ctx.const_strings))
+                .as_deref()
+                == Some(""));
+    if !is_pres {
+        return;
+    }
+    let is_focusable =
+        is_focusable_element(ctx.tag, ctx.opening, ctx.semantic, ctx.const_strings, true);
+    let has_global_aria = ctx.opening.attributes.iter().any(|item| {
+        item.as_attribute()
+            .and_then(|a| a.name.as_identifier())
+            .is_some_and(|id| GLOBAL_ARIA_PROPERTIES.contains(&id.name.as_str()))
+    });
+    if is_focusable || has_global_aria {
+        push_site(
+            sites,
+            RuleId::NoPresentationRoleConflict,
+            ctx.subject_name.clone(),
+            "noPresentationRoleConflict",
+            ctx.tag,
+            "This element is marked presentational but is also focusable or carries global ARIA state.".to_string(),
+            ctx.loc,
+            ctx.span,
+        );
     }
 }
 

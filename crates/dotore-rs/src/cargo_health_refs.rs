@@ -21,38 +21,35 @@ use crate::{
 
 type TomlMap = toml::map::Map<String, Value>;
 
-const CAPABILITY_GATE_FIXTURE_CRATES: &[&str] = &[
-    "tokio",
-    "tokio-util",
-    "tokio-stream",
-    "axum",
-    "axum-extra",
-    "axum-core",
-    "sqlx",
-    "serde",
-    "serde-json",
-    "tracing",
-    "leptos",
-    "dioxus",
-    "reqwest",
-    "diesel",
-    "sea-orm",
-    "rusqlite",
-    "postgres",
-    "tokio-postgres",
-    "futures",
-    "tower-http",
-    "actix-cors",
-    "cookie",
-    "jsonwebtoken",
-    "crossterm",
-];
+/// Per-file crate reference metadata extracted during `extract_rs_file` (`#50`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RsCrateRefFileIr {
+    pub prod_idents: HashSet<String>,
+    pub test_idents: HashSet<String>,
+    pub cfg_test_spans: Vec<ByteSpan>,
+}
+
+/// Extracts [`RsCrateRefFileIr`] from an already-parsed `syn::File` in a single pass.
+#[must_use]
+pub(crate) fn extract_file_crate_refs(ast: &syn::File, file_context: FileContext) -> RsCrateRefFileIr {
+    let mut ir = RsCrateRefFileIr::default();
+    let is_test_file = file_context != FileContext::Production;
+    let mut visitor = CrateRefAstVisitor {
+        in_test: is_test_file || attrs_have_cfg_test(&ast.attrs),
+        prod_idents: &mut ir.prod_idents,
+        test_idents: &mut ir.test_idents,
+        cfg_test_spans: Vec::new(),
+    };
+    visitor.visit_file(ast);
+    ir.cfg_test_spans = visitor.cfg_test_spans;
+    ir
+}
 
 /// Cross-references `[dependencies]` against crate identifiers in `files` for
 /// `rs-cargo-unused-dependency` and `rs-cargo-test-only-dependency`.
 #[expect(
     clippy::too_many_arguments,
-    reason = "Dependency truth evaluator cross-references normal and dev tables against extracted files"
+    reason = "Dependency truth evaluator cross-references normal and dev tables against extracted files (#50)"
 )]
 pub(crate) fn inspect_dependency_truth_for_package(
     package: &WorkspacePackage,
@@ -91,10 +88,10 @@ pub(crate) fn inspect_dependency_truth_for_package(
             .explicit_rule_override(RuleId::RsCargoTestOnlyDependency)
             .is_some();
 
-    let all_deps_are_capability_fixture_crates = normal_deps.keys().all(|k| {
-        let norm = k.trim().to_ascii_lowercase().replace('_', "-");
-        CAPABILITY_GATE_FIXTURE_CRATES.contains(&norm.as_str())
-    });
+    let is_virtual_only = package
+        .capability_gate
+        .dependencies
+        .contains_key("__virtual_only");
 
     let dev_dep_keys: HashSet<&str> = dev_deps
         .map(|t| t.keys().map(String::as_str).collect())
@@ -130,7 +127,7 @@ pub(crate) fn inspect_dependency_truth_for_package(
                 .is_some_and(|pi| refs.is_used_in_tests(pi, actual_pkg.unwrap_or(key)));
 
         if !used_in_prod && !used_in_test {
-            if !explicit_unused && all_deps_are_capability_fixture_crates {
+            if !explicit_unused && is_virtual_only {
                 continue;
             }
             emit_manifest_diagnostic_if_active(
@@ -149,7 +146,7 @@ pub(crate) fn inspect_dependency_truth_for_package(
                 out,
             );
         } else if !used_in_prod && used_in_test && !dev_dep_keys.contains(key.as_str()) {
-            if !explicit_test_only && all_deps_are_capability_fixture_crates {
+            if !explicit_test_only && is_virtual_only {
                 continue;
             }
             emit_manifest_diagnostic_if_active(
@@ -206,29 +203,28 @@ impl PackageCrateReferences {
 fn collect_package_crate_references(files: &[ExtractedFile]) -> PackageCrateReferences {
     let mut out = PackageCrateReferences::default();
     for file in files {
-        let is_test_file = file.file_context != FileContext::Production;
-        let Ok(ast) = syn::parse_file(&file.source) else {
+        let Some(rs_ir) = file.downcast_payload::<crate::ir::RsFileIr>() else {
             continue;
         };
-        let mut visitor = CrateRefAstVisitor {
-            in_test: is_test_file || attrs_have_cfg_test(&ast.attrs),
-            prod_idents: &mut out.prod_idents,
-            test_idents: &mut out.test_idents,
-            cfg_test_spans: Vec::new(),
-        };
-        visitor.visit_file(&ast);
+        out.prod_idents
+            .extend(rs_ir.crate_ref_ir.prod_idents.iter().cloned());
+        out.test_idents
+            .extend(rs_ir.crate_ref_ir.test_idents.iter().cloned());
+        let is_test_file = file.file_context != FileContext::Production;
         if is_test_file {
             out.test_sources.push(file.source.clone());
         } else {
-            for sp in &visitor.cfg_test_spans {
+            for sp in &rs_ir.crate_ref_ir.cfg_test_spans {
                 let start = usize::try_from(sp.start).unwrap_or(0);
                 let end = usize::try_from(sp.end).unwrap_or(0);
                 if let Some(sub) = file.source.get(start..end) {
                     out.test_sources.push(sub.to_string());
                 }
             }
-            out.prod_sources
-                .push((file.source.clone(), visitor.cfg_test_spans));
+            out.prod_sources.push((
+                file.source.clone(),
+                rs_ir.crate_ref_ir.cfg_test_spans.clone(),
+            ));
         }
     }
     out

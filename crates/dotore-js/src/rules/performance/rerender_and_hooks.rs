@@ -3,10 +3,6 @@
     clippy::wildcard_enum_match_arm,
     reason = "oxc_ast AST enums have 200+ variants; React performance rule detectors match only relevant AST node kinds"
 )]
-#![expect(
-    clippy::excessive_nesting,
-    reason = "Component body, hook argument, and JSX attribute AST destructuring traverses nested AST layers directly"
-)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,18 +17,14 @@ use oxc_semantic::{NodeId, Semantic, SymbolFlags};
 use oxc_span::{GetSpan, Span};
 
 use super::{
-    CHEAP_CONSTRUCTORS, DEP_HOOK_NAMES, HIGH_FREQUENCY_DOM_EVENTS, MemoStatus,
-    extract_jsx_identifier_name, is_react_named_hook_call,
+    DEP_HOOK_NAMES, MemoStatus, extract_jsx_identifier_name, is_react_named_hook_call,
 };
 use crate::{
     ir::{
-        react_ast::{find_enclosing_react_node, get_subject_name, is_component_name},
+        react_ast::{get_subject_name, is_component_name},
         types::SemanticRuleSite,
     },
-    matchers::{
-        is_global_ident, is_hook_with_deps_call, push_semantic_site, resolve_ident_symbol,
-        unwrap_expr,
-    },
+    matchers::{is_hook_with_deps_call, push_semantic_site, resolve_ident_symbol, unwrap_expr},
     rules::RuleId,
 };
 
@@ -41,61 +33,62 @@ pub(super) fn build_same_file_memo_registry(
 ) -> HashMap<String, MemoStatus> {
     let mut registry = HashMap::new();
     for (_, node) in semantic.nodes().iter_enumerated() {
-        match node.kind() {
-            AstKind::Function(func) => {
-                if let Some(id) = &func.id
-                    && is_component_name(id.name.as_str())
-                {
-                    registry
-                        .entry(id.name.to_string())
-                        .or_insert(MemoStatus::NotMemoized);
-                }
-            }
-            AstKind::VariableDeclarator(decl) => {
-                let Some(id) = decl.id.get_binding_identifier() else {
-                    continue;
-                };
-                if !is_component_name(id.name.as_str()) {
-                    continue;
-                }
-                let Some(init) = &decl.init else {
-                    continue;
-                };
-                match classify_memo_call_init(init, semantic) {
-                    Some(status) => {
-                        registry.insert(id.name.to_string(), status);
-                    }
-                    None => {
-                        if matches!(
-                            unwrap_expr(init),
-                            Expression::ArrowFunctionExpression(_)
-                                | Expression::FunctionExpression(_)
-                        ) {
-                            registry.insert(id.name.to_string(), MemoStatus::NotMemoized);
-                        }
-                    }
-                }
-            }
-            AstKind::ExportDefaultDeclaration(exp) => {
-                if let oxc_ast::ast::ExportDefaultDeclarationKind::CallExpression(call) =
-                    &exp.declaration
-                    && is_memo_callee(&call.callee)
-                    && let Some(first_arg) =
-                        call.arguments.first().and_then(Argument::as_expression)
-                    && let Expression::Identifier(inner_id) = unwrap_expr(first_arg)
-                {
-                    let status = if has_custom_memo_comparator(call, semantic) {
-                        MemoStatus::CustomComparatorMemo
-                    } else {
-                        MemoStatus::Memoized
-                    };
-                    registry.insert(inner_id.name.to_string(), status);
-                }
-            }
-            _ => {}
-        }
+        register_memo_node_in_registry(node.kind(), semantic, &mut registry);
     }
     registry
+}
+
+fn register_memo_node_in_registry(
+    kind: AstKind<'_>,
+    semantic: &Semantic<'_>,
+    registry: &mut HashMap<String, MemoStatus>,
+) {
+    match kind {
+        AstKind::Function(func) => {
+            if let Some(id) = &func.id
+                && is_component_name(id.name.as_str())
+            {
+                registry
+                    .entry(id.name.to_string())
+                    .or_insert(MemoStatus::NotMemoized);
+            }
+        }
+        AstKind::VariableDeclarator(decl) => {
+            let Some(id) = decl.id.get_binding_identifier() else {
+                return;
+            };
+            if !is_component_name(id.name.as_str()) {
+                return;
+            };
+            let Some(init) = &decl.init else {
+                return;
+            };
+            if let Some(status) = classify_memo_call_init(init, semantic) {
+                registry.insert(id.name.to_string(), status);
+            } else if matches!(
+                unwrap_expr(init),
+                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+            ) {
+                registry.insert(id.name.to_string(), MemoStatus::NotMemoized);
+            }
+        }
+        AstKind::ExportDefaultDeclaration(exp) => {
+            if let oxc_ast::ast::ExportDefaultDeclarationKind::CallExpression(call) =
+                &exp.declaration
+                && is_memo_callee(&call.callee)
+                && let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression)
+                && let Expression::Identifier(inner_id) = unwrap_expr(first_arg)
+            {
+                let status = if has_custom_memo_comparator(call, semantic) {
+                    MemoStatus::CustomComparatorMemo
+                } else {
+                    MemoStatus::Memoized
+                };
+                registry.insert(inner_id.name.to_string(), status);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn classify_memo_call_init(expr: &Expression<'_>, semantic: &Semantic<'_>) -> Option<MemoStatus> {
@@ -234,7 +227,7 @@ enum EmptyLiteralKind {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Inspects parameter and body destructuring defaults against component body uses"
+    reason = "Inspects parameter and body destructuring defaults against component body uses (#50)"
 )]
 fn check_rerender_memo_with_default_value(
     subject_name: &Option<String>,
@@ -246,107 +239,142 @@ fn check_rerender_memo_with_default_value(
     line_starts: &[u32],
     out: &mut Vec<SemanticRuleSite>,
 ) {
-    let mut defaults: Vec<(String, EmptyLiteralKind, Span)> = Vec::new();
-    for param in params {
-        collect_empty_defaults_from_pattern(&param.pattern, &mut defaults);
-    }
-    if let Some(first_param) = params.first()
-        && let Some(props_id) = first_param.pattern.get_binding_identifier()
-    {
-        for stmt in statements {
-            if let Statement::VariableDeclaration(var_decl) = stmt {
-                for decl in &var_decl.declarations {
-                    if let Some(init) = &decl.init
-                        && matches!(unwrap_expr(init), Expression::Identifier(id) if id.name == props_id.name)
-                    {
-                        collect_empty_defaults_from_pattern(&decl.id, &mut defaults);
-                    }
-                }
-            }
-        }
-    }
+    let defaults = collect_component_empty_defaults(params, statements);
     if defaults.is_empty() {
         return;
     }
 
     for (name, kind, def_span) in defaults {
-        let mut used_in_deps = false;
-        let mut used_in_memo_prop = false;
-
-        for (_, node) in semantic.nodes().iter_enumerated() {
-            if !body_span.contains_inclusive(node.span()) {
-                continue;
-            }
-            match node.kind() {
-                AstKind::CallExpression(call) => {
-                    if is_dep_hook_call(semantic, call) {
-                        for arg in &call.arguments {
-                            if let Some(Expression::ArrayExpression(arr)) =
-                                arg.as_expression().map(unwrap_expr)
-                            {
-                                for elem in &arr.elements {
-                                    if let Some(expr) = elem.as_expression()
-                                        && matches!(unwrap_expr(expr), Expression::Identifier(id) if id.name == name.as_str())
-                                    {
-                                        used_in_deps = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                AstKind::JSXOpeningElement(opening) => {
-                    let Some(tag_name) = extract_jsx_identifier_name(&opening.name) else {
-                        continue;
-                    };
-                    if !is_component_name(tag_name) {
-                        continue;
-                    }
-                    if memo_registry.get(tag_name) == Some(&MemoStatus::NotMemoized) {
-                        continue;
-                    }
-                    for attr_item in &opening.attributes {
-                        let JSXAttributeItem::Attribute(attr) = attr_item else {
-                            continue;
-                        };
-                        if let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value
-                            && let Some(expr) = cont.expression.as_expression()
-                            && matches!(unwrap_expr(expr), Expression::Identifier(id) if id.name == name.as_str())
-                        {
-                            used_in_memo_prop = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
+        let (used_in_deps, used_in_memo_prop) =
+            find_default_value_memo_usage(&name, body_span, memo_registry, semantic);
+        if !used_in_deps && !used_in_memo_prop {
+            continue;
         }
+        let (lit, alloc) = match kind {
+            EmptyLiteralKind::Object => ("{}", "object"),
+            EmptyLiteralKind::Array => ("[]", "array"),
+        };
+        let message = if used_in_deps {
+            format!(
+                "This reruns hooks that list it in their dependency array because default prop value {lit} makes a brand new {alloc} every render, so move it to a constant at the top of the file"
+            )
+        } else {
+            format!(
+                "This keeps redrawing children that compare props because default prop value {lit} makes a brand new {alloc} every render, so move it to a constant at the top of the file"
+            )
+        };
+        push_semantic_site(
+            out,
+            RuleId::RerenderMemoWithDefaultValue,
+            subject_name.clone(),
+            "rerenderMemoWithDefaultValue",
+            &name,
+            message,
+            line_starts,
+            def_span,
+        );
+    }
+}
 
-        if used_in_deps || used_in_memo_prop {
-            let (lit, alloc) = match kind {
-                EmptyLiteralKind::Object => ("{}", "object"),
-                EmptyLiteralKind::Array => ("[]", "array"),
-            };
-            let message = if used_in_deps {
-                format!(
-                    "This reruns hooks that list it in their dependency array because default prop value {lit} makes a brand new {alloc} every render, so move it to a constant at the top of the file"
-                )
-            } else {
-                format!(
-                    "This keeps redrawing children that compare props because default prop value {lit} makes a brand new {alloc} every render, so move it to a constant at the top of the file"
-                )
-            };
-            push_semantic_site(
-                out,
-                RuleId::RerenderMemoWithDefaultValue,
-                subject_name.clone(),
-                "rerenderMemoWithDefaultValue",
-                &name,
-                message,
-                line_starts,
-                def_span,
-            );
+fn collect_component_empty_defaults(
+    params: &[oxc_ast::ast::FormalParameter<'_>],
+    statements: &[Statement<'_>],
+) -> Vec<(String, EmptyLiteralKind, Span)> {
+    let mut defaults: Vec<(String, EmptyLiteralKind, Span)> = Vec::new();
+    for param in params {
+        collect_empty_defaults_from_pattern(&param.pattern, &mut defaults);
+    }
+    let Some(first_param) = params.first() else {
+        return defaults;
+    };
+    let Some(props_id) = first_param.pattern.get_binding_identifier() else {
+        return defaults;
+    };
+    for stmt in statements {
+        let Statement::VariableDeclaration(var_decl) = stmt else {
+            continue;
+        };
+        for decl in &var_decl.declarations {
+            if let Some(init) = &decl.init
+                && matches!(unwrap_expr(init), Expression::Identifier(id) if id.name == props_id.name)
+            {
+                collect_empty_defaults_from_pattern(&decl.id, &mut defaults);
+            }
         }
     }
+    defaults
+}
+
+fn find_default_value_memo_usage(
+    name: &str,
+    body_span: Span,
+    memo_registry: &HashMap<String, MemoStatus>,
+    semantic: &Semantic<'_>,
+) -> (bool, bool) {
+    let mut used_in_deps = false;
+    let mut used_in_memo_prop = false;
+
+    for (_, node) in semantic.nodes().iter_enumerated() {
+        if !body_span.contains_inclusive(node.span()) {
+            continue;
+        }
+        match node.kind() {
+            AstKind::CallExpression(call) => {
+                if is_dep_hook_call(semantic, call) && call_deps_reference_ident(call, name) {
+                    used_in_deps = true;
+                }
+            }
+            AstKind::JSXOpeningElement(opening)
+                if jsx_memo_prop_references_ident(opening, name, memo_registry) =>
+            {
+                used_in_memo_prop = true;
+            }
+            _ => {}
+        }
+    }
+    (used_in_deps, used_in_memo_prop)
+}
+
+fn call_deps_reference_ident(call: &CallExpression<'_>, name: &str) -> bool {
+    for arg in &call.arguments {
+        let Some(Expression::ArrayExpression(arr)) = arg.as_expression().map(unwrap_expr) else {
+            continue;
+        };
+        for elem in &arr.elements {
+            if let Some(expr) = elem.as_expression()
+                && matches!(unwrap_expr(expr), Expression::Identifier(id) if id.name == name)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn jsx_memo_prop_references_ident(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    name: &str,
+    memo_registry: &HashMap<String, MemoStatus>,
+) -> bool {
+    let Some(tag_name) = extract_jsx_identifier_name(&opening.name) else {
+        return false;
+    };
+    if !is_component_name(tag_name) || memo_registry.get(tag_name) == Some(&MemoStatus::NotMemoized)
+    {
+        return false;
+    }
+    opening.attributes.iter().any(|attr_item| {
+        let JSXAttributeItem::Attribute(attr) = attr_item else {
+            return false;
+        };
+        if let Some(JSXAttributeValue::ExpressionContainer(cont)) = &attr.value
+            && let Some(expr) = cont.expression.as_expression()
+        {
+            matches!(unwrap_expr(expr), Expression::Identifier(id) if id.name == name)
+        } else {
+            false
+        }
+    })
 }
 
 fn collect_empty_defaults_from_pattern(
@@ -413,52 +441,26 @@ fn check_rerender_memo_before_early_return(
 
     for stmt in statements {
         if memo_decl_span.is_none() {
-            let Statement::VariableDeclaration(var_decl) = stmt else {
-                continue;
-            };
-            for decl in &var_decl.declarations {
-                let Some(init) = &decl.init else {
-                    continue;
-                };
-                if let Expression::CallExpression(call) = unwrap_expr(init)
-                    && is_react_named_hook_call(call, "useMemo")
-                    && let Some(first_arg) =
-                        call.arguments.first().and_then(Argument::as_expression)
-                    && span_contains_jsx(first_arg.span(), semantic)
-                {
-                    memo_decl_span = Some(decl.span);
-                    if let Some(id) = decl.id.get_binding_identifier() {
-                        memo_consumers.insert(id.name.to_string());
-                    }
-                    callback_guard_texts =
-                        collect_leading_guard_texts(first_arg, semantic.source_text());
-                    break;
+            if let Some((span, name_opt, guards)) = try_find_jsx_use_memo_in_stmt(stmt, semantic) {
+                memo_decl_span = Some(span);
+                if let Some(name) = name_opt {
+                    memo_consumers.insert(name);
                 }
+                callback_guard_texts = guards;
             }
             continue;
         }
 
-        if let Statement::VariableDeclaration(var_decl) = stmt {
-            for decl in &var_decl.declarations {
-                if let (Some(id), Some(init)) = (decl.id.get_binding_identifier(), &decl.init)
-                    && span_references_any(init.span(), &memo_consumers, semantic)
-                {
-                    memo_consumers.insert(id.name.to_string());
-                }
-            }
-        }
+        extend_memo_consumers_from_stmt(stmt, &mut memo_consumers, semantic);
 
         if let Statement::IfStatement(if_stmt) = stmt
-            && !memo_consumers.is_empty()
-            && has_early_return_ignoring_memo(&if_stmt.consequent, &memo_consumers, semantic)
+            && is_unguarded_early_return_after_memo(
+                if_stmt,
+                &memo_consumers,
+                &callback_guard_texts,
+                semantic,
+            )
         {
-            if span_references_any(if_stmt.test.span(), &memo_consumers, semantic) {
-                continue;
-            }
-            let test_norm = normalize_ws(if_stmt.test.span().source_text(semantic.source_text()));
-            if callback_guard_texts.iter().any(|g| g == &test_norm) {
-                continue;
-            }
             if let Some(span) = memo_decl_span {
                 push_semantic_site(
                     out,
@@ -474,6 +476,66 @@ fn check_rerender_memo_before_early_return(
             return;
         }
     }
+}
+
+fn try_find_jsx_use_memo_in_stmt(
+    stmt: &Statement<'_>,
+    semantic: &Semantic<'_>,
+) -> Option<(Span, Option<String>, Vec<String>)> {
+    let Statement::VariableDeclaration(var_decl) = stmt else {
+        return None;
+    };
+    for decl in &var_decl.declarations {
+        let Some(init) = &decl.init else {
+            continue;
+        };
+        if let Expression::CallExpression(call) = unwrap_expr(init)
+            && is_react_named_hook_call(call, "useMemo")
+            && let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression)
+            && span_contains_jsx(first_arg.span(), semantic)
+        {
+            let name_opt = decl
+                .id
+                .get_binding_identifier()
+                .map(|id| id.name.to_string());
+            let guards = collect_leading_guard_texts(first_arg, semantic.source_text());
+            return Some((decl.span, name_opt, guards));
+        }
+    }
+    None
+}
+
+fn extend_memo_consumers_from_stmt(
+    stmt: &Statement<'_>,
+    memo_consumers: &mut HashSet<String>,
+    semantic: &Semantic<'_>,
+) {
+    let Statement::VariableDeclaration(var_decl) = stmt else {
+        return;
+    };
+    for decl in &var_decl.declarations {
+        if let (Some(id), Some(init)) = (decl.id.get_binding_identifier(), &decl.init)
+            && span_references_any(init.span(), memo_consumers, semantic)
+        {
+            memo_consumers.insert(id.name.to_string());
+        }
+    }
+}
+
+fn is_unguarded_early_return_after_memo(
+    if_stmt: &oxc_ast::ast::IfStatement<'_>,
+    memo_consumers: &HashSet<String>,
+    callback_guard_texts: &[String],
+    semantic: &Semantic<'_>,
+) -> bool {
+    if memo_consumers.is_empty()
+        || !has_early_return_ignoring_memo(&if_stmt.consequent, memo_consumers, semantic)
+        || span_references_any(if_stmt.test.span(), memo_consumers, semantic)
+    {
+        return false;
+    }
+    let test_norm = normalize_ws(if_stmt.test.span().source_text(semantic.source_text()));
+    !callback_guard_texts.iter().any(|g| g == &test_norm)
 }
 
 fn span_contains_jsx(span: Span, semantic: &Semantic<'_>) -> bool {
@@ -572,57 +634,21 @@ fn check_rerender_derived_state_from_hook(
             continue;
         };
         for decl in &var_decl.declarations {
-            let Some(id) = decl.id.get_binding_identifier() else {
+            let Some((cont_name, hook_name)) = extract_continuous_hook_binding(decl) else {
                 continue;
             };
-            let Some(Expression::CallExpression(call)) = decl.init.as_ref().map(unwrap_expr) else {
-                continue;
-            };
-            let Expression::Identifier(callee_id) = unwrap_expr(&call.callee) else {
-                continue;
-            };
-            let hook_name = callee_id.name.as_str();
-            if !is_continuous_value_hook_name(hook_name) {
-                continue;
-            }
-            let cont_name = id.name.as_str();
-
-            let mut threshold_spans: Vec<Span> = Vec::new();
-            for next_stmt in &statements[idx + 1..] {
-                let Statement::VariableDeclaration(next_var) = next_stmt else {
-                    break;
-                };
-                for next_decl in &next_var.declarations {
-                    if let Some(next_init) = &next_decl.init
-                        && is_threshold_comparison_expr(unwrap_expr(next_init), cont_name)
-                    {
-                        threshold_spans.push(next_decl.span);
-                    }
-                }
-            }
+            let threshold_spans =
+                collect_following_threshold_spans(&statements[idx + 1..], cont_name);
             if threshold_spans.is_empty() {
                 continue;
             }
-
-            let referenced_elsewhere = semantic.nodes().iter_enumerated().any(|(_, n)| {
-                if !body_span.contains_inclusive(n.span()) {
-                    return false;
-                }
-                if decl.span.contains_inclusive(n.span())
-                    || threshold_spans
-                        .iter()
-                        .any(|s| s.contains_inclusive(n.span()))
-                {
-                    return false;
-                }
-                if let AstKind::IdentifierReference(ref_id) = n.kind() {
-                    ref_id.name == cont_name
-                } else {
-                    false
-                }
-            });
-
-            if !referenced_elsewhere {
+            if !is_referenced_outside_thresholds(
+                cont_name,
+                decl.span,
+                &threshold_spans,
+                body_span,
+                semantic,
+            ) {
                 push_semantic_site(
                     out,
                     RuleId::RerenderDerivedStateFromHook,
@@ -638,6 +664,60 @@ fn check_rerender_derived_state_from_hook(
             }
         }
     }
+}
+
+fn extract_continuous_hook_binding<'a>(
+    decl: &'a oxc_ast::ast::VariableDeclarator<'a>,
+) -> Option<(&'a str, &'a str)> {
+    let id = decl.id.get_binding_identifier()?;
+    let Expression::CallExpression(call) = decl.init.as_ref().map(unwrap_expr)? else {
+        return None;
+    };
+    let Expression::Identifier(callee_id) = unwrap_expr(&call.callee) else {
+        return None;
+    };
+    let hook_name = callee_id.name.as_str();
+    is_continuous_value_hook_name(hook_name).then_some((id.name.as_str(), hook_name))
+}
+
+fn collect_following_threshold_spans(
+    following_stmts: &[Statement<'_>],
+    cont_name: &str,
+) -> Vec<Span> {
+    let mut threshold_spans: Vec<Span> = Vec::new();
+    for next_stmt in following_stmts {
+        let Statement::VariableDeclaration(next_var) = next_stmt else {
+            break;
+        };
+        for next_decl in &next_var.declarations {
+            if let Some(next_init) = &next_decl.init
+                && is_threshold_comparison_expr(unwrap_expr(next_init), cont_name)
+            {
+                threshold_spans.push(next_decl.span);
+            }
+        }
+    }
+    threshold_spans
+}
+
+fn is_referenced_outside_thresholds(
+    cont_name: &str,
+    decl_span: Span,
+    threshold_spans: &[Span],
+    body_span: Span,
+    semantic: &Semantic<'_>,
+) -> bool {
+    semantic.nodes().iter_enumerated().any(|(_, n)| {
+        if !body_span.contains_inclusive(n.span())
+            || decl_span.contains_inclusive(n.span())
+            || threshold_spans
+                .iter()
+                .any(|s| s.contains_inclusive(n.span()))
+        {
+            return false;
+        }
+        matches!(n.kind(), AstKind::IdentifierReference(ref_id) if ref_id.name == cont_name)
+    })
 }
 
 fn is_continuous_value_hook_name(name: &str) -> bool {
@@ -796,418 +876,3 @@ fn check_rendering_usetransition_loading(
     }
 }
 
-// ---------------------------------------------------------------------------
-// CallExpression rules:
-// 6. `rerender-transitions-scroll`
-// 7. `no-match-media-in-state-initializer`
-// 8. `no-eager-new-in-use-state-initializer`
-// 9. `no-usememo-simple-expression`
-// ---------------------------------------------------------------------------
-
-pub(super) fn check_rerender_transitions_scroll(
-    _node_id: NodeId,
-    call: &CallExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    let Expression::StaticMemberExpression(mem) = unwrap_expr(&call.callee) else {
-        return;
-    };
-    if mem.property.name != "addEventListener" {
-        return;
-    }
-    let Some(event_arg) = call.arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-    let Expression::StringLiteral(event_lit) = unwrap_expr(event_arg) else {
-        return;
-    };
-    let Some(event_name) = event_lit.value.as_str() else {
-        return;
-    };
-    if !HIGH_FREQUENCY_DOM_EVENTS.contains(&event_name) {
-        return;
-    }
-    let Some(handler_arg) = call.arguments.get(1).and_then(Argument::as_expression) else {
-        return;
-    };
-    let handler_span = match unwrap_expr(handler_arg) {
-        Expression::ArrowFunctionExpression(a) => a.body.span(),
-        Expression::FunctionExpression(f) => {
-            let Some(b) = &f.body else {
-                return;
-            };
-            b.span
-        }
-        _ => return,
-    };
-
-    // Skip if handler deduplicates via ref-guarded return (`if (target === ref.current) return`)
-    for (_, n) in semantic.nodes().iter_enumerated() {
-        if !handler_span.contains_inclusive(n.span()) {
-            continue;
-        }
-        if let AstKind::IfStatement(if_stmt) = n.kind()
-            && if_stmt
-                .test
-                .span()
-                .source_text(semantic.source_text())
-                .contains(".current")
-            && if_stmt
-                .consequent
-                .span()
-                .source_text(semantic.source_text())
-                .contains("return")
-        {
-            return;
-        }
-    }
-
-    for (inner_id, inner_node) in semantic.nodes().iter_enumerated() {
-        if !handler_span.contains_inclusive(inner_node.span()) {
-            continue;
-        }
-        let AstKind::CallExpression(set_call) = inner_node.kind() else {
-            continue;
-        };
-        let Expression::Identifier(callee_id) = unwrap_expr(&set_call.callee) else {
-            continue;
-        };
-        let name = callee_id.name.as_str();
-        if !name.starts_with("set") || !name.as_bytes().get(3).is_some_and(u8::is_ascii_uppercase) {
-            continue;
-        }
-        // Check that `setX` resolves to a local declaration (e.g. `useState`)
-        if resolve_ident_symbol(semantic, callee_id).is_none() {
-            continue;
-        }
-        // Skip constant-only setter calls (`setShow(false)`, `setTip(null)`)
-        if set_call
-            .arguments
-            .first()
-            .and_then(Argument::as_expression)
-            .is_none_or(is_constant_setter_arg)
-        {
-            continue;
-        }
-        // Skip if wrapped in `startTransition` or `requestAnimationFrame`
-        let is_wrapped = semantic
-            .nodes()
-            .ancestor_ids(inner_id)
-            .skip(1)
-            .any(|anc_id| {
-                if let AstKind::CallExpression(anc_call) = semantic.nodes().kind(anc_id)
-                    && let Expression::Identifier(id) = unwrap_expr(&anc_call.callee)
-                {
-                    matches!(
-                        id.name.as_str(),
-                        "startTransition" | "requestAnimationFrame" | "requestIdleCallback"
-                    )
-                } else {
-                    false
-                }
-            });
-        if is_wrapped {
-            continue;
-        }
-
-        let subject_name = find_enclosing_react_node(semantic, inner_id)
-            .and_then(|id| get_subject_name(semantic, id));
-        push_semantic_site(
-            out,
-            RuleId::RerenderTransitionsScroll,
-            subject_name,
-            "rerenderTransitionsScroll",
-            name,
-            format!(
-                "This can make scrolling stutter because setState in a \"{event_name}\" handler redraws on every event. Wrap it in startTransition, use useDeferredValue, or keep the value in a ref and throttle with requestAnimationFrame."
-            ),
-            line_starts,
-            set_call.span,
-        );
-        return;
-    }
-}
-
-fn is_constant_setter_arg(expr: &Expression<'_>) -> bool {
-    match unwrap_expr(expr) {
-        Expression::BooleanLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::StringLiteral(_)
-        | Expression::NullLiteral(_) => true,
-        Expression::Identifier(id) => id.name == "undefined",
-        Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty(),
-        Expression::UnaryExpression(u) => is_constant_setter_arg(&u.argument),
-        _ => false,
-    }
-}
-
-fn is_bound_react_hook_call(
-    call: &CallExpression<'_>,
-    hook_name: &str,
-    semantic: &Semantic<'_>,
-) -> bool {
-    match unwrap_expr(&call.callee) {
-        Expression::Identifier(ident) => {
-            let Some(sym_id) = resolve_ident_symbol(semantic, ident) else {
-                return false;
-            };
-            if !semantic
-                .scoping()
-                .symbol_flags(sym_id)
-                .contains(SymbolFlags::Import)
-            {
-                return false;
-            }
-            let decl_id = semantic.scoping().symbol_declaration(sym_id);
-            if let AstKind::ImportSpecifier(spec) = semantic.nodes().kind(decl_id) {
-                spec.imported.name() == hook_name
-            } else {
-                false
-            }
-        }
-        Expression::StaticMemberExpression(mem) => {
-            if mem.property.name != hook_name {
-                return false;
-            }
-            let Expression::Identifier(obj_id) = unwrap_expr(&mem.object) else {
-                return false;
-            };
-            if let Some(sym_id) = resolve_ident_symbol(semantic, obj_id) {
-                semantic
-                    .scoping()
-                    .symbol_flags(sym_id)
-                    .contains(SymbolFlags::Import)
-            } else {
-                obj_id.name == "React"
-            }
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn check_no_match_media_in_state_initializer(
-    node_id: NodeId,
-    call: &CallExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    if !is_bound_react_hook_call(call, "useState", semantic) {
-        return;
-    }
-    let Some(init_expr) = call.arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-    let search_span = match unwrap_expr(init_expr) {
-        Expression::ArrowFunctionExpression(arrow) => {
-            if arrow.r#async {
-                return;
-            }
-            arrow.body.span()
-        }
-        Expression::FunctionExpression(func) => {
-            if func.r#async || func.generator {
-                return;
-            }
-            let Some(b) = &func.body else {
-                return;
-            };
-            b.span
-        }
-        other => other.span(),
-    };
-
-    for (inner_id, inner_node) in semantic.nodes().iter_enumerated() {
-        if !search_span.contains_inclusive(inner_node.span()) {
-            continue;
-        }
-        let AstKind::CallExpression(mm_call) = inner_node.kind() else {
-            continue;
-        };
-        // Skip if inside a nested function/callback inside search_span
-        let in_nested_fn = semantic
-            .nodes()
-            .ancestor_ids(inner_id)
-            .skip(1)
-            .take_while(|&anc_id| {
-                search_span.contains_inclusive(semantic.nodes().get_node(anc_id).span())
-            })
-            .any(|anc_id| {
-                matches!(
-                    semantic.nodes().kind(anc_id),
-                    AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-                )
-            });
-        if in_nested_fn {
-            continue;
-        }
-        if !is_global_match_media_call(mm_call, semantic) {
-            continue;
-        }
-        let subject_name = find_enclosing_react_node(semantic, node_id)
-            .and_then(|id| get_subject_name(semantic, id));
-        push_semantic_site(
-            out,
-            RuleId::NoMatchMediaInStateInitializer,
-            subject_name,
-            "noMatchMediaInStateInitializer",
-            "matchMedia",
-            "`matchMedia()` in a useState initializer can cause an SSR crash or seed different server and hydration state. Prefer CSS media queries for layout, or use `useSyncExternalStore` with a stable server snapshot.".to_string(),
-            line_starts,
-            mm_call.span,
-        );
-        return;
-    }
-}
-
-fn is_global_match_media_call(call: &CallExpression<'_>, semantic: &Semantic<'_>) -> bool {
-    match unwrap_expr(&call.callee) {
-        Expression::Identifier(id) => id.name == "matchMedia" && is_global_ident(semantic, id),
-        Expression::StaticMemberExpression(mem) => {
-            if mem.property.name != "matchMedia" {
-                return false;
-            }
-            if let Expression::Identifier(obj_id) = unwrap_expr(&mem.object) {
-                (obj_id.name == "window" || obj_id.name == "globalThis")
-                    && is_global_ident(semantic, obj_id)
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn check_no_eager_new_in_use_state_initializer(
-    node_id: NodeId,
-    call: &CallExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    if !is_react_named_hook_call(call, "useState") {
-        return;
-    }
-    let Some(init_expr) = call.arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-    let Expression::NewExpression(new_expr) = unwrap_expr(init_expr) else {
-        return;
-    };
-    let ctor_name = match unwrap_expr(&new_expr.callee) {
-        Expression::Identifier(id) => id.name.as_str(),
-        Expression::StaticMemberExpression(mem) => mem.property.name.as_str(),
-        _ => "constructor",
-    };
-    if CHEAP_CONSTRUCTORS.contains(&ctor_name) && new_expr.arguments.is_empty() {
-        return;
-    }
-    let subject_name =
-        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
-    let target_name = format!("new {ctor_name}()");
-    push_semantic_site(
-        out,
-        RuleId::NoEagerNewInUseStateInitializer,
-        subject_name,
-        "noEagerNewInUseStateInitializer",
-        &target_name,
-        format!(
-            "`new {ctor_name}()` inside `useState(...)` runs on every render; pass a lazy initializer `useState(() => new {ctor_name}(...))` so it only runs on mount."
-        ),
-        line_starts,
-        new_expr.span,
-    );
-}
-
-pub(super) fn check_no_usememo_simple_expression(
-    node_id: NodeId,
-    call: &CallExpression<'_>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    out: &mut Vec<SemanticRuleSite>,
-) {
-    if !is_react_named_hook_call(call, "useMemo") {
-        return;
-    }
-    let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression) else {
-        return;
-    };
-    let ret_expr: Option<&Expression<'_>> = match unwrap_expr(first_arg) {
-        Expression::ArrowFunctionExpression(arrow) => {
-            if let Some(expr) = arrow.body.as_expression() {
-                Some(expr)
-            } else if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
-                if body.statements.len() == 1
-                    && let Statement::ReturnStatement(ret) = &body.statements[0]
-                {
-                    ret.argument.as_ref()
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        Expression::FunctionExpression(func) => {
-            let Some(body) = &func.body else {
-                return;
-            };
-            if body.statements.len() == 1
-                && let Statement::ReturnStatement(ret) = &body.statements[0]
-            {
-                ret.argument.as_ref()
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-    let Some(expr) = ret_expr.map(unwrap_expr) else {
-        return;
-    };
-    if matches!(
-        expr,
-        Expression::Identifier(_) | Expression::StaticMemberExpression(_)
-    ) {
-        return;
-    }
-    if !is_simple_cheap_expr(expr) {
-        return;
-    }
-    let subject_name =
-        find_enclosing_react_node(semantic, node_id).and_then(|id| get_subject_name(semantic, id));
-    push_semantic_site(
-        out,
-        RuleId::NoUsememoSimpleExpression,
-        subject_name,
-        "noUsememoSimpleExpression",
-        "useMemo",
-        "This costs more than it saves because useMemo is wrapping a value that's already cheap, so remove the useMemo".to_string(),
-        line_starts,
-        call.span,
-    );
-}
-
-fn is_simple_cheap_expr(expr: &Expression<'_>) -> bool {
-    match unwrap_expr(expr) {
-        Expression::Identifier(_)
-        | Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_) => true,
-        Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty(),
-        Expression::BinaryExpression(bin) => {
-            is_simple_cheap_expr(&bin.left) && is_simple_cheap_expr(&bin.right)
-        }
-        Expression::UnaryExpression(u) => is_simple_cheap_expr(&u.argument),
-        Expression::StaticMemberExpression(mem) => is_simple_cheap_expr(&mem.object),
-        Expression::ConditionalExpression(cond) => {
-            is_simple_cheap_expr(&cond.test)
-                && is_simple_cheap_expr(&cond.consequent)
-                && is_simple_cheap_expr(&cond.alternate)
-        }
-        _ => false,
-    }
-}

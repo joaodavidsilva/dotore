@@ -132,6 +132,7 @@ export class UserCardComponent {{}}
   <button (click)="selectUser()">Select</button>
   <div (click)="selectUser()" (keydown.enter)="selectUser()" role="button" tabindex="0">Select</div>
   <div (click)="selectUser()" (keyup)="selectUser()" role="button" [attr.tabindex]="0">Select 2</div>
+  <div role="button">Static non-interactive badge without event bindings</div>
   <span (mouseover)="showPreview()" (focus)="showPreview()" (mouseout)="hidePreview()" (blur)="hidePreview()">Hover</span>
   <h2>Dashboard</h2>
   <h3 [innerHTML]="headingHtml"></h3>

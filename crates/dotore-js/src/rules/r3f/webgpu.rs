@@ -9,14 +9,16 @@ use oxc_ast::{
     AstKind,
     ast::{
         Argument, AssignmentExpression, CallExpression, Expression, JSXOpeningElement,
-        StaticMemberExpression,
+        ObjectExpression, StaticMemberExpression,
     },
 };
 use oxc_semantic::NodeId;
 use oxc_span::{GetSpan, Span};
 
 use super::{
-    FileAnalysisCtx, R3F_WEBGPU_MODULES, WEBGPU_SYNC_METHODS, get_jsx_attr_expr, get_jsx_attr_item,
+    COLOR_SPACE_LINEAR_PROPS, COLOR_SPACE_SRGB_PROPS, DEFAULT_TRANSPARENT_MATERIALS,
+    FileAnalysisCtx, PBR_MATERIALS, PHYSICAL_NORMALIZED_PROPS, R3F_WEBGPU_MODULES,
+    WEBGPU_SYNC_METHODS, eval_static_f64, get_jsx_attr_expr, get_jsx_attr_item, get_obj_prop_expr,
 };
 use crate::{ir::types::SemanticRuleSite, rules::RuleId};
 
@@ -384,6 +386,193 @@ pub(crate) fn check_webgpu_use_three_gl_state(
                 );
             }
             _ => {}
+        }
+    }
+}
+
+pub(crate) fn check_three_material_options(
+    ctx: &FileAnalysisCtx<'_>,
+    node_id: NodeId,
+    ctor: &str,
+    obj: &ObjectExpression<'_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    check_three_material_opacity_and_basic(ctx, node_id, ctor, obj, sites);
+    check_three_material_pbr_and_physical(ctx, node_id, ctor, obj, sites);
+    check_three_material_texture_color_space(ctx, node_id, obj, sites);
+}
+
+fn check_three_material_opacity_and_basic(
+    ctx: &FileAnalysisCtx<'_>,
+    node_id: NodeId,
+    ctor: &str,
+    obj: &ObjectExpression<'_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if let Some(op_expr) = get_obj_prop_expr(obj, "opacity")
+        && let Some(op) = eval_static_f64(op_expr)
+    {
+        if !(0.0..=1.0).contains(&op) {
+            ctx.push_site(
+                sites,
+                node_id,
+                RuleId::ThreeValidMaterialOpacity,
+                "threeValidMaterialOpacity",
+                "opacity",
+                format!("Material opacity {op} is outside [0, 1]."),
+                op_expr.span(),
+            );
+        } else if op < 1.0
+            && !DEFAULT_TRANSPARENT_MATERIALS.contains(&ctor)
+            && !matches!(get_obj_prop_expr(obj, "transparent"), Some(Expression::BooleanLiteral(b)) if b.value)
+            && !matches!(get_obj_prop_expr(obj, "alphaHash"), Some(Expression::BooleanLiteral(b)) if b.value)
+            && get_obj_prop_expr(obj, "alphaTest")
+                .and_then(eval_static_f64)
+                .is_none_or(|v| v <= 0.0)
+        {
+            ctx.push_site(
+                sites,
+                node_id,
+                RuleId::ThreeRequireTransparentForOpacity,
+                "threeRequireTransparentForOpacity",
+                "opacity",
+                "Material sets `opacity < 1` without `transparent: true`, `alphaHash: true`, or `alphaTest > 0`.".to_string(),
+                op_expr.span(),
+            );
+        }
+    }
+
+    if ctor == "MeshBasicMaterial" {
+        for ignored in ["roughness", "metalness"] {
+            if let Some(expr) = get_obj_prop_expr(obj, ignored) {
+                ctx.push_site(
+                    sites,
+                    node_id,
+                    RuleId::ThreeNoIgnoredBasicMaterialProperties,
+                    "threeNoIgnoredBasicMaterialProperties",
+                    ignored,
+                    format!(
+                        "`MeshBasicMaterial` ignores `{ignored}`; use `MeshStandardMaterial` or `MeshPhysicalMaterial`."
+                    ),
+                    expr.span(),
+                );
+            }
+        }
+    }
+
+    if matches!(ctor, "LineBasicMaterial" | "LineDashedMaterial")
+        && let Some(lw_expr) = get_obj_prop_expr(obj, "linewidth")
+        && let Some(lw) = eval_static_f64(lw_expr)
+        && (lw - 1.0).abs() > f64::EPSILON
+    {
+        ctx.push_site(
+            sites,
+            node_id,
+            RuleId::ThreeNoIgnoredLinewidth,
+            "threeNoIgnoredLinewidth",
+            "linewidth",
+            format!("`linewidth: {lw}` is ignored by WebGL/WebGPU renderers."),
+            lw_expr.span(),
+        );
+    }
+}
+
+fn check_three_material_pbr_and_physical(
+    ctx: &FileAnalysisCtx<'_>,
+    node_id: NodeId,
+    ctor: &str,
+    obj: &ObjectExpression<'_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    if PBR_MATERIALS.contains(&ctor) {
+        for factor in ["roughness", "metalness"] {
+            if let Some(expr) = get_obj_prop_expr(obj, factor)
+                && let Some(val) = eval_static_f64(expr)
+                && !(0.0..=1.0).contains(&val)
+            {
+                ctx.push_site(
+                    sites,
+                    node_id,
+                    RuleId::ThreeValidPbrMaterialProperties,
+                    "threeValidPbrMaterialProperties",
+                    factor,
+                    format!("`{factor}` is {val}, outside [0, 1]."),
+                    expr.span(),
+                );
+            }
+        }
+    }
+
+    if ctor != "MeshPhysicalMaterial" {
+        return;
+    }
+    for prop in PHYSICAL_NORMALIZED_PROPS {
+        if let Some(expr) = get_obj_prop_expr(obj, prop)
+            && let Some(val) = eval_static_f64(expr)
+            && !(0.0..=1.0).contains(&val)
+        {
+            ctx.push_site(
+                sites,
+                node_id,
+                RuleId::ThreeValidPhysicalMaterialProperties,
+                "threeValidPhysicalMaterialProperties",
+                prop,
+                format!("`{prop}` is {val}, outside [0, 1]."),
+                expr.span(),
+            );
+        }
+    }
+    for ior_prop in ["ior", "iridescenceIOR"] {
+        if let Some(expr) = get_obj_prop_expr(obj, ior_prop)
+            && let Some(val) = eval_static_f64(expr)
+            && !(1.0..=2.333).contains(&val)
+        {
+            ctx.push_site(
+                sites,
+                node_id,
+                RuleId::ThreeValidPhysicalMaterialProperties,
+                "threeValidPhysicalMaterialProperties",
+                ior_prop,
+                format!("`{ior_prop}` is {val}, outside [1, 2.333]."),
+                expr.span(),
+            );
+        }
+    }
+}
+
+fn check_three_material_texture_color_space(
+    ctx: &FileAnalysisCtx<'_>,
+    node_id: NodeId,
+    obj: &ObjectExpression<'_>,
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for &prop in COLOR_SPACE_SRGB_PROPS
+        .iter()
+        .chain(COLOR_SPACE_LINEAR_PROPS.iter())
+    {
+        if let Some(Expression::Identifier(tex_id)) = get_obj_prop_expr(obj, prop)
+            && !ctx.render_target_vars.contains(tex_id.name.as_str())
+            && let Some((cs, 1)) = ctx.texture_color_spaces.get(tex_id.name.as_str())
+        {
+            let expected = if COLOR_SPACE_SRGB_PROPS.contains(&prop) {
+                "SRGBColorSpace"
+            } else {
+                "NoColorSpace"
+            };
+            if cs != expected {
+                ctx.push_site(
+                    sites,
+                    node_id,
+                    RuleId::ThreeValidTextureColorSpace,
+                    "threeValidTextureColorSpace",
+                    prop,
+                    format!(
+                        "`{prop}` expects `{expected}`, but `{}` is assigned `{cs}`.",
+                        tex_id.name
+                    ),
+                    tex_id.span,
+                );
+            }
         }
     }
 }

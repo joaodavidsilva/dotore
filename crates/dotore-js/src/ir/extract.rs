@@ -49,97 +49,16 @@ where
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default();
-    if matches!(ext, "css" | "scss" | "yml" | "yaml") {
+    if matches!(ext, "css" | "scss" | "yml" | "yaml" | "html" | "htm") {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, "", SourceType::default()).parse();
         let semantic_ret = SemanticBuilder::new()
             .with_build_nodes(true)
             .build(&parsed.program);
-        let line_starts = compute_line_starts(source);
-        let mut semantic_sites = Vec::new();
-        let motion = if matches!(ext, "css" | "scss") {
-            crate::rules::angular::extract_angular_stylesheet_sites(
-                source,
-                0,
-                None,
-                &line_starts,
-                &mut semantic_sites,
-            );
-            extract_stylesheet_motion_ir(source)
-        } else {
-            MotionFileIr::default()
-        };
-        let file_ir = FileIr {
-            path: path.to_path_buf(),
-            source: source.to_string(),
-            file_context: classify_file_context(path),
-            subjects: Vec::new(),
-            caller_sites: Vec::new(),
-            jsx_elements: Vec::new(),
-            jsx_subtrees: Vec::new(),
-            module: ModuleIr::default(),
-            symbol_outlines: Vec::new(),
-            mutations: Vec::new(),
-            async_flows: Vec::new(),
-            security_sinks: Vec::new(),
-            suppressions: extract_file_suppressions(source),
-            semantic_sites,
-            motion,
-            static_dom_ids: Vec::new(),
-            has_unresolved_id_spread: false,
-            frame_loop_roots: Vec::new(),
-            frame_helpers: Vec::new(),
-            context_providers: Vec::new(),
-            context_consumers: Vec::new(),
-            contextual_owner_spans: ContextualOwnerSpansIr::default(),
-            architecture_facets: ArchitectureFileFacets::default(),
-        };
-        return f(&file_ir, &semantic_ret.semantic);
-    }
-    if matches!(ext, "html" | "htm") {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, "", SourceType::default()).parse();
-        let semantic_ret = SemanticBuilder::new()
-            .with_build_nodes(true)
-            .build(&parsed.program);
-        let line_starts = compute_line_starts(source);
-        let mut semantic_sites = Vec::new();
-        crate::rules::angular::extract_angular_html_template_sites(
-            source,
-            0,
-            None,
-            &line_starts,
-            &mut semantic_sites,
-        );
-        let file_ir = FileIr {
-            path: path.to_path_buf(),
-            source: source.to_string(),
-            file_context: classify_file_context(path),
-            subjects: Vec::new(),
-            caller_sites: Vec::new(),
-            jsx_elements: Vec::new(),
-            jsx_subtrees: Vec::new(),
-            module: ModuleIr::default(),
-            symbol_outlines: Vec::new(),
-            mutations: Vec::new(),
-            async_flows: Vec::new(),
-            security_sinks: Vec::new(),
-            suppressions: extract_file_suppressions(source),
-            semantic_sites,
-            motion: MotionFileIr::default(),
-            static_dom_ids: Vec::new(),
-            has_unresolved_id_spread: false,
-            frame_loop_roots: Vec::new(),
-            frame_helpers: Vec::new(),
-            context_providers: Vec::new(),
-            context_consumers: Vec::new(),
-            contextual_owner_spans: ContextualOwnerSpansIr::default(),
-            architecture_facets: ArchitectureFileFacets::default(),
-        };
+        let file_ir = build_non_script_file_ir(path, ext, source);
         return f(&file_ir, &semantic_ret.semantic);
     }
 
-    let line_starts = compute_line_starts(source);
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
         .unwrap_or_default()
@@ -161,107 +80,115 @@ where
         .with_build_nodes(true)
         .build(&parsed.program);
     let semantic = semantic_ret.semantic;
+    let file_ir = build_script_file_ir(path, source, &parsed.program, &semantic);
+    f(&file_ir, &semantic)
+}
 
-    let ref_entries = collect_ref_entries(&semantic);
-    let subjects = extract_subjects(&semantic, &ref_entries, &line_starts);
-    let caller_sites = extract_caller_sites(&semantic, &line_starts);
-    let jsx_elements = extract_jsx_elements(&semantic, &line_starts);
-    let jsx_subtrees = extract_jsx_subtrees(&semantic, &line_starts);
-    let module = extract_module_ir(&parsed.program, &semantic, &jsx_elements, &line_starts);
-    let symbol_outlines = extract_symbol_outlines(&semantic, source, &line_starts);
-    let mutations = extract_mutations(&semantic, &ref_entries, &line_starts);
-    let async_flows = extract_async_flows(&semantic, &line_starts);
-    let security_sinks = extract_security_sinks(&parsed.program, &semantic, &module, &line_starts);
+fn build_non_script_file_ir(path: &Path, ext: &str, source: &str) -> FileIr {
+    let line_starts = compute_line_starts(source);
+    let mut semantic_sites = Vec::new();
+    let motion = if matches!(ext, "css" | "scss") {
+        crate::rules::angular::extract_angular_stylesheet_sites(
+            source,
+            0,
+            None,
+            &line_starts,
+            &mut semantic_sites,
+        );
+        extract_stylesheet_motion_ir(source)
+    } else if matches!(ext, "html" | "htm") {
+        crate::rules::angular::extract_angular_html_template_sites(
+            source,
+            0,
+            None,
+            &line_starts,
+            &mut semantic_sites,
+        );
+        MotionFileIr::default()
+    } else {
+        MotionFileIr::default()
+    };
+
+    FileIr {
+        path: path.to_path_buf(),
+        source: source.to_string(),
+        file_context: classify_file_context(path),
+        subjects: Vec::new(),
+        caller_sites: Vec::new(),
+        jsx_elements: Vec::new(),
+        jsx_subtrees: Vec::new(),
+        module: ModuleIr::default(),
+        symbol_outlines: Vec::new(),
+        mutations: Vec::new(),
+        async_flows: Vec::new(),
+        security_sinks: Vec::new(),
+        suppressions: extract_file_suppressions(source),
+        semantic_sites,
+        motion,
+        static_dom_ids: Vec::new(),
+        has_unresolved_id_spread: false,
+        frame_loop_roots: Vec::new(),
+        frame_helpers: Vec::new(),
+        context_providers: Vec::new(),
+        context_consumers: Vec::new(),
+        contextual_owner_spans: ContextualOwnerSpansIr::default(),
+        architecture_facets: ArchitectureFileFacets::default(),
+    }
+}
+
+fn build_script_file_ir(
+    path: &Path,
+    source: &str,
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &Semantic<'_>,
+) -> FileIr {
+    let line_starts = compute_line_starts(source);
+    let ref_entries = collect_ref_entries(semantic);
+    let subjects = extract_subjects(semantic, &ref_entries, &line_starts);
+    let caller_sites = extract_caller_sites(semantic, &line_starts);
+    let jsx_elements = extract_jsx_elements(semantic, &line_starts);
+    let jsx_subtrees = extract_jsx_subtrees(semantic, &line_starts);
+    let module = extract_module_ir(program, semantic, &jsx_elements, &line_starts);
+    let symbol_outlines = extract_symbol_outlines(semantic, source, &line_starts);
+    let mutations = extract_mutations(semantic, &ref_entries, &line_starts);
+    let async_flows = extract_async_flows(semantic, &line_starts);
+    let security_sinks = extract_security_sinks(program, semantic, &module, &line_starts);
     let suppressions = extract_file_suppressions(source);
     let mut semantic_sites =
-        extract_semantic_rule_sites(path, &parsed.program, &semantic, &ref_entries, &line_starts);
+        extract_semantic_rule_sites(path, program, semantic, &ref_entries, &line_starts);
     let (a11y_sites, static_dom_ids, has_unresolved_id_spread) =
-        extract_a11y_sites_and_dom_ids(path, &parsed.program, &semantic, &line_starts);
+        extract_a11y_sites_and_dom_ids(path, program, semantic, &line_starts);
     semantic_sites.extend(a11y_sites);
-    semantic_sites.extend(extract_design_sites(
-        path,
-        &parsed.program,
-        &semantic,
-        &line_starts,
-    ));
-    let motion = extract_script_motion_ir(&parsed.program, &semantic);
+    semantic_sites.extend(extract_design_sites(path, program, semantic, &line_starts));
+    let motion = extract_script_motion_ir(program, semantic);
     let (frame_loop_roots, frame_helpers) = crate::rules::r3f::extract_r3f_webgl_file_ir(
-        &parsed.program,
-        &semantic,
-        &module,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::bundle_size::extract_bundle_size_sites(
-        path,
-        &semantic,
-        &module,
-        &jsx_elements,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::js_performance::extract_js_performance_sites(
-        path,
-        &semantic,
-        &module,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::performance::extract_performance_sites(
-        path,
-        &semantic,
+        program,
+        semantic,
         &module,
         &line_starts,
         &mut semantic_sites,
     );
     let mut context_providers = Vec::new();
     let mut context_consumers = Vec::new();
-    let mut architecture_facets = ArchitectureFileFacets::default();
-    crate::rules::state_and_effects::extract_state_and_effects_sites(
-        &semantic,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::react_builtins::extract_react_builtins_sites(
-        &semantic,
+    populate_script_rule_sites(
         path,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::correctness::extract_correctness_sites(
-        &semantic,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::architecture::extract_architecture_sites(
-        &semantic,
+        semantic,
+        &module,
         &subjects,
+        &jsx_elements,
         &line_starts,
         &mut semantic_sites,
         &mut context_providers,
         &mut context_consumers,
     );
-    crate::rules::effect_teardown::extract_effect_teardown_sites(
-        path,
-        &semantic,
-        &subjects,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::defensive_js::extract_defensive_js_sites(
-        &semantic,
-        &subjects,
-        &line_starts,
-        &mut semantic_sites,
-    );
-    crate::rules::angular::extract_angular_sites(&semantic, &line_starts, &mut semantic_sites);
-    let mut contextual_owner_spans = extract_contextual_owner_spans(&semantic);
+    let mut contextual_owner_spans = extract_contextual_owner_spans(semantic);
     contextual_owner_spans.element_spans = jsx_subtrees.iter().map(|s| s.span).collect();
+    let mut architecture_facets = ArchitectureFileFacets::default();
     crate::rules::architecture::extract_soc_architecture_facets(
         path,
         source,
-        &parsed.program,
-        &semantic,
+        program,
+        semantic,
         &module,
         &subjects,
         &jsx_elements,
@@ -272,7 +199,7 @@ where
     crate::rules::architecture::extract_reuse_architecture_facets(
         path,
         source,
-        &semantic,
+        semantic,
         &subjects,
         &module,
         &line_starts,
@@ -284,7 +211,7 @@ where
             .push(cat.span);
     }
 
-    let file_ir = FileIr {
+    FileIr {
         path: path.to_path_buf(),
         source: source.to_string(),
         file_context: classify_file_context(path),
@@ -308,9 +235,80 @@ where
         context_consumers,
         contextual_owner_spans,
         architecture_facets,
-    };
+    }
+}
 
-    f(&file_ir, &semantic)
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Aggregates single-pass domain rule site extraction into semantic_sites and context buffers (#50)"
+)]
+fn populate_script_rule_sites(
+    path: &Path,
+    semantic: &Semantic<'_>,
+    module: &ModuleIr,
+    subjects: &[super::types::SubjectIr],
+    jsx_elements: &[super::types::JsxElementIr],
+    line_starts: &[u32],
+    semantic_sites: &mut Vec<super::types::SemanticRuleSite>,
+    context_providers: &mut Vec<super::types::ContextProviderSiteIr>,
+    context_consumers: &mut Vec<super::types::ContextConsumerSiteIr>,
+) {
+    crate::rules::bundle_size::extract_bundle_size_sites(
+        path,
+        semantic,
+        module,
+        jsx_elements,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::js_performance::extract_js_performance_sites(
+        path,
+        semantic,
+        module,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::performance::extract_performance_sites(
+        path,
+        semantic,
+        module,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::state_and_effects::extract_state_and_effects_sites(
+        semantic,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::react_builtins::extract_react_builtins_sites(
+        semantic,
+        path,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::correctness::extract_correctness_sites(semantic, line_starts, semantic_sites);
+    crate::rules::architecture::extract_architecture_sites(
+        semantic,
+        subjects,
+        line_starts,
+        semantic_sites,
+        context_providers,
+        context_consumers,
+    );
+    crate::rules::effect_teardown::extract_effect_teardown_sites(
+        path,
+        semantic,
+        subjects,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::defensive_js::extract_defensive_js_sites(
+        semantic,
+        subjects,
+        line_starts,
+        semantic_sites,
+    );
+    crate::rules::angular::extract_angular_sites(semantic, line_starts, semantic_sites);
 }
 
 fn collect_ref_entries(semantic: &Semantic<'_>) -> Vec<RefEntry> {

@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, AssignmentTarget, BinaryOperator, BindingPattern, CallExpression, Expression,
+        AssignmentTarget, BinaryOperator, BindingPattern, CallExpression, Expression,
         Statement,
     },
 };
@@ -395,15 +395,21 @@ fn should_skip_loop_await(
     let Expression::CallExpression(call) = arg else {
         return false;
     };
+    is_scheduler_or_sequencing_await_call(call, semantic)
+        || has_loop_carried_await_dependency(await_node_id, arg, loop_node_id, loop_span, semantic)
+}
 
-    // Check scheduler argument (e.g. `await job(scheduler)`)
-    for call_arg in &call.arguments {
-        if let Some(expr) = call_arg.as_expression()
-            && let Expression::Identifier(id) = unwrap_expr(expr)
-            && id.name.to_ascii_lowercase().contains("sched")
-        {
-            return true;
-        }
+fn is_scheduler_or_sequencing_await_call(
+    call: &CallExpression<'_>,
+    semantic: &Semantic<'_>,
+) -> bool {
+    if call.arguments.iter().any(|call_arg| {
+        matches!(
+            call_arg.as_expression().map(unwrap_expr),
+            Some(Expression::Identifier(id)) if id.name.to_ascii_lowercase().contains("sched")
+        )
+    }) {
+        return true;
     }
 
     let trail = collect_callee_identifier_trail(&call.callee);
@@ -422,7 +428,6 @@ fn should_skip_loop_await(
         }
     }
 
-    // Check if local function yields to host (e.g. `setTimeout` inside `new Promise`)
     if let Expression::Identifier(ident) = unwrap_expr(&call.callee)
         && let Some(sym_id) = resolve_ident_symbol(semantic, ident)
     {
@@ -430,29 +435,38 @@ fn should_skip_loop_await(
             .nodes()
             .get_node(semantic.scoping().symbol_declaration(sym_id));
         let decl_text = decl_node.span().source_text(semantic.source_text());
-        if (decl_text.contains("setTimeout")
-            || decl_text.contains("requestAnimationFrame")
-            || decl_text.contains("queueMicrotask")
-            || decl_text.contains("setImmediate"))
+        if [
+            "setTimeout",
+            "requestAnimationFrame",
+            "queueMicrotask",
+            "setImmediate",
+        ]
+        .iter()
+        .any(|kw| decl_text.contains(kw))
             && !decl_text.contains("void new Promise")
         {
             return true;
         }
     }
+    false
+}
 
-    // Check loop-carried dependency:
-    // 1. `dir = await dir.getDirectoryHandle(p)` where LHS is read inside the awaited call
+fn has_loop_carried_await_dependency(
+    await_node_id: NodeId,
+    arg: &Expression<'_>,
+    loop_node_id: NodeId,
+    loop_span: Span,
+    semantic: &Semantic<'_>,
+) -> bool {
     if let AstKind::AssignmentExpression(assign) = semantic.nodes().parent_kind(await_node_id)
         && let AssignmentTarget::AssignmentTargetIdentifier(lhs_id) = &assign.left
     {
-        let mut names = HashSet::new();
-        names.insert(lhs_id.name.to_string());
+        let names = HashSet::from([lhs_id.name.to_string()]);
         if expr_reads_any_bound_name(arg, &names, semantic) {
             return true;
         }
     }
 
-    // 2. `results.push(await fetchNext(id, prev))` where `results` is also read inside the loop before the push
     for anc_id in semantic.nodes().ancestor_ids(await_node_id) {
         if anc_id == loop_node_id {
             break;
@@ -461,15 +475,13 @@ fn should_skip_loop_await(
             && let Expression::StaticMemberExpression(mem) = unwrap_expr(&outer_call.callee)
             && (mem.property.name == "push" || mem.property.name == "unshift")
             && let Expression::Identifier(arr_id) = unwrap_expr(&mem.object)
+            && loop_span
+                .source_text(semantic.source_text())
+                .contains(&format!("{}[", arr_id.name))
         {
-            let arr_name = arr_id.name.as_str();
-            let loop_text = loop_span.source_text(semantic.source_text());
-            if loop_text.contains(&format!("{arr_name}[")) {
-                return true;
-            }
+            return true;
         }
     }
-
     false
 }
 
@@ -501,53 +513,24 @@ pub(super) fn check_async_defer_await_in_statements(
             i += 1;
             continue;
         };
-        let mut awaited_bindings: HashSet<String> = HashSet::new();
-        let mut has_await = false;
-        for decl in &var_decl.declarations {
-            if let Some(init) = &decl.init
-                && span_contains_direct_await(init.span(), semantic)
-            {
-                has_await = true;
-                awaited_bindings.extend(collect_pattern_bound_names(&decl.id));
-            }
-        }
-        if !has_await || awaited_bindings.is_empty() {
+        let mut awaited_bindings = collect_var_decl_awaited_bindings(var_decl, semantic);
+        if awaited_bindings.is_empty() {
             i += 1;
             continue;
         }
 
-        let mut guard_idx = i + 1;
-        while guard_idx < statements.len() {
-            let Statement::VariableDeclaration(next_var) = &statements[guard_idx] else {
-                break;
-            };
-            let mut derives_from_awaited = false;
-            for decl in &next_var.declarations {
-                if let Some(init) = &decl.init
-                    && (span_contains_direct_await(init.span(), semantic)
-                        || expr_reads_any_bound_name(init, &awaited_bindings, semantic))
-                {
-                    derives_from_awaited = true;
-                    awaited_bindings.extend(collect_pattern_bound_names(&decl.id));
-                }
-            }
-            if derives_from_awaited {
-                guard_idx += 1;
-                continue;
-            }
+        let guard_idx = advance_past_derived_awaited_declarations(
+            statements,
+            i + 1,
+            &mut awaited_bindings,
+            semantic,
+        );
+        let Some(next_stmt) = statements.get(guard_idx) else {
             break;
-        }
+        };
 
-        if guard_idx >= statements.len() {
-            break;
-        }
-
-        if let Statement::IfStatement(if_stmt) = &statements[guard_idx]
-            && if_stmt.alternate.is_none()
-            && is_early_exit_consequent(&if_stmt.consequent)
-            && !expr_reads_any_bound_name(&if_stmt.test, &awaited_bindings, semantic)
-            && !stmt_reads_any_bound_name(&if_stmt.consequent, &awaited_bindings, semantic)
-            && !is_cancellation_or_freshness_guard(&if_stmt.test, semantic)
+        if let Statement::IfStatement(if_stmt) = next_stmt
+            && is_deferrable_early_exit_guard(if_stmt, &awaited_bindings, semantic)
         {
             push_semantic_site(
                 out,
@@ -565,6 +548,58 @@ pub(super) fn check_async_defer_await_in_statements(
 
         i += 1;
     }
+}
+
+fn collect_var_decl_awaited_bindings(
+    var_decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    semantic: &Semantic<'_>,
+) -> HashSet<String> {
+    let mut awaited_bindings = HashSet::new();
+    for decl in &var_decl.declarations {
+        if let Some(init) = &decl.init
+            && span_contains_direct_await(init.span(), semantic)
+        {
+            awaited_bindings.extend(collect_pattern_bound_names(&decl.id));
+        }
+    }
+    awaited_bindings
+}
+
+fn advance_past_derived_awaited_declarations(
+    statements: &[Statement<'_>],
+    mut guard_idx: usize,
+    awaited_bindings: &mut HashSet<String>,
+    semantic: &Semantic<'_>,
+) -> usize {
+    while let Some(Statement::VariableDeclaration(next_var)) = statements.get(guard_idx) {
+        let mut derives_from_awaited = false;
+        for decl in &next_var.declarations {
+            if let Some(init) = &decl.init
+                && (span_contains_direct_await(init.span(), semantic)
+                    || expr_reads_any_bound_name(init, awaited_bindings, semantic))
+            {
+                derives_from_awaited = true;
+                awaited_bindings.extend(collect_pattern_bound_names(&decl.id));
+            }
+        }
+        if !derives_from_awaited {
+            break;
+        }
+        guard_idx += 1;
+    }
+    guard_idx
+}
+
+fn is_deferrable_early_exit_guard(
+    if_stmt: &oxc_ast::ast::IfStatement<'_>,
+    awaited_bindings: &HashSet<String>,
+    semantic: &Semantic<'_>,
+) -> bool {
+    if_stmt.alternate.is_none()
+        && is_early_exit_consequent(&if_stmt.consequent)
+        && !expr_reads_any_bound_name(&if_stmt.test, awaited_bindings, semantic)
+        && !stmt_reads_any_bound_name(&if_stmt.consequent, awaited_bindings, semantic)
+        && !is_cancellation_or_freshness_guard(&if_stmt.test, semantic)
 }
 
 fn span_contains_direct_await(span: Span, semantic: &Semantic<'_>) -> bool {
@@ -694,48 +729,15 @@ pub(super) fn check_js_async_reduce_without_awaited_acc(
     line_starts: &[u32],
     out: &mut Vec<SemanticRuleSite>,
 ) {
-    let method_name = match unwrap_expr(&call.callee) {
-        Expression::StaticMemberExpression(mem)
-            if mem.property.name == "reduce" || mem.property.name == "reduceRight" =>
-        {
-            mem.property.name.as_str()
-        }
-        Expression::ComputedMemberExpression(comp) => {
-            if let Expression::StringLiteral(s) = unwrap_expr(&comp.expression)
-                && let Some(val) = s.value.as_str()
-                && (val == "reduce" || val == "reduceRight")
-            {
-                val
-            } else {
-                return;
-            }
-        }
-        _ => return,
-    };
-
-    let Some(first_arg) = call.arguments.first().and_then(Argument::as_expression) else {
+    let Some((method_name, first_param_pat, body_span, reducer_span)) =
+        extract_async_reduce_callback_info(call)
+    else {
         return;
     };
-    let (params, body_span, reducer_span) = match unwrap_expr(first_arg) {
-        Expression::ArrowFunctionExpression(arrow) if arrow.r#async => {
-            (&arrow.params.items, arrow.body.span(), arrow.span)
-        }
-        Expression::FunctionExpression(func) if func.r#async => {
-            let Some(b) = &func.body else {
-                return;
-            };
-            (&func.params.items, b.span, func.span)
-        }
-        _ => return,
-    };
-
     if !span_contains_direct_await(body_span, semantic) {
         return;
     }
-    let Some(first_param) = params.first() else {
-        return;
-    };
-    let pat = match &first_param.pattern {
+    let pat = match first_param_pat {
         BindingPattern::AssignmentPattern(a) => &a.left,
         other => other,
     };
@@ -759,19 +761,7 @@ pub(super) fn check_js_async_reduce_without_awaited_acc(
         }
         BindingPattern::BindingIdentifier(acc_id) => {
             let acc_name = acc_id.name.as_str();
-            let awaits_acc = semantic.nodes().iter_enumerated().any(|(_, n)| {
-                if !body_span.contains_inclusive(n.span()) {
-                    return false;
-                }
-                if let AstKind::AwaitExpression(aw) = n.kind()
-                    && let Expression::Identifier(id) = unwrap_expr(&aw.argument)
-                {
-                    id.name == acc_name
-                } else {
-                    false
-                }
-            });
-            if !awaits_acc {
+            if !body_awaits_accumulator_ident(body_span, acc_name, semantic) {
                 let subject_name = find_enclosing_react_node(semantic, node_id)
                     .and_then(|id| get_subject_name(semantic, id));
                 push_semantic_site(
@@ -790,4 +780,53 @@ pub(super) fn check_js_async_reduce_without_awaited_acc(
         }
         BindingPattern::AssignmentPattern(_) => {}
     }
+}
+
+fn extract_async_reduce_callback_info<'a>(
+    call: &'a CallExpression<'a>,
+) -> Option<(&'a str, &'a BindingPattern<'a>, Span, Span)> {
+    let method_name = match unwrap_expr(&call.callee) {
+        Expression::StaticMemberExpression(mem)
+            if matches!(mem.property.name.as_str(), "reduce" | "reduceRight") =>
+        {
+            mem.property.name.as_str()
+        }
+        Expression::ComputedMemberExpression(comp) => {
+            let Expression::StringLiteral(s) = unwrap_expr(&comp.expression) else {
+                return None;
+            };
+            let val = s.value.as_str()?;
+            matches!(val, "reduce" | "reduceRight").then_some(val)?
+        }
+        _ => return None,
+    };
+
+    let first_arg = call.arguments.first()?.as_expression()?;
+    let (params, body_span, reducer_span) = match unwrap_expr(first_arg) {
+        Expression::ArrowFunctionExpression(arrow) if arrow.r#async => {
+            (&arrow.params.items, arrow.body.span(), arrow.span)
+        }
+        Expression::FunctionExpression(func) if func.r#async => {
+            let b = func.body.as_ref()?;
+            (&func.params.items, b.span, func.span)
+        }
+        _ => return None,
+    };
+    let first_param = params.first()?;
+    Some((method_name, &first_param.pattern, body_span, reducer_span))
+}
+
+fn body_awaits_accumulator_ident(
+    body_span: Span,
+    acc_name: &str,
+    semantic: &Semantic<'_>,
+) -> bool {
+    semantic.nodes().iter_enumerated().any(|(_, n)| {
+        body_span.contains_inclusive(n.span())
+            && matches!(
+                n.kind(),
+                AstKind::AwaitExpression(aw)
+                    if matches!(unwrap_expr(&aw.argument), Expression::Identifier(id) if id.name == acc_name)
+            )
+    })
 }

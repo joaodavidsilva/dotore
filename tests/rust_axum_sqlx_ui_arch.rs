@@ -718,6 +718,28 @@ pub async fn security_and_http_violations(user_arg: &str, url: &str) -> Result<(
     assert_eq!(count(RuleId::RsSecurityNoPermissiveCors), 3, "{diags:#?}");
     assert_eq!(count(RuleId::RsSecurityNoInsecureAuthCookie), 1, "{diags:#?}");
     assert_eq!(count(RuleId::RsSecurityNoDisabledJwtValidation), 2, "{diags:#?}");
+    // Verify `rs-security-no-insecure-auth-cookie` autofix replaces `false` with `true`
+    let cookie_diag = diags
+        .iter()
+        .find(|d| d.rule == RuleId::RsSecurityNoInsecureAuthCookie)
+        .unwrap();
+    assert!(cookie_diag.autofix.is_some());
+
+    // Verify empty string fallback `unwrap_or("".to_string())` on secret env var is flagged
+    let empty_secret_src = r#"
+pub fn read_empty_secret() -> String {
+    std::env::var("JWT_SECRET").unwrap_or("".to_string())
+}
+"#;
+    assert_eq!(
+        analyze_source(
+            Path::new("src/secret.rs"),
+            empty_secret_src,
+            Some(&[RuleId::RsSecurityNoSecretEnvFallback]),
+        )
+        .len(),
+        1
+    );
 
     let valid_src = r#"
 use reqwest::Client;
@@ -811,6 +833,35 @@ pub fn build_insecure_client() {
     assert_eq!(
         report.diagnostics[0].rule,
         RuleId::RsSecurityNoDisabledTlsVerification
+    );
+    // Verify `tokio_postgres` dependency rename is resolved for `rs-sqlx-no-formatted-query-string`
+    let pg_cargo = r#"
+[package]
+name = "pg-renamed"
+version = "0.1.0"
+
+[dependencies]
+pg_async = { package = "tokio-postgres", version = "0.7" }
+"#;
+    let pg_rs = r#"
+pub async fn query_user(user: &str) {
+    let client = pg_async::Client::connect("host=localhost", pg_async::NoTls).await.unwrap();
+    let sql = format!("SELECT * FROM users WHERE name = '{user}'");
+    let _ = client.query(&sql, &[]).await;
+}
+"#;
+    let pg_report = analyze_project_sources(
+        vec![
+            (PathBuf::from("Cargo.toml"), pg_cargo.to_string()),
+            (PathBuf::from("src/lib.rs"), pg_rs.to_string()),
+        ],
+        Some(&[RuleId::RsSqlxNoFormattedQueryString]),
+    );
+    assert_eq!(
+        pg_report.diagnostics.len(),
+        1,
+        "Expected pg_async -> tokio-postgres rename to be resolved: {:#?}",
+        pg_report.diagnostics
     );
 }
 

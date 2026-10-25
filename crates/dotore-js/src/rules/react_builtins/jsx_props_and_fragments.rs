@@ -9,9 +9,16 @@ use oxc_ast::{
     },
 };
 use oxc_semantic::{NodeId, Semantic};
-use oxc_span::{GetSpan, Span};
+use oxc_span::GetSpan;
 
-use super::{MAX_JSX_DEPTH, UNKNOWN_DOM_PROP_FIXES, strip_ts_and_parens};
+use super::{
+    UNKNOWN_DOM_PROP_FIXES,
+    components_and_classes::{
+        check_jsx_fragments_and_useless_fragment_element, check_jsx_no_useless_fragment_short,
+        check_jsx_pascal_case_and_max_depth,
+    },
+    strip_ts_and_parens,
+};
 use crate::{
     graph::ProjectGraph,
     ir::{
@@ -519,151 +526,184 @@ fn check_jsx_attributes_builtin(
             }
             continue;
         };
-        let Some(ident) = attr.name.as_identifier() else {
-            continue;
-        };
-        let attr_name = ident.name.as_str();
-        let attr_span = ByteSpan {
-            start: attr.span.start,
-            end: attr.span.end,
-        };
+        check_single_jsx_attribute_builtin(
+            semantic,
+            attr,
+            tag_name,
+            is_comp,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
+}
 
-        // 1. `no-unknown-property` on intrinsic DOM tags (`class` -> `className`, `for` -> `htmlFor`, etc.)
-        if !is_comp
-            && !tag_name.contains('-')
-            && let Some(&(_, standard_name)) = UNKNOWN_DOM_PROP_FIXES
-                .iter()
-                .find(|&&(bad, _)| bad == attr_name)
-        {
-            let patch = AutofixPatch::replace(
-                format!("Replace `{attr_name}` with `{standard_name}`"),
-                ByteSpan {
-                    start: ident.span.start,
-                    end: ident.span.end,
-                },
-                standard_name,
-            );
-            push_semantic_site_with_fix(
-                sites,
-                RuleId::NoUnknownProperty,
-                subj_name.clone(),
-                "noUnknownProperty",
-                attr_name,
-                format!(
-                    "Unknown DOM property `{attr_name}` on `<{tag_name}>`; did you mean `{standard_name}`?"
-                ),
-                line_starts,
-                attr.span,
-                Some(patch),
-            );
-        }
+fn check_single_jsx_attribute_builtin(
+    semantic: &Semantic<'_>,
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    tag_name: &str,
+    is_comp: bool,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(ident) = attr.name.as_identifier() else {
+        return;
+    };
+    let attr_name = ident.name.as_str();
 
-        // 2. `no-string-refs`: `ref="myRef"`
-        if attr_name == "ref" && matches!(attr.value, Some(JSXAttributeValue::StringLiteral(_))) {
-            push_semantic_site(
-                sites,
-                RuleId::NoStringRefs,
-                subj_name.clone(),
-                "noStringRefs",
-                "ref",
-                "String refs (`ref=\"...\"`) are deprecated; use `useRef()` or a callback ref instead.".to_string(),
-                line_starts,
-                attr.span,
-            );
-        }
+    if !is_comp
+        && !tag_name.contains('-')
+        && let Some(&(_, standard_name)) = UNKNOWN_DOM_PROP_FIXES
+            .iter()
+            .find(|&&(bad, _)| bad == attr_name)
+    {
+        let patch = AutofixPatch::replace(
+            format!("Replace `{attr_name}` with `{standard_name}`"),
+            ByteSpan {
+                start: ident.span.start,
+                end: ident.span.end,
+            },
+            standard_name,
+        );
+        push_semantic_site_with_fix(
+            sites,
+            RuleId::NoUnknownProperty,
+            subj_name.clone(),
+            "noUnknownProperty",
+            attr_name,
+            format!(
+                "Unknown DOM property `{attr_name}` on `<{tag_name}>`; did you mean `{standard_name}`?"
+            ),
+            line_starts,
+            attr.span,
+            Some(patch),
+        );
+    }
 
-        // 3. `style-prop-object`: `style="color: red"` on JSX element
-        if attr_name == "style" && matches!(attr.value, Some(JSXAttributeValue::StringLiteral(_))) {
-            push_semantic_site(
-                sites,
-                RuleId::StylePropObject,
-                subj_name.clone(),
-                "stylePropObject",
-                "style",
-                "The `style` prop expects a mapping from style properties to values, not a string."
-                    .to_string(),
-                line_starts,
-                attr.span,
-            );
-        }
+    if attr_name == "ref" && matches!(attr.value, Some(JSXAttributeValue::StringLiteral(_))) {
+        push_semantic_site(
+            sites,
+            RuleId::NoStringRefs,
+            subj_name.clone(),
+            "noStringRefs",
+            "ref",
+            "String refs (`ref=\"...\"`) are deprecated; use `useRef()` or a callback ref instead."
+                .to_string(),
+            line_starts,
+            attr.span,
+        );
+    }
 
-        // 4. `jsx-no-script-url`: `href="javascript:..."`
-        if matches!(attr_name, "href" | "src")
-            && let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
-            && s.value.as_str().is_some_and(|v| {
-                v.trim_start()
-                    .to_ascii_lowercase()
-                    .starts_with("javascript:")
-            })
-        {
-            push_semantic_site(
-                sites,
-                RuleId::JsxNoScriptUrl,
-                subj_name.clone(),
-                "jsxNoScriptUrl",
-                attr_name,
-                "`javascript:` URLs are a security and XSS hazard; use a `<button>` or a real URL."
-                    .to_string(),
-                line_starts,
-                attr.span,
-            );
-        }
+    if attr_name == "style" && matches!(attr.value, Some(JSXAttributeValue::StringLiteral(_))) {
+        push_semantic_site(
+            sites,
+            RuleId::StylePropObject,
+            subj_name.clone(),
+            "stylePropObject",
+            "style",
+            "The `style` prop expects a mapping from style properties to values, not a string."
+                .to_string(),
+            line_starts,
+            attr.span,
+        );
+    }
 
-        // 5. `jsx-boolean-value`: `disabled={true}`
-        if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value
-            && let Some(Expression::BooleanLiteral(b)) = c
-                .expression
-                .as_expression()
-                .map(Expression::without_parentheses)
-            && b.value
-        {
-            let patch = AutofixPatch::replace(
-                format!("Simplify `{attr_name}={{true}}` to `{attr_name}`"),
-                attr_span,
-                attr_name,
-            );
-            push_semantic_site_with_fix(
-                sites,
-                RuleId::JsxBooleanValue,
-                subj_name.clone(),
-                "jsxBooleanValue",
-                attr_name,
-                format!("Omit `={{true}}` on boolean JSX attribute `{attr_name}`."),
-                line_starts,
-                attr.span,
-                Some(patch),
-            );
-        }
+    if matches!(attr_name, "href" | "src")
+        && let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value
+        && s.value.as_str().is_some_and(|v| {
+            v.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("javascript:")
+        })
+    {
+        push_semantic_site(
+            sites,
+            RuleId::JsxNoScriptUrl,
+            subj_name.clone(),
+            "jsxNoScriptUrl",
+            attr_name,
+            "`javascript:` URLs are a security and XSS hazard; use a `<button>` or a real URL."
+                .to_string(),
+            line_starts,
+            attr.span,
+        );
+    }
 
-        // 6. `jsx-curly-brace-presence`: `title={"hello"}`
-        if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value
-            && let Some(Expression::StringLiteral(s)) = c
-                .expression
-                .as_expression()
-                .map(Expression::without_parentheses)
-            && !s.value.contains('"')
-        {
-            let s_text = s.span.source_text(semantic.source_text());
-            let patch = AutofixPatch::replace(
-                format!("Remove unnecessary curly braces around {s_text}"),
-                ByteSpan {
-                    start: c.span.start,
-                    end: c.span.end,
-                },
-                s_text,
-            );
-            push_semantic_site_with_fix(
-                sites,
-                RuleId::JsxCurlyBracePresence,
-                subj_name.clone(),
-                "jsxCurlyBracePresence",
-                attr_name,
-                format!("Curly braces are unnecessary around string literal prop `{attr_name}`."),
-                line_starts,
-                attr.span,
-                Some(patch),
-            );
-        }
+    if let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value {
+        check_jsx_attribute_expression_builtin(
+            semantic,
+            attr,
+            attr_name,
+            c,
+            subj_name,
+            line_starts,
+            sites,
+        );
+    }
+}
+
+fn check_jsx_attribute_expression_builtin(
+    semantic: &Semantic<'_>,
+    attr: &oxc_ast::ast::JSXAttribute<'_>,
+    attr_name: &str,
+    container: &oxc_ast::ast::JSXExpressionContainer<'_>,
+    subj_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Some(expr) = container
+        .expression
+        .as_expression()
+        .map(Expression::without_parentheses)
+    else {
+        return;
+    };
+    if let Expression::BooleanLiteral(b) = expr
+        && b.value
+    {
+        let patch = AutofixPatch::replace(
+            format!("Simplify `{attr_name}={{true}}` to `{attr_name}`"),
+            ByteSpan {
+                start: attr.span.start,
+                end: attr.span.end,
+            },
+            attr_name,
+        );
+        push_semantic_site_with_fix(
+            sites,
+            RuleId::JsxBooleanValue,
+            subj_name.clone(),
+            "jsxBooleanValue",
+            attr_name,
+            format!("Omit `={{true}}` on boolean JSX attribute `{attr_name}`."),
+            line_starts,
+            attr.span,
+            Some(patch),
+        );
+    } else if let Expression::StringLiteral(s) = expr
+        && !s.value.contains('"')
+    {
+        let s_text = s.span.source_text(semantic.source_text());
+        let patch = AutofixPatch::replace(
+            format!("Remove unnecessary curly braces around {s_text}"),
+            ByteSpan {
+                start: container.span.start,
+                end: container.span.end,
+            },
+            s_text,
+        );
+        push_semantic_site_with_fix(
+            sites,
+            RuleId::JsxCurlyBracePresence,
+            subj_name.clone(),
+            "jsxCurlyBracePresence",
+            attr_name,
+            format!("Curly braces are unnecessary around string literal prop `{attr_name}`."),
+            line_starts,
+            attr.span,
+            Some(patch),
+        );
     }
 }
 
@@ -684,7 +724,6 @@ pub(crate) fn evaluate_inline_prop_rules_with_graph<F>(
     if !jsx.is_component {
         return;
     }
-    // Skip `<*.Provider value={{...}}>` when `context-provider-value-from-unmemoized-local-literal` handles it
     if jsx.name.ends_with(".Provider")
         && is_active(RuleId::ContextProviderValueFromUnmemoizedLocalLiteral).is_some()
     {
@@ -694,110 +733,126 @@ pub(crate) fn evaluate_inline_prop_rules_with_graph<F>(
     let resolved_target = graph
         .resolve_target_subject(&file.path, jsx.span, &jsx.name)
         .map(|(_, subj)| subj);
-
-    // If the target component is wrapped in `memo(Comp, customAreEqual)`, reference identity is ignored
     if resolved_target.is_some_and(|subj| subj.has_custom_memo_comparator) {
         return;
     }
 
-    let is_hot_path_for_prop = |prop_name: &str| -> bool {
-        let Some(target_subj) = resolved_target else {
-            // Unresolved external component in single-file analysis
-            return true;
-        };
-        target_subj.is_memoized
-            || jsx.in_array_map
-            || target_subj
-                .props_in_hook_deps
-                .iter()
-                .any(|p| p == prop_name)
-    };
+    let hot_check = |prop_name: &str| is_hot_path_for_inline_prop(resolved_target, jsx, prop_name);
 
-    // 1. `jsx-no-new-object-as-prop`
     if is_active(RuleId::JsxNoNewObjectAsProp).is_some() {
-        for prop_name in &jsx.object_literal_props {
-            if is_hot_path_for_prop(prop_name) {
-                push_inline_prop_diag(
-                    out,
-                    file,
-                    jsx,
-                    RuleId::JsxNoNewObjectAsProp,
-                    "jsxNoNewObjectAsProp",
-                    prop_name,
-                    format!(
-                        "Prop `{prop_name}` on `<{}>` receives a fresh object literal on every render.",
-                        jsx.name
-                    ),
-                );
-            }
-        }
+        emit_hot_path_inline_prop_diags(
+            out,
+            file,
+            jsx,
+            &jsx.object_literal_props,
+            &hot_check,
+            RuleId::JsxNoNewObjectAsProp,
+            "jsxNoNewObjectAsProp",
+            "object literal",
+        );
     }
-
-    // 2. `jsx-no-new-array-as-prop`
     if is_active(RuleId::JsxNoNewArrayAsProp).is_some() {
-        for prop_name in &jsx.array_literal_props {
-            if is_hot_path_for_prop(prop_name) {
-                push_inline_prop_diag(
-                    out,
-                    file,
-                    jsx,
-                    RuleId::JsxNoNewArrayAsProp,
-                    "jsxNoNewArrayAsProp",
-                    prop_name,
-                    format!(
-                        "Prop `{prop_name}` on `<{}>` receives a fresh array allocation on every render.",
-                        jsx.name
-                    ),
-                );
-            }
-        }
+        emit_hot_path_inline_prop_diags(
+            out,
+            file,
+            jsx,
+            &jsx.array_literal_props,
+            &hot_check,
+            RuleId::JsxNoNewArrayAsProp,
+            "jsxNoNewArrayAsProp",
+            "array allocation",
+        );
     }
-
-    // 3. `jsx-no-new-function-as-prop`
     if is_active(RuleId::JsxNoNewFunctionAsProp).is_some() {
-        for prop_name in &jsx.function_props {
-            if is_hot_path_for_prop(prop_name) {
-                push_inline_prop_diag(
-                    out,
-                    file,
-                    jsx,
-                    RuleId::JsxNoNewFunctionAsProp,
-                    "jsxNoNewFunctionAsProp",
-                    prop_name,
-                    format!(
-                        "Prop `{prop_name}` on `<{}>` receives a fresh function on every render.",
-                        jsx.name
-                    ),
-                );
-            }
-        }
+        emit_hot_path_inline_prop_diags(
+            out,
+            file,
+            jsx,
+            &jsx.function_props,
+            &hot_check,
+            RuleId::JsxNoNewFunctionAsProp,
+            "jsxNoNewFunctionAsProp",
+            "function",
+        );
     }
-
-    // 4. `no-inline-prop-on-memo-component` (fires when target Subject is proven `is_memoized`)
     if resolved_target.is_some_and(|subj| subj.is_memoized)
         && is_active(RuleId::NoInlinePropOnMemoComponent).is_some()
     {
-        for (prop_name, kind_label) in jsx
-            .object_literal_props
+        emit_memo_inline_prop_diags(out, file, jsx);
+    }
+}
+
+fn is_hot_path_for_inline_prop(
+    resolved_target: Option<&crate::ir::SubjectIr>,
+    jsx: &JsxElementIr,
+    prop_name: &str,
+) -> bool {
+    let Some(target_subj) = resolved_target else {
+        return true;
+    };
+    target_subj.is_memoized
+        || jsx.in_array_map
+        || target_subj
+            .props_in_hook_deps
             .iter()
-            .map(|p| (p, "objects"))
-            .chain(jsx.array_literal_props.iter().map(|p| (p, "Arrays")))
-            .chain(jsx.function_props.iter().map(|p| (p, "functions")))
-            .chain(jsx.inline_jsx_props.iter().map(|p| (p, "JSX")))
-        {
+            .any(|p| p == prop_name)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Shared emitter for hot-path inline object, array, and function prop diagnostics (#50)"
+)]
+fn emit_hot_path_inline_prop_diags<H>(
+    out: &mut Vec<Diagnostic>,
+    file: &FileIr,
+    jsx: &JsxElementIr,
+    props: &[String],
+    is_hot_path: &H,
+    rule: RuleId,
+    message_id: &'static str,
+    alloc_noun: &str,
+) where
+    H: Fn(&str) -> bool,
+{
+    for prop_name in props {
+        if is_hot_path(prop_name) {
             push_inline_prop_diag(
                 out,
                 file,
                 jsx,
-                RuleId::NoInlinePropOnMemoComponent,
-                "noInlinePropOnMemoComponent",
+                rule,
+                message_id,
                 prop_name,
                 format!(
-                    "This redraws {} on every render because prop `{prop_name}` is {kind_label} built inline, defeating `memo()`. Move it to `useMemo`, `useCallback`, or module scope.",
+                    "Prop `{prop_name}` on `<{}>` receives a fresh {alloc_noun} on every render.",
                     jsx.name
                 ),
             );
         }
+    }
+}
+
+fn emit_memo_inline_prop_diags(out: &mut Vec<Diagnostic>, file: &FileIr, jsx: &JsxElementIr) {
+    for (prop_name, kind_label) in jsx
+        .object_literal_props
+        .iter()
+        .map(|p| (p, "objects"))
+        .chain(jsx.array_literal_props.iter().map(|p| (p, "Arrays")))
+        .chain(jsx.function_props.iter().map(|p| (p, "functions")))
+        .chain(jsx.inline_jsx_props.iter().map(|p| (p, "JSX")))
+    {
+        push_inline_prop_diag(
+            out,
+            file,
+            jsx,
+            RuleId::NoInlinePropOnMemoComponent,
+            "noInlinePropOnMemoComponent",
+            prop_name,
+            format!(
+                "This redraws {} on every render because prop `{prop_name}` is {kind_label} built inline, defeating `memo()`. Move it to `useMemo`, `useCallback`, or module scope.",
+                jsx.name
+            ),
+        );
     }
 }
 
@@ -823,259 +878,3 @@ fn push_inline_prop_diag(
     );
 }
 
-fn build_useless_fragment_autofix(
-    semantic: &Semantic<'_>,
-    frag_node_id: NodeId,
-    frag_span: Span,
-    meaningful: &[&oxc_ast::ast::JSXChild<'_>],
-    description: String,
-) -> Option<AutofixPatch> {
-    let in_jsx_parent = matches!(
-        semantic.nodes().parent_kind(frag_node_id),
-        AstKind::JSXElement(_) | AstKind::JSXFragment(_)
-    );
-    let replacement = if meaningful.is_empty() {
-        if in_jsx_parent {
-            Some(String::new())
-        } else {
-            None
-        }
-    } else if meaningful.len() == 1 {
-        match meaningful[0] {
-            oxc_ast::ast::JSXChild::Element(child_el) => Some(
-                child_el
-                    .span
-                    .source_text(semantic.source_text())
-                    .to_string(),
-            ),
-            oxc_ast::ast::JSXChild::Fragment(child_frag) => Some(
-                child_frag
-                    .span
-                    .source_text(semantic.source_text())
-                    .to_string(),
-            ),
-            oxc_ast::ast::JSXChild::Text(child_text) if in_jsx_parent => Some(
-                child_text
-                    .span
-                    .source_text(semantic.source_text())
-                    .to_string(),
-            ),
-            oxc_ast::ast::JSXChild::ExpressionContainer(child_expr) if in_jsx_parent => Some(
-                child_expr
-                    .span
-                    .source_text(semantic.source_text())
-                    .to_string(),
-            ),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    replacement.map(|rep| {
-        AutofixPatch::replace(
-            description,
-            ByteSpan {
-                start: frag_span.start,
-                end: frag_span.end,
-            },
-            rep,
-        )
-    })
-}
-
-fn check_jsx_no_useless_fragment_short(
-    frag_node_id: NodeId,
-    jsx_frag: &oxc_ast::ast::JSXFragment<'_>,
-    subj_name: &Option<String>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    let meaningful = collect_meaningful_jsx_children(&jsx_frag.children);
-    if meaningful.len() > 1 {
-        return;
-    }
-    let autofix = build_useless_fragment_autofix(
-        semantic,
-        frag_node_id,
-        jsx_frag.span,
-        &meaningful,
-        "Remove redundant `<>...</>` fragment wrapper".to_string(),
-    );
-    push_semantic_site_with_fix(
-        sites,
-        RuleId::JsxNoUselessFragment,
-        subj_name.clone(),
-        "jsxNoUselessFragment",
-        "Fragment",
-        "Fragments with a single child or empty content are redundant.".to_string(),
-        line_starts,
-        jsx_frag.span,
-        autofix,
-    );
-}
-
-fn check_jsx_fragments_and_useless_fragment_element(
-    frag_node_id: NodeId,
-    jsx_el: &JSXElement<'_>,
-    tag_name: &str,
-    subj_name: &Option<String>,
-    semantic: &Semantic<'_>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    if !matches!(tag_name, "Fragment" | "React.Fragment") {
-        return;
-    }
-    let opening = &jsx_el.opening_element;
-    if !opening.attributes.is_empty() {
-        return;
-    }
-
-    // 1. `jsx-fragments`: `<React.Fragment>` or `<Fragment>` with no attributes -> `<>...</>`
-    let frag_autofix = jsx_el.closing_element.as_ref().map(|closing| {
-        AutofixPatch::new(format!("Replace `<{tag_name}>` with shorthand `<>...</>`"))
-            .with_edit(
-                ByteSpan {
-                    start: opening.span.start,
-                    end: opening.span.end,
-                },
-                "<>",
-            )
-            .with_edit(
-                ByteSpan {
-                    start: closing.span.start,
-                    end: closing.span.end,
-                },
-                "</>",
-            )
-    });
-    push_semantic_site_with_fix(
-        sites,
-        RuleId::JsxFragments,
-        subj_name.clone(),
-        "jsxFragments",
-        tag_name,
-        format!("Prefer shorthand `<>...</>` over `<{tag_name}>` when no `key` is needed."),
-        line_starts,
-        jsx_el.span,
-        frag_autofix,
-    );
-
-    // 2. `jsx-no-useless-fragment` on `<Fragment>` / `<React.Fragment>` with <= 1 meaningful child
-    let meaningful = collect_meaningful_jsx_children(&jsx_el.children);
-    if meaningful.len() <= 1 {
-        let autofix = build_useless_fragment_autofix(
-            semantic,
-            frag_node_id,
-            jsx_el.span,
-            &meaningful,
-            format!("Remove redundant `<{tag_name}>` wrapper"),
-        );
-        push_semantic_site_with_fix(
-            sites,
-            RuleId::JsxNoUselessFragment,
-            subj_name.clone(),
-            "jsxNoUselessFragment",
-            tag_name,
-            "Fragments with a single child or empty content are redundant.".to_string(),
-            line_starts,
-            jsx_el.span,
-            autofix,
-        );
-    }
-}
-
-fn collect_meaningful_jsx_children<'a, 'b>(
-    children: &'a [oxc_ast::ast::JSXChild<'b>],
-) -> Vec<&'a oxc_ast::ast::JSXChild<'b>> {
-    children
-        .iter()
-        .filter(|c| match c {
-            oxc_ast::ast::JSXChild::Text(t) => !t.value.trim().is_empty(),
-            oxc_ast::ast::JSXChild::ExpressionContainer(ec) => !matches!(
-                ec.expression,
-                oxc_ast::ast::JSXExpression::EmptyExpression(_)
-            ),
-            _ => true,
-        })
-        .collect()
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Evaluates both jsx-pascal-case and jsx-max-depth on a JSXElement node"
-)]
-fn check_jsx_pascal_case_and_max_depth(
-    semantic: &Semantic<'_>,
-    jsx_node_id: NodeId,
-    opening: &JSXOpeningElement<'_>,
-    tag_name: &str,
-    is_comp: bool,
-    subj_name: &Option<String>,
-    line_starts: &[u32],
-    sites: &mut Vec<SemanticRuleSite>,
-) {
-    // 1. `jsx-pascal-case`: component name is ALL_CAPS_WITH_UNDERSCORE or starts with `_` or contains `_`
-    let check_seg = tag_name.rsplit('.').next().unwrap_or(tag_name);
-    let is_bad_pascal = if is_comp {
-        check_seg.contains('_')
-            || (check_seg.len() > 1
-                && check_seg
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
-    } else {
-        check_seg.starts_with('_')
-            && check_seg
-                .chars()
-                .nth(1)
-                .is_some_and(|c| c.is_ascii_uppercase())
-    };
-    if is_bad_pascal {
-        push_semantic_site(
-            sites,
-            RuleId::JsxPascalCase,
-            subj_name.clone(),
-            "jsxPascalCase",
-            tag_name,
-            format!("Component `<{tag_name}>` must use PascalCase naming."),
-            line_starts,
-            opening.name.span(),
-        );
-    }
-
-    // 2. `jsx-max-depth`: flag leaf JSX element at depth > 4
-    let has_jsx_el_children = if let AstKind::JSXElement(el) = semantic.nodes().kind(jsx_node_id) {
-        el.children
-            .iter()
-            .any(|c| matches!(c, oxc_ast::ast::JSXChild::Element(_)))
-    } else {
-        false
-    };
-    if !has_jsx_el_children {
-        let mut depth = 0_usize;
-        for anc_id in semantic.nodes().ancestor_ids(jsx_node_id) {
-            match semantic.nodes().kind(anc_id) {
-                AstKind::JSXElement(_) | AstKind::JSXFragment(_) => {
-                    depth += 1;
-                }
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => break,
-                _ => {}
-            }
-        }
-        if depth > MAX_JSX_DEPTH {
-            push_semantic_site(
-                sites,
-                RuleId::JsxMaxDepth,
-                subj_name.clone(),
-                "jsxMaxDepth",
-                tag_name,
-                format!(
-                    "JSX nesting depth of {depth} exceeds the maximum depth of {MAX_JSX_DEPTH}; extract a child component."
-                ),
-                line_starts,
-                opening.span,
-            );
-        }
-    }
-}

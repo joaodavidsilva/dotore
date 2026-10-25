@@ -407,51 +407,60 @@ fn find_mutating_http_in_query_fn(semantic: &Semantic<'_>, query_fn_span: Span) 
         if !query_fn_span.contains_inclusive(call.span) {
             continue;
         }
-        // Check `fetch(url, { method: "DELETE" | "POST" | "PUT" | "PATCH" })`
-        if let Expression::Identifier(id) = call.callee.without_parentheses()
-            && id.name == "fetch"
+        if let Some(method) = classify_mutating_fetch_call(semantic, call, source)
+            .or_else(|| classify_mutating_http_client_call(call))
         {
-            let url_arg = call.arguments.first().and_then(Argument::as_expression);
-            let Some(opts_arg) = call.arguments.get(1).and_then(Argument::as_expression) else {
-                continue;
-            };
-            let Expression::ObjectExpression(opts_obj) = opts_arg.without_parentheses() else {
-                continue;
-            };
-            let Some(method) = extract_static_http_method(opts_obj) else {
-                continue;
-            };
-            if !MUTATING_HTTP_METHODS.contains(&method.as_str()) {
-                continue;
-            }
-            let url_text = url_arg
-                .and_then(|u| resolve_static_url_text(semantic, u))
-                .unwrap_or_default();
-
-            if method == "POST" {
-                if is_graphql_url_segment(&url_text) && !has_graphql_mutation_body(opts_obj, source)
-                {
-                    continue;
-                }
-                if is_read_named_rpc_url(&url_text) {
-                    continue;
-                }
-            }
             return Some(method);
-        }
-
-        // Also check `axios.post(...)`, `api.delete(...)`, etc.
-        if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() {
-            let prop_upper = mem.property.name.to_ascii_uppercase();
-            if matches!(prop_upper.as_str(), "POST" | "PUT" | "PATCH" | "DELETE")
-                && let Expression::Identifier(recv) = mem.object.without_parentheses()
-                && matches!(recv.name.as_str(), "axios" | "http" | "client" | "ky")
-            {
-                return Some(prop_upper);
-            }
         }
     }
     None
+}
+
+fn classify_mutating_fetch_call(
+    semantic: &Semantic<'_>,
+    call: &CallExpression<'_>,
+    source: &str,
+) -> Option<String> {
+    let Expression::Identifier(id) = call.callee.without_parentheses() else {
+        return None;
+    };
+    if id.name != "fetch" {
+        return None;
+    }
+    let url_arg = call.arguments.first().and_then(Argument::as_expression);
+    let opts_arg = call.arguments.get(1).and_then(Argument::as_expression)?;
+    let Expression::ObjectExpression(opts_obj) = opts_arg.without_parentheses() else {
+        return None;
+    };
+    let method = extract_static_http_method(opts_obj)?;
+    if !MUTATING_HTTP_METHODS.contains(&method.as_str()) {
+        return None;
+    }
+    let url_text = url_arg
+        .and_then(|u| resolve_static_url_text(semantic, u))
+        .unwrap_or_default();
+    if method == "POST"
+        && ((is_graphql_url_segment(&url_text) && !has_graphql_mutation_body(opts_obj, source))
+            || is_read_named_rpc_url(&url_text))
+    {
+        return None;
+    }
+    Some(method)
+}
+
+fn classify_mutating_http_client_call(call: &CallExpression<'_>) -> Option<String> {
+    let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+        return None;
+    };
+    let prop_upper = mem.property.name.to_ascii_uppercase();
+    if matches!(prop_upper.as_str(), "POST" | "PUT" | "PATCH" | "DELETE")
+        && let Expression::Identifier(recv) = mem.object.without_parentheses()
+        && matches!(recv.name.as_str(), "axios" | "http" | "client" | "ky")
+    {
+        Some(prop_upper)
+    } else {
+        None
+    }
 }
 
 fn resolve_static_url_text(semantic: &Semantic<'_>, url_expr: &Expression<'_>) -> Option<String> {

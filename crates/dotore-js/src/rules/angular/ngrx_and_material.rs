@@ -509,6 +509,53 @@ pub(super) fn check_ngrx_type_reference(
     );
 }
 
+struct MaterialMixinTracker {
+    has_all_themes: bool,
+    has_all_colors: bool,
+    has_all_typographies: bool,
+    has_all_densities: bool,
+    seen_mat_core: bool,
+    seen_mixins: HashSet<String>,
+}
+
+impl MaterialMixinTracker {
+    fn new(style_source: &str) -> Self {
+        Self {
+            has_all_themes: style_source.contains("all-component-themes(")
+                || style_source.contains("angular-material-theme("),
+            has_all_colors: style_source.contains("all-component-colors(")
+                || style_source.contains("angular-material-color("),
+            has_all_typographies: style_source.contains("all-component-typographies(")
+                || style_source.contains("angular-material-typography("),
+            has_all_densities: style_source.contains("all-component-densities(")
+                || style_source.contains("angular-material-density("),
+            seen_mat_core: false,
+            seen_mixins: HashSet::new(),
+        }
+    }
+
+    fn is_conflicting_mixin(&mut self, short_mixin: &str) -> bool {
+        if short_mixin == "core" {
+            let dup = self.seen_mat_core;
+            self.seen_mat_core = true;
+            return dup;
+        }
+        if short_mixin.starts_with("all-component-") || short_mixin.starts_with("angular-material-")
+        {
+            return false;
+        }
+        let conflicts_with_all = (self.has_all_themes && short_mixin.ends_with("-theme"))
+            || (self.has_all_colors && short_mixin.ends_with("-color"))
+            || (self.has_all_typographies && short_mixin.ends_with("-typography"))
+            || (self.has_all_densities && short_mixin.ends_with("-density"));
+        let is_tracked_suffix = ["-theme", "-color", "-typography", "-density"]
+            .iter()
+            .any(|s| short_mixin.ends_with(s));
+        let is_dup_mixin = is_tracked_suffix && !self.seen_mixins.insert(short_mixin.to_string());
+        conflicts_with_all || is_dup_mixin
+    }
+}
+
 /// Scans an Angular stylesheet (`.scss`, `.css`, or `@Component({ styles: [...] })`)
 /// for conflicting Angular Material theme/color/typography/density mixins.
 pub(crate) fn extract_angular_stylesheet_sites(
@@ -518,76 +565,46 @@ pub(crate) fn extract_angular_stylesheet_sites(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    let has_all_themes = style_source.contains("all-component-themes(")
-        || style_source.contains("angular-material-theme(");
-    let has_all_colors = style_source.contains("all-component-colors(")
-        || style_source.contains("angular-material-color(");
-    let has_all_typographies = style_source.contains("all-component-typographies(")
-        || style_source.contains("angular-material-typography(");
-    let has_all_densities = style_source.contains("all-component-densities(")
-        || style_source.contains("angular-material-density(");
-
-    let mut seen_mat_core = false;
-    let mut seen_mixins: HashSet<String> = HashSet::new();
-
+    let mut tracker = MaterialMixinTracker::new(style_source);
     let mut cursor = 0usize;
+
     for line in style_source.split('\n') {
-        let line_len = line.len();
-        let trimmed = line.trim();
-        if let Some(inc_pos) = trimmed.find("@include") {
-            let after_inc = trimmed[inc_pos + "@include".len()..].trim();
-            let mixin_call = after_inc
-                .split('(')
-                .next()
-                .unwrap_or(after_inc)
-                .trim()
-                .trim_end_matches(';');
-            let short_mixin = mixin_call
-                .strip_prefix("mat.")
-                .or_else(|| mixin_call.strip_prefix("mat-"))
-                .unwrap_or(mixin_call);
-
-            let is_conflict = if short_mixin == "core" {
-                let dup = seen_mat_core;
-                seen_mat_core = true;
-                dup
-            } else if !short_mixin.starts_with("all-component-")
-                && !short_mixin.starts_with("angular-material-")
-            {
-                let conflicts_with_all = (has_all_themes && short_mixin.ends_with("-theme"))
-                    || (has_all_colors && short_mixin.ends_with("-color"))
-                    || (has_all_typographies && short_mixin.ends_with("-typography"))
-                    || (has_all_densities && short_mixin.ends_with("-density"));
-                let is_dup_mixin = (short_mixin.ends_with("-theme")
-                    || short_mixin.ends_with("-color")
-                    || short_mixin.ends_with("-typography")
-                    || short_mixin.ends_with("-density"))
-                    && !seen_mixins.insert(short_mixin.to_string());
-                conflicts_with_all || is_dup_mixin
-            } else {
-                false
-            };
-
-            if is_conflict && (mixin_call.starts_with("mat.") || mixin_call.starts_with("mat-")) {
-                let rel_offset = line.find("@include").unwrap_or(0);
-                let start =
-                    base_byte_offset + u32::try_from(cursor + rel_offset).unwrap_or(0);
-                let end = base_byte_offset
-                    + u32::try_from(cursor + line.trim_end().len()).unwrap_or(start);
-                sites.push(SemanticRuleSite {
-                    rule: RuleId::AngularMaterialNoConflictingMixins,
-                    subject_name: subject_name.map(ToOwned::to_owned),
-                    message_id: "angularMaterialNoConflictingMixins",
-                    target_name: mixin_call.to_string(),
-                    message: format!(
-                        "Conflicting Angular Material mixin `@include {mixin_call}(...)`; `all-component-*` already emits styles for every component."
-                    ),
-                    loc: loc_from_line_starts(line_starts, start),
-                    span: ByteSpan { start, end },
-                    autofix: None,
-                });
-            }
+        if let Some((mixin_call, short_mixin)) = parse_material_include_line(line)
+            && tracker.is_conflicting_mixin(short_mixin)
+        {
+            let rel_offset = line.find("@include").unwrap_or(0);
+            let start = base_byte_offset + u32::try_from(cursor + rel_offset).unwrap_or(0);
+            let end =
+                base_byte_offset + u32::try_from(cursor + line.trim_end().len()).unwrap_or(start);
+            sites.push(SemanticRuleSite {
+                rule: RuleId::AngularMaterialNoConflictingMixins,
+                subject_name: subject_name.map(ToOwned::to_owned),
+                message_id: "angularMaterialNoConflictingMixins",
+                target_name: mixin_call.to_string(),
+                message: format!(
+                    "Conflicting Angular Material mixin `@include {mixin_call}(...)`; `all-component-*` already emits styles for every component."
+                ),
+                loc: loc_from_line_starts(line_starts, start),
+                span: ByteSpan { start, end },
+                autofix: None,
+            });
         }
-        cursor += line_len + 1;
+        cursor += line.len() + 1;
     }
+}
+
+fn parse_material_include_line(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    let inc_pos = trimmed.find("@include")?;
+    let after_inc = trimmed[inc_pos + "@include".len()..].trim();
+    let mixin_call = after_inc
+        .split('(')
+        .next()
+        .unwrap_or(after_inc)
+        .trim()
+        .trim_end_matches(';');
+    let short_mixin = mixin_call
+        .strip_prefix("mat.")
+        .or_else(|| mixin_call.strip_prefix("mat-"))?;
+    Some((mixin_call, short_mixin))
 }

@@ -2,7 +2,6 @@
 //! loader waterfall, redirect-in-try-catch, and anchor navigation rules.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
 
@@ -49,14 +48,49 @@ pub(crate) fn check_mutation_in_effect_as_read(
         return;
     };
 
-    // Collect `mutate` / `mutateAsync` trigger symbols and check whether `data` is read or intent is read-like
+    let (trigger_syms, consumes_data, mut binding_names) =
+        collect_mutation_binding_info(semantic, &decl.id);
+    if trigger_syms.is_empty() {
+        return;
+    }
+
+    append_mutation_fn_text(mutation_call, semantic.source_text(), &mut binding_names);
+    let has_read_intent = binding_names
+        .iter()
+        .any(|n| has_word_in_set(n, READ_ONLY_MUTATION_WORDS));
+    let has_write_intent = binding_names
+        .iter()
+        .any(|n| has_word_in_set(n, WRITE_INTENT_WORDS));
+
+    if !consumes_data && (!has_read_intent || has_write_intent) {
+        return;
+    }
+
+    if let Some(span) = find_mutation_trigger_in_effect(semantic, &trigger_syms) {
+        push_semantic_site(
+            sites,
+            RuleId::QueryNoMutationInEffectAsRead,
+            subject_name.clone(),
+            "queryNoMutationInEffectAsRead",
+            "useMutation",
+            "Triggering useMutation inside useEffect to load data bypasses caching and deduplication; use useQuery instead.".to_string(),
+            line_starts,
+            span,
+        );
+    }
+}
+
+fn collect_mutation_binding_info(
+    semantic: &Semantic<'_>,
+    pat: &BindingPattern<'_>,
+) -> (Vec<SymbolId>, bool, Vec<String>) {
     let mut trigger_syms: Vec<SymbolId> = Vec::new();
     let mut consumes_data = false;
     let mut binding_names: Vec<String> = Vec::new();
 
-    match &decl.id {
-        BindingPattern::ObjectPattern(pat) => {
-            for prop in &pat.properties {
+    match pat {
+        BindingPattern::ObjectPattern(obj_pat) => {
+            for prop in &obj_pat.properties {
                 let key_name = prop.key.static_name();
                 let key_str = key_name.as_ref().and_then(|n| n.as_str());
                 if matches!(key_str, Some("mutate" | "mutateAsync"))
@@ -75,80 +109,72 @@ pub(crate) fn check_mutation_in_effect_as_read(
             binding_names.push(id.name.to_string());
             if let Some(sym) = id.symbol_id.get() {
                 trigger_syms.push(sym);
-                for r in semantic.scoping().get_resolved_references(sym) {
-                    let p_id = semantic.nodes().parent_id(r.node_id());
-                    if let AstKind::StaticMemberExpression(mem) = semantic.nodes().kind(p_id)
-                        && mem.property.name == "data"
-                    {
-                        consumes_data = true;
-                    }
-                }
+                consumes_data = semantic
+                    .scoping()
+                    .get_resolved_references(sym)
+                    .any(|r| {
+                        let p_id = semantic.nodes().parent_id(r.node_id());
+                        matches!(
+                            semantic.nodes().kind(p_id),
+                            AstKind::StaticMemberExpression(mem) if mem.property.name == "data"
+                        )
+                    });
             }
         }
         _ => {}
     }
+    (trigger_syms, consumes_data, binding_names)
+}
 
-    if trigger_syms.is_empty() {
+fn append_mutation_fn_text(
+    mutation_call: &CallExpression<'_>,
+    source: &str,
+    binding_names: &mut Vec<String>,
+) {
+    let Some(Argument::ObjectExpression(opts)) = mutation_call.arguments.first() else {
         return;
-    }
-
-    // Check mutationFn name intent
-    if let Some(Argument::ObjectExpression(opts)) = mutation_call.arguments.first() {
-        for prop_kind in &opts.properties {
-            if let ObjectPropertyKind::ObjectProperty(prop) = prop_kind
-                && prop.key.static_name().as_ref().and_then(|n| n.as_str()) == Some("mutationFn")
-            {
-                let text = prop.value.span().source_text(semantic.source_text());
-                binding_names.push(text.to_string());
-            }
+    };
+    for prop_kind in &opts.properties {
+        if let ObjectPropertyKind::ObjectProperty(prop) = prop_kind
+            && prop.key.static_name().as_ref().and_then(|n| n.as_str()) == Some("mutationFn")
+        {
+            binding_names.push(prop.value.span().source_text(source).to_string());
         }
     }
+}
 
-    let has_read_intent = binding_names
-        .iter()
-        .any(|n| has_word_in_set(n, READ_ONLY_MUTATION_WORDS));
-    let has_write_intent = binding_names
-        .iter()
-        .any(|n| has_word_in_set(n, WRITE_INTENT_WORDS));
-
-    if !consumes_data && (!has_read_intent || has_write_intent) {
-        return;
-    }
-
-    for sym_id in trigger_syms {
+fn find_mutation_trigger_in_effect(
+    semantic: &Semantic<'_>,
+    trigger_syms: &[SymbolId],
+) -> Option<Span> {
+    for &sym_id in trigger_syms {
         for reference in semantic.scoping().get_resolved_references(sym_id) {
             let ref_node_id = reference.node_id();
-            let p_id = semantic.nodes().parent_id(ref_node_id);
-            let call_span = match semantic.nodes().kind(p_id) {
-                AstKind::CallExpression(c) => Some(c.span),
-                AstKind::StaticMemberExpression(mem)
-                    if matches!(mem.property.name.as_str(), "mutate" | "mutateAsync") =>
-                {
-                    let gp_id = semantic.nodes().parent_id(p_id);
-                    if let AstKind::CallExpression(c) = semantic.nodes().kind(gp_id) {
-                        Some(c.span)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            if let Some(span) = call_span
+            if let Some(span) = mutation_reference_call_span(semantic, ref_node_id)
                 && is_inside_use_effect_execution(semantic, ref_node_id)
             {
-                push_semantic_site(
-                    sites,
-                    RuleId::QueryNoMutationInEffectAsRead,
-                    subject_name.clone(),
-                    "queryNoMutationInEffectAsRead",
-                    "useMutation",
-                    "Triggering useMutation inside useEffect to load data bypasses caching and deduplication; use useQuery instead.".to_string(),
-                    line_starts,
-                    span,
-                );
-                return;
+                return Some(span);
             }
         }
+    }
+    None
+}
+
+fn mutation_reference_call_span(semantic: &Semantic<'_>, ref_node_id: NodeId) -> Option<Span> {
+    let p_id = semantic.nodes().parent_id(ref_node_id);
+    match semantic.nodes().kind(p_id) {
+        AstKind::CallExpression(c) => Some(c.span),
+        AstKind::StaticMemberExpression(mem)
+            if matches!(mem.property.name.as_str(), "mutate" | "mutateAsync") =>
+        {
+            let gp_id = semantic.nodes().parent_id(p_id);
+            if let AstKind::CallExpression(c) = semantic.nodes().kind(gp_id) {
+                Some(c.span)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -251,84 +277,109 @@ fn span_has_query_cache_update(semantic: &Semantic<'_>, span: Span, source: &str
         }
         match node.kind() {
             AstKind::CallExpression(c) => {
-                let callee = unwrap_expr(&c.callee);
-                if let Expression::StaticMemberExpression(mem) = callee {
-                    let prop_name = mem.property.name.as_str();
-                    if QUERY_CACHE_UPDATE_METHODS.contains(&prop_name) {
-                        return true;
-                    }
-                    if prop_name == "invalidate"
-                        && !matches!(
-                            mem.object.without_parentheses(),
-                            Expression::Identifier(id) if id.name == "session"
-                        )
-                    {
-                        return true;
-                    }
-                }
-                if let Expression::Identifier(id) = callee {
-                    let lower = id.name.to_ascii_lowercase();
-                    if lower.contains("invalidat")
-                        || lower.contains("refetch")
-                        || lower.contains("querycache")
-                    {
-                        // Check if `id` resolves to a local function that does NOT update cache
-                        if let Some(ref_id) = id.reference_id.get()
-                            && let Some(sym_id) =
-                                semantic.scoping().get_reference(ref_id).symbol_id()
-                        {
-                            let decl_id = semantic.scoping().symbol_declaration(sym_id);
-                            if let AstKind::VariableDeclarator(d) = semantic.nodes().kind(decl_id)
-                                && let Some(init) = &d.init
-                                && matches!(
-                                    init.without_parentheses(),
-                                    Expression::ArrowFunctionExpression(_)
-                                        | Expression::FunctionExpression(_)
-                                )
-                            {
-                                if span_has_query_cache_update(semantic, init.span(), source) {
-                                    return true;
-                                }
-                                continue;
-                            }
-                        }
-                        return true;
-                    }
-                    if QUERY_CACHE_UPDATE_METHODS.contains(&id.name.as_str()) && id.name != "clear"
-                    {
-                        return true;
-                    }
-                }
-                // Check if `queryClient` is passed as an argument to a helper
-                if c.arguments.iter().any(|arg| {
-                    arg.as_expression().is_some_and(|e| {
-                        matches!(
-                            e.without_parentheses(),
-                            Expression::Identifier(id) if id.name == "queryClient"
-                        )
-                    })
-                }) {
+                if call_updates_query_cache(semantic, c, source) {
                     return true;
                 }
             }
-            AstKind::IdentifierReference(ident) => {
-                // Callback reference like `onSuccess: invalidate`
-                if let Some(ref_id) = ident.reference_id.get()
-                    && let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id()
-                {
-                    let decl_id = semantic.scoping().symbol_declaration(sym_id);
-                    if let AstKind::Function(func) = semantic.nodes().kind(decl_id)
-                        && func.span != span
-                        && span_has_query_cache_update(semantic, func.span, source)
-                    {
-                        return true;
-                    }
-                }
+            AstKind::IdentifierReference(ident)
+                if ident_ref_resolves_to_cache_updating_fn(semantic, ident, span, source) =>
+            {
+                return true;
             }
             _ => {}
         }
     }
     false
+}
+
+fn call_updates_query_cache(
+    semantic: &Semantic<'_>,
+    c: &CallExpression<'_>,
+    source: &str,
+) -> bool {
+    let callee = unwrap_expr(&c.callee);
+    if let Expression::StaticMemberExpression(mem) = callee {
+        let prop_name = mem.property.name.as_str();
+        if QUERY_CACHE_UPDATE_METHODS.contains(&prop_name) {
+            return true;
+        }
+        if prop_name == "invalidate"
+            && !matches!(
+                mem.object.without_parentheses(),
+                Expression::Identifier(id) if id.name == "session"
+            )
+        {
+            return true;
+        }
+    }
+    if let Expression::Identifier(id) = callee
+        && ident_callee_updates_query_cache(semantic, id, source)
+    {
+        return true;
+    }
+    c.arguments.iter().any(|arg| {
+        arg.as_expression().is_some_and(|e| {
+            matches!(
+                e.without_parentheses(),
+                Expression::Identifier(id) if id.name == "queryClient"
+            )
+        })
+    })
+}
+
+fn ident_callee_updates_query_cache(
+    semantic: &Semantic<'_>,
+    id: &oxc_ast::ast::IdentifierReference<'_>,
+    source: &str,
+) -> bool {
+    let lower = id.name.to_ascii_lowercase();
+    if lower.contains("invalidat") || lower.contains("refetch") || lower.contains("querycache") {
+        if let Some(init_span) = resolve_local_fn_decl_init_span(semantic, id) {
+            return span_has_query_cache_update(semantic, init_span, source);
+        }
+        return true;
+    }
+    QUERY_CACHE_UPDATE_METHODS.contains(&id.name.as_str()) && id.name != "clear"
+}
+
+fn resolve_local_fn_decl_init_span(
+    semantic: &Semantic<'_>,
+    id: &oxc_ast::ast::IdentifierReference<'_>,
+) -> Option<Span> {
+    let ref_id = id.reference_id.get()?;
+    let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    let AstKind::VariableDeclarator(d) = semantic.nodes().kind(decl_id) else {
+        return None;
+    };
+    let init = d.init.as_ref()?;
+    matches!(
+        init.without_parentheses(),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+    )
+    .then(|| init.span())
+}
+
+fn ident_ref_resolves_to_cache_updating_fn(
+    semantic: &Semantic<'_>,
+    ident: &oxc_ast::ast::IdentifierReference<'_>,
+    outer_span: Span,
+    source: &str,
+) -> bool {
+    let Some(ref_id) = ident.reference_id.get() else {
+        return false;
+    };
+    let Some(sym_id) = semantic.scoping().get_reference(ref_id).symbol_id() else {
+        return false;
+    };
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    if let AstKind::Function(func) = semantic.nodes().kind(decl_id)
+        && func.span != outer_span
+    {
+        span_has_query_cache_update(semantic, func.span, source)
+    } else {
+        false
+    }
 }
 
 fn has_word_in_set(identifier: &str, words: &[&str]) -> bool {

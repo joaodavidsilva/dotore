@@ -253,7 +253,6 @@ fn collect_missing_hook_deps(
     subj_span: Span,
     declared_deps: &[String],
 ) -> Vec<String> {
-    // First pass: collect all member-read chains (`currentUser.uid`, `props.value`) and bare identifier reads
     let mut member_chains_by_root: HashMap<String, Vec<String>> = HashMap::new();
     let mut non_guard_bare_roots: HashSet<String> = HashSet::new();
     let mut ordered_candidates: Vec<(String, bool)> = Vec::new();
@@ -265,63 +264,94 @@ fn collect_missing_hook_deps(
         let AstKind::IdentifierReference(ident) = node.kind() else {
             continue;
         };
-        let Some(sym_id) = resolve_ident_symbol(semantic, ident) else {
-            continue;
-        };
-        if semantic
-            .scoping()
-            .symbol_flags(sym_id)
-            .contains(SymbolFlags::Import)
-        {
-            continue;
-        }
-        let decl_id = semantic.scoping().symbol_declaration(sym_id);
-        let decl_span = semantic.nodes().get_node(decl_id).span();
-
-        // Must be declared inside `subj_span`, and outside `cb_span`
-        if !subj_span.contains_inclusive(decl_span) || cb_span.contains_inclusive(decl_span) {
-            continue;
-        }
-
-        // Skip stable hook bindings (`useState` setter, `useReducer` dispatch, `useRef` container)
-        if is_stable_hook_symbol(semantic, sym_id, decl_id) {
-            continue;
-        }
-
-        // Check if this identifier is the root object of a static member expression (`currentUser.uid`)
-        if let Some(full_chain) =
-            extract_enclosing_static_member_chain(semantic, node_id, &ident.name)
-        {
-            member_chains_by_root
-                .entry(ident.name.to_string())
-                .or_default()
-                .push(full_chain.clone());
-            ordered_candidates.push((full_chain, true));
-        } else {
-            if !is_null_guard_only_read(semantic, node_id) {
-                non_guard_bare_roots.insert(ident.name.to_string());
-            }
-            ordered_candidates.push((ident.name.to_string(), false));
-        }
+        record_hook_dep_candidate(
+            semantic,
+            node_id,
+            ident,
+            cb_span,
+            subj_span,
+            &mut member_chains_by_root,
+            &mut non_guard_bare_roots,
+            &mut ordered_candidates,
+        );
     }
 
+    filter_unsatisfied_hook_deps(
+        ordered_candidates,
+        &non_guard_bare_roots,
+        &member_chains_by_root,
+        declared_deps,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Records candidate hook dependencies into member-chain and bare-root accumulators (#50)"
+)]
+fn record_hook_dep_candidate(
+    semantic: &Semantic<'_>,
+    node_id: NodeId,
+    ident: &oxc_ast::ast::IdentifierReference<'_>,
+    cb_span: Span,
+    subj_span: Span,
+    member_chains_by_root: &mut HashMap<String, Vec<String>>,
+    non_guard_bare_roots: &mut HashSet<String>,
+    ordered_candidates: &mut Vec<(String, bool)>,
+) {
+    let Some(sym_id) = resolve_ident_symbol(semantic, ident) else {
+        return;
+    };
+    if semantic
+        .scoping()
+        .symbol_flags(sym_id)
+        .contains(SymbolFlags::Import)
+    {
+        return;
+    }
+    let decl_id = semantic.scoping().symbol_declaration(sym_id);
+    let decl_span = semantic.nodes().get_node(decl_id).span();
+
+    if !subj_span.contains_inclusive(decl_span) || cb_span.contains_inclusive(decl_span) {
+        return;
+    }
+    if is_stable_hook_symbol(semantic, sym_id, decl_id) {
+        return;
+    }
+
+    if let Some(full_chain) = extract_enclosing_static_member_chain(semantic, node_id, &ident.name)
+    {
+        member_chains_by_root
+            .entry(ident.name.to_string())
+            .or_default()
+            .push(full_chain.clone());
+        ordered_candidates.push((full_chain, true));
+    } else {
+        if !is_null_guard_only_read(semantic, node_id) {
+            non_guard_bare_roots.insert(ident.name.to_string());
+        }
+        ordered_candidates.push((ident.name.to_string(), false));
+    }
+}
+
+fn filter_unsatisfied_hook_deps(
+    ordered_candidates: Vec<(String, bool)>,
+    non_guard_bare_roots: &HashSet<String>,
+    member_chains_by_root: &HashMap<String, Vec<String>>,
+    declared_deps: &[String],
+) -> Vec<String> {
     let mut missing = Vec::new();
     for (candidate, is_member_chain) in ordered_candidates {
-        if !is_member_chain {
-            // If `candidate` is a bare root (e.g. `currentUser`) that was ONLY read in an `if` null guard,
-            // and at least one of its member chains (`currentUser.uid`) is in `declared_deps`, skip!
-            if !non_guard_bare_roots.contains(&candidate)
-                && let Some(chains) = member_chains_by_root.get(&candidate)
-                && chains.iter().any(|c| is_dep_satisfied(c, declared_deps))
-            {
-                continue;
-            }
+        if !is_member_chain
+            && !non_guard_bare_roots.contains(&candidate)
+            && let Some(chains) = member_chains_by_root.get(&candidate)
+            && chains.iter().any(|c| is_dep_satisfied(c, declared_deps))
+        {
+            continue;
         }
         if !is_dep_satisfied(&candidate, declared_deps) && !missing.contains(&candidate) {
             missing.push(candidate);
         }
     }
-
     missing
 }
 

@@ -30,442 +30,378 @@ struct OutlineTarget<'a> {
     line_starts: &'a [u32],
 }
 
+struct OutlineExtractor<'a> {
+    semantic: &'a Semantic<'a>,
+    source: &'a str,
+    lines: Vec<&'a str>,
+    line_starts: &'a [u32],
+    outlines: Vec<SymbolOutline>,
+}
+
 /// Extracts all **Symbol Outlines** (`Function`, `Class`, `Interface`, `Type`, `Enum`, `Constant`, `Variable`, `Method`, `Property`, `Import`, `Export`) in `semantic`.
 pub(super) fn extract_symbol_outlines(
     semantic: &Semantic<'_>,
     source: &str,
     line_starts: &[u32],
 ) -> Vec<SymbolOutline> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut outlines = Vec::new();
-
+    let mut extractor = OutlineExtractor {
+        semantic,
+        source,
+        lines: source.lines().collect(),
+        line_starts,
+        outlines: Vec::new(),
+    };
     for (node_id, node) in semantic.nodes().iter_enumerated() {
-        let parent_id = semantic.nodes().parent_id(node_id);
-        let parent_kind = semantic.nodes().kind(parent_id);
-        let container = find_enclosing_container_name(semantic, node_id);
+        extractor.visit_node(node_id, node.kind());
+    }
+    extractor.outlines
+}
 
-        match node.kind() {
+impl OutlineExtractor<'_> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Forwards outline target fields without redundant intermediate struct construction (#50)"
+    )]
+    fn push(
+        &mut self,
+        name: String,
+        kind: SymbolKind,
+        id_span: Span,
+        decl_span: Span,
+        body_start: Option<u32>,
+        parent_name: Option<String>,
+        exported: bool,
+    ) {
+        push_symbol_outline(
+            &mut self.outlines,
+            OutlineTarget {
+                name,
+                kind,
+                id_span,
+                decl_span,
+                body_start,
+                parent_name,
+                exported,
+                source: self.source,
+                lines: &self.lines,
+                line_starts: self.line_starts,
+            },
+        );
+    }
+
+    fn visit_node(&mut self, node_id: NodeId, kind: AstKind<'_>) {
+        let parent_id = self.semantic.nodes().parent_id(node_id);
+        let parent_kind = self.semantic.nodes().kind(parent_id);
+        let container = find_enclosing_container_name(self.semantic, node_id);
+
+        if self.visit_declaration_node(node_id, kind, parent_id, parent_kind, &container) {
+            return;
+        }
+        if self.visit_member_or_property_node(node_id, kind, parent_kind, &container) {
+            return;
+        }
+        self.visit_import_or_export_node(kind, container);
+    }
+
+    fn visit_declaration_node(
+        &mut self,
+        node_id: NodeId,
+        kind: AstKind<'_>,
+        parent_id: NodeId,
+        parent_kind: AstKind<'_>,
+        container: &Option<String>,
+    ) -> bool {
+        match kind {
             AstKind::Function(func) => {
                 if matches!(
                     parent_kind,
                     AstKind::MethodDefinition(_)
                         | AstKind::ObjectProperty(_)
                         | AstKind::PropertyDefinition(_)
-                ) {
-                    continue;
-                }
-                if func.is_expression() && matches!(parent_kind, AstKind::VariableDeclarator(_)) {
-                    continue;
+                ) || (func.is_expression() && matches!(parent_kind, AstKind::VariableDeclarator(_)))
+                {
+                    return true;
                 }
                 if let Some(id) = &func.id {
                     let (decl_span, exported) =
-                        resolve_decl_span_and_export(semantic, node_id, func.span);
-                    push_symbol_outline(
-                        &mut outlines,
-                        OutlineTarget {
-                            name: id.name.to_string(),
-                            kind: SymbolKind::Function,
-                            id_span: id.span,
-                            decl_span,
-                            body_start: func.body.as_ref().map(|b| b.span.start),
-                            parent_name: container,
-                            exported,
-                            source,
-                            lines: &lines,
-                            line_starts,
-                        },
+                        resolve_decl_span_and_export(self.semantic, node_id, func.span);
+                    self.push(
+                        id.name.to_string(),
+                        SymbolKind::Function,
+                        id.span,
+                        decl_span,
+                        func.body.as_ref().map(|b| b.span.start),
+                        container.clone(),
+                        exported,
                     );
                 }
             }
             AstKind::Class(class) => {
                 if class.is_expression() && matches!(parent_kind, AstKind::VariableDeclarator(_)) {
-                    continue;
+                    return true;
                 }
                 if let Some(id) = &class.id {
                     let (decl_span, exported) =
-                        resolve_decl_span_and_export(semantic, node_id, class.span);
-                    push_symbol_outline(
-                        &mut outlines,
-                        OutlineTarget {
-                            name: id.name.to_string(),
-                            kind: SymbolKind::Class,
-                            id_span: id.span,
-                            decl_span,
-                            body_start: Some(class.body.span.start),
-                            parent_name: container,
-                            exported,
-                            source,
-                            lines: &lines,
-                            line_starts,
-                        },
+                        resolve_decl_span_and_export(self.semantic, node_id, class.span);
+                    self.push(
+                        id.name.to_string(),
+                        SymbolKind::Class,
+                        id.span,
+                        decl_span,
+                        Some(class.body.span.start),
+                        container.clone(),
+                        exported,
                     );
                 }
             }
             AstKind::TSInterfaceDeclaration(iface) => {
                 let (decl_span, exported) =
-                    resolve_decl_span_and_export(semantic, node_id, iface.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: iface.id.name.to_string(),
-                        kind: SymbolKind::Interface,
-                        id_span: iface.id.span,
-                        decl_span,
-                        body_start: Some(iface.body.span.start),
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                    resolve_decl_span_and_export(self.semantic, node_id, iface.span);
+                self.push(
+                    iface.id.name.to_string(),
+                    SymbolKind::Interface,
+                    iface.id.span,
+                    decl_span,
+                    Some(iface.body.span.start),
+                    container.clone(),
+                    exported,
                 );
             }
             AstKind::TSTypeAliasDeclaration(t) => {
-                let (decl_span, exported) = resolve_decl_span_and_export(semantic, node_id, t.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: t.id.name.to_string(),
-                        kind: SymbolKind::Type,
-                        id_span: t.id.span,
-                        decl_span,
-                        body_start: None,
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                let (decl_span, exported) =
+                    resolve_decl_span_and_export(self.semantic, node_id, t.span);
+                self.push(
+                    t.id.name.to_string(),
+                    SymbolKind::Type,
+                    t.id.span,
+                    decl_span,
+                    None,
+                    container.clone(),
+                    exported,
                 );
             }
             AstKind::TSEnumDeclaration(e) => {
-                let (decl_span, exported) = resolve_decl_span_and_export(semantic, node_id, e.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: e.id.name.to_string(),
-                        kind: SymbolKind::Enum,
-                        id_span: e.id.span,
-                        decl_span,
-                        body_start: Some(e.body.span.start),
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
-            }
-            AstKind::TSEnumMember(member) => {
-                let Some(member_name) = extract_enum_member_name(&member.id) else {
-                    continue;
-                };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, member.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: member_name,
-                        kind: SymbolKind::EnumMember,
-                        id_span: member.id.span(),
-                        decl_span: member.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                let (decl_span, exported) =
+                    resolve_decl_span_and_export(self.semantic, node_id, e.span);
+                self.push(
+                    e.id.name.to_string(),
+                    SymbolKind::Enum,
+                    e.id.span,
+                    decl_span,
+                    Some(e.body.span.start),
+                    container.clone(),
+                    exported,
                 );
             }
             AstKind::VariableDeclarator(decl) => {
-                let AstKind::VariableDeclaration(var_decl) = parent_kind else {
-                    continue;
-                };
-                let init_expr = decl.init.as_ref().map(Expression::without_parentheses);
-                let is_fn_init = matches!(
-                    init_expr,
-                    Some(
-                        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
-                    )
-                );
-                let kind = if is_fn_init {
-                    SymbolKind::Function
-                } else if var_decl.kind == VariableDeclarationKind::Const {
-                    SymbolKind::Constant
-                } else {
-                    SymbolKind::Variable
-                };
-                let body_start = expr_body_start(init_expr);
-                let (var_span, exported) =
-                    resolve_decl_span_and_export(semantic, parent_id, var_decl.span);
-                let decl_span = if var_decl.declarations.len() == 1 {
-                    var_span
-                } else {
-                    decl.span
-                };
-                let mut bindings = Vec::new();
-                collect_binding_identifiers(&decl.id, &mut bindings);
-                for (name, id_span) in bindings {
-                    push_symbol_outline(
-                        &mut outlines,
-                        OutlineTarget {
-                            name,
-                            kind,
-                            id_span,
-                            decl_span,
-                            body_start,
-                            parent_name: container.clone(),
-                            exported,
-                            source,
-                            lines: &lines,
-                            line_starts,
-                        },
-                    );
-                }
+                self.visit_variable_declarator(decl, parent_id, parent_kind, container);
             }
-            AstKind::MethodDefinition(m) => {
-                let Some(name) = property_key_name(&m.key) else {
-                    continue;
-                };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, m.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name,
-                        kind: SymbolKind::Method,
-                        id_span: m.key.span(),
-                        decl_span: m.span,
-                        body_start: m.value.body.as_ref().map(|b| b.span.start),
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
-            }
-            AstKind::PropertyDefinition(p) => {
-                let Some(name) = property_key_name(&p.key) else {
-                    continue;
-                };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, p.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name,
-                        kind: SymbolKind::Property,
-                        id_span: p.key.span(),
-                        decl_span: p.span,
-                        body_start: expr_body_start(
-                            p.value.as_ref().map(Expression::without_parentheses),
-                        ),
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
-            }
-            AstKind::AccessorProperty(a) => {
-                let Some(name) = property_key_name(&a.key) else {
-                    continue;
-                };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, a.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name,
-                        kind: SymbolKind::Property,
-                        id_span: a.key.span(),
-                        decl_span: a.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
-            }
-            AstKind::TSMethodSignature(m) => {
-                let Some(name) = property_key_name(&m.key) else {
-                    continue;
-                };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, m.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name,
-                        kind: SymbolKind::Method,
-                        id_span: m.key.span(),
-                        decl_span: m.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
-            }
-            AstKind::TSPropertySignature(p) => {
-                let Some(name) = property_key_name(&p.key) else {
-                    continue;
-                };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, p.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name,
-                        kind: SymbolKind::Property,
-                        id_span: p.key.span(),
-                        decl_span: p.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
-            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn visit_variable_declarator(
+        &mut self,
+        decl: &oxc_ast::ast::VariableDeclarator<'_>,
+        parent_id: NodeId,
+        parent_kind: AstKind<'_>,
+        container: &Option<String>,
+    ) {
+        let AstKind::VariableDeclaration(var_decl) = parent_kind else {
+            return;
+        };
+        let init_expr = decl.init.as_ref().map(Expression::without_parentheses);
+        let is_fn_init = matches!(
+            init_expr,
+            Some(Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_))
+        );
+        let kind = if is_fn_init {
+            SymbolKind::Function
+        } else if var_decl.kind == VariableDeclarationKind::Const {
+            SymbolKind::Constant
+        } else {
+            SymbolKind::Variable
+        };
+        let body_start = expr_body_start(init_expr);
+        let (var_span, exported) =
+            resolve_decl_span_and_export(self.semantic, parent_id, var_decl.span);
+        let decl_span = if var_decl.declarations.len() == 1 {
+            var_span
+        } else {
+            decl.span
+        };
+        let mut bindings = Vec::new();
+        collect_binding_identifiers(&decl.id, &mut bindings);
+        for (name, id_span) in bindings {
+            self.push(
+                name,
+                kind,
+                id_span,
+                decl_span,
+                body_start,
+                container.clone(),
+                exported,
+            );
+        }
+    }
+
+    fn visit_member_or_property_node(
+        &mut self,
+        node_id: NodeId,
+        kind: AstKind<'_>,
+        parent_kind: AstKind<'_>,
+        container: &Option<String>,
+    ) -> bool {
+        let (opt_name, sym_kind, id_span, decl_span, body_start) = match kind {
+            AstKind::TSEnumMember(member) => (
+                extract_enum_member_name(&member.id),
+                SymbolKind::EnumMember,
+                member.id.span(),
+                member.span,
+                None,
+            ),
+            AstKind::MethodDefinition(m) => (
+                property_key_name(&m.key),
+                SymbolKind::Method,
+                m.key.span(),
+                m.span,
+                m.value.body.as_ref().map(|b| b.span.start),
+            ),
+            AstKind::PropertyDefinition(p) => (
+                property_key_name(&p.key),
+                SymbolKind::Property,
+                p.key.span(),
+                p.span,
+                expr_body_start(p.value.as_ref().map(Expression::without_parentheses)),
+            ),
+            AstKind::AccessorProperty(a) => (
+                property_key_name(&a.key),
+                SymbolKind::Property,
+                a.key.span(),
+                a.span,
+                None,
+            ),
+            AstKind::TSMethodSignature(m) => (
+                property_key_name(&m.key),
+                SymbolKind::Method,
+                m.key.span(),
+                m.span,
+                None,
+            ),
+            AstKind::TSPropertySignature(p) => (
+                property_key_name(&p.key),
+                SymbolKind::Property,
+                p.key.span(),
+                p.span,
+                None,
+            ),
             AstKind::ObjectProperty(prop) => {
                 if !matches!(parent_kind, AstKind::ObjectExpression(_)) {
-                    continue;
+                    return true;
                 }
-                let Some(name) = property_key_name(&prop.key) else {
-                    continue;
-                };
-                let kind = if prop.method {
+                let sym_kind = if prop.method {
                     SymbolKind::Method
                 } else {
                     SymbolKind::Property
                 };
-                let (_, exported) = resolve_decl_span_and_export(semantic, node_id, prop.span);
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name,
-                        kind,
-                        id_span: prop.key.span(),
-                        decl_span: prop.span,
-                        body_start: expr_body_start(Some(prop.value.without_parentheses())),
-                        parent_name: container,
-                        exported,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
+                (
+                    property_key_name(&prop.key),
+                    sym_kind,
+                    prop.key.span(),
+                    prop.span,
+                    expr_body_start(Some(prop.value.without_parentheses())),
+                )
             }
+            _ => return false,
+        };
+        if let Some(name) = opt_name {
+            let (_, exported) = resolve_decl_span_and_export(self.semantic, node_id, decl_span);
+            self.push(
+                name,
+                sym_kind,
+                id_span,
+                decl_span,
+                body_start,
+                container.clone(),
+                exported,
+            );
+        }
+        true
+    }
+
+    fn visit_import_or_export_node(&mut self, kind: AstKind<'_>, container: Option<String>) {
+        match kind {
             AstKind::ImportSpecifier(spec) => {
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: spec.local.name.to_string(),
-                        kind: SymbolKind::Import,
-                        id_span: spec.local.span,
-                        decl_span: spec.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported: false,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                self.push(
+                    spec.local.name.to_string(),
+                    SymbolKind::Import,
+                    spec.local.span,
+                    spec.span,
+                    None,
+                    container,
+                    false,
                 );
             }
             AstKind::ImportDefaultSpecifier(spec) => {
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: spec.local.name.to_string(),
-                        kind: SymbolKind::Import,
-                        id_span: spec.local.span,
-                        decl_span: spec.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported: false,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                self.push(
+                    spec.local.name.to_string(),
+                    SymbolKind::Import,
+                    spec.local.span,
+                    spec.span,
+                    None,
+                    container,
+                    false,
                 );
             }
             AstKind::ImportNamespaceSpecifier(spec) => {
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: spec.local.name.to_string(),
-                        kind: SymbolKind::Import,
-                        id_span: spec.local.span,
-                        decl_span: spec.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported: false,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                self.push(
+                    spec.local.name.to_string(),
+                    SymbolKind::Import,
+                    spec.local.span,
+                    spec.span,
+                    None,
+                    container,
+                    false,
                 );
             }
             AstKind::ExportSpecifier(spec) => {
                 let name = spec.exported.name().as_str().to_string();
-                if name.is_empty() {
-                    continue;
-                }
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
+                if !name.is_empty() {
+                    self.push(
                         name,
-                        kind: SymbolKind::Export,
-                        id_span: spec.exported.span(),
-                        decl_span: spec.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported: true,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
-                );
+                        SymbolKind::Export,
+                        spec.exported.span(),
+                        spec.span,
+                        None,
+                        container,
+                        true,
+                    );
+                }
             }
             AstKind::ExportDefaultDeclaration(exp) => {
-                push_symbol_outline(
-                    &mut outlines,
-                    OutlineTarget {
-                        name: "default".to_string(),
-                        kind: SymbolKind::Export,
-                        id_span: exp.span,
-                        decl_span: exp.span,
-                        body_start: None,
-                        parent_name: container,
-                        exported: true,
-                        source,
-                        lines: &lines,
-                        line_starts,
-                    },
+                self.push(
+                    "default".to_string(),
+                    SymbolKind::Export,
+                    exp.span,
+                    exp.span,
+                    None,
+                    container,
+                    true,
                 );
             }
             AstKind::ExportAllDeclaration(exp) => {
                 if let Some(exported_name) = &exp.exported {
                     let name = exported_name.name().as_str().to_string();
                     if !name.is_empty() {
-                        push_symbol_outline(
-                            &mut outlines,
-                            OutlineTarget {
-                                name,
-                                kind: SymbolKind::Export,
-                                id_span: exported_name.span(),
-                                decl_span: exp.span,
-                                body_start: None,
-                                parent_name: container,
-                                exported: true,
-                                source,
-                                lines: &lines,
-                                line_starts,
-                            },
+                        self.push(
+                            name,
+                            SymbolKind::Export,
+                            exported_name.span(),
+                            exp.span,
+                            None,
+                            container,
+                            true,
                         );
                     }
                 }
@@ -473,8 +409,6 @@ pub(super) fn extract_symbol_outlines(
             _ => {}
         }
     }
-
-    outlines
 }
 
 fn find_enclosing_container_name(semantic: &Semantic<'_>, node_id: NodeId) -> Option<String> {

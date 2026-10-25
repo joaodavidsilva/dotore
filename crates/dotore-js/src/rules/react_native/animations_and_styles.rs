@@ -2,7 +2,6 @@
 //! Detox, and layout animation rule detectors.
 #![expect(
     clippy::wildcard_enum_match_arm,
-    clippy::excessive_nesting,
     reason = "oxc_ast node/expression enums have dozens of variants; rule detectors match only targeted AST shapes"
 )]
 
@@ -24,7 +23,7 @@ use crate::{ir::types::SemanticRuleSite, matchers::push_semantic_site, rules::Ru
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Single-pass visitor for all React Native CallExpression rules"
+    reason = "Single-pass visitor for all React Native CallExpression rules (#50)"
 )]
 pub(crate) fn check_rn_call_rules(
     program: &Program<'_>,
@@ -37,142 +36,9 @@ pub(crate) fn check_rn_call_rules(
     line_starts: &[u32],
     sites: &mut Vec<SemanticRuleSite>,
 ) {
-    // 1. `rn-animation-reaction-as-derived`
-    if let Expression::Identifier(id) = call.callee.without_parentheses()
-        && id.name == "useAnimatedReaction"
-        && is_named_import_from(
-            program,
-            "useAnimatedReaction",
-            "useAnimatedReaction",
-            "react-native-reanimated",
-        )
-        && let Some(second_arg) = call.arguments.get(1).and_then(Argument::as_expression)
-        && is_single_shared_value_copy(second_arg, source)
-    {
-        push_semantic_site(
-            sites,
-            RuleId::RnAnimationReactionAsDerived,
-            subject_name.clone(),
-            "rnAnimationReactionAsDerived",
-            "useAnimatedReaction",
-            "This useAnimatedReaction only copies one shared value into another, so it can miss Reanimated's derived-value dependency tracking.".to_string(),
-            line_starts,
-            call.span,
-        );
-    }
+    check_rn_reanimated_and_identifier_calls(program, call, subject_name, source, line_starts, sites);
+    check_rn_member_call_rules(call, subject_name, line_starts, sites);
 
-    // 2. `rn-no-dimensions-get`
-    if subject_name.is_some()
-        && let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
-        && mem.property.name == "get"
-        && let Expression::Identifier(obj_id) = mem.object.without_parentheses()
-        && obj_id.name == "Dimensions"
-    {
-        push_semantic_site(
-            sites,
-            RuleId::RnNoDimensionsGet,
-            subject_name.clone(),
-            "rnNoDimensionsGet",
-            "Dimensions.get",
-            "Dimensions.get() inside a component does not update when the window rotates or resizes; use useWindowDimensions() instead.".to_string(),
-            line_starts,
-            call.span,
-        );
-    }
-
-    // 3. `StyleSheet.create(...)` shadow rules (`rn-style-prefer-box-shadow`, `rn-no-legacy-shadow-styles`)
-    if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
-        && mem.property.name == "create"
-        && let Expression::Identifier(obj_id) = mem.object.without_parentheses()
-        && obj_id.name == "StyleSheet"
-        && let Some(Argument::ObjectExpression(styles_obj)) = call.arguments.first()
-    {
-        for prop_kind in &styles_obj.properties {
-            let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                continue;
-            };
-            let Expression::ObjectExpression(style_def) = prop.value.without_parentheses() else {
-                continue;
-            };
-            check_style_object_shadows(style_def, subject_name, line_starts, sites);
-        }
-    }
-
-    // 4. Reanimated 4 migration rules (`rn-reanimated-4-*`)
-    if let Expression::Identifier(id) = call.callee.without_parentheses() {
-        let fn_name = id.name.as_str();
-        if is_named_import_from(program, fn_name, fn_name, "react-native-reanimated") {
-            if fn_name == "withSpring"
-                && let Some(Argument::ObjectExpression(cfg_obj)) = call.arguments.get(1)
-            {
-                for prop_kind in &cfg_obj.properties {
-                    let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
-                        continue;
-                    };
-                    let key_name = prop.key.static_name();
-                    let Some(k) = key_name.as_ref().and_then(|n| n.as_str()) else {
-                        continue;
-                    };
-                    if matches!(k, "restDisplacementThreshold" | "restSpeedThreshold") {
-                        push_semantic_site(
-                            sites,
-                            RuleId::RnReanimated4NoLegacySpringThresholds,
-                            subject_name.clone(),
-                            "rnReanimated4NoLegacySpringThresholds",
-                            k,
-                            format!(
-                                "Reanimated 4 removed `{k}`; use the `energyThreshold` spring option instead."
-                            ),
-                            line_starts,
-                            prop.span,
-                        );
-                    }
-                }
-            }
-
-            if matches!(
-                fn_name,
-                "useAnimatedGestureHandler"
-                    | "useWorkletCallback"
-                    | "combineTransition"
-                    | "addWhitelistedNativeProps"
-                    | "addWhitelistedUIProps"
-            ) {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnReanimated4NoRemovedApi,
-                    subject_name.clone(),
-                    "rnReanimated4NoRemovedApi",
-                    fn_name,
-                    format!(
-                        "Reanimated 4 removed `{fn_name}`; migrate to the Gesture API or Reanimated 4 replacement."
-                    ),
-                    line_starts,
-                    call.span,
-                );
-            }
-
-            if matches!(
-                fn_name,
-                "runOnUI" | "runOnJS" | "executeOnUIRuntimeSync" | "runOnRuntime"
-            ) {
-                push_semantic_site(
-                    sites,
-                    RuleId::RnReanimated4UseWorkletsScheduler,
-                    subject_name.clone(),
-                    "rnReanimated4UseWorkletsScheduler",
-                    fn_name,
-                    format!(
-                        "For Reanimated 4, import the worklet scheduler replacement for `{fn_name}` from `react-native-worklets`."
-                    ),
-                    line_starts,
-                    call.span,
-                );
-            }
-        }
-    }
-
-    // 5. `rn-detox-missing-await`
     if is_detox_file
         && matches!(
             semantic.nodes().parent_kind(node_id),
@@ -192,10 +58,131 @@ pub(crate) fn check_rn_call_rules(
         );
     }
 
-    // 6. `rn-no-set-native-props`
-    if let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses()
-        && mem.property.name == "setNativeProps"
+    check_rn_animate_layout_property(semantic, call, subject_name, line_starts, sites);
+}
+
+fn check_rn_reanimated_and_identifier_calls(
+    program: &Program<'_>,
+    call: &CallExpression<'_>,
+    subject_name: &Option<String>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Expression::Identifier(id) = call.callee.without_parentheses() else {
+        return;
+    };
+    let fn_name = id.name.as_str();
+    if !is_named_import_from(program, fn_name, fn_name, "react-native-reanimated") {
+        return;
+    }
+
+    if fn_name == "useAnimatedReaction"
+        && let Some(second_arg) = call.arguments.get(1).and_then(Argument::as_expression)
+        && is_single_shared_value_copy(second_arg, source)
     {
+        push_semantic_site(
+            sites,
+            RuleId::RnAnimationReactionAsDerived,
+            subject_name.clone(),
+            "rnAnimationReactionAsDerived",
+            "useAnimatedReaction",
+            "This useAnimatedReaction only copies one shared value into another, so it can miss Reanimated's derived-value dependency tracking.".to_string(),
+            line_starts,
+            call.span,
+        );
+    }
+
+    if fn_name == "withSpring"
+        && let Some(Argument::ObjectExpression(cfg_obj)) = call.arguments.get(1)
+    {
+        check_reanimated_spring_legacy_thresholds(cfg_obj, subject_name, line_starts, sites);
+    }
+
+    if matches!(
+        fn_name,
+        "useAnimatedGestureHandler"
+            | "useWorkletCallback"
+            | "combineTransition"
+            | "addWhitelistedNativeProps"
+            | "addWhitelistedUIProps"
+    ) {
+        push_semantic_site(
+            sites,
+            RuleId::RnReanimated4NoRemovedApi,
+            subject_name.clone(),
+            "rnReanimated4NoRemovedApi",
+            fn_name,
+            format!(
+                "Reanimated 4 removed `{fn_name}`; migrate to the Gesture API or Reanimated 4 replacement."
+            ),
+            line_starts,
+            call.span,
+        );
+    }
+
+    if matches!(
+        fn_name,
+        "runOnUI" | "runOnJS" | "executeOnUIRuntimeSync" | "runOnRuntime"
+    ) {
+        push_semantic_site(
+            sites,
+            RuleId::RnReanimated4UseWorkletsScheduler,
+            subject_name.clone(),
+            "rnReanimated4UseWorkletsScheduler",
+            fn_name,
+            format!(
+                "For Reanimated 4, import the worklet scheduler replacement for `{fn_name}` from `react-native-worklets`."
+            ),
+            line_starts,
+            call.span,
+        );
+    }
+}
+
+fn check_reanimated_spring_legacy_thresholds(
+    cfg_obj: &ObjectExpression<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for prop_kind in &cfg_obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+            continue;
+        };
+        let key_name = prop.key.static_name();
+        let Some(k) = key_name.as_ref().and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if matches!(k, "restDisplacementThreshold" | "restSpeedThreshold") {
+            push_semantic_site(
+                sites,
+                RuleId::RnReanimated4NoLegacySpringThresholds,
+                subject_name.clone(),
+                "rnReanimated4NoLegacySpringThresholds",
+                k,
+                format!(
+                    "Reanimated 4 removed `{k}`; use the `energyThreshold` spring option instead."
+                ),
+                line_starts,
+                prop.span,
+            );
+        }
+    }
+}
+
+fn check_rn_member_call_rules(
+    call: &CallExpression<'_>,
+    subject_name: &Option<String>,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+        return;
+    };
+    let prop_name = mem.property.name.as_str();
+
+    if prop_name == "setNativeProps" {
         push_semantic_site(
             sites,
             RuleId::RnNoSetNativeProps,
@@ -206,10 +193,38 @@ pub(crate) fn check_rn_call_rules(
             line_starts,
             call.span,
         );
+        return;
     }
 
-    // 7. `rn-animate-layout-property`
-    check_rn_animate_layout_property(semantic, call, subject_name, line_starts, sites);
+    let Expression::Identifier(obj_id) = mem.object.without_parentheses() else {
+        return;
+    };
+
+    if subject_name.is_some() && obj_id.name == "Dimensions" && prop_name == "get" {
+        push_semantic_site(
+            sites,
+            RuleId::RnNoDimensionsGet,
+            subject_name.clone(),
+            "rnNoDimensionsGet",
+            "Dimensions.get",
+            "Dimensions.get() inside a component does not update when the window rotates or resizes; use useWindowDimensions() instead.".to_string(),
+            line_starts,
+            call.span,
+        );
+    } else if obj_id.name == "StyleSheet"
+        && prop_name == "create"
+        && let Some(Argument::ObjectExpression(styles_obj)) = call.arguments.first()
+    {
+        for prop_kind in &styles_obj.properties {
+            let ObjectPropertyKind::ObjectProperty(prop) = prop_kind else {
+                continue;
+            };
+            let Expression::ObjectExpression(style_def) = prop.value.without_parentheses() else {
+                continue;
+            };
+            check_style_object_shadows(style_def, subject_name, line_starts, sites);
+        }
+    }
 }
 
 fn is_single_shared_value_copy(reaction_fn: &Expression<'_>, _source: &str) -> bool {
@@ -430,29 +445,12 @@ pub(crate) fn check_gesture_and_pressable_jsx_rules(
 ) {
     let opening = &jsx_el.opening_element;
 
-    // 1. `rn-prefer-pressable-over-gesture-detector`
     if el_name == "GestureDetector"
         && let Some(gesture_attr) = find_jsx_attr(opening, "gesture")
         && let Some(JSXAttributeValue::ExpressionContainer(container)) = &gesture_attr.value
         && let Some(expr) = container.expression.as_expression()
     {
-        let gesture_text = match expr.without_parentheses() {
-            Expression::Identifier(ident) => ident
-                .reference_id
-                .get()
-                .and_then(|r| semantic.scoping().get_reference(r).symbol_id())
-                .and_then(|s| {
-                    let decl_id = semantic.scoping().symbol_declaration(s);
-                    if let AstKind::VariableDeclarator(d) = semantic.nodes().kind(decl_id) {
-                        d.init.as_ref().map(|i| i.span().source_text(source))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default(),
-            other => other.span().source_text(source),
-        };
-
+        let gesture_text = resolve_gesture_expr_source(semantic, expr, source);
         if gesture_text.contains("Gesture.Tap()") && !gesture_text.contains("numberOfTaps(") {
             push_semantic_site(
                 sites,
@@ -467,27 +465,60 @@ pub(crate) fn check_gesture_and_pressable_jsx_rules(
         }
     }
 
-    // 2. `rn-pressable-shared-value-mutation`
     if (el_name == "Pressable" || TOUCHABLE_COMPONENTS.contains(&el_name))
         && source.contains("useSharedValue(")
     {
-        for prop_name in ["onPress", "onPressIn", "onPressOut", "onLongPress"] {
-            if let Some(attr) = find_jsx_attr(opening, prop_name) {
-                let attr_text = attr.span.source_text(source);
-                if attr_text.contains(".value =") || attr_text.contains(".value=") {
-                    push_semantic_site(
-                        sites,
-                        RuleId::RnPressableSharedValueMutation,
-                        subject_name.clone(),
-                        "rnPressableSharedValueMutation",
-                        prop_name,
-                        "Mutating a Reanimated shared value inside a Pressable JS handler crosses the bridge on press; use GestureDetector + Gesture.Tap() on the UI thread.".to_string(),
-                        line_starts,
-                        attr.span,
-                    );
-                    break;
+        check_pressable_shared_value_mutation(opening, subject_name, source, line_starts, sites);
+    }
+}
+
+fn resolve_gesture_expr_source<'a>(
+    semantic: &Semantic<'a>,
+    expr: &Expression<'a>,
+    source: &'a str,
+) -> &'a str {
+    match expr.without_parentheses() {
+        Expression::Identifier(ident) => ident
+            .reference_id
+            .get()
+            .and_then(|r| semantic.scoping().get_reference(r).symbol_id())
+            .and_then(|s| {
+                let decl_id = semantic.scoping().symbol_declaration(s);
+                if let AstKind::VariableDeclarator(d) = semantic.nodes().kind(decl_id) {
+                    d.init.as_ref().map(|i| i.span().source_text(source))
+                } else {
+                    None
                 }
-            }
+            })
+            .unwrap_or_default(),
+        other => other.span().source_text(source),
+    }
+}
+
+fn check_pressable_shared_value_mutation(
+    opening: &oxc_ast::ast::JSXOpeningElement<'_>,
+    subject_name: &Option<String>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    for prop_name in ["onPress", "onPressIn", "onPressOut", "onLongPress"] {
+        let Some(attr) = find_jsx_attr(opening, prop_name) else {
+            continue;
+        };
+        let attr_text = attr.span.source_text(source);
+        if attr_text.contains(".value =") || attr_text.contains(".value=") {
+            push_semantic_site(
+                sites,
+                RuleId::RnPressableSharedValueMutation,
+                subject_name.clone(),
+                "rnPressableSharedValueMutation",
+                prop_name,
+                "Mutating a Reanimated shared value inside a Pressable JS handler crosses the bridge on press; use GestureDetector + Gesture.Tap() on the UI thread.".to_string(),
+                line_starts,
+                attr.span,
+            );
+            break;
         }
     }
 }

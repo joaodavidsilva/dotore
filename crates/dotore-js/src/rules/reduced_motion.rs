@@ -1,14 +1,11 @@
 //! Single-pass motion library and CSS `@media (prefers-reduced-motion: reduce)` extraction
 //! and cross-file [`ProjectGraph`] evaluation for `require-reduced-motion` (WCAG 2.3.3).
 
-use std::{
-    collections::HashSet,
-    path::{Component, Path},
-};
+use std::{collections::HashSet, path::Path};
 
 use crate::{
     config::{Capability, WorkspacePackage, resolve_package_for_file},
-    graph::ProjectGraph,
+    graph::{ProjectGraph, resolution::normalize_path_components},
     ir::{
         ByteSpan, FileIr, SourceLoc,
         motion_and_frame_loop::{
@@ -117,38 +114,54 @@ fn resolve_package_motion_evidence(files: &[&FileIr]) -> (bool, bool) {
 
     for file in files {
         for pending in &file.motion.pending_refs {
-            match &pending.usage {
-                PendingMotionUsage::ReExport { .. } => {}
-                PendingMotionUsage::JsxTag {
-                    reduced_motion_prop,
-                } => {
-                    let ev = resolve_pending_ref_evidence(file, pending, files);
-                    if ev.is_motion_component || ev.is_motion_component_factory {
-                        has_motion_use = true;
-                    }
-                    if ev.is_motion_config
-                        && matches!(reduced_motion_prop.as_deref(), Some("user" | "always"))
-                    {
-                        has_reduced_motion_handling = true;
-                    }
-                }
-                PendingMotionUsage::Call {
-                    value_consumed,
-                    via_call_or_apply,
-                } => {
-                    let ev = resolve_pending_ref_evidence(file, pending, files);
-                    if ev.is_animation_function {
-                        has_motion_use = true;
-                    }
-                    if ev.is_reduced_motion_hook && *value_consumed && !*via_call_or_apply {
-                        has_reduced_motion_handling = true;
-                    }
-                }
-            }
+            apply_pending_motion_ref(
+                file,
+                pending,
+                files,
+                &mut has_motion_use,
+                &mut has_reduced_motion_handling,
+            );
         }
     }
 
     (has_motion_use, has_reduced_motion_handling)
+}
+
+fn apply_pending_motion_ref(
+    file: &FileIr,
+    pending: &PendingMotionRef,
+    files: &[&FileIr],
+    has_motion_use: &mut bool,
+    has_reduced_motion_handling: &mut bool,
+) {
+    match &pending.usage {
+        PendingMotionUsage::ReExport { .. } => {}
+        PendingMotionUsage::JsxTag {
+            reduced_motion_prop,
+        } => {
+            let ev = resolve_pending_ref_evidence(file, pending, files);
+            if ev.is_motion_component || ev.is_motion_component_factory {
+                *has_motion_use = true;
+            }
+            if ev.is_motion_config
+                && matches!(reduced_motion_prop.as_deref(), Some("user" | "always"))
+            {
+                *has_reduced_motion_handling = true;
+            }
+        }
+        PendingMotionUsage::Call {
+            value_consumed,
+            via_call_or_apply,
+        } => {
+            let ev = resolve_pending_ref_evidence(file, pending, files);
+            if ev.is_animation_function {
+                *has_motion_use = true;
+            }
+            if ev.is_reduced_motion_hook && *value_consumed && !*via_call_or_apply {
+                *has_reduced_motion_handling = true;
+            }
+        }
+    }
 }
 
 fn resolve_pending_ref_evidence(
@@ -191,8 +204,6 @@ fn resolve_module_export_evidence<'a>(
     }
 
     let mut combined = MotionExpressionEvidence::default();
-
-    // 1. Direct exported evidence in `file`
     for (name, ev) in &file.motion.exported_evidence {
         if name == export_name {
             combined = combined.merge(*ev);
@@ -202,7 +213,23 @@ fn resolve_module_export_evidence<'a>(
         return combined;
     }
 
-    // 2. Named re-exports in `file.motion.pending_refs`
+    if let Some(ev) = resolve_named_reexport_evidence(file, export_name, files, visited) {
+        return ev;
+    }
+
+    if let Some(ev) = resolve_star_reexport_evidence(file, export_name, files, visited) {
+        return ev;
+    }
+
+    combined
+}
+
+fn resolve_named_reexport_evidence<'a>(
+    file: &'a FileIr,
+    export_name: &str,
+    files: &[&'a FileIr],
+    visited: &mut HashSet<(&'a Path, String)>,
+) -> Option<MotionExpressionEvidence> {
     for pending in &file.motion.pending_refs {
         let PendingMotionUsage::ReExport { exported_as } = &pending.usage else {
             continue;
@@ -210,43 +237,50 @@ fn resolve_module_export_evidence<'a>(
         if exported_as != export_name {
             continue;
         }
-        if let Some(target_file) = find_local_module_file(&file.path, &pending.module_source, files)
-        {
-            let mut ev = if pending.imported_name == "*" {
-                MotionExpressionEvidence {
-                    is_motion_namespace: true,
-                    ..MotionExpressionEvidence::default()
-                }
-            } else {
-                resolve_module_export_evidence(target_file, &pending.imported_name, files, visited)
-            };
-            for member in &pending.member_chain {
-                ev = classify_motion_member(ev, member);
+        let Some(target_file) = find_local_module_file(&file.path, &pending.module_source, files)
+        else {
+            continue;
+        };
+        let mut ev = if pending.imported_name == "*" {
+            MotionExpressionEvidence {
+                is_motion_namespace: true,
+                ..MotionExpressionEvidence::default()
             }
-            if ev.has_any() {
-                return ev;
-            }
+        } else {
+            resolve_module_export_evidence(target_file, &pending.imported_name, files, visited)
+        };
+        for member in &pending.member_chain {
+            ev = classify_motion_member(ev, member);
+        }
+        if ev.has_any() {
+            return Some(ev);
         }
     }
+    None
+}
 
-    // 3. `export * from "..."` star re-exports
+fn resolve_star_reexport_evidence<'a>(
+    file: &'a FileIr,
+    export_name: &str,
+    files: &[&'a FileIr],
+    visited: &mut HashSet<(&'a Path, String)>,
+) -> Option<MotionExpressionEvidence> {
     for star_src in &file.motion.star_reexports {
         if is_motion_module_source(star_src) {
             let ev = classify_motion_export(export_name);
             if ev.has_any() {
-                return ev;
+                return Some(ev);
             }
         } else if star_src.starts_with('.')
             && let Some(target_file) = find_local_module_file(&file.path, star_src, files)
         {
             let ev = resolve_module_export_evidence(target_file, export_name, files, visited);
             if ev.has_any() {
-                return ev;
+                return Some(ev);
             }
         }
     }
-
-    combined
+    None
 }
 
 fn find_local_module_file<'a>(
@@ -259,10 +293,10 @@ fn find_local_module_file<'a>(
     }
     let parent = importing_path.parent().unwrap_or_else(|| Path::new(""));
     let joined = parent.join(module_source);
-    let joined_norm = normalize_path_str(&joined);
+    let joined_norm = normalize_path_components(&joined);
     let target_stem = strip_known_ext(&joined_norm);
     for candidate in files {
-        let cand_norm = normalize_path_str(&candidate.path);
+        let cand_norm = normalize_path_components(&candidate.path);
         let cand_stem = strip_known_ext(&cand_norm);
         if cand_stem == target_stem
             || cand_stem
@@ -273,35 +307,6 @@ fn find_local_module_file<'a>(
         }
     }
     None
-}
-
-fn normalize_path_str(path: &Path) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut has_root = false;
-    for comp in path.components() {
-        match comp {
-            Component::RootDir => has_root = true,
-            Component::CurDir | Component::Prefix(_) => {}
-            Component::ParentDir => {
-                if parts.last().is_some_and(|last| last != "..") {
-                    parts.pop();
-                } else if !has_root {
-                    parts.push("..".to_string());
-                }
-            }
-            Component::Normal(s) => {
-                if let Some(str_val) = s.to_str() {
-                    parts.push(str_val.to_string());
-                }
-            }
-        }
-    }
-    let joined = parts.join("/");
-    if has_root {
-        format!("/{joined}")
-    } else {
-        joined
-    }
 }
 
 fn strip_known_ext(path: &str) -> &str {
