@@ -735,11 +735,14 @@ pub fn parse_python_suppression_directive(
 /// `clippy::*`, and standard `rustc` lint names) to canonical `dotore` rule keys.
 #[must_use]
 pub fn map_rust_allow_lint_to_rules(lint: &str) -> Vec<String> {
+    if let Some(rule_id) = RuleId::parse(lint) {
+        return vec![rule_id.as_str().to_string()];
+    }
     let stripped = lint
         .strip_prefix("dotore::")
         .or_else(|| lint.strip_prefix("dotore/"))
         .or_else(|| {
-            lint.split_once("::")
+            lint.rsplit_once("::")
                 .map(|(_, after)| after)
                 .filter(|after| !after.is_empty())
         })
@@ -749,9 +752,10 @@ pub fn map_rust_allow_lint_to_rules(lint: &str) -> Vec<String> {
         | "rs-no-unwrap-in-production"
         | "unwrap_used"
         | "expect_used" => vec!["rs-no-unwrap-in-production".to_string()],
-        "rs_no_unguarded_slice_index" | "rs-no-unguarded-slice-index" | "indexing_slicing" => {
-            vec!["rs-no-unguarded-slice-index".to_string()]
-        }
+        "rs_no_unguarded_slice_index"
+        | "rs-no-unguarded-slice-index"
+        | "indexing_slicing"
+        | "string_slice" => vec!["rs-no-unguarded-slice-index".to_string()],
         "rs_no_lossy_numeric_as_cast"
         | "rs-no-lossy-numeric-as-cast"
         | "cast_possible_truncation"
@@ -768,24 +772,25 @@ pub fn map_rust_allow_lint_to_rules(lint: &str) -> Vec<String> {
         "rs_tokio_no_std_lock_across_await"
         | "rs-tokio-no-std-lock-across-await"
         | "await_holding_lock" => vec!["rs-tokio-no-std-lock-across-await".to_string()],
-        "rs_tokio_no_blocking_in_async" | "rs-tokio-no-blocking-in-async" => {
-            vec!["rs-tokio-no-blocking-in-async".to_string()]
-        }
+        "rs_tokio_no_blocking_in_async"
+        | "rs-tokio-no-blocking-in-async"
+        | "blocking_call_in_async" => vec!["rs-tokio-no-blocking-in-async".to_string()],
         "rs_tokio_prefer_bounded_channel" | "rs-tokio-prefer-bounded-channel" => {
             vec!["rs-tokio-prefer-bounded-channel".to_string()]
         }
-        "rs_perf_no_clone_in_loop" | "rs-perf-no-clone-in-loop" => {
-            vec!["rs-perf-no-clone-in-loop".to_string()]
-        }
+        "rs_perf_no_clone_in_loop"
+        | "rs-perf-no-clone-in-loop"
+        | "unnecessary_to_owned" => vec!["rs-perf-no-clone-in-loop".to_string()],
         "rs_perf_hoist_regex_to_lazylock" | "rs-perf-hoist-regex-to-lazylock" => {
             vec!["rs-perf-hoist-regex-to-lazylock".to_string()]
         }
-        "rs_perf_prefer_vec_with_capacity" | "rs-perf-prefer-vec-with-capacity" => {
-            vec!["rs-perf-prefer-vec-with-capacity".to_string()]
-        }
-        "rs_perf_no_unnecessary_format" | "rs-perf-no-unnecessary-format" | "useless_format" => {
-            vec!["rs-perf-no-unnecessary-format".to_string()]
-        }
+        "rs_perf_prefer_vec_with_capacity"
+        | "rs-perf-prefer-vec-with-capacity"
+        | "vec_init_then_push" => vec!["rs-perf-prefer-vec-with-capacity".to_string()],
+        "rs_perf_no_unnecessary_format"
+        | "rs-perf-no-unnecessary-format"
+        | "useless_format"
+        | "format_collect" => vec!["rs-perf-no-unnecessary-format".to_string()],
         "rs_arch_no_many_boolean_params"
         | "rs-arch-no-many-boolean-params"
         | "fn_params_excessive_bools" => vec!["rs-arch-no-many-boolean-params".to_string()],
@@ -798,6 +803,28 @@ pub fn map_rust_allow_lint_to_rules(lint: &str) -> Vec<String> {
         "rs_arch_no_legacy_mod_rs" | "rs-arch-no-legacy-mod-rs" | "mod_module_files" => {
             vec!["rs-arch-no-legacy-mod-rs".to_string()]
         }
+        "await_holding_refcell_ref" => vec!["rs-no-await-holding-refcell".to_string()],
+        "panic" | "todo" | "unimplemented" | "exit" | "panic_in_result_fn" => {
+            vec!["rs-no-panic-or-todo-in-production".to_string()]
+        }
+        "dbg_macro" | "print_stdout" | "print_stderr" => {
+            vec!["rs-no-dbg-or-print-in-library".to_string()]
+        }
+        "permissions_set_readonly_false" => {
+            vec!["rs-security-no-world-writable-permissions".to_string()]
+        }
+        "zombie_processes" => vec!["rs-no-zombie-child-process".to_string()],
+        "missing_transmute_annotations" | "crosspointer_transmute" => {
+            vec!["rs-no-transmute-without-type-annotations".to_string()]
+        }
+        "missing_safety_doc" => vec!["rs-require-safety-doc-on-pub-unsafe-fn".to_string()],
+        "allow_attributes_without_reason" | "unreasoned_allow_attribute" => {
+            vec!["rs-structure-unreasoned-allow".to_string()]
+        }
+        "cognitive_complexity" | "complex_function" => {
+            vec!["rs-structure-complex-function".to_string()]
+        }
+        "too_many_lines" | "oversized_unit" => vec!["rs-structure-oversized-unit".to_string()],
         other => {
             if let Some(rule_id) =
                 RuleId::parse(other).or_else(|| RuleId::parse(&other.replace('_', "-")))

@@ -23,6 +23,66 @@ use crate::{
     rules::{AutofixPatch, RuleId},
 };
 
+/// Returns `true` if `rule` belongs to the Angular, Angular Template, NgRx, or Angular Material rule suite.
+#[must_use]
+pub const fn is_evaluated_angular_rule(rule: RuleId) -> bool {
+    matches!(
+        rule,
+        RuleId::AngularNoSignalWriteInEffect
+            | RuleId::AngularRxjsSubscribeRequiresTeardown
+            | RuleId::AngularPreferOnPushChangeDetection
+            | RuleId::AngularForTrackNoIndex
+            | RuleId::AngularNoWorkInConstructor
+            | RuleId::AngularNoNestedSubscribe
+            | RuleId::AngularNoDirectNativeElementMutation
+            | RuleId::AngularNoUncalledSignals
+            | RuleId::AngularPreferSignalModel
+            | RuleId::AngularPreferSignals
+            | RuleId::AngularNoConflictingLifecycle
+            | RuleId::AngularContextualLifecycle
+            | RuleId::AngularContextualDecorator
+            | RuleId::AngularNoAsyncLifecycleMethod
+            | RuleId::AngularNoLifecycleCall
+            | RuleId::AngularRequireLifecycleOnPrototype
+            | RuleId::AngularNoEmptyLifecycleMethod
+            | RuleId::AngularUseLifecycleInterface
+            | RuleId::AngularUsePipeTransformInterface
+            | RuleId::AngularNoPipeImpure
+            | RuleId::AngularNoOutputNative
+            | RuleId::AngularNoOutputOnPrefix
+            | RuleId::AngularRelativeUrlPrefix
+            | RuleId::AngularPreferStandalone
+            | RuleId::AngularPreferInject
+            | RuleId::AngularUseInjectableProvidedIn
+            | RuleId::AngularPreferHostMetadataProperty
+            | RuleId::AngularNoDuplicatesInMetadataArrays
+            | RuleId::AngularNoForwardRef
+            | RuleId::AngularNoInputsMetadataProperty
+            | RuleId::AngularNoOutputsMetadataProperty
+            | RuleId::AngularNoQueriesMetadataProperty
+            | RuleId::AngularPreferOutputReadonly
+            | RuleId::AngularPreferOutputEmitterRef
+            | RuleId::AngularUseComponentViewEncapsulation
+            | RuleId::AngularNoAttributeDecorator
+            | RuleId::AngularComponentMaxInlineDeclarations
+            | RuleId::AngularTemplateNoAny
+            | RuleId::AngularTemplateAltText
+            | RuleId::AngularTemplateClickEventsHaveKeyEvents
+            | RuleId::AngularTemplateMouseEventsHaveKeyEvents
+            | RuleId::AngularTemplateElementsHaveContent
+            | RuleId::AngularTemplateInteractiveSupportsFocus
+            | RuleId::AngularTemplateTableScope
+            | RuleId::AngularTemplateValidAria
+            | RuleId::NgrxNoMultipleActionsInEffects
+            | RuleId::NgrxNoEffectDecoratorAndCreator
+            | RuleId::NgrxNoCyclicActionCreators
+            | RuleId::NgrxNoTypedGlobalStore
+            | RuleId::NgrxOnFunctionExplicitReturnType
+            | RuleId::NgrxSelectStyle
+            | RuleId::AngularMaterialNoConflictingMixins
+    )
+}
+
 /// Extracts Angular `@Component`, `@Directive`, `@Injectable`, and `@Pipe` classes as [`SubjectIr`]s
 /// so **Subject** counts, **Contextual Owner** spans, and **Fix Capsules** cover Angular classes.
 pub(crate) fn extract_angular_class_subjects(

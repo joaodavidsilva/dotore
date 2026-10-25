@@ -1,4 +1,4 @@
-//! Decomposed 976-rule static [`RuleMetadata`] catalog assembled at compile time.
+//! Decomposed 1076-rule static [`RuleMetadata`] catalog assembled at compile time.
 
 use crate::rules::types::RuleMetadata;
 
@@ -12,6 +12,14 @@ pub(crate) mod ecosystem;
 pub(crate) mod performance_and_bundle;
 /// Angular, Python, Rust, and cross-language architecture rule metadata (`921..=975`).
 pub(crate) mod polyglot;
+/// Extended Angular Signals, lifecycle, decorator contract, HTML template, NgRx, and Material rule metadata (`976..=1020`).
+pub(crate) mod angular_extended;
+/// Extended Python Zen, complexity, wildcard import, Bandit security, and structure rule metadata (`1021..=1034`).
+pub(crate) mod python_extended;
+/// Extended Rust SourceKernel, Cargo manifest/lockfile health, structural, and Clippy-grade rule metadata (`1035..=1069`).
+pub(crate) mod rust_extended;
+/// Deterministic trust-boundary security rule metadata (`1070..=1075`).
+pub(crate) mod trust_boundary_security;
 /// React core **Effect Node**, **State Slot**, hooks, lifecycle, and architecture rule metadata (`0..=35`, `693..=766`).
 pub(crate) mod react_core;
 /// React Native and Expo mobile rule metadata (`597..=655`).
@@ -33,10 +41,14 @@ const SLICES: &[&[RuleMetadata]] = &[
     react_core::EXTENDED_REACT_RULES,
     defensive_and_correctness::RULES,
     polyglot::RULES,
+    angular_extended::RULES,
+    python_extended::RULES,
+    rust_extended::RULES,
+    trust_boundary_security::RULES,
 ];
 
 /// Total number of registered rules in `dotore`.
-pub const TOTAL_RULES: usize = 976;
+pub const TOTAL_RULES: usize = 1076;
 
 pub(crate) static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
     assert!(!react_core::CORE_INITIAL_RULES.is_empty());
@@ -60,5 +72,5 @@ pub(crate) static RULE_REGISTRY_ARRAY: [RuleMetadata; TOTAL_RULES] = {
     out
 };
 
-/// Static slice of all 976 registered [`RuleMetadata`] entries in [`crate::rules::RuleId`] discriminant order.
+/// Static slice of all 1076 registered [`RuleMetadata`] entries in [`crate::rules::RuleId`] discriminant order.
 pub const RULE_REGISTRY: &[RuleMetadata] = &RULE_REGISTRY_ARRAY;

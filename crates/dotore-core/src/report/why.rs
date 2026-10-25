@@ -280,7 +280,7 @@ pub fn explain_location_with_analyzers(
                 category: diag.category,
                 severity: diag.severity,
                 tier: diag.tier,
-                message: diag.message.clone(),
+                message: super::mask_credentials(&diag.message),
                 explanation,
                 code_frame: render_code_frame(&target_source, diag.loc.line),
                 cascade_steps,
@@ -337,7 +337,7 @@ pub fn explain_location_with_analyzers(
                     category: diag.category,
                     severity: diag.severity,
                     tier: diag.tier,
-                    message: diag.message.clone(),
+                    message: super::mask_credentials(&diag.message),
                     explanation,
                     code_frame: render_code_frame(&target_source, diag.loc.line),
                     cascade_steps,
@@ -658,7 +658,8 @@ pub fn diagnose_why_not_active_common(
 /// Renders a 5-line numbered source code frame centered on `target_line`.
 #[must_use]
 pub fn render_code_frame(source: &str, target_line: u32) -> String {
-    let lines: Vec<&str> = source.lines().collect();
+    let redacted = super::mask_credentials(source);
+    let lines: Vec<&str> = redacted.lines().collect();
     if lines.is_empty() {
         return String::new();
     }

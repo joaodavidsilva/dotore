@@ -141,80 +141,40 @@ const DEP_CAPABILITY_TABLE: &[(&str, &[Capability])] = &[
     ("eslint-plugin-react-compiler", &[Capability::ReactCompiler]),
     ("typescript", &[Capability::TypeScript]),
     ("tailwindcss", &[Capability::Tailwind]),
-    (
-        "react-router",
-        &[Capability::React, Capability::ReactRouter],
-    ),
-    (
-        "react-router-dom",
-        &[Capability::React, Capability::ReactRouter],
-    ),
-    (
-        "@react-router/dev",
-        &[Capability::React, Capability::ReactRouter],
-    ),
-    (
-        "@react-router/node",
-        &[Capability::React, Capability::ReactRouter],
-    ),
-    (
-        "@react-router/serve",
-        &[Capability::React, Capability::ReactRouter],
-    ),
+    ("react-router", &[Capability::React, Capability::ReactRouter]),
+    ("react-router-dom", &[Capability::React, Capability::ReactRouter]),
+    ("@react-router/dev", &[Capability::React, Capability::ReactRouter]),
+    ("@react-router/node", &[Capability::React, Capability::ReactRouter]),
+    ("@react-router/serve", &[Capability::React, Capability::ReactRouter]),
     ("remotion", &[Capability::React, Capability::Remotion]),
     ("@remotion/cli", &[Capability::React, Capability::Remotion]),
-    (
-        "@remotion/player",
-        &[Capability::React, Capability::Remotion],
-    ),
-    (
-        "@remotion/renderer",
-        &[Capability::React, Capability::Remotion],
-    ),
+    ("@remotion/player", &[Capability::React, Capability::Remotion]),
+    ("@remotion/renderer", &[Capability::React, Capability::Remotion]),
     ("react-redux", &[Capability::React, Capability::Redux]),
     ("@reduxjs/toolkit", &[Capability::Redux]),
     ("redux", &[Capability::Redux]),
-    (
-        "@tanstack/react-form",
-        &[Capability::React, Capability::TanstackForm],
-    ),
-    (
-        "@tanstack/react-table",
-        &[Capability::React, Capability::TanstackTable],
-    ),
-    (
-        "@tanstack/react-virtual",
-        &[Capability::React, Capability::TanstackVirtual],
-    ),
+    ("@tanstack/react-form", &[Capability::React, Capability::TanstackForm]),
+    ("@tanstack/react-table", &[Capability::React, Capability::TanstackTable]),
+    ("@tanstack/react-virtual", &[Capability::React, Capability::TanstackVirtual]),
     ("radix-ui", &[Capability::RadixUi]),
     ("@base-ui/react", &[Capability::BaseUi]),
     ("@base-ui-components/react", &[Capability::BaseUi]),
     ("react-aria-components", &[Capability::ReactAria]),
     ("styled-components", &[Capability::StyledComponents]),
-    (
-        "@angular/core",
-        &[
-            Capability::Angular,
-            Capability::Rxjs,
-            Capability::TypeScript,
-        ],
-    ),
-    (
-        "@angular/common",
-        &[Capability::Angular, Capability::TypeScript],
-    ),
-    (
-        "@angular/router",
-        &[Capability::Angular, Capability::TypeScript],
-    ),
-    (
-        "@angular/forms",
-        &[Capability::Angular, Capability::TypeScript],
-    ),
-    (
-        "@angular/platform-browser",
-        &[Capability::Angular, Capability::TypeScript],
-    ),
+    ("@angular/core", &[Capability::Angular, Capability::Rxjs, Capability::TypeScript]),
+    ("@angular/common", &[Capability::Angular, Capability::TypeScript]),
+    ("@angular/router", &[Capability::Angular, Capability::TypeScript]),
+    ("@angular/forms", &[Capability::Angular, Capability::TypeScript]),
+    ("@angular/platform-browser", &[Capability::Angular, Capability::TypeScript]),
+    ("@angular/cdk", &[Capability::Angular, Capability::TypeScript]),
+    ("@angular/material", &[Capability::Angular, Capability::AngularMaterial, Capability::TypeScript]),
+    ("@ngrx/store", &[Capability::Angular, Capability::NgRx, Capability::Rxjs, Capability::TypeScript]),
+    ("@ngrx/effects", &[Capability::Angular, Capability::NgRx, Capability::Rxjs, Capability::TypeScript]),
+    ("@ngrx/entity", &[Capability::Angular, Capability::NgRx, Capability::TypeScript]),
+    ("@ngrx/router-store", &[Capability::Angular, Capability::NgRx, Capability::TypeScript]),
+    ("@ngrx/component-store", &[Capability::Angular, Capability::NgRx, Capability::Rxjs, Capability::TypeScript]),
+    ("@ngrx/signals", &[Capability::Angular, Capability::NgRx, Capability::TypeScript]),
+    ("@ngrx/operators", &[Capability::Angular, Capability::NgRx, Capability::Rxjs, Capability::TypeScript]),
     ("rxjs", &[Capability::Rxjs]),
 ];
 
@@ -300,6 +260,11 @@ pub enum Capability {
     Angular,
     /// RxJS reactive streams (`rxjs`).
     Rxjs,
+    /// NgRx reactive state management (`@ngrx/store`, `@ngrx/effects`, `@ngrx/*`).
+    #[serde(rename = "ngrx", alias = "ng-rx")]
+    NgRx,
+    /// Angular Material component library (`@angular/material`).
+    AngularMaterial,
     /// Python language runtime (`.py`, `.pyi`, `pyproject.toml`, `requirements.txt`).
     Python,
     /// FastAPI web framework (`fastapi`).
@@ -332,6 +297,26 @@ pub enum Capability {
     Leptos,
     /// Dioxus reactive Rust UI framework (`dioxus`).
     Dioxus,
+    /// Reqwest HTTP client (`reqwest`).
+    Reqwest,
+    /// Diesel ORM (`diesel`, `diesel-async`).
+    Diesel,
+    /// SeaORM async ORM (`sea-orm`, `sea-query`).
+    SeaOrm,
+    /// Rusqlite SQLite driver (`rusqlite`).
+    Rusqlite,
+    /// Postgres and Tokio-Postgres drivers (`postgres`, `tokio-postgres`).
+    Postgres,
+    /// Futures crate (`futures`, `futures-executor`, `futures-util`).
+    Futures,
+    /// Tower HTTP middleware (`tower-http`).
+    TowerHttp,
+    /// Actix CORS middleware (`actix-cors`).
+    ActixCors,
+    /// HTTP cookie management (`cookie`).
+    Cookie,
+    /// JSON Web Token verification (`jsonwebtoken`).
+    Jsonwebtoken,
 }
 
 impl Capability {
@@ -377,6 +362,8 @@ impl Capability {
             Self::StyledComponents => "styled-components",
             Self::Angular => "angular",
             Self::Rxjs => "rxjs",
+            Self::NgRx => "ngrx",
+            Self::AngularMaterial => "angular-material",
             Self::Python => "python",
             Self::FastApi => "fastapi",
             Self::Pydantic => "pydantic",
@@ -392,6 +379,16 @@ impl Capability {
             Self::Tracing => "tracing",
             Self::Leptos => "leptos",
             Self::Dioxus => "dioxus",
+            Self::Reqwest => "reqwest",
+            Self::Diesel => "diesel",
+            Self::SeaOrm => "sea-orm",
+            Self::Rusqlite => "rusqlite",
+            Self::Postgres => "postgres",
+            Self::Futures => "futures",
+            Self::TowerHttp => "tower-http",
+            Self::ActixCors => "actix-cors",
+            Self::Cookie => "cookie",
+            Self::Jsonwebtoken => "jsonwebtoken",
         }
     }
 }
@@ -556,6 +553,8 @@ impl CapabilityGate {
             Capability::Angular,
             Capability::Rxjs,
             Capability::TypeScript,
+            Capability::NgRx,
+            Capability::AngularMaterial,
         ])
     }
 
@@ -585,6 +584,16 @@ impl CapabilityGate {
             Capability::Tracing,
             Capability::Leptos,
             Capability::Dioxus,
+            Capability::Reqwest,
+            Capability::Diesel,
+            Capability::SeaOrm,
+            Capability::Rusqlite,
+            Capability::Postgres,
+            Capability::Futures,
+            Capability::TowerHttp,
+            Capability::ActixCors,
+            Capability::Cookie,
+            Capability::Jsonwebtoken,
         ])
     }
 
@@ -719,6 +728,12 @@ impl CapabilityGate {
             && pred.requires.contains(&Capability::Django);
         let has_rust_ui_or = pred.requires.contains(&Capability::Leptos)
             && pred.requires.contains(&Capability::Dioxus);
+        let has_rust_sql_or = pred.requires.contains(&Capability::Sqlx)
+            && pred.requires.contains(&Capability::Diesel);
+        let has_rust_cors_or = pred.requires.contains(&Capability::TowerHttp)
+            && pred.requires.contains(&Capability::ActixCors);
+        let has_rust_async_or = pred.requires.contains(&Capability::Tokio)
+            && pred.requires.contains(&Capability::Futures);
         let has_any_rust_cap = self.capabilities.contains(&Capability::Rust)
             || self.capabilities.iter().any(|c| {
                 matches!(
@@ -730,6 +745,16 @@ impl CapabilityGate {
                         | Capability::Tracing
                         | Capability::Leptos
                         | Capability::Dioxus
+                        | Capability::Reqwest
+                        | Capability::Diesel
+                        | Capability::SeaOrm
+                        | Capability::Rusqlite
+                        | Capability::Postgres
+                        | Capability::Futures
+                        | Capability::TowerHttp
+                        | Capability::ActixCors
+                        | Capability::Cookie
+                        | Capability::Jsonwebtoken
                 )
             });
         let requires_ok = pred.requires.iter().all(|req| {
@@ -739,6 +764,28 @@ impl CapabilityGate {
             } else if has_rust_ui_or && matches!(req, Capability::Leptos | Capability::Dioxus) {
                 self.capabilities.contains(&Capability::Leptos)
                     || self.capabilities.contains(&Capability::Dioxus)
+            } else if has_rust_sql_or
+                && matches!(
+                    req,
+                    Capability::Sqlx
+                        | Capability::Diesel
+                        | Capability::SeaOrm
+                        | Capability::Rusqlite
+                        | Capability::Postgres
+                )
+            {
+                self.capabilities.contains(&Capability::Sqlx)
+                    || self.capabilities.contains(&Capability::Diesel)
+                    || self.capabilities.contains(&Capability::SeaOrm)
+                    || self.capabilities.contains(&Capability::Rusqlite)
+                    || self.capabilities.contains(&Capability::Postgres)
+            } else if has_rust_cors_or && matches!(req, Capability::TowerHttp | Capability::ActixCors)
+            {
+                self.capabilities.contains(&Capability::TowerHttp)
+                    || self.capabilities.contains(&Capability::ActixCors)
+            } else if has_rust_async_or && matches!(req, Capability::Tokio | Capability::Futures) {
+                self.capabilities.contains(&Capability::Tokio)
+                    || self.capabilities.contains(&Capability::Futures)
             } else if *req == Capability::Rust {
                 has_any_rust_cap
             } else {
@@ -812,6 +859,11 @@ fn infer_capabilities_from_deps(deps: &HashMap<String, String>) -> HashSet<Capab
         }
     }
     if deps.keys().any(|k| k.starts_with("@angular/")) {
+        caps.insert(Capability::Angular);
+        caps.insert(Capability::TypeScript);
+    }
+    if deps.keys().any(|k| k.starts_with("@ngrx/")) {
+        caps.insert(Capability::NgRx);
         caps.insert(Capability::Angular);
         caps.insert(Capability::TypeScript);
     }

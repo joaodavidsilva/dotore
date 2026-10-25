@@ -375,9 +375,60 @@ pub(crate) fn is_subprocess_callee(callee: &str) -> bool {
     )
 }
 
+/// Returns `true` if `rule` is a Python diagnostic rule evaluated by `dotore-py`.
+#[must_use]
+pub const fn is_evaluated_python_rule(rule: RuleId) -> bool {
+    matches!(
+        rule,
+        RuleId::PyNoMutableDefaultArg
+            | RuleId::PyNoSilentBroadExcept
+            | RuleId::PyRequireContextManagerForResource
+            | RuleId::PyNoUnguardedParseOrKeyAccess
+            | RuleId::PyRequireTimezoneAwareDatetime
+            | RuleId::PyPydanticPreferDefaultFactory
+            | RuleId::PyFastapiRequireResponseModel
+            | RuleId::PyFastapiMutatingRouteRequiresAuth
+            | RuleId::PyOrmNoQueryInLoop
+            | RuleId::PySecurityNoRawSqlInterpolation
+            | RuleId::PySecurityNoUnsafeDeserializationOrShell
+            | RuleId::PyAsyncNoBlockingCall
+            | RuleId::PyAsyncNoSequentialAwaitInLoop
+            | RuleId::PyAsyncNoUnawaitedCoroutine
+            | RuleId::PyAsyncNoFireAndForgetTask
+            | RuleId::PyPerfHoistRegex
+            | RuleId::PyPerfNoLinearMembershipInLoop
+            | RuleId::PyArchNoCircularImports
+            | RuleId::PyArchNoUnusedExports
+            | RuleId::PyZenComplexFunction
+            | RuleId::PyZenDeepNesting
+            | RuleId::PyZenLongFunction
+            | RuleId::PyZenTooManyParams
+            | RuleId::PyZenLargeClass
+            | RuleId::PyZenNoDenseSemicolonStatements
+            | RuleId::PyNoWildcardImport
+            | RuleId::PySecurityHttpRequestRequiresTimeout
+            | RuleId::PySecurityNoDisabledTlsVerify
+            | RuleId::PySecurityNoWeakCryptoOrRandom
+            | RuleId::PySecurityNoXxeOrUnsafeArchive
+            | RuleId::PySecurityNoHardcodedSecretOrTmp
+            | RuleId::PyStructureMissingPyTyped
+            | RuleId::PyStructureLowTypeHintCoverage
+            | RuleId::ArchThinEntrypoint
+            | RuleId::ArchNoMixedIoAndPresentation
+            | RuleId::ArchSeparateStaticCatalogFromTypes
+            | RuleId::ArchNoMixedDomainMonolith
+            | RuleId::ArchNoInlineTerminalUiPrimitives
+            | RuleId::ArchPreferFluentBuilder
+            | RuleId::ArchNoDuplicatedHelperLogic
+    )
+}
+
 /// Returns `true` if `package`'s **Capability Gate** allows `rule`.
 #[must_use]
 fn gate_allows_py_rule(package: &WorkspacePackage, rule: RuleId) -> bool {
+    if !is_evaluated_python_rule(rule) {
+        return false;
+    }
     let meta = rule.metadata();
     if package.capability_gate.allows_rule(meta) {
         return true;

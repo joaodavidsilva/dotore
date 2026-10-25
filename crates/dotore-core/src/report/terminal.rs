@@ -262,7 +262,11 @@ fn format_single_diagnostic(out: &mut String, diag: &Diagnostic, color: bool) {
         diag.loc.column,
         subject
     );
-    let _ = writeln!(out, "{dim}│{reset}  {}", diag.message);
+    let _ = writeln!(
+        out,
+        "{dim}│{reset}  {}",
+        super::mask_credentials(&diag.message)
+    );
     if !diag.cascade_steps.is_empty() {
         let flow = FlowDiagram::new(&diag.cascade_steps);
         let _ = writeln!(out, "{dim}│{reset}  cascade: {}", flow.render_arrow_chain());

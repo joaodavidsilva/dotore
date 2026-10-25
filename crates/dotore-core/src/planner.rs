@@ -276,14 +276,14 @@ pub fn build_root_cause_groups_and_capsules<C: PlannerContext + ?Sized>(
             let tier = group_prescription_tier(&indices, diagnostics);
             let blast_radius =
                 compute_blast_radius(ctx, &indices, diagnostics, sources, &subject_spans_by_file);
+            let first_msg = crate::report::mask_credentials(&first.message);
             let message = if indices.len() > 1 {
                 format!(
-                    "{} ({} related sites in Root-Cause Group)",
-                    first.message,
+                    "{first_msg} ({} related sites in Root-Cause Group)",
                     indices.len()
                 )
             } else {
-                first.message.clone()
+                first_msg
             };
 
             Some(RootCauseGroup {
@@ -885,7 +885,7 @@ pub fn excerpt_from_span(file: &Path, source: &str, span: ByteSpan) -> SourceExc
         file: file.to_path_buf(),
         start_line: start_loc.line,
         end_line: end_loc.line.max(start_loc.line),
-        source: sliced,
+        source: crate::report::mask_credentials(&sliced),
     }
 }
 
@@ -1350,7 +1350,7 @@ fn render_capsule_plan_markdown(
                     d.file.display(),
                     d.loc.line,
                     d.loc.column,
-                    d.message
+                    crate::report::mask_credentials(&d.message)
                 );
                 if !d.cascade_steps.is_empty() {
                     let _ = writeln!(md, "  - Render Cascade: `{}`", d.cascade_steps.join(" -> "));
@@ -1371,7 +1371,7 @@ fn render_capsule_plan_markdown(
     let _ = writeln!(
         md,
         "```{subj_lang}\n{}\n```\n",
-        capsule.subject_excerpt.source
+        crate::report::mask_credentials(&capsule.subject_excerpt.source)
     );
 
     if !capsule.caller_site_excerpts.is_empty() {
@@ -1389,7 +1389,11 @@ fn render_capsule_plan_markdown(
                 caller_ex.start_line,
                 caller_ex.end_line
             );
-            let _ = writeln!(md, "```{caller_lang}\n{}\n```\n", caller_ex.source);
+            let _ = writeln!(
+                md,
+                "```{caller_lang}\n{}\n```\n",
+                crate::report::mask_credentials(&caller_ex.source)
+            );
         }
     }
 
@@ -1411,7 +1415,11 @@ fn render_capsule_plan_markdown(
             exemplar.start_line,
             exemplar.end_line
         );
-        let _ = writeln!(md, "```{ex_lang}\n{}\n```\n", exemplar.source);
+        let _ = writeln!(
+            md,
+            "```{ex_lang}\n{}\n```\n",
+            crate::report::mask_credentials(&exemplar.source)
+        );
     }
 
     md
@@ -1749,7 +1757,7 @@ pub fn render_rule_bundle_summary_text(rule: RuleId, report: &JsonReport) -> Str
             d.tier.as_str(),
             group_id,
             subject,
-            d.message
+            crate::report::mask_credentials(&d.message)
         );
         if !d.cascade_steps.is_empty() {
             let _ = writeln!(out, "    Render Cascade: {}", d.cascade_steps.join(" -> "));
@@ -2001,7 +2009,7 @@ fn render_handoff_groups_section(md: &mut String, report: &JsonReport, bundle_di
                     d.loc.line,
                     d.loc.column,
                     group.id,
-                    d.message
+                    crate::report::mask_credentials(&d.message)
                 );
                 if !d.cascade_steps.is_empty() {
                     let _ = writeln!(
@@ -2025,7 +2033,11 @@ fn render_handoff_groups_section(md: &mut String, report: &JsonReport, bundle_di
                 cap.subject_excerpt.start_line,
                 cap.subject_excerpt.end_line
             );
-            let _ = writeln!(md, "```{lang}\n{}\n```\n", cap.subject_excerpt.source);
+            let _ = writeln!(
+                md,
+                "```{lang}\n{}\n```\n",
+                crate::report::mask_credentials(&cap.subject_excerpt.source)
+            );
         }
 
         if let Some(cap) = capsule
@@ -2044,7 +2056,7 @@ fn render_handoff_groups_section(md: &mut String, report: &JsonReport, bundle_di
                     caller_ex.file.display(),
                     caller_ex.start_line,
                     caller_ex.end_line,
-                    caller_ex.source
+                    crate::report::mask_credentials(&caller_ex.source)
                 );
             }
             let _ = writeln!(md);
@@ -2078,7 +2090,11 @@ fn render_handoff_groups_section(md: &mut String, report: &JsonReport, bundle_di
                 exemplar.start_line,
                 exemplar.end_line
             );
-            let _ = writeln!(md, "```{ex_lang}\n{}\n```\n", exemplar.source);
+            let _ = writeln!(
+                md,
+                "```{ex_lang}\n{}\n```\n",
+                crate::report::mask_credentials(&exemplar.source)
+            );
         }
     }
 }

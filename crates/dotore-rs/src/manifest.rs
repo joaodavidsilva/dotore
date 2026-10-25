@@ -161,6 +161,16 @@ fn record_rust_dep_and_capabilities(gate: &mut CapabilityGate, raw_name: &str, v
         "dioxus" | "dioxus-hooks" | "dioxus-web" | "dioxus-desktop" | "dioxus-fullstack" => {
             &[Capability::Dioxus]
         }
+        "reqwest" => &[Capability::Reqwest],
+        "diesel" | "diesel-async" => &[Capability::Diesel],
+        "sea-orm" | "sea-query" => &[Capability::SeaOrm],
+        "rusqlite" => &[Capability::Rusqlite],
+        "postgres" | "tokio-postgres" | "deadpool-postgres" => &[Capability::Postgres],
+        "futures" | "futures-util" | "futures-executor" | "futures-core" => &[Capability::Futures],
+        "tower-http" => &[Capability::TowerHttp],
+        "actix-cors" => &[Capability::ActixCors],
+        "cookie" | "tower-cookies" => &[Capability::Cookie],
+        "jsonwebtoken" => &[Capability::Jsonwebtoken],
         _ => &[],
     };
 

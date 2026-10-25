@@ -25,6 +25,20 @@ use injection_and_baas::evaluate_security_scan_patterns;
 #[cfg(test)]
 use dom_and_client::find_suspicious_public_env_in_line;
 
+/// Returns `true` if `rule` is a deterministic trust-boundary security rule (`#58`).
+#[must_use]
+pub const fn is_evaluated_trust_boundary_security_rule(rule: RuleId) -> bool {
+    matches!(
+        rule,
+        RuleId::CiWorkflowSecurityRisk
+            | RuleId::ElectronWebviewBridgeRisk
+            | RuleId::UntrustedHostHeaderOrigin
+            | RuleId::PrivateResponsePublicCache
+            | RuleId::LlmPromptRoleAndToolSinkRisk
+            | RuleId::SupabaseServiceRoleUnscopedQuery
+    )
+}
+
 /// Evaluates all `security` and `security-scan` rules on `file` using `graph` for cross-file resolution.
 pub(crate) fn evaluate_security_rules<F>(
     graph: &ProjectGraph,

@@ -7,6 +7,8 @@ pub mod ci_install;
 pub mod html;
 /// Machine-readable [`JsonReport`] schema, builders, and JSON serializer.
 pub mod json;
+/// Deterministic credential redaction (`mask_credentials`) for diagnostics, code frames, and reports.
+pub mod redaction;
 /// Rule catalog listing (`dotore rules list`) and rule explanation (`dotore rules explain`).
 pub mod rules;
 /// Terminal and ASCII report rendering (`dotore check`, `dotore design`, and `dotore fix`).
@@ -29,6 +31,7 @@ pub use json::{
     build_report_from_planner_context, load_scan_result_cache, lookup_scan_cache, read_json_report,
     resolve_scan_cache_path, store_scan_cache, write_json_report,
 };
+pub use redaction::mask_credentials;
 pub use rules::{
     RuleCatalogEntry, RulesListOptions, build_rule_catalog, explain_rule, format_rule_catalog_text,
     format_rule_explanation_text,

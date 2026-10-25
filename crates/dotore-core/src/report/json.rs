@@ -180,6 +180,7 @@ pub fn build_report_from_planner_context<C: PlannerContext + ?Sized>(
     packages: &[WorkspacePackage],
 ) -> JsonReport {
     for diag in &mut diagnostics {
+        diag.message = super::mask_credentials(&diag.message);
         diag.message_id = "";
         diag.docs_url = diag.rule.metadata().docs_url;
     }

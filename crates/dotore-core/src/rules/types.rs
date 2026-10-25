@@ -2209,6 +2209,206 @@ pub enum RuleId {
     RsPerfNoSyscallInLoop,
     /// `#[derive(Serialize)]` struct or enum contains an unannotated `HashSet` or `HashMap` field with non-deterministic iteration order.
     RsNoUnorderedCollectionInSerialize,
+    /// Signal read in a boolean/conditional test without calling the signal getter `()`.
+    AngularNoUncalledSignals,
+    /// Paired `@Input() foo` and `@Output() fooChange` properties that can be replaced with `model()`.
+    AngularPreferSignalModel,
+    /// Legacy `@Input()` or `BehaviorSubject` state where `input()` or `signal()` is preferred.
+    AngularPreferSignals,
+    /// Conflicting `DoCheck` and `OnChanges` lifecycle hooks implemented on the same class.
+    AngularNoConflictingLifecycle,
+    /// Angular lifecycle hook declared on an invalid decorator context (e.g. `ngOnInit` on `@Injectable` or `@Pipe`).
+    AngularContextualLifecycle,
+    /// Angular property/parameter decorator (`@Input`, `@Output`, `@ViewChild`, `@ContentChild`) used in an invalid class context.
+    AngularContextualDecorator,
+    /// Angular lifecycle method marked `async`.
+    AngularNoAsyncLifecycleMethod,
+    /// Direct imperative invocation of an Angular lifecycle hook (`this.ngOnInit()`).
+    AngularNoLifecycleCall,
+    /// Angular lifecycle hook declared as an instance arrow/function property instead of a prototype method.
+    AngularRequireLifecycleOnPrototype,
+    /// Empty Angular lifecycle hook method body.
+    AngularNoEmptyLifecycleMethod,
+    /// Class implements an Angular lifecycle hook method without declaring the corresponding lifecycle interface.
+    AngularUseLifecycleInterface,
+    /// `@Pipe` class does not implement `PipeTransform`.
+    AngularUsePipeTransformInterface,
+    /// `@Pipe` configured with `pure: false`.
+    AngularNoPipeImpure,
+    /// `@Output` or `output()` named after a native DOM event (`click`, `change`, `focus`, `blur`, `submit`).
+    AngularNoOutputNative,
+    /// `@Output` or `output()` property prefixed with `on`.
+    AngularNoOutputOnPrefix,
+    /// `@Component` `templateUrl` or `styleUrl`/`styleUrls` path missing a `./` or `../` relative prefix.
+    AngularRelativeUrlPrefix,
+    /// `@Component`, `@Directive`, or `@Pipe` explicitly setting `standalone: false`.
+    AngularPreferStandalone,
+    /// Constructor parameter dependency injection used instead of `inject()`.
+    AngularPreferInject,
+    /// `@Injectable()` service missing `providedIn` scope metadata.
+    AngularUseInjectableProvidedIn,
+    /// `@HostBinding` or `@HostListener` decorator used instead of the `host: { ... }` metadata property.
+    AngularPreferHostMetadataProperty,
+    /// Duplicate identifier in `@Component`, `@Directive`, or `@NgModule` metadata array (`imports`, `providers`, `declarations`, `exports`).
+    AngularNoDuplicatesInMetadataArrays,
+    /// `forwardRef(...)` indirection used to resolve a dependency reference.
+    AngularNoForwardRef,
+    /// `inputs: [...]` metadata property used in `@Component` or `@Directive`.
+    AngularNoInputsMetadataProperty,
+    /// `outputs: [...]` metadata property used in `@Component` or `@Directive`.
+    AngularNoOutputsMetadataProperty,
+    /// `queries: { ... }` metadata property used in `@Component` or `@Directive`.
+    AngularNoQueriesMetadataProperty,
+    /// `@Output()` or `output()` class property not marked `readonly`.
+    AngularPreferOutputReadonly,
+    /// `@Output()` initialized with a manual RxJS `Subject` instead of `EventEmitter` or `output()`.
+    AngularPreferOutputEmitterRef,
+    /// `@Component` disabling style encapsulation via `ViewEncapsulation.None`.
+    AngularUseComponentViewEncapsulation,
+    /// `@Attribute(...)` constructor parameter decorator used instead of `input()` or `@Input()`.
+    AngularNoAttributeDecorator,
+    /// `@Component` inline `template` or `styles` declaration exceeds maximum line threshold.
+    AngularComponentMaxInlineDeclarations,
+    /// `$any(...)` type-cast call inside an Angular template expression.
+    AngularTemplateNoAny,
+    /// `<img>`, `<area>`, `<input type="image">`, or `<object>` in an Angular template missing accessible `alt` text.
+    AngularTemplateAltText,
+    /// `(click)` binding on a non-interactive element in an Angular template without keyboard event support.
+    AngularTemplateClickEventsHaveKeyEvents,
+    /// `(mouseover)` or `(mouseout)` binding in an Angular template without corresponding `(focus)` or `(blur)`.
+    AngularTemplateMouseEventsHaveKeyEvents,
+    /// Heading (`<h1>`–`<h6>`) or anchor (`<a>`) element in an Angular template with no accessible content.
+    AngularTemplateElementsHaveContent,
+    /// Interactive role and event binding on a non-interactive Angular template element missing `tabindex`.
+    AngularTemplateInteractiveSupportsFocus,
+    /// `scope` or `[attr.scope]` attribute placed on a non-`<th>` element or given an invalid scope value in an Angular template.
+    AngularTemplateTableScope,
+    /// Invalid or misspelled `aria-*` or `[attr.aria-*]` attribute in an Angular template.
+    AngularTemplateValidAria,
+    /// NgRx `createEffect` pipeline returning multiple actions from a single mapping operator.
+    NgrxNoMultipleActionsInEffects,
+    /// NgRx effect combining the legacy `@Effect()` decorator with `createEffect(...)`.
+    NgrxNoEffectDecoratorAndCreator,
+    /// NgRx `createEffect` listening to `ofType(action)` and re-dispatching the same action cyclically.
+    NgrxNoCyclicActionCreators,
+    /// NgRx `Store<T>` injected with a generic global state type parameter.
+    NgrxNoTypedGlobalStore,
+    /// NgRx `on(action, (state, action) => ...)` reducer handler missing an explicit return type annotation.
+    NgrxOnFunctionExplicitReturnType,
+    /// NgRx `store.pipe(select(...))` or string-literal `store.select('...')` used instead of `store.select(selector)` / `store.selectSignal(selector)`.
+    NgrxSelectStyle,
+    /// Conflicting Angular Material theme mixins or mutually exclusive Material button/directive selectors.
+    AngularMaterialNoConflictingMixins,
+    /// Python function or method exceeds cyclomatic (`> 15`) or cognitive (`> 25`) complexity threshold.
+    PyZenComplexFunction,
+    /// Python function or method control-flow nesting depth exceeds `5`.
+    PyZenDeepNesting,
+    /// Python function or method body exceeds `75` lines.
+    PyZenLongFunction,
+    /// Python function or method declares more than `10` parameters (excluding `self`/`cls` and `__init__`).
+    PyZenTooManyParams,
+    /// Python `class` definition declares more than `20` direct methods.
+    PyZenLargeClass,
+    /// Python source line chains multiple semicolon-separated statements.
+    PyZenNoDenseSemicolonStatements,
+    /// Wildcard `from module import *` statement outside `__init__.py`.
+    PyNoWildcardImport,
+    /// Python `requests` or `httpx` HTTP call missing a `timeout` argument.
+    PySecurityHttpRequestRequiresTimeout,
+    /// Python HTTP client or SSL context disabling TLS certificate verification (`verify=False`, `ssl._create_unverified_context`).
+    PySecurityNoDisabledTlsVerify,
+    /// Weak cryptographic hash (`md5`, `sha1`), non-CSPRNG `random.*` for secrets/tokens, or non-constant-time secret comparison (`==`).
+    PySecurityNoWeakCryptoOrRandom,
+    /// Unsafe XML parser vulnerable to XXE or unvalidated `tarfile`/`zipfile.extractall()` archive extraction.
+    PySecurityNoXxeOrUnsafeArchive,
+    /// Hardcoded password/secret/token literal or insecure `/tmp` path in production Python code.
+    PySecurityNoHardcodedSecretOrTmp,
+    /// Typed Python library package missing a PEP 561 `py.typed` marker file.
+    PyStructureMissingPyTyped,
+    /// Python package has low type-annotation coverage across production modules (`< 50%`).
+    PyStructureLowTypeHintCoverage,
+    /// `tokio::task::block_in_place` called on a `current_thread` Tokio runtime or single-threaded `#[tokio::test]`.
+    RsTokioNoBlockInPlaceOnCurrentThread,
+    /// `futures::executor::block_on` or `tokio::runtime::Runtime::block_on` / `Handle::block_on` called inside an `async` context.
+    RsAsyncNoBlockOnInAsync,
+    /// `reqwest` client builder disabling TLS certificate or hostname verification (`danger_accept_invalid_certs(true)`).
+    RsSecurityNoDisabledTlsVerification,
+    /// `std::process::Command` executing a dynamically constructed program path or formatted `-c` / `/C` shell script.
+    RsSecurityNoDynamicShellCommand,
+    /// `reqwest` response body read (`.json()`, `.text()`, `.bytes()`) without checking `.error_for_status()` or `.status()`.
+    RsHttpNoUncheckedResponseStatus,
+    /// Secret environment variable read (`std::env::var`) falling back to a hardcoded literal or empty default via `.unwrap_or*`.
+    RsSecurityNoSecretEnvFallback,
+    /// Permissive CORS configuration (`CorsLayer::very_permissive()`, `Cors::permissive()`, or `allow_credentials(true)` with wildcard/mirrored origin).
+    RsSecurityNoPermissiveCors,
+    /// Authentication or session `Cookie` built with `.http_only(false)`.
+    RsSecurityNoInsecureAuthCookie,
+    /// `jsonwebtoken` validation disabling signature verification (`insecure_disable_signature_validation`, `dangerous::insecure_decode`).
+    RsSecurityNoDisabledJwtValidation,
+    /// Multiple incompatible major versions of the same crate resolved in `Cargo.lock`.
+    RsCargoDuplicateMajorVersions,
+    /// Binary Cargo package missing a committed `Cargo.lock` at the workspace root.
+    RsCargoMissingLockfile,
+    /// Cargo `path` dependency resolving outside the workspace root directory.
+    RsCargoPathDepOutsideWorkspace,
+    /// `[lints.clippy]` or `[workspace.lints.clippy]` manifest table setting an active catalogued lint to `"allow"`.
+    RsCargoPermissiveLintTable,
+    /// `.cargo/config.toml` `rustflags` disabling lints (`-A warnings`, `--cap-lints allow`) or overflow checks (`overflow-checks=off`).
+    RsCargoPermissiveRustflags,
+    /// `[profile.release]` enabling full debug symbols without `strip`.
+    RsCargoReleaseDebugSymbols,
+    /// Binary workspace root `Cargo.toml` missing `overflow-checks = true` under `[profile.release]`.
+    RsCargoUncheckedReleaseOverflow,
+    /// Non-optional `[dependencies]` entry in `Cargo.toml` never referenced in package source files.
+    RsCargoUnusedDependency,
+    /// Non-optional `[dependencies]` entry referenced only in tests, benches, or examples instead of `[dev-dependencies]`.
+    RsCargoTestOnlyDependency,
+    /// Registry dependency in `Cargo.toml` using an unbounded wildcard `"*"` version requirement.
+    RsCargoUnboundedWildcardDependency,
+    /// Git dependency in `Cargo.toml` not pinned to a full 40-character commit SHA `rev`.
+    RsCargoUnpinnedGitDependency,
+    /// File-wide or module-wide inner `#![allow(...)]` attribute silencing lints across an entire scope.
+    RsStructureCrateLevelAllow,
+    /// `#[allow(...)]` attribute missing a `reason = "..."` justification argument.
+    RsStructureUnreasonedAllow,
+    /// Item stacking multiple `#[allow(...)]` attributes or silencing 4 or more lints in one attribute.
+    RsStructureStackedAllow,
+    /// Rust function or method exceeding cyclomatic (`>= 20`) or cognitive (`>= 25`) complexity threshold.
+    RsStructureComplexFunction,
+    /// Rust file (`>= 1000` lines), `impl`/`mod` block (`>= 500` lines), or function (`>= 150` lines) exceeding size budget.
+    RsStructureOversizedUnit,
+    /// `.rs` source file under `src/` not reached by any `mod` declaration, `include!`, or `build.rs`.
+    RsStructureOrphanModuleFile,
+    /// Declared Cargo feature in `[features]` never read by `cfg(feature = "...")`, or `cfg(feature = "...")` naming an undeclared feature.
+    RsStructureUnreferencedFeature,
+    /// Near-duplicate Rust function bodies with normalized AST subtree Sørensen-Dice similarity `>= 80%`.
+    RsStructureNearDuplicateFunction,
+    /// `RefCell::borrow()` or `RefCell::borrow_mut()` guard held across an `.await` point.
+    RsNoAwaitHoldingRefcell,
+    /// `panic!`, `todo!`, `unimplemented!`, or `std::process::exit` in production Rust code.
+    RsNoPanicOrTodoInProduction,
+    /// Leftover `dbg!` macro in production code, or `println!`/`eprintln!` in a library crate.
+    RsNoDbgOrPrintInLibrary,
+    /// World-writable file permissions set via `Permissions::set_readonly(false)` or `from_mode(0o777)`.
+    RsSecurityNoWorldWritablePermissions,
+    /// Spawned `std::process::Command::spawn()` child process handle dropped without calling `.wait()` or `.wait_with_output()`.
+    RsNoZombieChildProcess,
+    /// `std::mem::transmute` called without explicit source and destination turbofish type annotations `::<Src, Dst>`.
+    RsNoTransmuteWithoutTypeAnnotations,
+    /// `pub unsafe fn` missing a `# Safety` documentation section.
+    RsRequireSafetyDocOnPubUnsafeFn,
+    /// GitHub Actions workflow vulnerability (`pull_request_target` untrusted checkout, `${{ github.event.* }}` shell injection, or secret in build step).
+    CiWorkflowSecurityRisk,
+    /// Electron, Tauri, or mobile WebView bridge misconfiguration (`nodeIntegration: true`, `contextIsolation: false`, unvalidated `senderFrame` or `openExternal`).
+    ElectronWebviewBridgeRisk,
+    /// Password-reset, OAuth callback, or absolute URL constructed from an unvalidated `Host` or `X-Forwarded-Host` header.
+    UntrustedHostHeaderOrigin,
+    /// Authenticated route reading cookies/session/authorization headers while setting `Cache-Control: public` or `s-maxage`.
+    PrivateResponsePublicCache,
+    /// Raw client `messages` passed to an LLM without role filtering, unbounded tool loop missing `maxSteps`, or MCP tool args flowing into dangerous sinks.
+    LlmPromptRoleAndToolSinkRisk,
+    /// Server route using `SUPABASE_SERVICE_ROLE_KEY` to query or mutate tables with request inputs without an explicit tenant/user `.eq(...)` filter.
+    SupabaseServiceRoleUnscopedQuery,
 }
 
 /// Static catalog metadata for a registered diagnostic rule.
@@ -2321,14 +2521,34 @@ impl RuleId {
         if trimmed.is_empty() {
             return None;
         }
-        let without_prefix = trimmed.strip_prefix("dotore/").unwrap_or(trimmed);
+        let without_prefix = trimmed
+            .strip_prefix("dotore/")
+            .or_else(|| trimmed.strip_prefix("dotore::"))
+            .unwrap_or(trimmed);
+        if without_prefix
+            .strip_prefix("radon/CC")
+            .or_else(|| without_prefix.strip_prefix("radon/cc"))
+            .is_some_and(|rest| rest.is_empty() || rest.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Some(Self::PyZenComplexFunction);
+        }
+        let without_clippy = without_prefix.strip_prefix("clippy::");
         for meta in super::catalog::RULE_REGISTRY {
             if meta.canonical_id == without_prefix
                 || meta.qualified_key == trimmed
                 || meta.legacy_aliases.contains(&trimmed)
                 || meta.legacy_aliases.contains(&without_prefix)
+                || without_clippy.is_some_and(|c| meta.legacy_aliases.contains(&c))
             {
                 return Some(meta.id);
+            }
+        }
+        if without_prefix.contains('_') {
+            let kebab = without_prefix.replace('_', "-");
+            for meta in super::catalog::RULE_REGISTRY {
+                if meta.canonical_id == kebab {
+                    return Some(meta.id);
+                }
             }
         }
         None
@@ -2359,6 +2579,12 @@ impl RuleId {
                 | Self::CircularDependency
                 | Self::PyArchNoCircularImports
                 | Self::RsArchNoUnusedPubCrateItems
+                | Self::RsStructureNearDuplicateFunction
+                | Self::RsStructureOrphanModuleFile
+                | Self::RsStructureOversizedUnit
+                | Self::RsStructureComplexFunction
+                | Self::PyStructureMissingPyTyped
+                | Self::PyStructureLowTypeHintCoverage
         )
     }
 }

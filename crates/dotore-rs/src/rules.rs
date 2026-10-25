@@ -199,6 +199,41 @@ const fn is_evaluated_rust_rule(rule: RuleId) -> bool {
             | RuleId::RsPerfNoUnnecessaryFormat
             | RuleId::RsPerfNoSyscallInLoop
             | RuleId::RsNoUnorderedCollectionInSerialize
+            | RuleId::RsTokioNoBlockInPlaceOnCurrentThread
+            | RuleId::RsAsyncNoBlockOnInAsync
+            | RuleId::RsSecurityNoDisabledTlsVerification
+            | RuleId::RsSecurityNoDynamicShellCommand
+            | RuleId::RsHttpNoUncheckedResponseStatus
+            | RuleId::RsSecurityNoSecretEnvFallback
+            | RuleId::RsSecurityNoPermissiveCors
+            | RuleId::RsSecurityNoInsecureAuthCookie
+            | RuleId::RsSecurityNoDisabledJwtValidation
+            | RuleId::RsCargoDuplicateMajorVersions
+            | RuleId::RsCargoMissingLockfile
+            | RuleId::RsCargoPathDepOutsideWorkspace
+            | RuleId::RsCargoPermissiveLintTable
+            | RuleId::RsCargoPermissiveRustflags
+            | RuleId::RsCargoReleaseDebugSymbols
+            | RuleId::RsCargoUncheckedReleaseOverflow
+            | RuleId::RsCargoUnusedDependency
+            | RuleId::RsCargoTestOnlyDependency
+            | RuleId::RsCargoUnboundedWildcardDependency
+            | RuleId::RsCargoUnpinnedGitDependency
+            | RuleId::RsStructureCrateLevelAllow
+            | RuleId::RsStructureUnreasonedAllow
+            | RuleId::RsStructureStackedAllow
+            | RuleId::RsStructureComplexFunction
+            | RuleId::RsStructureOversizedUnit
+            | RuleId::RsStructureOrphanModuleFile
+            | RuleId::RsStructureUnreferencedFeature
+            | RuleId::RsStructureNearDuplicateFunction
+            | RuleId::RsNoAwaitHoldingRefcell
+            | RuleId::RsNoPanicOrTodoInProduction
+            | RuleId::RsNoDbgOrPrintInLibrary
+            | RuleId::RsSecurityNoWorldWritablePermissions
+            | RuleId::RsNoZombieChildProcess
+            | RuleId::RsNoTransmuteWithoutTypeAnnotations
+            | RuleId::RsRequireSafetyDocOnPubUnsafeFn
             | RuleId::ArchThinEntrypoint
             | RuleId::ArchNoMixedIoAndPresentation
             | RuleId::ArchSeparateStaticCatalogFromTypes

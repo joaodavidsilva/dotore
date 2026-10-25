@@ -594,12 +594,13 @@ fn append_root_cause_group_card(
     );
     let rationale = html_escape(&format_blast_radius_rationale(&group.blast_radius));
     let capsule_html = capsule.map_or_else(String::new, render_fix_capsule_html);
+    let masked_group_msg = super::mask_credentials(&group.message);
     let search_attr = html_escape(&format!(
         "{} {} {} {}",
         file_str,
         group.rule.as_str(),
         group.subject_name.as_deref().unwrap_or(""),
-        group.message
+        masked_group_msg
     ));
 
     let _ = writeln!(
@@ -626,7 +627,7 @@ fn append_root_cause_group_card(
         group.blast_radius.score,
         group.tier.as_str(),
         group.rule.as_str(),
-        html_escape(&group.message),
+        html_escape(&masked_group_msg),
         html_escape(&group.id),
         group.blast_radius.tier.as_str(),
         group.blast_radius.score,
@@ -645,7 +646,7 @@ fn render_fix_capsule_html(capsule: &FixCapsule) -> String {
             html_escape(&capsule.subject_excerpt.file.display().to_string()),
             capsule.subject_excerpt.start_line,
             capsule.subject_excerpt.end_line,
-            html_escape(&capsule.subject_excerpt.source),
+            html_escape(&super::mask_credentials(&capsule.subject_excerpt.source)),
         );
     }
     if let Some(ex) = &capsule.exemplar
@@ -657,7 +658,7 @@ fn render_fix_capsule_html(capsule: &FixCapsule) -> String {
             html_escape(&ex.file.display().to_string()),
             ex.start_line,
             ex.end_line,
-            html_escape(&ex.source),
+            html_escape(&super::mask_credentials(&ex.source)),
         );
     }
     format!(
@@ -711,12 +712,13 @@ fn append_diagnostic_card(
     let callers_html = render_caller_sites_html(diag);
     let autofix_html = render_autofix_html(diag);
     let docs_url = html_escape(diag.docs_url);
+    let masked_diag_msg = super::mask_credentials(&diag.message);
     let search_attr = html_escape(&format!(
         "{} {} {} {}",
         file_str,
         diag.rule.as_str(),
         diag.subject_name.as_deref().unwrap_or(""),
-        diag.message
+        masked_diag_msg
     ));
 
     let _ = writeln!(
@@ -744,7 +746,7 @@ fn append_diagnostic_card(
         diag.tier.as_str(),
         diag.tier.as_str(),
         diag.rule.as_str(),
-        html_escape(&diag.message),
+        html_escape(&masked_diag_msg),
     );
 }
 

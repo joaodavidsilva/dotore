@@ -37,6 +37,8 @@ pub use dotore_core::rules::{
     RuleMetadata, RuleSeverity, RuleSeverityOverride, RuleTag, SourceExcerpt, rule_registry, types,
 };
 pub use supply_chain::supply_chain_purl_hash;
+pub use angular::is_evaluated_angular_rule;
+pub use security::is_evaluated_trust_boundary_security_rule;
 
 use std::path::Path;
 
