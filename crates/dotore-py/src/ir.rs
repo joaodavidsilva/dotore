@@ -21,6 +21,7 @@ use ruff_text_size::Ranged;
 
 use crate::{
     asyncio::extract_asyncio_diagnostics,
+    bandit::extract_bandit_diagnostics,
     fastapi_pydantic::extract_fastapi_pydantic_diagnostics,
     graph::{self, PyModuleGraphInfo},
     matchers::{PyScopeTracker, annotation_is_final, is_upper_snake_case, text_range_to_byte_span},
@@ -28,6 +29,7 @@ use crate::{
     perf::extract_perf_diagnostics,
     safety::extract_safety_diagnostics,
     security::extract_security_diagnostics,
+    zen::extract_zen_diagnostics,
 };
 
 /// Single-pass intermediate representation for a Python source file (`.py` or `.pyi`).
@@ -110,7 +112,23 @@ pub(crate) fn extract_python_file(path: &Path, source: &str) -> ExtractedFile {
         &mut candidate_diagnostics,
         &mut potential_unawaited_calls,
     );
+    extract_bandit_diagnostics(
+        path,
+        source,
+        &line_starts,
+        is_stub_file,
+        suite,
+        &mut candidate_diagnostics,
+    );
     extract_perf_diagnostics(
+        path,
+        source,
+        &line_starts,
+        is_stub_file,
+        suite,
+        &mut candidate_diagnostics,
+    );
+    extract_zen_diagnostics(
         path,
         source,
         &line_starts,
@@ -536,6 +554,7 @@ fn is_suppression_comment_body(text: &str) -> bool {
     text.starts_with("dotore-disable")
         || text.starts_with("dotore-enable")
         || text.starts_with("noqa")
+        || text.starts_with("nosec")
         || text.starts_with("ruff:")
         || text.starts_with("type:")
         || text.starts_with("pragma:")

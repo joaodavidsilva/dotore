@@ -424,9 +424,15 @@ pub fn load_local_config_in_dir(dir: &Path) -> Option<DotoreConfig> {
             return Some(cfg);
         }
     }
-    fs::read_to_string(dir.join("package.json"))
+    if let Some(cfg) = fs::read_to_string(dir.join("package.json"))
         .ok()
         .and_then(|c| DotoreConfig::from_package_json_str(&c))
+    {
+        return Some(cfg);
+    }
+    fs::read_to_string(dir.join("pyproject.toml"))
+        .ok()
+        .and_then(|c| DotoreConfig::from_pyproject_toml_str(&c))
 }
 
 #[derive(Debug, Clone)]

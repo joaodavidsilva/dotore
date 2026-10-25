@@ -786,6 +786,7 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     let mut pkg_jsons: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut angular_jsons: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut py_manifests: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+    let mut py_typed_paths: Vec<PathBuf> = Vec::new();
     let mut cargo_tomls: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut config_files: Vec<(PathBuf, PathBuf, String)> = Vec::new();
     let mut compiler_configs: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -823,6 +824,8 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             || (file_name.starts_with("constraints") && file_name.ends_with(".txt"))
         {
             py_manifests.push((parent_dir, path, content));
+        } else if file_name == "py.typed" {
+            py_typed_paths.push(path);
         } else if file_name == "Cargo.toml" {
             cargo_tomls.push((parent_dir, path.clone()));
             manifests.insert(path, content);
@@ -855,6 +858,7 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
                 .and_then(|(_, p)| manifests.get(p))
                 .and_then(|c| DotoreConfig::from_package_json_str(c))
         })
+        .or_else(|| find_pyproject_config_in_dir(&py_manifests, Path::new(".")))
         .or_else(|| {
             config_files
                 .first()
@@ -1015,11 +1019,16 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             }
         }
         for dir in py_dirs {
-            let dir_manifests: Vec<(PathBuf, &str)> = py_manifests
+            let mut dir_manifests: Vec<(PathBuf, &str)> = py_manifests
                 .iter()
                 .filter(|(d, _, _)| d.as_path() == dir)
                 .map(|(_, p, c)| (p.clone(), c.as_str()))
                 .collect();
+            for pt in &py_typed_paths {
+                if dir == Path::new(".") || pt.starts_with(dir) {
+                    dir_manifests.push((pt.clone(), ""));
+                }
+            }
             let py_gate = py.infer_capability_gate(dir, &dir_manifests);
             if let Some(existing) = packages.iter_mut().find(|p| p.root_dir == dir) {
                 existing.capability_gate.merge(&py_gate);
@@ -1028,6 +1037,7 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
                     .iter()
                     .find(|(c_dir, _, _)| c_dir.as_path() == dir)
                     .and_then(|(_, p, c)| DotoreConfig::from_config_file_str(p, c).ok())
+                    .or_else(|| find_pyproject_config_in_dir(&py_manifests, dir))
                     .unwrap_or_else(|| root_config.clone());
                 let name = dir
                     .file_name()
@@ -1088,7 +1098,11 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
     if packages.is_empty() {
         let mut default_gate = CapabilityGate::default_react();
         if has_py_files {
-            default_gate.merge(&CapabilityGate::default_python());
+            let mut py_default = CapabilityGate::default_python();
+            if !py_typed_paths.is_empty() {
+                py_default.entrypoints.insert(PathBuf::from("py.typed"));
+            }
+            default_gate.merge(&py_default);
         }
         if has_rs_files {
             default_gate.merge(&CapabilityGate::default_rust());
@@ -1113,6 +1127,18 @@ fn extract_virtual_workspace_packages(files: Vec<(PathBuf, String)>) -> VirtualW
             }
         }
     }
+
+fn find_pyproject_config_in_dir(
+    py_manifests: &[(PathBuf, PathBuf, String)],
+    dir: &Path,
+) -> Option<DotoreConfig> {
+    py_manifests
+        .iter()
+        .find(|(d, p, _)| {
+            d.as_path() == dir && p.file_name().and_then(|n| n.to_str()) == Some("pyproject.toml")
+        })
+        .and_then(|(_, _, c)| DotoreConfig::from_pyproject_toml_str(c))
+}
 
     VirtualWorkspaceSplit {
         packages,

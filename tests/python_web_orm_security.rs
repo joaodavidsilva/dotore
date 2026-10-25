@@ -707,3 +707,315 @@ async def create_item(session, ids: list[int], raw_cfg: str):
     assert!(rules.contains(&RuleId::PySecurityNoRawSqlInterpolation));
     assert!(rules.contains(&RuleId::PySecurityNoUnsafeDeserializationOrShell));
 }
+
+#[test]
+fn py_security_http_request_requires_timeout_flags_missing_or_none_timeout_and_skips_tests() {
+    let invalid_src = r#"import httpx
+import requests
+
+def sync_catalog(url: str, payload: dict):
+    r1 = requests.get(url)
+    r2 = requests.post(url, json=payload, timeout=None)
+    r3 = httpx.delete(url)
+    r4 = httpx.request("PUT", url, json=payload)
+    return r1, r2, r3, r4
+"#;
+    let diags = analyze_source(
+        Path::new("app/http_client.py"),
+        invalid_src,
+        Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+    );
+    assert_eq!(diags.len(), 4, "Expected 4 B113 diagnostics, got {diags:?}");
+    for d in &diags {
+        assert_eq!(d.rule, RuleId::PySecurityHttpRequestRequiresTimeout);
+        assert_eq!(d.subject_name.as_deref(), Some("sync_catalog"));
+        assert!(d.autofix.is_some());
+    }
+
+    let (patched, _) = apply_patches_to_source(invalid_src, &diags);
+    assert!(PyLanguageAnalyzer::new().validate_syntax(Path::new("app/http_client.py"), &patched));
+    assert!(
+        analyze_source(
+            Path::new("app/http_client.py"),
+            &patched,
+            Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+        )
+        .is_empty()
+    );
+
+    // Valid: explicit timeout, dict.get, inline # noqa: B113 / # dotore-disable, and test/example files
+    let valid_src = r#"import httpx
+import requests
+
+def sync_catalog_safe(url: str, headers: dict[str, str]):
+    auth = headers.get("Authorization")
+    r1 = requests.get(url, timeout=5.0)
+    r2 = httpx.post(url, timeout=(3.0, 10.0))
+    r3 = requests.get(url)  # noqa: B113
+    # dotore-disable-next-line bandit/B113
+    r4 = httpx.get(url)
+    return auth, r1, r2, r3, r4
+"#;
+    assert!(
+        analyze_source(
+            Path::new("app/http_client.py"),
+            valid_src,
+            Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("tests/test_http_client.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("examples/demo_http.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityHttpRequestRequiresTimeout]),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn py_security_no_disabled_tls_verify_flags_verify_false_and_unverified_ssl_contexts() {
+    let invalid_src = r#"import ssl
+import httpx
+import requests
+import urllib3
+
+def fetch_insecure(url: str):
+    urllib3.disable_warnings()
+    r1 = requests.get(url, verify=False, timeout=5)
+    client = httpx.Client(verify=False)
+    async_client = httpx.AsyncClient(verify=False)
+    ctx = ssl._create_unverified_context()
+    return r1, client, async_client, ctx
+"#;
+    let diags = analyze_source(
+        Path::new("app/tls.py"),
+        invalid_src,
+        Some(&[RuleId::PySecurityNoDisabledTlsVerify]),
+    );
+    assert_eq!(diags.len(), 5, "Expected 5 B501 diagnostics, got {diags:?}");
+
+    let valid_src = r#"import ssl
+import httpx
+import requests
+
+def fetch_secure(url: str):
+    r1 = requests.get(url, verify=True, timeout=5)
+    r2 = requests.get(url, verify="/etc/ssl/certs/ca-certificates.crt", timeout=5)
+    client = httpx.Client(verify=True)
+    ctx = ssl.create_default_context()
+    r3 = requests.get(url, verify=False, timeout=5)  # noqa: B501
+    return r1, r2, client, ctx, r3
+"#;
+    assert!(
+        analyze_source(
+            Path::new("app/tls.py"),
+            valid_src,
+            Some(&[RuleId::PySecurityNoDisabledTlsVerify]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("tests/test_tls.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityNoDisabledTlsVerify]),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn py_security_no_weak_crypto_or_random_flags_md5_sha1_weak_random_and_digest_eq() {
+    let invalid_src = r#"import hashlib
+import random
+
+def generate_reset_token(payload: bytes, signature: str, expected_signature: str) -> str:
+    d1 = hashlib.md5(payload).hexdigest()
+    d2 = hashlib.sha1(payload).hexdigest()
+    d3 = hashlib.new("md5", payload).hexdigest()
+    reset_token = str(random.randint(100000, 999999))
+    api_secret = "".join(random.choices("abcdef0123456789", k=32))
+    if signature == expected_signature:
+        return reset_token
+    return d1 + d2 + d3 + api_secret
+"#;
+    let diags = analyze_source(
+        Path::new("app/crypto.py"),
+        invalid_src,
+        Some(&[RuleId::PySecurityNoWeakCryptoOrRandom]),
+    );
+    assert_eq!(
+        diags.len(),
+        6,
+        "Expected 6 B303/B311/B324/digest diagnostics, got {diags:?}"
+    );
+
+    let valid_src = r#"import hashlib
+import hmac
+import random
+import secrets
+
+def verify_and_generate_safe(payload: bytes, signature: str, expected_signature: str) -> str:
+    checksum = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+    git_oid = hashlib.new("sha1", payload, usedforsecurity=False).hexdigest()
+    strong = hashlib.sha256(payload).hexdigest()
+    reset_token = secrets.token_urlsafe(32)
+    backoff_jitter_ms = random.randint(50, 250)
+    weak_ok = hashlib.md5(payload).hexdigest()  # noqa: B324
+    if hmac.compare_digest(signature, expected_signature):
+        return reset_token
+    return f"{checksum}:{git_oid}:{strong}:{backoff_jitter_ms}:{weak_ok}"
+"#;
+    assert!(
+        analyze_source(
+            Path::new("app/crypto.py"),
+            valid_src,
+            Some(&[RuleId::PySecurityNoWeakCryptoOrRandom]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("tests/test_crypto.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityNoWeakCryptoOrRandom]),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn py_security_no_xxe_or_unsafe_archive_flags_extractall_and_unsafe_xml_parsers() {
+    let invalid_src = r#"import tarfile
+import zipfile
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+import xml.sax
+from lxml import etree
+
+def unpack_and_parse_unsafe(tar_path: str, zip_path: str, raw_xml: str):
+    with tarfile.open(tar_path) as tar:
+        tar.extractall("/var/data/out")
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall("/var/data/zip_out")
+    root1 = ET.fromstring(raw_xml)
+    doc2 = minidom.parseString(raw_xml)
+    parser3 = xml.sax.make_parser()
+    parser4 = etree.XMLParser(resolve_entities=True)
+    return root1, doc2, parser3, parser4
+"#;
+    let diags = analyze_source(
+        Path::new("app/archive_xml.py"),
+        invalid_src,
+        Some(&[RuleId::PySecurityNoXxeOrUnsafeArchive]),
+    );
+    assert_eq!(
+        diags.len(),
+        6,
+        "Expected 6 B202/B314-B320 diagnostics, got {diags:?}"
+    );
+
+    let valid_src = r#"import tarfile
+import zipfile
+from defusedxml import ElementTree as SafeET
+from lxml import etree
+
+def unpack_and_parse_safe(tar_path: str, zip_path: str, raw_xml: str, safe_members: list[str]):
+    with tarfile.open(tar_path) as tar:
+        tar.extractall("/var/data/out", filter="data")
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall("/var/data/zip_out", members=safe_members)
+    root = SafeET.fromstring(raw_xml)
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    return root, parser
+"#;
+    assert!(
+        analyze_source(
+            Path::new("app/archive_xml.py"),
+            valid_src,
+            Some(&[RuleId::PySecurityNoXxeOrUnsafeArchive]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("tests/test_archive_xml.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityNoXxeOrUnsafeArchive]),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn py_security_no_hardcoded_secret_or_tmp_flags_secrets_and_tmp_paths_and_skips_placeholders_and_tests()
+ {
+    let invalid_src = r#"from pathlib import Path
+
+DB_PASSWORD = "prod_super_secret_98765"
+API_KEY: str = "sk_live_abcdef1234567890"
+
+def dump_credentials(client_secret: str = "hardcoded_default_secret"):
+    cache_path = Path("/tmp/app_credentials.json")
+    with open("/var/tmp/session_dump.txt", "w", encoding="utf-8") as handle:
+        handle.write(client_secret)
+    return cache_path
+"#;
+    let diags = analyze_source(
+        Path::new("app/secrets_and_tmp.py"),
+        invalid_src,
+        Some(&[RuleId::PySecurityNoHardcodedSecretOrTmp]),
+    );
+    assert_eq!(
+        diags.len(),
+        5,
+        "Expected 5 B105-B108 diagnostics, got {diags:?}"
+    );
+
+    let valid_src = r#"import os
+import tempfile
+
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+PASSWORD_ENV_NAME = "APP_DB_PASSWORD"
+TOKEN_URL = "https://auth.example.com/oauth/token"
+PLACEHOLDER_SECRET = "changeme"
+
+def write_temp_safely(payload: str):
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=True) as tmp:
+        tmp.write(payload)
+"#;
+    assert!(
+        analyze_source(
+            Path::new("app/secrets_and_tmp.py"),
+            valid_src,
+            Some(&[RuleId::PySecurityNoHardcodedSecretOrTmp]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("tests/test_secrets.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityNoHardcodedSecretOrTmp]),
+        )
+        .is_empty()
+    );
+    assert!(
+        analyze_source(
+            Path::new("examples/quickstart.py"),
+            invalid_src,
+            Some(&[RuleId::PySecurityNoHardcodedSecretOrTmp]),
+        )
+        .is_empty()
+    );
+}
