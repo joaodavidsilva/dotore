@@ -1285,3 +1285,585 @@ fn project_level_pnpm_hardening_rsc_advisory_and_supply_chain_cache_work() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn upgraded_security_rules_catch_bypass_patterns_and_allow_safe_guards() {
+    // 1. postmessage-origin-risk: weak origin checks & sensitive payload to "*"
+    let pm_rules = &[RuleId::PostmessageOriginRisk];
+    for bad_pm in [
+        r#"window.addEventListener("message", (event) => {
+            if (event.origin.includes("trusted.example.com")) {
+                handleMessage(event.data);
+            }
+        });"#,
+        r#"window.addEventListener("message", (event) => {
+            if (event.origin.startsWith("https://trusted.example.com")) {
+                handleMessage(event.data);
+            }
+        });"#,
+        r#"window.addEventListener("message", (event) => {
+            if (event.origin.endsWith("trusted.example.com")) {
+                handleMessage(event.data);
+            }
+        });"#,
+        r#"window.addEventListener("message", (event) => {
+            if (/trusted\.example\.com/.test(event.origin)) {
+                handleMessage(event.data);
+            }
+        });"#,
+        r#"export function sendAuth(frame: Window, sessionToken: string) {
+            frame.postMessage({ type: "auth", token: sessionToken }, "*");
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/pm.ts"), bad_pm, Some(pm_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected postmessage-origin-risk diagnostic for:\n{bad_pm}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_pm in [
+        r#"window.addEventListener("message", (event) => {
+            if (event.origin !== "https://trusted.example.com") return;
+            handleMessage(event.data);
+        });"#,
+        r#"window.addEventListener("message", (event) => {
+            if (!/^https:\/\/([a-z0-9-]+\.)?trusted\.example\.com$/.test(event.origin)) return;
+            handleMessage(event.data);
+        });"#,
+        r#"export function sendResize(frame: Window, height: number) {
+            frame.postMessage({ type: "resize", height }, "*");
+        }"#,
+        r#"export function sendAuthSafe(frame: Window, sessionToken: string) {
+            frame.postMessage({ type: "auth", token: sessionToken }, "https://app.example.com");
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/pm-safe.ts"), safe_pm, Some(pm_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 postmessage-origin-risk diagnostics for:\n{safe_pm}\ngot: {diags:?}"
+        );
+    }
+
+    // 2. cors-cookie-trust-risk: reflected Origin with credentials & permissive cors() middleware
+    let cors_rules = &[RuleId::CorsCookieTrustRisk];
+    for bad_cors in [
+        r#"export function handler(req: any, res: any) {
+            res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+            res.setHeader("Access-Control-Allow-Credentials", "true");
+        }"#,
+        r#"export function GET(request: Request) {
+            const origin = request.headers.get("origin") ?? "";
+            return new Response("ok", {
+                headers: {
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                },
+            });
+        }"#,
+        r#"import cors from "cors";
+        export const middleware = cors({ origin: true, credentials: true });"#,
+        r#"import cors from "cors";
+        export const middleware = cors({ origin: (o, cb) => cb(null, true), credentials: true });"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/cors.ts"), bad_cors, Some(cors_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected cors-cookie-trust-risk diagnostic for:\n{bad_cors}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_cors in [
+        r#"const ALLOWED = new Set(["https://app.example.com"]);
+        export function handler(req: any, res: any) {
+            const origin = req.headers.origin;
+            if (ALLOWED.has(origin)) {
+                res.setHeader("Access-Control-Allow-Origin", origin);
+                res.setHeader("Access-Control-Allow-Credentials", "true");
+            }
+        }"#,
+        r#"import cors from "cors";
+        export const middleware = cors({ origin: ["https://app.example.com"], credentials: true });"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/cors-safe.ts"), safe_cors, Some(cors_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 cors-cookie-trust-risk diagnostics for:\n{safe_cors}\ngot: {diags:?}"
+        );
+    }
+
+    // 3. jwt-insecure-verification: decode without verify, RS256/HS256 confusion, unvalidated header.jku/x5u
+    let jwt_rules = &[RuleId::JwtInsecureVerification];
+    for bad_jwt in [
+        r#"import jwt from "jsonwebtoken";
+        export function getSessionUser(token: string) {
+            const payload = jwt.decode(token) as { sub: string; role: string };
+            return payload;
+        }"#,
+        r#"import { decodeJwt } from "jose";
+        export function readClaims(token: string) {
+            return decodeJwt(token);
+        }"#,
+        r#"import jwt from "jsonwebtoken";
+        export function verifyToken(token: string, publicKey: string) {
+            return jwt.verify(token, publicKey, { algorithms: ["RS256", "HS256"] });
+        }"#,
+        r#"import jwt from "jsonwebtoken";
+        export async function verifyWithJku(token: string) {
+            const decoded: any = jwt.decode(token, { complete: true });
+            const jwks = await fetch(decoded.header.jku).then((r) => r.json());
+            return jwt.verify(token, jwks.keys[0]);
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/jwt.ts"), bad_jwt, Some(jwt_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected jwt-insecure-verification diagnostic for:\n{bad_jwt}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_jwt in [
+        r#"import jwt from "jsonwebtoken";
+        export function verifyToken(token: string, publicKey: string) {
+            return jwt.verify(token, publicKey, { algorithms: ["RS256"], issuer: "https://auth.example.com" });
+        }"#,
+        r#"import { decodeProtectedHeader, jwtVerify } from "jose";
+        export async function verifyJose(token: string, key: any) {
+            const hdr = decodeProtectedHeader(token);
+            return jwtVerify(token, key, { algorithms: ["RS256"] });
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/jwt-safe.ts"), safe_jwt, Some(jwt_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 jwt-insecure-verification diagnostics for:\n{safe_jwt}\ngot: {diags:?}"
+        );
+    }
+
+    // 4. insecure-crypto-risk: non-constant-time signature comparison, aes-*-ecb, static IV
+    let crypto_rules = &[RuleId::InsecureCryptoRisk];
+    for bad_crypto in [
+        r#"export function verifyWebhook(signature: string, expectedSignature: string) {
+            return signature === expectedSignature;
+        }"#,
+        r#"export function checkApiKey(req: any, secretApiKey: string) {
+            return req.headers["x-api-key"] === secretApiKey;
+        }"#,
+        r#"import crypto from "node:crypto";
+        export function encryptEcb(key: Buffer, data: string) {
+            return crypto.createCipheriv("aes-256-ecb", key, null);
+        }"#,
+        r#"import crypto from "node:crypto";
+        export function encryptStaticIv(key: Buffer, data: string) {
+            return crypto.createCipheriv("aes-256-cbc", key, "0123456789abcdef");
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/crypto.ts"), bad_crypto, Some(crypto_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected insecure-crypto-risk diagnostic for:\n{bad_crypto}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_crypto in [
+        r#"import crypto from "node:crypto";
+        export function verifyWebhook(signature: string, expectedSignature: string) {
+            if (!signature || signature.length !== expectedSignature.length) return false;
+            return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
+        }"#,
+        r#"import crypto from "node:crypto";
+        export function encryptGcm(key: Buffer, data: string) {
+            const iv = crypto.randomBytes(12);
+            return crypto.createCipheriv("aes-256-gcm", key, iv);
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/crypto-safe.ts"), safe_crypto, Some(crypto_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 insecure-crypto-risk diagnostics for:\n{safe_crypto}\ngot: {diags:?}"
+        );
+    }
+
+    // 5. iframe-missing-sandbox: allow-scripts + allow-same-origin simultaneously
+    let iframe_rules = &[RuleId::IframeMissingSandbox];
+    let bad_iframe = analyze_source(
+        Path::new("src/components/PreviewFrame.tsx"),
+        r#"export const PreviewFrame = ({ url }: { url: string }) => (
+            <iframe src={url} sandbox="allow-scripts allow-same-origin" />
+        );"#,
+        Some(iframe_rules),
+    );
+    assert_eq!(bad_iframe.len(), 1);
+
+    let safe_iframe = analyze_source(
+        Path::new("src/components/PreviewFrame.tsx"),
+        r#"export const PreviewFrame = ({ url }: { url: string }) => (
+            <iframe src={url} sandbox="allow-scripts" />
+        );"#,
+        Some(iframe_rules),
+    );
+    assert!(safe_iframe.is_empty());
+}
+
+#[test]
+fn ci_workflow_security_risk_scans_github_workflows_in_memory_and_workspace() {
+    let wf_rules = &[RuleId::CiWorkflowSecurityRisk];
+
+    // 1. pull_request_target + checkout of PR head ref
+    let pr_target_yaml = r#"name: PR Target Unsafe
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm test
+"#;
+    let diags_prt = analyze_source(
+        Path::new(".github/workflows/pr-target.yml"),
+        pr_target_yaml,
+        Some(wf_rules),
+    );
+    assert_eq!(diags_prt.len(), 1);
+    assert_eq!(diags_prt[0].rule, RuleId::CiWorkflowSecurityRisk);
+
+    // 2. Untrusted ${{ github.event.* }} interpolation inside `run:`
+    let interp_yaml = r#"name: Greet Issue
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print title
+        run: |
+          echo "Issue title: ${{ github.event.issue.title }}"
+"#;
+    let diags_interp = analyze_source(
+        Path::new(".github/workflows/triage.yaml"),
+        interp_yaml,
+        Some(wf_rules),
+    );
+    assert_eq!(diags_interp.len(), 1);
+
+    // 3. Secret in build step (cargo test / npm install while secret is in env)
+    let secret_build_yaml = r#"name: CI
+on: [push]
+env:
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace
+"#;
+    let diags_secret = analyze_source(
+        Path::new(".github/workflows/ci.yml"),
+        secret_build_yaml,
+        Some(wf_rules),
+    );
+    assert_eq!(diags_secret.len(), 1);
+
+    // 4. Safe workflow: passes event title via env: and scopes secret to `cargo publish --no-verify`
+    let safe_yaml = r#"name: Safe Release
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PR title safely
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: echo "Checking $PR_TITLE"
+      - name: Publish without verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-verify
+"#;
+    let diags_safe = analyze_source(
+        Path::new(".github/workflows/safe.yml"),
+        safe_yaml,
+        Some(wf_rules),
+    );
+    assert!(
+        diags_safe.is_empty(),
+        "Expected 0 diagnostics on safe workflow, got: {diags_safe:?}"
+    );
+
+    // 5. Verify `analyze_project_sources` and `scan_workspace` both discover `.github/workflows/*.{yml,yaml}`
+    let proj_report = analyze_project_sources(
+        vec![
+            (
+                PathBuf::from("package.json"),
+                r#"{"name": "wf-app", "version": "1.0.0"}"#.to_string(),
+            ),
+            (
+                PathBuf::from(".github/workflows/unsafe.yml"),
+                pr_target_yaml.to_string(),
+            ),
+            (
+                PathBuf::from(".github/workflows/safe.yaml"),
+                safe_yaml.to_string(),
+            ),
+        ],
+        Some(wf_rules),
+    );
+    assert_eq!(proj_report.diagnostics.len(), 1);
+    assert!(proj_report.diagnostics[0].file.ends_with(".github/workflows/unsafe.yml"));
+
+    let temp_dir = unique_temp_dir("github-workflows");
+    let wf_dir = temp_dir.join(".github").join("workflows");
+    fs::create_dir_all(&wf_dir).expect("create .github/workflows");
+    fs::write(
+        temp_dir.join("package.json"),
+        r#"{"name": "wf-app", "version": "1.0.0"}"#,
+    )
+    .expect("write package.json");
+    fs::write(wf_dir.join("unsafe.yml"), interp_yaml).expect("write unsafe.yml");
+    fs::write(wf_dir.join("safe.yaml"), safe_yaml).expect("write safe.yaml");
+
+    let (ws_report, _) = scan_workspace(&ScanOptions {
+        paths: vec![temp_dir.clone()],
+        rules: Some(vec![RuleId::CiWorkflowSecurityRisk]),
+        ..ScanOptions::default()
+    })
+    .expect("scan workspace with .github/workflows");
+    let _ = fs::remove_dir_all(&temp_dir);
+    assert_eq!(ws_report.diagnostics.len(), 1);
+    assert_eq!(ws_report.diagnostics[0].rule, RuleId::CiWorkflowSecurityRisk);
+}
+
+#[test]
+fn trust_boundary_electron_host_cache_llm_and_supabase_service_role_rules() {
+    // 1. electron-webview-bridge-risk
+    let electron_rules = &[RuleId::ElectronWebviewBridgeRisk];
+    for bad_electron in [
+        r#"import { BrowserWindow } from "electron";
+        export const win = new BrowserWindow({
+            webPreferences: { nodeIntegration: true, contextIsolation: false },
+        });"#,
+        r#"import { ipcMain } from "electron";
+        import { execSync } from "node:child_process";
+        ipcMain.handle("run-cmd", async (_event, cmd: string) => {
+            return execSync(cmd).toString();
+        });"#,
+        r#"import { shell } from "electron";
+        export const openLink = (targetUrl: string) => shell.openExternal(targetUrl);"#,
+        r#"import { WebView } from "react-native-webview";
+        export const AppWebView = ({ uri }: { uri: string }) => (
+            <WebView source={{ uri }} allowUniversalAccessFromFileURLs={true} />
+        );"#,
+    ] {
+        let diags = analyze_source(Path::new("src/desktop/main.tsx"), bad_electron, Some(electron_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected electron-webview-bridge-risk diagnostic for:\n{bad_electron}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_electron in [
+        r#"import { BrowserWindow, ipcMain, shell } from "electron";
+        import fs from "node:fs";
+        export const win = new BrowserWindow({
+            webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+        });
+        ipcMain.handle("read-notes", async (event, file: string) => {
+            if (!event.senderFrame || new URL(event.senderFrame.url).origin !== "app://bundle") {
+                throw new Error("Unauthorized senderFrame");
+            }
+            return fs.readFileSync("/safe/notes.txt", "utf8");
+        });
+        export function openDocs(rawUrl: string) {
+            const parsed = new URL(rawUrl);
+            if (parsed.protocol !== "https:") throw new Error("Untrusted protocol");
+            return shell.openExternal(parsed.toString());
+        }"#,
+        r#"import { WebView } from "react-native-webview";
+        export const SafeWebView = ({ uri }: { uri: string }) => (
+            <WebView source={{ uri }} allowFileAccessFromFileURLs={false} allowUniversalAccessFromFileURLs={false} />
+        );"#,
+    ] {
+        let diags = analyze_source(Path::new("src/desktop/safe.tsx"), safe_electron, Some(electron_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 electron-webview-bridge-risk diagnostics for:\n{safe_electron}\ngot: {diags:?}"
+        );
+    }
+
+    // 2. untrusted-host-header-origin
+    let host_rules = &[RuleId::UntrustedHostHeaderOrigin];
+    for bad_host in [
+        r#"export async function sendPasswordReset(req: any, token: string) {
+            const host = req.headers.host;
+            const resetUrl = `https://${host}/reset-password?token=${token}`;
+            return sendEmail(resetUrl);
+        }"#,
+        r#"import { headers } from "next/headers";
+        export async function buildOAuthRedirect() {
+            const forwardedHost = (await headers()).get("x-forwarded-host");
+            const redirect_uri = `https://${forwardedHost}/api/auth/callback`;
+            return redirect_uri;
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/reset.ts"), bad_host, Some(host_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected untrusted-host-header-origin diagnostic for:\n{bad_host}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_host in [
+        r#"export async function sendPasswordReset(token: string) {
+            const resetUrl = `${process.env.APP_URL}/reset-password?token=${token}`;
+            return sendEmail(resetUrl);
+        }"#,
+        r#"const ALLOWED_HOSTS = new Set(["app.example.com"]);
+        export async function sendMagicLink(req: any, token: string) {
+            const host = req.headers.host;
+            if (!ALLOWED_HOSTS.has(host)) throw new Error("Invalid host");
+            const magicLink = `https://${host}/magic?token=${token}`;
+            return sendEmail(magicLink);
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/server/reset-safe.ts"), safe_host, Some(host_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 untrusted-host-header-origin diagnostics for:\n{safe_host}\ngot: {diags:?}"
+        );
+    }
+
+    // 3. private-response-public-cache
+    let cache_rules = &[RuleId::PrivateResponsePublicCache];
+    for bad_cache in [
+        r#"import { cookies } from "next/headers";
+        export async function GET() {
+            const store = await cookies();
+            const session = store.get("session");
+            return Response.json({ session }, {
+                headers: { "Cache-Control": "public, max-age=300, s-maxage=600" },
+            });
+        }"#,
+        r#"export async function loader({ request }: { request: Request }) {
+            const authHeader = request.headers.get("authorization");
+            const profile = await fetchProfile(authHeader);
+            return new Response(JSON.stringify(profile), {
+                headers: { "Cache-Control": "s-maxage=120, stale-while-revalidate=60" },
+            });
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("app/api/me/route.ts"), bad_cache, Some(cache_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected private-response-public-cache diagnostic for:\n{bad_cache}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_cache in [
+        r#"import { cookies } from "next/headers";
+        export async function GET() {
+            const store = await cookies();
+            const session = store.get("session");
+            return Response.json({ session }, {
+                headers: { "Cache-Control": "private, no-store" },
+            });
+        }"#,
+        r#"export async function GET() {
+            const posts = await fetchPublicPosts();
+            return Response.json(posts, {
+                headers: { "Cache-Control": "public, s-maxage=3600" },
+            });
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("app/api/safe/route.ts"), safe_cache, Some(cache_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 private-response-public-cache diagnostics for:\n{safe_cache}\ngot: {diags:?}"
+        );
+    }
+
+    // 4. llm-prompt-role-and-tool-sink-risk
+    let llm_rules = &[RuleId::LlmPromptRoleAndToolSinkRisk];
+    for bad_llm in [
+        r#"export async function chatHandler(req: any, openai: any) {
+            return openai.chat.completions.create({
+                model: "gpt-4o",
+                messages: req.body.messages,
+            });
+        }"#,
+        r#"import { generateText } from "ai";
+        export async function runAgent(model: any, tools: any, prompt: string) {
+            return generateText({ model, tools, prompt });
+        }"#,
+        r#"import { tool } from "ai";
+        import { execSync } from "node:child_process";
+        export const diagTool = tool({
+            description: "Run diagnostic",
+            execute: async ({ cmd }: { cmd: string }) => execSync(cmd).toString(),
+        });"#,
+    ] {
+        let diags = analyze_source(Path::new("src/ai/chat.ts"), bad_llm, Some(llm_rules));
+        assert!(
+            !diags.is_empty(),
+            "Expected llm-prompt-role-and-tool-sink-risk diagnostic for:\n{bad_llm}\ngot: {diags:?}"
+        );
+    }
+
+    for safe_llm in [
+        r#"export async function chatHandler(req: any, openai: any) {
+            const safeMessages = req.body.messages.filter(
+                (m: any) => m.role === "user" || m.role === "assistant"
+            );
+            return openai.chat.completions.create({
+                model: "gpt-4o",
+                messages: safeMessages,
+            });
+        }"#,
+        r#"import { generateText } from "ai";
+        export async function runAgentBounded(model: any, tools: any, prompt: string) {
+            return generateText({ model, tools, maxSteps: 5, prompt });
+        }"#,
+    ] {
+        let diags = analyze_source(Path::new("src/ai/chat-safe.ts"), safe_llm, Some(llm_rules));
+        assert!(
+            diags.is_empty(),
+            "Expected 0 llm-prompt-role-and-tool-sink-risk diagnostics for:\n{safe_llm}\ngot: {diags:?}"
+        );
+    }
+
+    // 5. supabase-service-role-unscoped-query
+    let sb_rules = &[RuleId::SupabaseServiceRoleUnscopedQuery];
+    let bad_sb = analyze_source(
+        Path::new("app/api/invoices/route.ts"),
+        r#"import { createClient } from "@supabase/supabase-js";
+        const supabaseAdmin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+        export async function DELETE(req: any) {
+            return supabaseAdmin.from("invoices").delete().eq("id", req.query.invoiceId);
+        }"#,
+        Some(sb_rules),
+    );
+    assert_eq!(bad_sb.len(), 1);
+
+    let safe_sb = analyze_source(
+        Path::new("app/api/invoices/route.ts"),
+        r#"import { createClient } from "@supabase/supabase-js";
+        const supabaseAdmin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+        export async function DELETE(req: any, session: any) {
+            return supabaseAdmin
+                .from("invoices")
+                .delete()
+                .eq("id", req.query.invoiceId)
+                .eq("user_id", session.user.id);
+        }"#,
+        Some(sb_rules),
+    );
+    assert!(safe_sb.is_empty());
+}
