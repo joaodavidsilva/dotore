@@ -900,3 +900,5 @@ export class HelperDestroyComponent implements OnInit, OnDestroy {
         Some("NonLifecycleUnsubComponent")
     );
 }
+
+mod angular_core;
