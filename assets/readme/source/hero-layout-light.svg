@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="400" viewBox="0 0 1200 400"
+     role="img" aria-labelledby="title desc">
+  <title id="title">dotore — Pure-Rust Polyglot Static Analyzer and Remediation Engine</title>
+  <desc id="desc">Single-pass static analysis, Capability Gate inference, 1,076 rules, and deterministic autofix across JS/TS, React, Angular, Python, and Rust.</desc>
+
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1200" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F6F4EE"/>
+      <stop offset="100%" stop-color="#EDE9DF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Outer Canvas -->
+  <rect width="1200" height="400" rx="22" fill="url(#bg-grad)"/>
+  <rect x="1" y="1" width="1198" height="398" rx="21" fill="none" stroke="#D5CFC2" stroke-width="1.5"/>
+
+  <!-- Left Column: Identity & Value -->
+  <g id="title-block" transform="translate(44, 46)">
+    <!-- Eyebrow badge -->
+    <rect x="0" y="0" width="430" height="34" rx="8" fill="#FFFFFF" stroke="#D5CFC2" stroke-width="1"/>
+    <circle cx="18" cy="17" r="5" fill="#0D9462"/>
+    <text x="34" y="22" fill="#1E3A8A" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">PURE-RUST STATIC ANALYZER · 1,076 RULES</text>
+
+    <!-- Project Title -->
+    <text x="0" y="108" fill="#0E1116" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="68" font-weight="800" letter-spacing="-1.5">dotore</text>
+
+    <!-- Concrete Description -->
+    <text x="0" y="152" fill="#2D3643" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="21" font-weight="500">Single-pass polyglot analysis, deterministic</text>
+    <text x="0" y="180" fill="#2D3643" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="21" font-weight="500">autofixes, and root-cause Fix Capsules.</text>
+
+    <!-- Capability Gate Pills -->
+    <g transform="translate(0, 212)">
+      <rect x="0" y="0" width="88" height="34" rx="8" fill="#FFFFFF" stroke="#D5CFC2" stroke-width="1"/>
+      <text x="44" y="22" text-anchor="middle" fill="#1F2937" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">JS / TS</text>
+
+      <rect x="96" y="0" width="80" height="34" rx="8" fill="#FFFFFF" stroke="#D5CFC2" stroke-width="1"/>
+      <text x="136" y="22" text-anchor="middle" fill="#1D4ED8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">React</text>
+
+      <rect x="184" y="0" width="96" height="34" rx="8" fill="#FFFFFF" stroke="#D5CFC2" stroke-width="1"/>
+      <text x="232" y="22" text-anchor="middle" fill="#B91C1C" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">Angular</text>
+
+      <rect x="288" y="0" width="88" height="34" rx="8" fill="#FFFFFF" stroke="#D5CFC2" stroke-width="1"/>
+      <text x="332" y="22" text-anchor="middle" fill="#B45309" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">Python</text>
+
+      <rect x="384" y="0" width="72" height="34" rx="8" fill="#FFFFFF" stroke="#D5CFC2" stroke-width="1"/>
+      <text x="420" y="22" text-anchor="middle" fill="#047857" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">Rust</text>
+    </g>
+
+    <!-- Bottom Metadata -->
+    <text x="0" y="282" fill="#525B69" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Capability Gate · Diff Scopes · Agent Handoff · CDP Scan</text>
+  </g>
+
+  <!-- Center Column: Project-Native Terminal & Fix Capsule Proof (Dark Terminal Panel preserved for CLI identity) -->
+  <g id="project-proof" transform="translate(508, 42)">
+    <rect x="0" y="0" width="388" height="316" rx="14" fill="#111722" stroke="#283244" stroke-width="1.5"/>
+
+    <!-- Terminal Title Bar -->
+    <rect x="0" y="0" width="388" height="36" rx="14" fill="#182130"/>
+    <rect x="0" y="22" width="388" height="14" fill="#182130"/>
+    <line x1="0" y1="36" x2="388" y2="36" stroke="#283448" stroke-width="1"/>
+    <circle cx="18" cy="18" r="5" fill="#EF4444"/>
+    <circle cx="34" cy="18" r="5" fill="#F59E0B"/>
+    <circle cx="50" cy="18" r="5" fill="#10B981"/>
+    <text x="210" y="23" text-anchor="middle" fill="#D1D5DB" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="600">dotore check · 100/100</text>
+
+    <!-- Health Score Row -->
+    <text x="20" y="68" fill="#9CA3AF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="600">SCORE</text>
+    <rect x="84" y="53" width="136" height="18" rx="5" fill="#10B981"/>
+    <text x="232" y="68" fill="#34D399" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">100 Excellent</text>
+
+    <!-- Tier Counters -->
+    <rect x="20" y="84" width="348" height="34" rx="8" fill="#161F2E" stroke="#263348" stroke-width="1"/>
+    <circle cx="36" cy="101" r="4" fill="#34D399"/>
+    <text x="46" y="106" fill="#34D399" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600">Autofix</text>
+    <circle cx="136" cy="101" r="4" fill="#FBBF24"/>
+    <text x="146" y="106" fill="#FBBF24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600">Surgical</text>
+    <circle cx="246" cy="101" r="4" fill="#60A5FA"/>
+    <text x="256" y="106" fill="#60A5FA" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600">Refactor</text>
+
+    <!-- Fix Capsule Diff Specimen -->
+    <rect x="20" y="132" width="348" height="164" rx="10" fill="#0B0F17" stroke="#263348" stroke-width="1"/>
+    <text x="32" y="156" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600">[no-derived-state] Form.tsx:14</text>
+
+    <!-- Removed lines -->
+    <rect x="28" y="170" width="332" height="52" rx="5" fill="#2A1218"/>
+    <text x="36" y="192" fill="#FCA5A5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5">- const [full, setFull] = useState('');</text>
+    <text x="36" y="213" fill="#FCA5A5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5">- useEffect(() =&gt; setFull(a + b));</text>
+
+    <!-- Added line -->
+    <rect x="28" y="232" width="332" height="44" rx="5" fill="#0E2920"/>
+    <text x="36" y="259" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="600">+ const full = a + b;</text>
+  </g>
+
+  <!-- Right Column: Reserved Mascot Area -->
+  <g id="mascot-slot" transform="translate(896, 36)">
+  </g>
+</svg>

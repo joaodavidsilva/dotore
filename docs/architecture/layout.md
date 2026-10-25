@@ -317,6 +317,15 @@ src/
     analysis.rs           # snapshot validation, multi-navigation merging, React/LoAF/interaction hotspot aggregation, and report builder
     report.rs             # terminal, JSON, and JSONL report formatters for RuntimeScanReport
   report.rs               # terminal, JSON, why/explain, and self-contained HTML reporters facade
+assets/
+  readme/
+    hero-dark.png         # composed dark-theme README hero (SVG layout + surgical robot mascot)
+    hero-light.png        # composed light-theme README hero (SVG layout + surgical robot mascot)
+    source/
+      hero-layout-dark.svg  # editable dark SVG layout source
+      hero-layout-light.svg # editable light SVG layout source
+      hero-subject.png      # transparent surgical robot mascot cutout
+      hero-prompt.txt       # Gemini generation prompt and model record
 docs/
   adr/                    # architecture decision records
   agents/                 # issue-tracker, triage-labels, domain conventions
