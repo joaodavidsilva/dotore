@@ -225,7 +225,7 @@ impl SourceKernelDetectorsVisitor<'_> {
     }
 
     // 2a. `rs-security-no-dynamic-shell-command` (method `.arg(script)` / `.args([...])`)
-    // Note: Intentionally fires in test code too per rust-doctor spec!
+    // Note: Intentionally fires in test code too.
     fn check_dynamic_shell_method(&mut self, call: &ExprMethodCall) {
         let Some(own_args) = extract_command_arg_elements(call) else {
             return;

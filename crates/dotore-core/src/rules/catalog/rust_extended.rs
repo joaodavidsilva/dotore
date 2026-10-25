@@ -15,7 +15,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-tokio-no-block-in-place-on-current-thread",
         "dotore/rs-tokio-no-block-in-place-on-current-thread",
         &[
-            "rust_doctor::source::block_in_place_on_current_thread",
+            "dotore::source::block_in_place_on_current_thread",
             "block_in_place_on_current_thread",
         ],
         "tokio::task::block_in_place panics on a current_thread runtime",
@@ -35,7 +35,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-async-no-block-on-in-async",
         "dotore/rs-async-no-block-on-in-async",
         &[
-            "rust_doctor::source::block_on_in_async",
+            "dotore::source::block_on_in_async",
             "block_on_in_async",
         ],
         "block_on called inside an async function or block",
@@ -55,7 +55,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-security-no-disabled-tls-verification",
         "dotore/rs-security-no-disabled-tls-verification",
         &[
-            "rust_doctor::source::disabled_tls_verification",
+            "dotore::source::disabled_tls_verification",
             "disabled_tls_verification",
         ],
         "reqwest client disables TLS certificate or hostname verification",
@@ -75,7 +75,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-security-no-dynamic-shell-command",
         "dotore/rs-security-no-dynamic-shell-command",
         &[
-            "rust_doctor::source::dynamic_shell_command",
+            "dotore::source::dynamic_shell_command",
             "dynamic_shell_command",
         ],
         "Shell command or program path built dynamically from runtime values",
@@ -95,7 +95,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-http-no-unchecked-response-status",
         "dotore/rs-http-no-unchecked-response-status",
         &[
-            "rust_doctor::source::unchecked_http_status",
+            "dotore::source::unchecked_http_status",
             "unchecked_http_status",
         ],
         "HTTP response body read without checking status or calling error_for_status()",
@@ -115,7 +115,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-security-no-secret-env-fallback",
         "dotore/rs-security-no-secret-env-fallback",
         &[
-            "rust_doctor::source::secret_env_fallback",
+            "dotore::source::secret_env_fallback",
             "secret_env_fallback",
         ],
         "Secret environment variable falls back to a hardcoded or empty default",
@@ -135,7 +135,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-security-no-permissive-cors",
         "dotore/rs-security-no-permissive-cors",
         &[
-            "rust_doctor::source::permissive_cors",
+            "dotore::source::permissive_cors",
             "permissive_cors",
         ],
         "Permissive CORS layer allows any origin or combines credentials with wildcard/mirrored origin",
@@ -155,7 +155,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-security-no-insecure-auth-cookie",
         "dotore/rs-security-no-insecure-auth-cookie",
         &[
-            "rust_doctor::source::insecure_auth_cookie",
+            "dotore::source::insecure_auth_cookie",
             "insecure_auth_cookie",
         ],
         "Authentication or session cookie built with http_only(false)",
@@ -175,7 +175,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-security-no-disabled-jwt-validation",
         "dotore/rs-security-no-disabled-jwt-validation",
         &[
-            "rust_doctor::source::disabled_jwt_validation",
+            "dotore::source::disabled_jwt_validation",
             "disabled_jwt_validation",
         ],
         "jsonwebtoken signature verification disabled via insecure_disable_signature_validation or insecure_decode",
@@ -195,7 +195,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-duplicate-major-versions",
         "dotore/rs-cargo-duplicate-major-versions",
         &[
-            "rust_doctor::cargo::duplicate_major_versions",
+            "dotore::cargo::duplicate_major_versions",
             "duplicate_major_versions",
         ],
         "Multiple incompatible major versions of the same crate resolved in Cargo.lock",
@@ -214,7 +214,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         RuleId::RsCargoMissingLockfile,
         "rs-cargo-missing-lockfile",
         "dotore/rs-cargo-missing-lockfile",
-        &["rust_doctor::cargo::missing_lockfile", "missing_lockfile"],
+        &["dotore::cargo::missing_lockfile", "missing_lockfile"],
         "Binary Cargo workspace is missing a committed Cargo.lock",
         RuleCategory::Maintainability,
         RuleSeverity::Warning,
@@ -232,7 +232,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-path-dep-outside-workspace",
         "dotore/rs-cargo-path-dep-outside-workspace",
         &[
-            "rust_doctor::cargo::path_dependency_outside_workspace",
+            "dotore::cargo::path_dependency_outside_workspace",
             "path_dependency_outside_workspace",
         ],
         "Cargo path dependency resolves outside the workspace root",
@@ -252,7 +252,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-permissive-lint-table",
         "dotore/rs-cargo-permissive-lint-table",
         &[
-            "rust_doctor::cargo::permissive_lint_table",
+            "dotore::cargo::permissive_lint_table",
             "permissive_lint_table",
         ],
         "Cargo.toml [lints] table sets an active correctness or safety rule to allow",
@@ -272,7 +272,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-permissive-rustflags",
         "dotore/rs-cargo-permissive-rustflags",
         &[
-            "rust_doctor::cargo::permissive_rustflags",
+            "dotore::cargo::permissive_rustflags",
             "permissive_rustflags",
         ],
         "Check-disabling rustflags (-A warnings, --cap-lints allow, overflow-checks=off) in .cargo/config.toml",
@@ -292,7 +292,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-release-debug-symbols",
         "dotore/rs-cargo-release-debug-symbols",
         &[
-            "rust_doctor::cargo::release_debug_symbols",
+            "dotore::cargo::release_debug_symbols",
             "release_debug_symbols",
         ],
         "[profile.release] enables full debug symbols without strip",
@@ -312,7 +312,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-unchecked-release-overflow",
         "dotore/rs-cargo-unchecked-release-overflow",
         &[
-            "rust_doctor::cargo::unchecked_release_overflow",
+            "dotore::cargo::unchecked_release_overflow",
             "unchecked_release_overflow",
         ],
         "Binary workspace Cargo.toml does not enable overflow-checks = true in [profile.release]",
@@ -331,7 +331,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         RuleId::RsCargoUnusedDependency,
         "rs-cargo-unused-dependency",
         "dotore/rs-cargo-unused-dependency",
-        &["rust_doctor::cargo::unused_dependency", "unused_dependency"],
+        &["dotore::cargo::unused_dependency", "unused_dependency"],
         "Declared Cargo.toml dependency is never referenced in package source files",
         RuleCategory::Maintainability,
         RuleSeverity::Warning,
@@ -349,7 +349,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-test-only-dependency",
         "dotore/rs-cargo-test-only-dependency",
         &[
-            "rust_doctor::cargo::test_only_dependency",
+            "dotore::cargo::test_only_dependency",
             "test_only_dependency",
         ],
         "Regular [dependencies] entry is referenced only in tests, benches, or examples",
@@ -369,7 +369,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-unbounded-wildcard-dependency",
         "dotore/rs-cargo-unbounded-wildcard-dependency",
         &[
-            "rust_doctor::cargo::unbounded_registry_dependency",
+            "dotore::cargo::unbounded_registry_dependency",
             "unbounded_registry_dependency",
         ],
         "Cargo registry dependency specifies an unbounded '*' wildcard version",
@@ -389,7 +389,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-cargo-unpinned-git-dependency",
         "dotore/rs-cargo-unpinned-git-dependency",
         &[
-            "rust_doctor::cargo::unpinned_git_dependency",
+            "dotore::cargo::unpinned_git_dependency",
             "unpinned_git_dependency",
         ],
         "Cargo git dependency is not pinned to a full 40-character commit rev SHA",
@@ -409,7 +409,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-crate-level-allow",
         "dotore/rs-structure-crate-level-allow",
         &[
-            "rust_doctor::structure::crate_level_allow",
+            "dotore::structure::crate_level_allow",
             "crate_level_allow",
         ],
         "File-wide or module-wide inner #![allow(...)] attribute",
@@ -429,7 +429,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-unreasoned-allow",
         "dotore/rs-structure-unreasoned-allow",
         &[
-            "rust_doctor::structure::unreasoned_allow_attribute",
+            "dotore::structure::unreasoned_allow_attribute",
             "unreasoned_allow_attribute",
             "allow_attributes_without_reason",
             "clippy::allow_attributes_without_reason",
@@ -451,7 +451,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-stacked-allow",
         "dotore/rs-structure-stacked-allow",
         &[
-            "rust_doctor::structure::stacked_allow_attribute",
+            "dotore::structure::stacked_allow_attribute",
             "stacked_allow_attribute",
         ],
         "Item stacks multiple #[allow] attributes or silences 4+ lints at once",
@@ -471,7 +471,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-complex-function",
         "dotore/rs-structure-complex-function",
         &[
-            "rust_doctor::structure::complex_function",
+            "dotore::structure::complex_function",
             "complex_function",
             "cognitive_complexity",
             "clippy::cognitive_complexity",
@@ -493,7 +493,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-oversized-unit",
         "dotore/rs-structure-oversized-unit",
         &[
-            "rust_doctor::structure::oversized_unit",
+            "dotore::structure::oversized_unit",
             "oversized_unit",
             "too_many_lines",
             "clippy::too_many_lines",
@@ -515,7 +515,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-orphan-module-file",
         "dotore/rs-structure-orphan-module-file",
         &[
-            "rust_doctor::structure::orphan_module_file",
+            "dotore::structure::orphan_module_file",
             "orphan_module_file",
         ],
         "Rust source file under src/ is not reached by any mod declaration",
@@ -535,7 +535,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-unreferenced-feature",
         "dotore/rs-structure-unreferenced-feature",
         &[
-            "rust_doctor::structure::unreferenced_feature",
+            "dotore::structure::unreferenced_feature",
             "unreferenced_feature",
         ],
         "Unread Cargo.toml feature or cfg(feature = \"...\") referencing an undeclared feature",
@@ -555,8 +555,8 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "rs-structure-near-duplicate-function",
         "dotore/rs-structure-near-duplicate-function",
         &[
-            "rust_doctor::structure::near_duplicate_function_body",
-            "rust_doctor::structure::duplicate_function_body",
+            "dotore::structure::near_duplicate_function_body",
+            "dotore::structure::duplicate_function_body",
             "near_duplicate_function_body",
             "duplicate_function_body",
         ],

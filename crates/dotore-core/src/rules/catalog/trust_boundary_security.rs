@@ -16,7 +16,7 @@ pub(crate) const RULES: &[RuleMetadata] = &[
         "ci-workflow-security-risk",
         "dotore/ci-workflow-security-risk",
         &[
-            "rust_doctor::repo::secret_in_build_step",
+            "dotore::repo::secret_in_build_step",
             "secret_in_build_step",
             "workflow-injection",
         ],

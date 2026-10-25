@@ -556,7 +556,7 @@ class InvoiceGenerator:
 }
 
 #[test]
-fn pyproject_toml_tool_dotore_and_python_doctor_config_and_profiles_are_loaded_and_applied() {
+fn pyproject_toml_tool_dotore_config_and_profiles_are_loaded_and_applied() {
     let analyzer = PyLanguageAnalyzer::new();
 
     // 1. Profile inference: library ([build-system]), web (fastapi/flask), cli (click or [project.scripts]), script (profile override)
@@ -604,7 +604,7 @@ my-cli = "my_cli.main:cli"
     );
     assert_eq!(cli_gate.package_role, PackageRole::Application);
 
-    // 2. [tool.python-doctor] and [tool.dotore] suppress, per-file-suppress, rules, and profile override
+    // 2. [tool.dotore] suppress, per-file-suppress, rules, and profile override
     let configured_pyproject = r#"
 [build-system]
 requires = ["setuptools"]
@@ -614,11 +614,11 @@ build-backend = "setuptools.build_meta"
 name = "configured-app"
 version = "0.1.0"
 
-[tool.python-doctor]
+[tool.dotore]
 profile = "script"
 suppress = ["py-require-timezone-aware-datetime"]
 
-[tool.python-doctor.per-file-suppress]
+[tool.dotore.per-file-suppress]
 "app/legacy/*" = ["B006"]
 "app/compat.py" = "exceptions/silent"
 
@@ -626,7 +626,7 @@ suppress = ["py-require-timezone-aware-datetime"]
 "py-require-context-manager-for-resource" = "off"
 "#;
     let cfg = DotoreConfig::from_pyproject_toml_str(configured_pyproject)
-        .expect("Expected DotoreConfig from [tool.python-doctor] and [tool.dotore]");
+        .expect("Expected DotoreConfig from [tool.dotore]");
     assert!(cfg.effective_severity(RuleId::PyRequireTimezoneAwareDatetime).is_none());
     assert!(cfg.effective_severity(RuleId::PyRequireContextManagerForResource).is_none());
     assert!(cfg.is_overridden_for_file(

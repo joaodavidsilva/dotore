@@ -21,7 +21,7 @@ crates/
         loader/
           js_parser.rs    # zero-dependency static JS/TS object config parser (ConfigCursor)
         mutator.rs        # in-place configuration mutator (dotore rules)
-        pyproject.rs      # [tool.dotore] / [tool.python-doctor] pyproject.toml loader and profile inference
+        pyproject.rs      # [tool.dotore] pyproject.toml loader and profile inference
       rules.rs            # unified rule registry module root
       rules/
         types.rs          # RuleId, RuleMetadata, PrescriptionTier, RuleCategory, RuleSeverity, RuleTag

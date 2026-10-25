@@ -945,14 +945,14 @@ fn is_toml_line_suppressed(source: &str, line_1based: u32, rule: RuleId) -> bool
             continue;
         };
         let trimmed = comment.trim();
-        if (trimmed.contains("dotore-disable") || trimmed.contains("rust-doctor-disable"))
+        if trimmed.contains("dotore-disable")
             && (trimmed.contains(rule.as_str())
                 || rule
                     .metadata()
                     .legacy_aliases
                     .iter()
                     .any(|alias| trimmed.contains(alias))
-                || (!trimmed.contains("rs-") && !trimmed.contains("rust_doctor::")))
+                || (!trimmed.contains("rs-") && !trimmed.contains("dotore::")))
         {
             return true;
         }

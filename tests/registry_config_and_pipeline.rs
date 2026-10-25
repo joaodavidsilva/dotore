@@ -2602,53 +2602,53 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
             RuleId::RsTokioNoBlockInPlaceOnCurrentThread,
             "rs-tokio-no-block-in-place-on-current-thread",
             &[
-                "rust_doctor::source::block_in_place_on_current_thread",
+                "dotore::source::block_in_place_on_current_thread",
                 "block_in_place_on_current_thread",
             ],
         ),
         (
             RuleId::RsAsyncNoBlockOnInAsync,
             "rs-async-no-block-on-in-async",
-            &["rust_doctor::source::block_on_in_async", "block_on_in_async"],
+            &["dotore::source::block_on_in_async", "block_on_in_async"],
         ),
         (
             RuleId::RsSecurityNoDisabledTlsVerification,
             "rs-security-no-disabled-tls-verification",
             &[
-                "rust_doctor::source::disabled_tls_verification",
+                "dotore::source::disabled_tls_verification",
                 "disabled_tls_verification",
             ],
         ),
         (
             RuleId::RsSecurityNoDynamicShellCommand,
             "rs-security-no-dynamic-shell-command",
-            &["rust_doctor::source::dynamic_shell_command", "dynamic_shell_command"],
+            &["dotore::source::dynamic_shell_command", "dynamic_shell_command"],
         ),
         (
             RuleId::RsHttpNoUncheckedResponseStatus,
             "rs-http-no-unchecked-response-status",
-            &["rust_doctor::source::unchecked_http_status", "unchecked_http_status"],
+            &["dotore::source::unchecked_http_status", "unchecked_http_status"],
         ),
         (
             RuleId::RsSecurityNoSecretEnvFallback,
             "rs-security-no-secret-env-fallback",
-            &["rust_doctor::source::secret_env_fallback", "secret_env_fallback"],
+            &["dotore::source::secret_env_fallback", "secret_env_fallback"],
         ),
         (
             RuleId::RsSecurityNoPermissiveCors,
             "rs-security-no-permissive-cors",
-            &["rust_doctor::source::permissive_cors", "permissive_cors"],
+            &["dotore::source::permissive_cors", "permissive_cors"],
         ),
         (
             RuleId::RsSecurityNoInsecureAuthCookie,
             "rs-security-no-insecure-auth-cookie",
-            &["rust_doctor::source::insecure_auth_cookie", "insecure_auth_cookie"],
+            &["dotore::source::insecure_auth_cookie", "insecure_auth_cookie"],
         ),
         (
             RuleId::RsSecurityNoDisabledJwtValidation,
             "rs-security-no-disabled-jwt-validation",
             &[
-                "rust_doctor::source::disabled_jwt_validation",
+                "dotore::source::disabled_jwt_validation",
                 "disabled_jwt_validation",
             ],
         ),
@@ -2657,79 +2657,79 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
             RuleId::RsCargoDuplicateMajorVersions,
             "rs-cargo-duplicate-major-versions",
             &[
-                "rust_doctor::cargo::duplicate_major_versions",
+                "dotore::cargo::duplicate_major_versions",
                 "duplicate_major_versions",
             ],
         ),
         (
             RuleId::RsCargoMissingLockfile,
             "rs-cargo-missing-lockfile",
-            &["rust_doctor::cargo::missing_lockfile", "missing_lockfile"],
+            &["dotore::cargo::missing_lockfile", "missing_lockfile"],
         ),
         (
             RuleId::RsCargoPathDepOutsideWorkspace,
             "rs-cargo-path-dep-outside-workspace",
             &[
-                "rust_doctor::cargo::path_dependency_outside_workspace",
+                "dotore::cargo::path_dependency_outside_workspace",
                 "path_dependency_outside_workspace",
             ],
         ),
         (
             RuleId::RsCargoPermissiveLintTable,
             "rs-cargo-permissive-lint-table",
-            &["rust_doctor::cargo::permissive_lint_table", "permissive_lint_table"],
+            &["dotore::cargo::permissive_lint_table", "permissive_lint_table"],
         ),
         (
             RuleId::RsCargoPermissiveRustflags,
             "rs-cargo-permissive-rustflags",
-            &["rust_doctor::cargo::permissive_rustflags", "permissive_rustflags"],
+            &["dotore::cargo::permissive_rustflags", "permissive_rustflags"],
         ),
         (
             RuleId::RsCargoReleaseDebugSymbols,
             "rs-cargo-release-debug-symbols",
-            &["rust_doctor::cargo::release_debug_symbols", "release_debug_symbols"],
+            &["dotore::cargo::release_debug_symbols", "release_debug_symbols"],
         ),
         (
             RuleId::RsCargoUncheckedReleaseOverflow,
             "rs-cargo-unchecked-release-overflow",
             &[
-                "rust_doctor::cargo::unchecked_release_overflow",
+                "dotore::cargo::unchecked_release_overflow",
                 "unchecked_release_overflow",
             ],
         ),
         (
             RuleId::RsCargoUnusedDependency,
             "rs-cargo-unused-dependency",
-            &["rust_doctor::cargo::unused_dependency", "unused_dependency"],
+            &["dotore::cargo::unused_dependency", "unused_dependency"],
         ),
         (
             RuleId::RsCargoTestOnlyDependency,
             "rs-cargo-test-only-dependency",
-            &["rust_doctor::cargo::test_only_dependency", "test_only_dependency"],
+            &["dotore::cargo::test_only_dependency", "test_only_dependency"],
         ),
         (
             RuleId::RsCargoUnboundedWildcardDependency,
             "rs-cargo-unbounded-wildcard-dependency",
             &[
-                "rust_doctor::cargo::unbounded_registry_dependency",
+                "dotore::cargo::unbounded_registry_dependency",
                 "unbounded_registry_dependency",
             ],
         ),
         (
             RuleId::RsCargoUnpinnedGitDependency,
             "rs-cargo-unpinned-git-dependency",
-            &["rust_doctor::cargo::unpinned_git_dependency", "unpinned_git_dependency"],
+            &["dotore::cargo::unpinned_git_dependency", "unpinned_git_dependency"],
         ),
         (
             RuleId::RsStructureCrateLevelAllow,
             "rs-structure-crate-level-allow",
-            &["rust_doctor::structure::crate_level_allow", "crate_level_allow"],
+            &["dotore::structure::crate_level_allow", "crate_level_allow"],
         ),
         (
             RuleId::RsStructureUnreasonedAllow,
             "rs-structure-unreasoned-allow",
             &[
-                "rust_doctor::structure::unreasoned_allow_attribute",
+                "dotore::structure::unreasoned_allow_attribute",
                 "unreasoned_allow_attribute",
                 "clippy::allow_attributes_without_reason",
             ],
@@ -2738,7 +2738,7 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
             RuleId::RsStructureStackedAllow,
             "rs-structure-stacked-allow",
             &[
-                "rust_doctor::structure::stacked_allow_attribute",
+                "dotore::structure::stacked_allow_attribute",
                 "stacked_allow_attribute",
             ],
         ),
@@ -2746,7 +2746,7 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
             RuleId::RsStructureComplexFunction,
             "rs-structure-complex-function",
             &[
-                "rust_doctor::structure::complex_function",
+                "dotore::structure::complex_function",
                 "complex_function",
                 "clippy::cognitive_complexity",
             ],
@@ -2755,7 +2755,7 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
             RuleId::RsStructureOversizedUnit,
             "rs-structure-oversized-unit",
             &[
-                "rust_doctor::structure::oversized_unit",
+                "dotore::structure::oversized_unit",
                 "oversized_unit",
                 "clippy::too_many_lines",
             ],
@@ -2763,13 +2763,13 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
         (
             RuleId::RsStructureOrphanModuleFile,
             "rs-structure-orphan-module-file",
-            &["rust_doctor::structure::orphan_module_file", "orphan_module_file"],
+            &["dotore::structure::orphan_module_file", "orphan_module_file"],
         ),
         (
             RuleId::RsStructureUnreferencedFeature,
             "rs-structure-unreferenced-feature",
             &[
-                "rust_doctor::structure::unreferenced_feature",
+                "dotore::structure::unreferenced_feature",
                 "unreferenced_feature",
             ],
         ),
@@ -2777,8 +2777,8 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
             RuleId::RsStructureNearDuplicateFunction,
             "rs-structure-near-duplicate-function",
             &[
-                "rust_doctor::structure::near_duplicate_function_body",
-                "rust_doctor::structure::duplicate_function_body",
+                "dotore::structure::near_duplicate_function_body",
+                "dotore::structure::duplicate_function_body",
             ],
         ),
         (
@@ -2829,7 +2829,7 @@ fn polyglot_and_security_rule_registry_and_legacy_aliases_resolve_via_parse_and_
         (
             RuleId::CiWorkflowSecurityRisk,
             "ci-workflow-security-risk",
-            &["rust_doctor::repo::secret_in_build_step", "secret_in_build_step"],
+            &["dotore::repo::secret_in_build_step", "secret_in_build_step"],
         ),
         (
             RuleId::ElectronWebviewBridgeRisk,

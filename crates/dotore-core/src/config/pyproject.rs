@@ -1,4 +1,4 @@
-//! `pyproject.toml` configuration (`[tool.dotore]` and `[tool.python-doctor]`) and
+//! `pyproject.toml` `[tool.dotore]` configuration and
 //! Python project profile (`web`, `cli`, `library`, `script`) inference.
 
 use crate::rules::{RuleId, RuleSeverityOverride};
@@ -38,7 +38,7 @@ const SCRIPT_SUPPRESSED_RULES: &[&str] = &[
 ];
 
 impl DotoreConfig {
-    /// Extracts a [`DotoreConfig`] from `[tool.dotore]` and `[tool.python-doctor]` in a
+    /// Extracts a [`DotoreConfig`] from `[tool.dotore]` in a
     /// `pyproject.toml` string (including Python `cli`/`script` profile rule suppressions).
     #[must_use]
     pub fn from_pyproject_toml_str(toml_str: &str) -> Option<Self> {
@@ -47,19 +47,13 @@ impl DotoreConfig {
         let dotore_tbl = tool
             .and_then(|t| t.get("dotore"))
             .and_then(toml::Value::as_table);
-        let py_doctor_tbl = tool
-            .and_then(|t| t.get("python-doctor").or_else(|| t.get("python_doctor")))
-            .and_then(toml::Value::as_table);
 
         let profile = infer_python_profile_from_pyproject_doc(&doc);
-        if dotore_tbl.is_none() && py_doctor_tbl.is_none() && profile != Some("cli") {
+        if dotore_tbl.is_none() && profile != Some("cli") {
             return None;
         }
 
         let mut cfg = Self::default();
-        if let Some(tbl) = py_doctor_tbl {
-            apply_pyproject_tool_table(tbl, &mut cfg);
-        }
         if let Some(tbl) = dotore_tbl {
             apply_pyproject_tool_table(tbl, &mut cfg);
         }
@@ -93,18 +87,15 @@ impl DotoreConfig {
 /// parsed `pyproject.toml` document.
 #[must_use]
 pub fn infer_python_profile_from_pyproject_doc(doc: &toml::Value) -> Option<&'static str> {
-    if let Some(tool) = doc.get("tool").and_then(toml::Value::as_table) {
-        for section_name in ["dotore", "python-doctor", "python_doctor"] {
-            if let Some(profile_str) = tool
-                .get(section_name)
-                .and_then(toml::Value::as_table)
-                .and_then(|t| t.get("profile"))
-                .and_then(toml::Value::as_str)
-                && let Some(normalized) = normalize_profile_kind(profile_str)
-            {
-                return Some(normalized);
-            }
-        }
+    if let Some(tool) = doc.get("tool").and_then(toml::Value::as_table)
+        && let Some(profile_str) = tool
+            .get("dotore")
+            .and_then(toml::Value::as_table)
+            .and_then(|t| t.get("profile"))
+            .and_then(toml::Value::as_str)
+        && let Some(normalized) = normalize_profile_kind(profile_str)
+    {
+        return Some(normalized);
     }
 
     let deps = collect_pyproject_dep_names(doc);

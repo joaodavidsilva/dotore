@@ -7,7 +7,7 @@ pub mod capability_gate;
 pub mod loader;
 /// In-place configuration mutator (`dotore rules`).
 pub mod mutator;
-/// `pyproject.toml` `[tool.dotore]` / `[tool.python-doctor]` configuration and profile loader.
+/// `pyproject.toml` `[tool.dotore]` configuration and profile loader.
 pub mod pyproject;
 /// Workspace package discovery and path/JSONC normalization helpers.
 pub mod workspace;
