@@ -26,7 +26,7 @@ use super::{
     react_ast::{RefEntry, extract_caller_sites, extract_jsx_elements},
     subject::extract_subjects,
     types::{
-        ArchitectureFileFacets, ByteSpan, ContextualOwnerSpansIr, FileIr, FileSuppressions,
+        ArchitectureFileFacets, ByteSpan, ContextualOwnerSpansIr, FileIr,
         ModuleIr, MotionFileIr, RelatedHookOwnerSpanIr, classify_file_context, compute_line_starts,
     },
 };
@@ -55,6 +55,15 @@ where
         let semantic_ret = SemanticBuilder::new()
             .with_build_nodes(true)
             .build(&parsed.program);
+        let line_starts = compute_line_starts(source);
+        let mut semantic_sites = Vec::new();
+        crate::rules::angular::extract_angular_stylesheet_sites(
+            source,
+            0,
+            None,
+            &line_starts,
+            &mut semantic_sites,
+        );
         let file_ir = FileIr {
             path: path.to_path_buf(),
             source: source.to_string(),
@@ -68,8 +77,8 @@ where
             mutations: Vec::new(),
             async_flows: Vec::new(),
             security_sinks: Vec::new(),
-            suppressions: FileSuppressions::default(),
-            semantic_sites: Vec::new(),
+            suppressions: extract_file_suppressions(source),
+            semantic_sites,
             motion: extract_stylesheet_motion_ir(source),
             static_dom_ids: Vec::new(),
             has_unresolved_id_spread: false,

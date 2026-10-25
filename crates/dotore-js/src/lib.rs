@@ -164,7 +164,11 @@ impl LanguageAnalyzer for JsLanguageAnalyzer {
         let mut gate = if let Some(json) = pkg_json_source {
             CapabilityGate::from_package_json_str(json)
         } else if has_angular_json && !package_dir.join("package.json").is_file() {
-            CapabilityGate::default_angular()
+            CapabilityGate::with_capabilities([
+                Capability::Angular,
+                Capability::Rxjs,
+                Capability::TypeScript,
+            ])
         } else {
             CapabilityGate::discover(package_dir)
         };

@@ -25,8 +25,8 @@ use crate::{
 
 use super::{
     angular_class_decorator_kind, callee_ident_name, decorator_name, enclosing_subject_name,
-    extract_template_text_and_offset, prop_key_str, push_angular_site,
-    signals_and_lifecycle::extract_decorator_first_string_arg,
+    extract_angular_stylesheet_sites, extract_template_text_and_offset, prop_key_str,
+    push_angular_site, signals_and_lifecycle::extract_decorator_first_string_arg,
 };
 
 const NATIVE_DOM_EVENT_NAMES: &[&str] = &[
@@ -413,6 +413,7 @@ fn check_component_specific_metadata_prop(
             }
         }
         "styles" => {
+            extract_inline_styles_sites(&prop.value, class_name, source, line_starts, sites);
             let style_lines = count_inline_styles_lines(&prop.value, source);
             if style_lines > 15 {
                 push_angular_site(
@@ -445,6 +446,43 @@ fn count_inline_styles_lines(expr: &Expression<'_>, source: &str) -> usize {
             .sum(),
         other => extract_template_text_and_offset(other, source)
             .map_or(0, |(txt, _)| txt.lines().count()),
+    }
+}
+
+fn extract_inline_styles_sites(
+    expr: &Expression<'_>,
+    class_name: Option<&str>,
+    source: &str,
+    line_starts: &[u32],
+    sites: &mut Vec<SemanticRuleSite>,
+) {
+    match expr.without_parentheses() {
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                if let Some(e) = elem.as_expression()
+                    && let Some((txt, inner_start)) = extract_template_text_and_offset(e, source)
+                {
+                    extract_angular_stylesheet_sites(
+                        txt,
+                        inner_start,
+                        class_name,
+                        line_starts,
+                        sites,
+                    );
+                }
+            }
+        }
+        other => {
+            if let Some((txt, inner_start)) = extract_template_text_and_offset(other, source) {
+                extract_angular_stylesheet_sites(
+                    txt,
+                    inner_start,
+                    class_name,
+                    line_starts,
+                    sites,
+                );
+            }
+        }
     }
 }
 

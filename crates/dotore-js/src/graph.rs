@@ -3,10 +3,11 @@
 //! SCC detection, JSX **Caller Sites**, and **Render Cascades**.
 
 pub(crate) mod callers_and_cascades;
+pub(crate) mod cycles_and_deps;
 pub(crate) mod dead_code;
 pub(crate) mod duplicate_jsx;
+pub(crate) mod edges;
 pub(crate) mod resolution;
-
 use std::{collections::HashMap, path::PathBuf};
 
 pub(crate) use callers_and_cascades::{MultiEffectCascade, find_multi_effect_cascades};
@@ -15,15 +16,16 @@ pub use dotore_core::ir::ResolvedCallerSite;
 use crate::ir::{ByteSpan, FileIr, SourceLoc};
 
 use callers_and_cascades::{ComponentTarget, index_file_caller_sites};
+use cycles_and_deps::{detect_circular_dependencies, detect_unused_dependencies};
 use dead_code::{
-    detect_circular_dependencies, detect_dead_exports, detect_orphan_files,
-    detect_unused_dependencies, discover_entrypoints_and_roots, trace_reachability,
+    detect_dead_exports, detect_orphan_files, discover_entrypoints_and_roots, trace_reachability,
 };
 use duplicate_jsx::detect_duplicate_jsx_families;
+use edges::build_module_edges;
 use resolution::{
-    CompiledPathMapping, IndexedTargetFile, PackageManifestInfo, build_module_edges,
-    build_platform_sibling_index, collect_indexed_targets, compile_tsconfig_mappings,
-    extract_expo_plugin_specifiers, parse_package_manifests, resolve_specifier_to_target_indices,
+    CompiledPathMapping, IndexedTargetFile, PackageManifestInfo, build_platform_sibling_index,
+    collect_indexed_targets, compile_tsconfig_mappings, extract_expo_plugin_specifiers,
+    parse_package_manifests, resolve_specifier_to_target_indices,
 };
 
 /// An unused value or type export detected in the module graph.

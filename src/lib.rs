@@ -262,21 +262,32 @@ fn is_standalone_angular_source(path: &Path, source: &str) -> bool {
     }
     let path_str = path.to_string_lossy();
     source.contains("@angular/")
+        || source.contains("@ngrx/")
         || source.contains("@Component(")
         || source.contains("@Directive(")
         || source.contains("@Injectable(")
         || source.contains("@Pipe(")
         || source.contains("@NgModule(")
+        || source.contains("@Effect(")
+        || source.contains("createEffect(")
+        || source.contains("createReducer(")
+        || source.contains("@include mat.")
         || path_str.ends_with(".component.ts")
         || path_str.ends_with(".directive.ts")
         || path_str.ends_with(".service.ts")
         || path_str.ends_with(".pipe.ts")
         || path_str.ends_with(".module.ts")
+        || path_str.ends_with(".effects.ts")
+        || path_str.ends_with(".reducer.ts")
+        || path_str.ends_with(".actions.ts")
+        || path_str.ends_with(".selectors.ts")
+        || path_str.ends_with(".facade.ts")
+        || path_str.ends_with(".store.ts")
         || path_str.ends_with(".component.html")
-        || (matches!(
+        || matches!(
             path.extension().and_then(|e| e.to_str()),
             Some("html" | "htm")
-        ) && source.contains("@for"))
+        )
 }
 
 /// Analyzes a single in-memory source file under an explicit [`DotoreConfig`] and [`CapabilityGate`]

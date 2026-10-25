@@ -661,7 +661,11 @@ impl CapabilityGate {
             .map_or_else(
                 || {
                     if has_angular_json {
-                        Self::default_angular()
+                        Self::with_capabilities([
+                            Capability::Angular,
+                            Capability::Rxjs,
+                            Capability::TypeScript,
+                        ])
                     } else {
                         Self::default_react()
                     }
