@@ -125,6 +125,8 @@
     .install-command {
       display: flex;
       align-items: center;
+      min-width: 0;
+      max-width: 100%;
       min-height: 48px;
       border: 1px solid var(--border);
       border-radius: 9px;
@@ -132,7 +134,7 @@
       box-shadow: 0 1px 2px rgb(20 32 27 / 5%);
       overflow: hidden;
     }
-    .install-command code { padding: 0 8px 0 16px; font-size: 14px; }
+    .install-command code { min-width: 0; padding: 0 8px 0 16px; overflow-x: auto; font-size: 14px; white-space: nowrap; }
     .copy-button {
       align-self: stretch;
       min-width: 68px;
@@ -326,12 +328,12 @@
       <p class="hero-copy">dotore finds cross-file root causes, explains their blast radius, and applies deterministic fixes across JavaScript, TypeScript, React, Angular, Python, and Rust.</p>
       <div class="hero-actions">
         <div class="install-command">
-          <code id="install-command">cargo install --path .</code>
+          <code id="install-command">cargo install --git https://github.com/joaodavidsilva/dotore.git</code>
           <button class="copy-button" type="button" data-copy-target="install-command" hidden>Copy</button>
         </div>
         <a class="button" href="https://github.com/joaodavidsilva/dotore">View on GitHub ↗</a>
       </div>
-      <p class="hero-note">Run from a local clone. Requires the Rust toolchain.</p>
+      <p class="hero-note">Installs the dotore CLI directly from GitHub. Requires the Rust toolchain.</p>
 
       <div class="terminal-wrap">
         <div class="terminal">
