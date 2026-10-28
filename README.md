@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="./assets/readme/hero-dark.png#gh-dark-mode-only" width="100%" alt="dotore — Pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation engine for JS/TS, React, Angular, Python, and Rust">
-  <img src="./assets/readme/hero-light.png#gh-light-mode-only" width="100%" alt="dotore — Pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation engine for JS/TS, React, Angular, Python, and Rust">
+  <img src="./assets/readme/hero-dark.png#gh-dark-mode-only" width="100%" alt="dotore: Pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation engine for JS/TS, React, Angular, Python, and Rust">
+  <img src="./assets/readme/hero-light.png#gh-light-mode-only" width="100%" alt="dotore: Pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation engine for JS/TS, React, Angular, Python, and Rust">
 </p>
 
 # dotore
@@ -60,7 +60,7 @@ dotore check --handoff          # auto-detects claude, codex, cursor, amp, openc
 
 ## Ecosystems & Rule Catalog (1,076 Rules)
 
-Rules activate automatically via **Capability Gates** inferred from your manifests—React rules never run on Angular or Rust packages, and library crates skip application-only checks.
+Rules activate automatically via **Capability Gates** inferred from your manifests. React rules never run on Angular or Rust packages, and library crates skip application-only checks.
 
 | Domain | Coverage |
 |---|---|
@@ -77,9 +77,9 @@ Rules activate automatically via **Capability Gates** inferred from your manifes
 
 Every diagnostic carries one of three **Prescription Tiers**:
 
-- **`autofix`** — Safe, deterministic AST byte-range rewrite applied by `dotore fix` and verified by re-parsing.
-- **`surgical`** — Localized single-function/component edit guided by a **Fix Capsule**.
-- **`refactor`** — Cross-component or architectural change with **Caller Sites** and **Blast Radius** context.
+- **`autofix`**: Safe, deterministic AST byte-range rewrite applied by `dotore fix` and verified by re-parsing.
+- **`surgical`**: Localized single-function/component edit guided by a **Fix Capsule**.
+- **`refactor`**: Cross-component or architectural change with **Caller Sites** and **Blast Radius** context.
 
 ## Configuration
 
