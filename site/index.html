@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="dotore is a pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation engine for JavaScript, TypeScript, React, Angular, Python, and Rust.">
   <meta name="theme-color" content="#ffffff">
-  <meta property="og:title" content="dotore — Know if your codebase is actually healthy">
+  <meta property="og:title" content="dotore — Know how healthy your codebase is">
   <meta property="og:description" content="1,076 rules. Cross-file analysis. Deterministic fixes. One Rust binary.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://joaodavidsilva.github.io/dotore/">
@@ -208,6 +208,16 @@
     .score { color: #a8b8af; font-size: 12px; }
     .score strong { color: #75d9ae; }
     .terminal .button { min-height: 44px; padding-inline: 14px; font-size: 12px; }
+    .term-summary { margin-bottom: 6px; color: #d7e2dc; font-size: 13px; }
+    .term-summary.dim { margin-bottom: 20px; color: #94a59c; font-size: 12px; }
+    .term-summary strong { color: #ffb4ab; font-weight: 500; }
+    .diagnostic-more { color: #94a59c; font-size: 12px; }
+    .score strong.bad { color: #ffb4ab; }
+    .demo-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .demo-grid .terminal-wide { grid-column: 1 / -1; }
+    .demo-grid .terminal-body { padding: 18px; }
+    .demo-grid .terminal { min-width: 0; }
+    .demo-note { margin: 16px 0 0; color: #94a59c; font-size: 12px; }
     .stats { border-block: 1px solid var(--border); background: var(--subtle); }
     .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
     .stat { padding: 28px 24px; text-align: center; }
@@ -277,7 +287,7 @@
       .nav-links { gap: 16px; }
       .nav-links a:not(.nav-github) { display: none; }
       .hero { padding-top: 60px; }
-      .feature-grid, .workflow-grid { grid-template-columns: 1fr; }
+      .feature-grid, .workflow-grid, .demo-grid { grid-template-columns: 1fr; }
       .step p { min-height: 0; }
       .stats-grid { grid-template-columns: repeat(2, 1fr); }
       .stat:nth-child(3) { border-left: 0; }
@@ -324,7 +334,7 @@
   <main id="main">
     <section class="hero container" id="top">
       <div class="eyebrow">Polyglot static analysis &amp; remediation</div>
-      <h1>Know if your codebase is <span>actually healthy.</span></h1>
+      <h1>Know how <span>healthy your codebase is.</span></h1>
       <p class="hero-copy">dotore finds cross-file root causes, explains their blast radius, and applies deterministic fixes across JavaScript, TypeScript, React, Angular, Python, and Rust.</p>
       <div class="hero-actions">
         <div class="install-command">
@@ -339,24 +349,42 @@
         <div class="terminal">
           <div class="terminal-bar">
             <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
-            <span class="mono">dotore — workspace check</span>
-            <span class="mono">React / TypeScript</span>
+            <span class="mono">dotore — demo workspace</span>
+            <span class="mono">React · Python · Rust</span>
           </div>
           <div class="terminal-body mono">
-            <div class="terminal-command"><strong>$</strong> dotore check src/components/CheckoutCard.tsx</div>
-            <div class="diagnostic-head">
-              <strong id="diagnostic-label">error · dotore/no-derived-state</strong>
-              <span>Autofix · CheckoutCard.tsx:24</span>
+            <div class="terminal-command"><strong>$</strong> <span id="demo-command">dotore check .</span></div>
+            <div id="demo-check">
+              <div class="term-summary"><strong>Critical</strong> · 8 files · 16 findings · 4 errors, 12 warnings</div>
+              <div class="term-summary dim">api 64/100 · cli 52/100 · web 53/100</div>
+              <div class="diagnostic-head">
+                <strong>py-security-no-unsafe-deserialization-or-shell</strong>
+                <span>autofix · api/main.py:5:12</span>
+              </div>
+              <div class="diagnostic-title"><code>yaml.load(...)</code> without <code>SafeLoader</code> allows arbitrary Python object instantiation; use <code>yaml.safe_load(...)</code> instead.</div>
+              <div class="diagnostic-head">
+                <strong>rs-no-unwrap-in-production</strong>
+                <span>surgical · cli/src/main.rs:2:66</span>
+              </div>
+              <div class="diagnostic-title">Avoid <code>.unwrap()</code> in production Rust code; propagate errors with <code>?</code>, match with <code>let ... else</code>, or use <code>.unwrap_or_default()</code>.</div>
+              <div class="diagnostic-head">
+                <strong>no-derived-state</strong>
+                <span>autofix · web/src/components/CheckoutCard.tsx:7:21</span>
+              </div>
+              <div class="diagnostic-title">Avoid storing derived state. Instead, compute "fullName" directly during render.<br>Render #1 (stale derived value) -&gt; useEffect runs -&gt; sets "fullName" -&gt; Render #2 (re-renders with derived value)</div>
+              <div class="diagnostic-more">+ 13 more findings across api, cli, and web</div>
             </div>
-            <div class="diagnostic-title" id="diagnostic-title" aria-live="polite">Derived state in useEffect triggers an avoidable render cascade.</div>
-            <pre class="code-block" aria-label="Derived state diagnostic and suggested fix"><code><span class="code-line context">23  export function CheckoutCard({ first, last }: Props) {</span><span class="code-line deleted" data-before>24    const [fullName, setFullName] = useState("");</span><span class="code-line deleted" data-before>25    useEffect(() =&gt; { setFullName(`${first} ${last}`); }, [first, last]);</span><span class="code-line added" data-after hidden>24    const fullName = `${first} ${last}`.trim();</span><span class="code-line context">26    return &lt;h2&gt;{fullName}&lt;/h2&gt;;</span><span class="code-line context">27  }</span></code></pre>
+            <div id="demo-fix" hidden>
+              <pre class="code-block" aria-label="Patches applied by dotore fix"><code><span class="code-line context">api/main.py</span><span class="code-line deleted">-   return yaml.load(open(path).read())</span><span class="code-line added">+   return yaml.safe_load(open(path).read())</span><span class="code-line deleted">-   return requests.get(url)</span><span class="code-line added">+   return requests.get(url, timeout=10.0)</span><span class="code-line context"> </span><span class="code-line context">web/src/components/CheckoutCard.tsx</span><span class="code-line deleted">-   const [fullName, setFullName] = useState("");</span><span class="code-line deleted">-   useEffect(() =&gt; { setFullName(`${first} ${last}`); }, [first, last]);</span><span class="code-line added">+   const fullName = `${first} ${last}`;</span><span class="code-line context"> </span><span class="code-line context">Applied 3 autofixes across 2 files.</span></code></pre>
+            </div>
             <div class="terminal-footer">
-              <div class="score">Health Score <strong id="score">84/100</strong> · <span id="finding-count">1 autofix available</span></div>
-              <button class="button" type="button" id="fix-toggle" aria-pressed="false" hidden>Apply sample fix</button>
+              <div class="score">Health Score <strong class="bad" id="score">45/100</strong> · <span id="finding-count">16 findings, 3 autofixes available</span></div>
+              <button class="button" type="button" id="fix-toggle" aria-pressed="false" hidden>Run dotore fix</button>
             </div>
           </div>
         </div>
       </div>
+      <p class="hero-note">Real output from a small demo workspace (a React app, a Python API, a Rust CLI) seeded with common mistakes.</p>
     </section>
 
     <section class="stats" aria-label="Project facts">
@@ -370,8 +398,8 @@
 
     <section class="section container" id="features">
       <div class="section-heading">
-        <div class="section-kicker">One engine, whole workspace</div>
-        <h2>Less triage. More useful context.</h2>
+        <div class="section-kicker">Features</div>
+        <h2>Cross-file analysis, only the rules you need.</h2>
         <p>Parse each file once, build a cross-file project graph, and activate only the rules that match your project.</p>
       </div>
       <div class="feature-grid">
@@ -393,7 +421,7 @@
         <article class="feature">
           <div class="feature-icon mono" aria-hidden="true">P0</div>
           <h3>Prioritized remediation</h3>
-          <p>Group findings by root cause and blast radius, then generate actionable Fix Capsules ranked from P0 to P3.</p>
+          <p>Group findings by root cause and blast radius, then generate Fix Capsules ranked from P0 to P3.</p>
         </article>
         <article class="feature">
           <div class="feature-icon mono" aria-hidden="true">Δ</div>
@@ -403,8 +431,66 @@
         <article class="feature">
           <div class="feature-icon mono" aria-hidden="true">→</div>
           <h3>Coding-agent handoff</h3>
-          <p>Send structured findings, source excerpts, invariants, and suggested patches directly to your coding agent.</p>
+          <p>Send structured findings, source excerpts, invariants, and suggested patches to your coding agent.</p>
         </article>
+      </div>
+    </section>
+
+    <section class="section container" id="demo">
+      <div class="section-heading">
+        <div class="section-kicker">Real output</div>
+        <h2>What dotore reports on a real run.</h2>
+        <p>Output from dotore 0.1.0 on the same demo workspace. The plan ranks 13 findings, <code>why</code> explains one in full, and the project graph finds import cycles and unused exports.</p>
+      </div>
+      <div class="demo-grid">
+        <div class="terminal">
+          <div class="terminal-bar">
+            <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="mono">dotore plan</span>
+            <span class="mono">13 Fix Capsules</span>
+          </div>
+          <div class="terminal-body mono">
+            <div class="terminal-command"><strong>$</strong> dotore plan .</div>
+            <pre class="code-block" aria-label="Prioritized remediation queue"><code><span class="code-line context">#    Pri  Blast  Rule                              Where</span><span class="code-line context">001  P1   86     no-derived-state                  Cart.tsx:3</span><span class="code-line context">002  P1   60     rs-no-unwrap-in-production        main.rs:1</span><span class="code-line context">003  P1   55     no-pass-live-state-to-parent      Cart.tsx:3</span><span class="code-line context">004  P2   42     jsx-no-new-array-as-prop          App.tsx:4</span><span class="code-line context">...</span><span class="code-line context">011  P3   15     circular-dependency               a.ts:1</span><span class="code-line context">012  P3   15     rs-cargo-missing-lockfile         Cargo.toml:1</span><span class="code-line context">013  P3   15     unused-export                     b.ts:3</span></code></pre>
+            <p class="demo-note">Ranked by blast radius. Each row is a Markdown plan in <code>plans/</code> with the code excerpt, a transformation recipe, and the invariants to preserve.</p>
+          </div>
+        </div>
+        <div class="terminal">
+          <div class="terminal-bar">
+            <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="mono">dotore why</span>
+            <span class="mono">Cart.tsx:6</span>
+          </div>
+          <div class="terminal-body mono">
+            <div class="terminal-command"><strong>$</strong> dotore why web/src/components/Cart.tsx:6</div>
+            <div class="diagnostic-head">
+              <strong>no-pass-live-state-to-parent</strong>
+              <span>warning · refactor · P1 (score 55)</span>
+            </div>
+            <div class="diagnostic-title">Avoid passing live state to parent components in an effect. Instead, lift "total" state up to the parent of "Cart", and pass it down to "Cart" as a prop.<br>Render #1 updates local state (total) -&gt; useEffect runs -&gt; calls prop `onTotal` -&gt; Parent re-renders and cascades back down</div>
+            <pre class="code-block" aria-label="Code frame around the finding"><code><span class="code-line context">  4 |   const [total, setTotal] = useState(0);</span><span class="code-line context">  5 |   useEffect(() =&gt; { setTotal(items.reduce((a, b) =&gt; a + b, 0)); }, [items]);</span><span class="code-line deleted">&gt; 6 |   useEffect(() =&gt; { onTotal(total); }, [total]);</span><span class="code-line context">  7 |   return &lt;div onClick={() =&gt; setTotal(0)}&gt;{total}&lt;/div&gt;;</span></code></pre>
+            <p class="demo-note">Recipe: call the parent callback alongside <code>setState</code> in the event handler, or lift the State Slot up to the parent Subject.</p>
+          </div>
+        </div>
+        <div class="terminal terminal-wide">
+          <div class="terminal-bar">
+            <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="mono">dotore check — project graph findings</span>
+            <span class="mono">2 findings</span>
+          </div>
+          <div class="terminal-body mono">
+            <div class="diagnostic-head">
+              <strong>circular-dependency</strong>
+              <span>refactor · web/src/a.ts:1:1</span>
+            </div>
+            <div class="diagnostic-title">Runtime import cycle: ./web/src/a.ts → ./web/src/b.ts → ./web/src/a.ts. Modules in the cycle can observe partially initialized exports.</div>
+            <div class="diagnostic-head">
+              <strong>unused-export</strong>
+              <span>surgical · web/src/b.ts:3:1</span>
+            </div>
+            <div class="diagnostic-title" style="margin-bottom:0">Unused value export: <code>neverUsed</code> has no importer in the analyzed project graph.</div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -412,7 +498,7 @@
       <div class="container">
         <div class="section-heading center">
           <div class="section-kicker">From findings to fixes</div>
-          <h2>A workflow built for action.</h2>
+          <h2>Check, plan, fix.</h2>
           <p>Start with zero configuration, then adopt diff-aware checks and agent handoffs where they help.</p>
         </div>
         <div class="workflow-grid">
@@ -441,7 +527,7 @@
     <section class="section container" id="faq">
       <div class="section-heading center">
         <div class="section-kicker">Questions</div>
-        <h2>Built to fit your existing stack.</h2>
+        <h2>Using dotore with your existing tools.</h2>
       </div>
       <div class="faq">
         <details open>
@@ -487,27 +573,24 @@
 
   <script>
     const fixToggle = document.getElementById('fix-toggle');
-    const beforeLines = document.querySelectorAll('[data-before]');
-    const afterLines = document.querySelectorAll('[data-after]');
+    const checkPanel = document.getElementById('demo-check');
+    const fixPanel = document.getElementById('demo-fix');
+    const demoCommand = document.getElementById('demo-command');
     const score = document.getElementById('score');
     const findingCount = document.getElementById('finding-count');
-    const diagnosticLabel = document.getElementById('diagnostic-label');
-    const diagnosticTitle = document.getElementById('diagnostic-title');
     let fixed = false;
 
     fixToggle.hidden = false;
     fixToggle.addEventListener('click', () => {
       fixed = !fixed;
-      beforeLines.forEach((line) => { line.hidden = fixed; });
-      afterLines.forEach((line) => { line.hidden = !fixed; });
+      checkPanel.hidden = fixed;
+      fixPanel.hidden = !fixed;
       fixToggle.setAttribute('aria-pressed', String(fixed));
-      fixToggle.textContent = fixed ? 'Show original' : 'Apply sample fix';
-      score.textContent = fixed ? '100/100' : '84/100';
-      findingCount.textContent = fixed ? 'no findings' : '1 autofix available';
-      diagnosticLabel.textContent = fixed ? 'passed · dotore/no-derived-state' : 'error · dotore/no-derived-state';
-      diagnosticTitle.textContent = fixed
-        ? 'Derived state removed. The component now computes fullName during render.'
-        : 'Derived state in useEffect triggers an avoidable render cascade.';
+      fixToggle.textContent = fixed ? 'Back to dotore check' : 'Run dotore fix';
+      demoCommand.textContent = fixed ? 'dotore fix .' : 'dotore check .';
+      score.textContent = fixed ? '63/100' : '45/100';
+      score.classList.toggle('bad', !fixed);
+      findingCount.textContent = fixed ? '13 findings left, 0 autofixes pending' : '16 findings, 3 autofixes available';
     });
 
     document.querySelectorAll('[data-copy-target]').forEach((button) => {
