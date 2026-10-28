@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="dotore is a pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation engine for JavaScript, TypeScript, React, Angular, Python, and Rust.">
+  <meta name="theme-color" content="#ffffff">
+  <meta property="og:title" content="dotore — Know if your codebase is actually healthy">
+  <meta property="og:description" content="1,076 rules. Cross-file analysis. Deterministic fixes. One Rust binary.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://joaodavidsilva.github.io/dotore/">
+  <link rel="canonical" href="https://joaodavidsilva.github.io/dotore/">
+  <link rel="icon" href="./assets/dotore.png" type="image/png">
+  <title>dotore — Polyglot static analysis and remediation</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    :root {
+      color-scheme: light;
+      --bg: #ffffff;
+      --subtle: #f6f8f7;
+      --surface: #ffffff;
+      --text: #14201b;
+      --muted: #59636e;
+      --border: #dfe5e2;
+      --accent: #087f5b;
+      --accent-strong: #066648;
+      --accent-soft: #eaf8f1;
+      --terminal: #0d1412;
+      --terminal-surface: #121c18;
+      --terminal-text: #e7eee9;
+      --danger: #b42318;
+      --danger-soft: #fff1f0;
+      --success: #087f5b;
+      --success-soft: #eaf8f1;
+      --max: 1120px;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      font-synthesis: none;
+      -webkit-font-smoothing: antialiased;
+    }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.6; }
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, summary:focus-visible {
+      outline: 3px solid #40a37f;
+      outline-offset: 4px;
+    }
+    code, pre, .mono {
+      font-family: "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace;
+    }
+    .container { width: min(var(--max), calc(100% - 40px)); margin-inline: auto; }
+    .skip-link {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      z-index: 10;
+      padding: 8px 12px;
+      background: var(--text);
+      color: white;
+      border-radius: 6px;
+      transform: translateY(-150%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .announcement {
+      padding: 9px 20px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+    }
+    .announcement strong { color: var(--accent); }
+    .site-header { border-bottom: 1px solid var(--border); }
+    .nav {
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .brand { display: inline-flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 750; letter-spacing: -0.03em; }
+    .brand img { width: 32px; height: 32px; object-fit: contain; }
+    .nav-links { display: flex; align-items: center; gap: 26px; color: var(--muted); font-size: 14px; }
+    .nav-links a { display: inline-flex; align-items: center; min-height: 44px; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-github {
+      padding-inline: 15px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text) !important;
+      font-weight: 600;
+    }
+    .nav-github:hover { background: var(--subtle); }
+    .hero { padding: 82px 0 50px; text-align: center; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 20px;
+      padding: 5px 11px;
+      border: 1px solid #c9e8da;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      max-width: 850px;
+      margin-inline: auto;
+      margin-bottom: 22px;
+      font-size: clamp(40px, 6vw, 68px);
+      line-height: 1.06;
+      letter-spacing: -0.055em;
+      font-weight: 760;
+    }
+    h1 span { color: var(--accent); }
+    .hero-copy { max-width: 680px; margin: 0 auto 30px; color: var(--muted); font-size: 18px; line-height: 1.65; }
+    .hero-actions { display: flex; justify-content: center; align-items: stretch; gap: 12px; flex-wrap: wrap; }
+    .install-command {
+      display: flex;
+      align-items: center;
+      min-height: 48px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgb(20 32 27 / 5%);
+      overflow: hidden;
+    }
+    .install-command code { padding: 0 8px 0 16px; font-size: 14px; }
+    .copy-button {
+      align-self: stretch;
+      min-width: 68px;
+      margin-left: 8px;
+      border: 0;
+      border-left: 1px solid var(--border);
+      background: var(--subtle);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .copy-button:hover { color: var(--text); background: #edf2ef; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 20px;
+      border: 1px solid var(--accent-strong);
+      border-radius: 9px;
+      background: var(--accent);
+      color: white;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .button:hover { background: var(--accent-strong); }
+    .button-secondary { border-color: var(--border); background: white; color: var(--text); }
+    .button-secondary:hover { background: var(--subtle); }
+    .hero-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; }
+    .terminal-wrap { max-width: 850px; margin: 34px auto 0; text-align: left; }
+    .terminal {
+      overflow: hidden;
+      border: 1px solid #26352f;
+      border-radius: 14px;
+      background: var(--terminal);
+      color: var(--terminal-text);
+      box-shadow: 0 24px 60px -24px rgb(13 20 18 / 35%);
+    }
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 45px;
+      padding: 0 16px;
+      border-bottom: 1px solid #26352f;
+      background: var(--terminal-surface);
+      color: #94a59c;
+      font-size: 12px;
+    }
+    .traffic { display: flex; gap: 7px; }
+    .traffic span { width: 10px; height: 10px; border-radius: 50%; }
+    .traffic span:nth-child(1) { background: #ff5f57; }
+    .traffic span:nth-child(2) { background: #febc2e; }
+    .traffic span:nth-child(3) { background: #28c840; }
+    .terminal-body { padding: 22px; }
+    .terminal-command { margin-bottom: 20px; color: #a8b8af; font-size: 13px; }
+    .terminal-command strong { color: #75d9ae; font-weight: 500; }
+    .diagnostic-head { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 8px; font-size: 12px; }
+    .diagnostic-head strong { color: #ffb4ab; }
+    .diagnostic-head span { color: #94a59c; }
+    .diagnostic-title { margin-bottom: 18px; color: #d7e2dc; font-size: 13px; }
+    .code-block { margin: 0; overflow-x: auto; font-size: 12.5px; line-height: 1.8; }
+    .code-line { display: block; min-width: max-content; padding-inline: 8px; }
+    .code-line.deleted { border-left: 2px solid #ef776d; background: rgb(180 35 24 / 16%); color: #ffc1bb; }
+    .code-line.added { border-left: 2px solid #55c995; background: rgb(8 127 91 / 20%); color: #a6e9ca; }
+    .code-line.context { color: #a8b8af; }
+    .terminal-footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 20px; }
+    .score { color: #a8b8af; font-size: 12px; }
+    .score strong { color: #75d9ae; }
+    .terminal .button { min-height: 44px; padding-inline: 14px; font-size: 12px; }
+    .stats { border-block: 1px solid var(--border); background: var(--subtle); }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .stat { padding: 28px 24px; text-align: center; }
+    .stat + .stat { border-left: 1px solid var(--border); }
+    .stat strong { display: block; margin-bottom: 3px; font-size: 27px; line-height: 1.2; letter-spacing: -0.04em; }
+    .stat span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .section { padding: 88px 0; }
+    .section-subtle { border-block: 1px solid var(--border); background: var(--subtle); }
+    .section-heading { max-width: 650px; margin-bottom: 38px; }
+    .section-heading.center { margin-inline: auto; text-align: center; }
+    .section-kicker { margin-bottom: 8px; color: var(--accent); font-size: 12px; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
+    h2 { margin-bottom: 14px; font-size: clamp(30px, 4vw, 42px); line-height: 1.15; letter-spacing: -0.04em; }
+    .section-heading p { margin-bottom: 0; color: var(--muted); font-size: 16px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .feature { padding: 25px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .feature-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      margin-bottom: 18px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 15px;
+      font-weight: 800;
+    }
+    .feature h3 { margin-bottom: 8px; font-size: 17px; letter-spacing: -0.015em; }
+    .feature p { margin-bottom: 0; color: var(--muted); font-size: 14px; }
+    .workflow-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; counter-reset: steps; }
+    .step { counter-increment: steps; }
+    .step::before {
+      content: "0" counter(steps);
+      display: block;
+      margin-bottom: 14px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+    }
+    .step h3 { margin-bottom: 8px; font-size: 18px; }
+    .step p { min-height: 68px; margin-bottom: 18px; color: var(--muted); font-size: 14px; }
+    .step code { display: block; padding: 13px 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: white; color: var(--text); font-size: 12px; white-space: nowrap; }
+    .languages { display: flex; justify-content: center; gap: 9px; flex-wrap: wrap; margin-top: 38px; }
+    .language { padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; background: white; color: var(--muted); font-size: 12px; }
+    .faq { max-width: 800px; margin-inline: auto; }
+    .faq details { border-bottom: 1px solid var(--border); }
+    .faq details:first-child { border-top: 1px solid var(--border); }
+    .faq summary { position: relative; padding: 20px 38px 20px 0; cursor: pointer; font-size: 15px; font-weight: 650; list-style: none; }
+    .faq summary::-webkit-details-marker { display: none; }
+    .faq summary::after { content: "+"; position: absolute; right: 8px; color: var(--muted); font-size: 20px; font-weight: 400; }
+    .faq details[open] summary::after { content: "−"; }
+    .faq details p { margin: -4px 0 20px; padding-right: 38px; color: var(--muted); font-size: 14px; }
+    .faq code { color: var(--text); font-size: 0.92em; }
+    .final-cta { padding: 62px 24px; border-radius: 16px; background: var(--terminal); color: white; text-align: center; }
+    .final-cta h2 { margin-bottom: 12px; }
+    .final-cta p { max-width: 560px; margin: 0 auto 24px; color: #a8b8af; }
+    .final-cta .hero-actions { align-items: center; }
+    .final-cta .button-secondary { border-color: #33443c; background: transparent; color: white; }
+    .final-cta .button-secondary:hover { background: var(--terminal-surface); }
+    .site-footer { margin-top: 88px; border-top: 1px solid var(--border); }
+    .footer-inner { min-height: 100px; display: flex; align-items: center; justify-content: space-between; gap: 24px; color: var(--muted); font-size: 13px; }
+    .footer-links { display: flex; gap: 22px; }
+    .footer-links a { display: inline-flex; align-items: center; min-height: 44px; }
+    .footer-links a:hover { color: var(--text); }
+    @media (max-width: 800px) {
+      .nav-links { gap: 16px; }
+      .nav-links a:not(.nav-github) { display: none; }
+      .hero { padding-top: 60px; }
+      .feature-grid, .workflow-grid { grid-template-columns: 1fr; }
+      .step p { min-height: 0; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .stat:nth-child(3) { border-left: 0; }
+      .stat:nth-child(n+3) { border-top: 1px solid var(--border); }
+      .section { padding: 64px 0; }
+    }
+    @media (max-width: 520px) {
+      .container { width: min(var(--max), calc(100% - 28px)); }
+      .announcement { font-size: 11px; }
+      .hero-copy { font-size: 16px; }
+      .hero-actions { flex-direction: column; }
+      .install-command { justify-content: space-between; }
+      .install-command code { font-size: 12px; }
+      .terminal-body { padding: 15px; }
+      .terminal-footer { align-items: flex-start; flex-direction: column; }
+      .diagnostic-head { flex-direction: column; gap: 2px; }
+      .stat { padding: 22px 10px; }
+      .stat strong { font-size: 23px; }
+      .footer-inner { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: 22px; gap: 4px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="announcement"><strong>1,076 rules</strong> · Zero configuration · One pure-Rust binary</div>
+  <header class="site-header">
+    <nav class="nav container" aria-label="Main navigation">
+      <a class="brand" href="#top" aria-label="dotore home">
+        <img src="./assets/dotore.png" alt="" width="32" height="32">
+        <span>dotore</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#faq">FAQ</a>
+        <a class="nav-github" href="https://github.com/joaodavidsilva/dotore">GitHub ↗</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero container" id="top">
+      <div class="eyebrow">Polyglot static analysis &amp; remediation</div>
+      <h1>Know if your codebase is <span>actually healthy.</span></h1>
+      <p class="hero-copy">dotore finds cross-file root causes, explains their blast radius, and applies deterministic fixes across JavaScript, TypeScript, React, Angular, Python, and Rust.</p>
+      <div class="hero-actions">
+        <div class="install-command">
+          <code id="install-command">cargo install --path .</code>
+          <button class="copy-button" type="button" data-copy-target="install-command" hidden>Copy</button>
+        </div>
+        <a class="button" href="https://github.com/joaodavidsilva/dotore">View on GitHub ↗</a>
+      </div>
+      <p class="hero-note">Run from a local clone. Requires the Rust toolchain.</p>
+
+      <div class="terminal-wrap">
+        <div class="terminal">
+          <div class="terminal-bar">
+            <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="mono">dotore — workspace check</span>
+            <span class="mono">React / TypeScript</span>
+          </div>
+          <div class="terminal-body mono">
+            <div class="terminal-command"><strong>$</strong> dotore check src/components/CheckoutCard.tsx</div>
+            <div class="diagnostic-head">
+              <strong id="diagnostic-label">error · dotore/no-derived-state</strong>
+              <span>Autofix · CheckoutCard.tsx:24</span>
+            </div>
+            <div class="diagnostic-title" id="diagnostic-title" aria-live="polite">Derived state in useEffect triggers an avoidable render cascade.</div>
+            <pre class="code-block" aria-label="Derived state diagnostic and suggested fix"><code><span class="code-line context">23  export function CheckoutCard({ first, last }: Props) {</span><span class="code-line deleted" data-before>24    const [fullName, setFullName] = useState("");</span><span class="code-line deleted" data-before>25    useEffect(() =&gt; { setFullName(`${first} ${last}`); }, [first, last]);</span><span class="code-line added" data-after hidden>24    const fullName = `${first} ${last}`.trim();</span><span class="code-line context">26    return &lt;h2&gt;{fullName}&lt;/h2&gt;;</span><span class="code-line context">27  }</span></code></pre>
+            <div class="terminal-footer">
+              <div class="score">Health Score <strong id="score">84/100</strong> · <span id="finding-count">1 autofix available</span></div>
+              <button class="button" type="button" id="fix-toggle" aria-pressed="false" hidden>Apply sample fix</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats" aria-label="Project facts">
+      <div class="stats-grid container">
+        <div class="stat"><strong>1,076</strong><span>Rules</span></div>
+        <div class="stat"><strong>0–100</strong><span>Health score</span></div>
+        <div class="stat"><strong>3</strong><span>Remediation tiers</span></div>
+        <div class="stat"><strong>1</strong><span>Rust binary</span></div>
+      </div>
+    </section>
+
+    <section class="section container" id="features">
+      <div class="section-heading">
+        <div class="section-kicker">One engine, whole workspace</div>
+        <h2>Less triage. More useful context.</h2>
+        <p>Parse each file once, build a cross-file project graph, and activate only the rules that match your project.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <div class="feature-icon mono" aria-hidden="true">⌘</div>
+          <h3>Cross-file root causes</h3>
+          <p>Connect caller sites, render cascades, circular dependencies, and architecture boundaries instead of reviewing isolated warnings.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon mono" aria-hidden="true">±</div>
+          <h3>Deterministic autofixes</h3>
+          <p>Apply syntax-verified AST byte-range patches with <code>dotore fix</code>, or preview every change with <code>--dry-run</code>.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon mono" aria-hidden="true">◎</div>
+          <h3>Automatic capability gates</h3>
+          <p>Manifests determine active rules. React checks stay out of Angular projects, and libraries skip application-only checks.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon mono" aria-hidden="true">P0</div>
+          <h3>Prioritized remediation</h3>
+          <p>Group findings by root cause and blast radius, then generate actionable Fix Capsules ranked from P0 to P3.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon mono" aria-hidden="true">Δ</div>
+          <h3>Diff-aware adoption</h3>
+          <p>Scan changed files, contextual owners, or changed lines. Baselines let legacy repositories block only new regressions.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon mono" aria-hidden="true">→</div>
+          <h3>Coding-agent handoff</h3>
+          <p>Send structured findings, source excerpts, invariants, and suggested patches directly to your coding agent.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section section-subtle" id="workflow">
+      <div class="container">
+        <div class="section-heading center">
+          <div class="section-kicker">From findings to fixes</div>
+          <h2>A workflow built for action.</h2>
+          <p>Start with zero configuration, then adopt diff-aware checks and agent handoffs where they help.</p>
+        </div>
+        <div class="workflow-grid">
+          <article class="step">
+            <h3>Check the workspace</h3>
+            <p>Run static analysis across your project and calculate its deterministic Health Score.</p>
+            <code>dotore check --score</code>
+          </article>
+          <article class="step">
+            <h3>Plan the remediation</h3>
+            <p>Group related findings into root causes with caller-site and blast-radius context.</p>
+            <code>dotore plan</code>
+          </article>
+          <article class="step">
+            <h3>Apply verified fixes</h3>
+            <p>Preview safe rewrites, apply them, or hand the complete remediation bundle to an agent.</p>
+            <code>dotore fix --dry-run</code>
+          </article>
+        </div>
+        <div class="languages" aria-label="Supported ecosystems">
+          <span class="language">JavaScript</span><span class="language">TypeScript</span><span class="language">React &amp; Next.js</span><span class="language">Angular</span><span class="language">Python</span><span class="language">Rust</span><span class="language">React Native</span><span class="language">Three.js &amp; WebGL</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section container" id="faq">
+      <div class="section-heading center">
+        <div class="section-kicker">Questions</div>
+        <h2>Built to fit your existing stack.</h2>
+      </div>
+      <div class="faq">
+        <details open>
+          <summary>Why use dotore alongside ESLint, Ruff, and Clippy?</summary>
+          <p>dotore analyzes multiple ecosystems in one Rust binary and adds cross-file caller sites, render cascades, root-cause grouping, Fix Capsules, and a shared Health Score. Rules activate automatically from your manifests.</p>
+        </details>
+        <details>
+          <summary>Can I adopt it incrementally in a legacy monorepo?</summary>
+          <p>Yes. Use <code>dotore check --scope contextual --base origin/main</code> or <code>dotore check --baseline baseline.json</code> so CI focuses on changed code or newly introduced regressions.</p>
+        </details>
+        <details>
+          <summary>How does coding-agent handoff work?</summary>
+          <p>Run <code>dotore check --handoff</code>. dotore creates a structured remediation bundle with subject and caller-site excerpts, invariants, and exemplars, then launches a supported coding agent or prints the bundle.</p>
+        </details>
+        <details>
+          <summary>Does dotore require configuration?</summary>
+          <p>No. It works out of the box and infers capabilities from <code>package.json</code>, <code>angular.json</code>, <code>pyproject.toml</code>, and <code>Cargo.toml</code>. Optional configuration can override rules, ignored files, and tags.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="container" aria-labelledby="get-started">
+      <div class="final-cta">
+        <h2 id="get-started">Check your workspace.</h2>
+        <p>Install from source, run one command, and turn flat diagnostics into a prioritized remediation plan.</p>
+        <div class="hero-actions">
+          <a class="button" href="https://github.com/joaodavidsilva/dotore#quickstart">Read the quickstart ↗</a>
+          <a class="button button-secondary" href="https://github.com/joaodavidsilva/dotore#core-commands">Explore commands</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner container">
+      <span>dotore · Pure-Rust polyglot static analysis</span>
+      <div class="footer-links">
+        <a href="https://github.com/joaodavidsilva/dotore">GitHub</a>
+        <a href="https://github.com/joaodavidsilva/dotore/issues">Issues</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    const fixToggle = document.getElementById('fix-toggle');
+    const beforeLines = document.querySelectorAll('[data-before]');
+    const afterLines = document.querySelectorAll('[data-after]');
+    const score = document.getElementById('score');
+    const findingCount = document.getElementById('finding-count');
+    const diagnosticLabel = document.getElementById('diagnostic-label');
+    const diagnosticTitle = document.getElementById('diagnostic-title');
+    let fixed = false;
+
+    fixToggle.hidden = false;
+    fixToggle.addEventListener('click', () => {
+      fixed = !fixed;
+      beforeLines.forEach((line) => { line.hidden = fixed; });
+      afterLines.forEach((line) => { line.hidden = !fixed; });
+      fixToggle.setAttribute('aria-pressed', String(fixed));
+      fixToggle.textContent = fixed ? 'Show original' : 'Apply sample fix';
+      score.textContent = fixed ? '100/100' : '84/100';
+      findingCount.textContent = fixed ? 'no findings' : '1 autofix available';
+      diagnosticLabel.textContent = fixed ? 'passed · dotore/no-derived-state' : 'error · dotore/no-derived-state';
+      diagnosticTitle.textContent = fixed
+        ? 'Derived state removed. The component now computes fullName during render.'
+        : 'Derived state in useEffect triggers an avoidable render cascade.';
+    });
+
+    document.querySelectorAll('[data-copy-target]').forEach((button) => {
+      button.hidden = false;
+      button.addEventListener('click', async () => {
+        const command = document.getElementById(button.dataset.copyTarget).textContent;
+        try {
+          await navigator.clipboard.writeText(command);
+          button.textContent = 'Copied';
+        } catch {
+          button.textContent = 'Copy failed';
+        }
+        window.setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+      });
+    });
+  </script>
+</body>
+</html>

@@ -9,6 +9,8 @@ Pure-Rust polyglot static analyzer, deterministic auto-fixer, and remediation en
 
 `dotore` parses each file once, builds a cross-file project graph, gates its **1,076 rules** automatically from your project manifests (`package.json`, `angular.json`, `pyproject.toml`, `Cargo.toml`), and groups findings by root cause with a `0–100` Health Score.
 
+**Website:** [joaodavidsilva.github.io/dotore](https://joaodavidsilva.github.io/dotore/)
+
 ## Quickstart
 
 ```bash
