@@ -326,6 +326,9 @@ assets/
       hero-layout-light.svg # editable light SVG layout source
       hero-subject.png      # transparent surgical robot mascot cutout
       hero-prompt.txt       # Gemini generation prompt and model record
+skills/
+  dotore/
+    SKILL.md              # the `/dotore` agent skill, embedded into the binary by `dotore install` (ci_install.rs)
 docs/
   adr/                    # architecture decision records
   agents/                 # issue-tracker, triage-labels, domain conventions

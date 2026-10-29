@@ -334,35 +334,8 @@ pub struct InstallResult {
     pub dry_run: bool,
 }
 
-const DOTORE_SKILL_CONTENT: &str = r#"---
-name: dotore
-description: Use when finishing a feature, fixing a bug, before committing React or TypeScript code, or when the user types `/dotore`. Runs static correctness, performance, accessibility, security, and architecture analysis and applies deterministic remediation.
-version: "1.0.0"
----
-
-# /dotore — Deterministic React & TypeScript Analysis and Remediation
-
-`dotore` is a pure-Rust static analyzer, deterministic auto-fixer, and remediation engine for React and TypeScript codebases.
-
-## Workflow
-
-1. **Check (`dotore check`)**:
-   - Run `dotore check --scope changed` after edits (or `dotore check --json` for structured machine output with **Root-Cause Groups**, **Blast Radius**, and **Fix Capsules**).
-2. **Auto-fix (`dotore fix`)**:
-   - Run `dotore fix` to deterministically apply all `Autofix`-tier single- and cross-file rewrites directly in Rust.
-3. **Inspect Root Cause (`dotore why <file:line>`)**:
-   - Run `dotore why <file:line>` to inspect why a diagnostic fired (or why a rule, inline suppression, or **Capability Gate** did or did not apply) and read its self-contained **Fix Capsule**.
-4. **Search Symbols (`dotore search <query>`)**:
-   - Run `dotore search <query>` to fuzzy-search AST **Symbol Outlines** across the repository without reading whole files.
-5. **Generate Execution Plans (`dotore plan`)**:
-   - Run `dotore plan --out plans` to emit prioritized `plans/NNN-<slug>.md` remediation plans and `plans/README.md`.
-6. **Configure & Explain Rules (`dotore rules`)**:
-   - Run `dotore rules list` or `dotore rules explain <rule>` to inspect rules offline, and `dotore rules set | enable | disable | category | ignore-tag` to update `dotore.config.*` or `package.json#dotore` in place.
-7. **UI Design Audit (`dotore design`)**:
-   - Run `dotore design` to run a focused UI polish audit enabling all `design`-tagged rules.
-8. **Live Runtime Profiling (`dotore scan <url>`)**:
-   - Run `dotore scan <url> --format json` to capture a Chrome DevTools Protocol (CDP) trace and React component render hotspots.
-"#;
+/// Unified `/dotore` agent skill, embedded from the repository-root `skills/dotore/SKILL.md` (single source of truth).
+const DOTORE_SKILL_CONTENT: &str = include_str!("../../../../skills/dotore/SKILL.md");
 
 const GIT_HOOK_BLOCK_START: &str = "# dotore hook start";
 const GIT_HOOK_BLOCK_END: &str = "# dotore hook end";
